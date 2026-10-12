@@ -60,6 +60,25 @@ class ContractTest(unittest.TestCase):
                 if banned in line:
                     self.assertIn("never", line.lower(), f"{banned!r} outside a 'never' line: {line}")
 
+    def test_skill_guards_against_review_findings(self):
+        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        for phrase in (
+            "Hard stop: schema",                 # approve reminder matches the stored reason
+            r"prisma/(schema\.prisma|migrations/)",  # deterministic schema guard before merge
+            "human-approval.md",
+            '"reworks"',                         # REWORK-once enforced by the orchestrator
+            "second rework",
+            'reason="worktree dirty"',           # no dead ends
+            "merge refused",
+            "UNKNOWN",
+            "still missing after the re-spawn",
+            "refuse",                            # approve refuses jobs with nothing to merge
+            "board.py --dir",                    # next/backlog go through the locked board
+            " next",
+            "backlog-add",
+        ):
+            self.assertIn(phrase, text, phrase)
+
 
 if __name__ == "__main__":
     unittest.main()

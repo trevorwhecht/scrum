@@ -158,6 +158,37 @@ class BoardTest(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("nope", bad.stderr)
 
+    # --- backlog ---
+    def test_next_claims_first_unchecked_item_and_creates_job(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [x] old → 001-old\n- [ ] Add CSV export\n- [ ] Dark mode\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export"})
+        self.assertIn("- [x] Add CSV export → 001-add-csv-export", (self.root / "backlog.md").read_text())
+        self.assertIn("- [ ] Dark mode", (self.root / "backlog.md").read_text())
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Dark mode")
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+
+    def test_concurrent_next_never_claims_the_same_item(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(6)))
+        procs = [subprocess.Popen([sys.executable, str(BOARD_PY), "--dir", str(self.root), "next"],
+                                  stdout=subprocess.PIPE, text=True) for _ in range(6)]
+        features = [json.loads(p.communicate()[0])["feature"] for p in procs]
+        self.assertEqual(sorted(features), [f"item {i}" for i in range(6)])
+
+    def test_backlog_add_appends_unchecked_items(self):
+        board.cmd_backlog_add(self.root, ["fix A (from 001-x)", "fix B (from 001-x)"])
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] fix A (from 001-x)\n- [ ] fix B (from 001-x)\n")
+
+    def test_sync_counts_reworks_used(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["reworks"], 0)
+        self.write(f"{job_id}/round-2/decision.md", "REWORK\nfix-now: X")
+        self.write(f"{job_id}/round-3/decision.md", "**REWORK**")
+        self.write(f"{job_id}/decision.md", "REWORK")  # root copy is not double-counted
+        self.assertEqual(board.cmd_sync(self.root, job_id)["reworks"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
