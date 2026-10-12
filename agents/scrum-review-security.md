@@ -1,6 +1,6 @@
 ---
-name: factory-review-security
-description: Factory security reviewer. Reviews one round's diff for exploitable problems and writes round-N/review-security.md. Spawned only by the /factory orchestrator.
+name: scrum-review-security
+description: Scrum security reviewer. Reviews one round's diff for exploitable problems and writes round-N/review-security.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 ---

@@ -3,13 +3,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = {
-    "factory-spec-writer": "opus", "factory-builder": "opus", "factory-review-security": "opus",
-    "factory-review-ux": "sonnet", "factory-review-ui": "sonnet", "factory-review-code": "sonnet",
-    "factory-approver": "opus",
+    "scrum-spec-writer": "opus", "scrum-builder": "opus", "scrum-review-security": "opus",
+    "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
+    "scrum-approver": "opus",
 }
 FIRST_LINE = {
-    "factory-builder": "STATUS: READY", "factory-approver": "ESCALATE", "factory-review-security": "VERDICT: PASS",
-    "factory-review-ux": "VERDICT: PASS", "factory-review-ui": "VERDICT: PASS", "factory-review-code": "VERDICT: PASS",
+    "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
+    "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
 }
 
 
@@ -43,16 +43,16 @@ class ContractTest(unittest.TestCase):
             self.assertIn("git merge", text, name)
 
     def test_skill_references_every_agent_and_board_command(self):
-        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for name in AGENTS:
             self.assertIn(name, text)
         for cmd in ("board.py", " new ", " set ", " sync "):
             self.assertIn(cmd, text)
-        fm = frontmatter(ROOT / "skills" / "factory" / "SKILL.md")
-        self.assertEqual(fm.get("name"), "factory")
+        fm = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")
+        self.assertEqual(fm.get("name"), "trevskills-scrum")
 
     def test_skill_only_merges_via_gh_squash(self):
-        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("gh pr merge", text)
         self.assertIn("--squash", text)
         for line in text.splitlines():
@@ -61,7 +61,7 @@ class ContractTest(unittest.TestCase):
                     self.assertIn("never", line.lower(), f"{banned!r} outside a 'never' line: {line}")
 
     def test_skill_guards_against_review_findings(self):
-        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for phrase in (
             "Hard stop: schema",                 # approve reminder matches the stored reason
             r"prisma/(schema\.prisma|migrations/)",  # deterministic schema guard before merge

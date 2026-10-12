@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Software Factory</title>
+<title>Trevskills Scrum</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
@@ -45,7 +45,7 @@ article a{color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Software Factory</h1><span id="status" aria-live="polite">loading…</span></header>
+<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span></header>
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><article id="doc"></article></dialog>
 <script>
@@ -87,7 +87,7 @@ function render() {
 async function poll() {
   try {
     const res = await fetch("board.json", {cache: "no-store"});
-    if (!res.ok) { $("status").textContent = "No board.json yet. Run /factory in this repo."; jobs = []; render(); return; }
+    if (!res.ok) { $("status").textContent = "No board.json yet. Run /trevskills-scrum in this repo."; jobs = []; render(); return; }
     const text = await res.text();
     if (text !== lastText) { jobs = JSON.parse(text).jobs || []; lastText = text; render(); }
     $("status").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`;

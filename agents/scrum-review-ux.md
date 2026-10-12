@@ -1,6 +1,6 @@
 ---
-name: factory-review-ux
-description: Factory UX reviewer. Reviews one round's user flows, states, copy and accessibility, and writes round-N/review-ux.md. Spawned only by the /factory orchestrator.
+name: scrum-review-ux
+description: Scrum UX reviewer. Reviews one round's user flows, states, copy and accessibility, and writes round-N/review-ux.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---

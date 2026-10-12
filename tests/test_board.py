@@ -2,16 +2,16 @@ import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "skills" / "factory"))
+sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 import board  # noqa: E402
 
-BOARD_PY = ROOT / "skills" / "factory" / "board.py"
+BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
 
 
 class BoardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "factory"
+        self.root = Path(self.tmp.name) / "scrum"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -31,7 +31,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(job_id, "001-add-rate-limiting")
         self.assertTrue((self.root / "jobs" / job_id).is_dir())
         job = self.jobs()[0]
-        self.assertEqual(job["branch"], "factory/001-add-rate-limiting")
+        self.assertEqual(job["branch"], "scrum/001-add-rate-limiting")
         self.assertEqual(job["stage"], "spec")
         self.assertEqual(job["limit"], 2)
         self.assertEqual(job["reviews"], {r: "pending" for r in board.REVIEWERS})

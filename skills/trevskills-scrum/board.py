@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The software factory's board. Only the /factory orchestrator calls this; nothing else writes board.json.
+"""The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base (empty value = null)
@@ -8,7 +8,7 @@
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
-from the files. --dir points at the project's factory/ folder (default ./factory).
+from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, json, os, re, sys
 from contextlib import contextmanager
@@ -83,7 +83,7 @@ def add_job(root, board, title):
     job_id = f"{max(nums, default=0) + 1:03d}-{slug(title)}"
     (jobs_dir / job_id).mkdir()
     board["jobs"].append({
-        "id": job_id, "title": title, "branch": f"factory/{job_id}", "stage": "spec", "round": 0, "limit": 2,
+        "id": job_id, "title": title, "branch": f"scrum/{job_id}", "stage": "spec", "round": 0, "limit": 2,
         "reviews": {r: "pending" for r in REVIEWERS}, "rounds": [], "files": [],
         "pr": None, "reason": None, "worktree": None, "builder": None, "base": None, "updatedAt": now(),
     })
@@ -160,7 +160,7 @@ def cmd_sync(root, job_id):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dir", type=Path, default=Path("factory"))
+    p.add_argument("--dir", type=Path, default=Path("scrum"))
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("new").add_argument("title")
     s = sub.add_parser("set")

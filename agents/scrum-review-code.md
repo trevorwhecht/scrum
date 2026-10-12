@@ -1,6 +1,6 @@
 ---
-name: factory-review-code
-description: Factory code reviewer. Reviews one round's correctness against the acceptance criteria, its tests, conventions and simplicity, and writes round-N/review-code.md. Spawned only by the /factory orchestrator.
+name: scrum-review-code
+description: Scrum code reviewer. Reviews one round's correctness against the acceptance criteria, its tests, conventions and simplicity, and writes round-N/review-code.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---

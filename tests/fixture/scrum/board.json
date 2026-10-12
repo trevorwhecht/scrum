@@ -1,20 +1,20 @@
 {
   "jobs": [
-    {"id": "001-dark-mode", "title": "Dark mode toggle", "branch": "factory/001-dark-mode", "stage": "done", "round": 1, "limit": 2,
+    {"id": "001-dark-mode", "title": "Dark mode toggle", "branch": "scrum/001-dark-mode", "stage": "done", "round": 1, "limit": 2,
      "reviews": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}],
      "files": [], "pr": "https://github.com/example/repo/pull/12", "reason": null, "updatedAt": "2026-10-12T10:00:00+00:00"},
-    {"id": "002-stripe-refunds", "title": "Stripe refunds", "branch": "factory/002-stripe-refunds", "stage": "needs-human", "round": 2, "limit": 2,
+    {"id": "002-stripe-refunds", "title": "Stripe refunds", "branch": "scrum/002-stripe-refunds", "stage": "needs-human", "round": 2, "limit": 2,
      "reviews": {"security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
                 {"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "PASS"}],
      "files": ["decision.md", "missing.md"], "pr": null, "reason": "Hard stop: money — refund amount calculation changed", "updatedAt": "2026-10-12T11:00:00+00:00"},
-    {"id": "003-rate-limiting", "title": "Rate limiting on login", "branch": "factory/003-rate-limiting", "stage": "review", "round": 2, "limit": 2,
+    {"id": "003-rate-limiting", "title": "Rate limiting on login", "branch": "scrum/003-rate-limiting", "stage": "review", "round": 2, "limit": 2,
      "reviews": {"security": "CHANGES", "ux": "PASS", "ui": "pending", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "INVALID", "code": "PASS"},
                 {"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "pending", "code": "PASS"}],
      "files": ["spec.md", "round-1/review-security.md"], "pr": null, "reason": null, "updatedAt": "2020-01-01T00:00:00+00:00"},
-    {"id": "004-csv-export", "title": "CSV export for orders", "branch": "factory/004-csv-export", "stage": "spec", "round": 0, "limit": 2,
+    {"id": "004-csv-export", "title": "CSV export for orders", "branch": "scrum/004-csv-export", "stage": "spec", "round": 0, "limit": 2,
      "reviews": {"security": "pending", "ux": "pending", "ui": "pending", "code": "pending"},
      "rounds": [], "files": [], "pr": null, "reason": null, "updatedAt": "2099-01-01T00:00:00+00:00"}
   ]

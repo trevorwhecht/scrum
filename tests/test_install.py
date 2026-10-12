@@ -14,7 +14,7 @@ class InstallTest(unittest.TestCase):
             home = Path(t)
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
-            self.assertEqual((home / "skills" / "factory").resolve(), ROOT / "skills" / "factory")
+            self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
             for agent in (ROOT / "agents").glob("*.md"):
                 self.assertEqual((home / "agents" / agent.name).resolve(), agent)
 
@@ -22,7 +22,7 @@ class InstallTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)
             (home / "agents").mkdir(parents=True)
-            real = home / "agents" / "factory-builder.md"
+            real = home / "agents" / "scrum-builder.md"
             real.write_text("mine")
             result = self.run_install(home)
             self.assertNotEqual(result.returncode, 0)

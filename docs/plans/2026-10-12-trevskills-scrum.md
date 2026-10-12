@@ -1,14 +1,14 @@
-# Software Factory Implementation Plan
+# Trevskills Scrum Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a `/factory` Claude Code skill and its agents. It turns a feature request into a squash-merged PR, and a one-file dashboard shows each job's progress.
+**Goal:** Build a `/trevskills-scrum` Claude Code skill and its agents. It turns a feature request into a squash-merged PR, and a one-file dashboard shows each job's progress.
 
 **Architecture:**
-- **One orchestrator skill** (`skills/factory/SKILL.md`) runs the loop and spawns seven subagents (`agents/factory-*.md`). Each agent writes exactly one markdown file per step.
+- **One orchestrator skill** (`skills/trevskills-scrum/SKILL.md`) runs the loop and spawns seven subagents (`agents/scrum-*.md`). Each agent writes exactly one markdown file per step.
 - **`board.py` is the only writer of `board.json`.** It is stdlib Python and uses a file lock with atomic replace. It derives review verdicts from the first lines of the files on disk, so the board can't drift from the files.
 - **`dashboard.html` polls `board.json`.** It is a single static file.
-- **`install.sh` symlinks everything into `~/.claude`.** That makes the factory work in every repo.
+- **`install.sh` symlinks everything into `~/.claude`.** That makes the scrum work in every repo.
 
 **Tech Stack:** Markdown (skill and agents), Python 3 stdlib with unittest, plain HTML/CSS/JS with marked@12.0.2 from cdnjs, bash, git worktrees, and the `gh` CLI.
 
@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-- Every agent file is named `factory-<role>.md`, and its frontmatter `name` matches the filename.
+- Every agent file is named `scrum-<role>.md`, and its frontmatter `name` matches the filename.
 - Models: spec-writer, builder, security and approver run on `opus`. The ux, ui and code reviewers run on `sonnet`.
 - First-line contracts, all case-insensitive and tolerant of markdown decoration:
   - reviews: `VERDICT: PASS|CHANGES`
@@ -24,21 +24,21 @@
   - `check.md`: `CHECK: PASS|FAIL`
   - `decision.md`: `APPROVE|REWORK|ESCALATE`
 - Reviewers: `CHANGES` only for a `[blocking]` finding with confidence ≥ 80.
-- The default review round limit is 2. The approver may REWORK at most once per job. `/factory rework` adds 2 rounds.
+- The default review round limit is 2. The approver may REWORK at most once per job. `/trevskills-scrum rework` adds 2 rounds.
 - Escalation reasons are hard stops only:
   - schema/migrations
   - money/auth/secrets
   - builder BLOCKED
   - infrastructure: `gh` missing, or a PR conflict or CI still failing after 2 builder fixes
 - Never run anywhere: `prisma migrate`, `prisma db push`, `git reset`, `git rebase`, force-push, `gh pr merge --auto/--admin`, or a push to `main`/`master`.
-- The only `git merge` allowed: the orchestrator runs `git -C $WT merge origin/$DEFAULT` to resolve a PR conflict on its own `factory/*` branch. Agents never run `git merge`.
-- The only merge is `gh pr merge <factory/id> --squash`, after checks pass.
+- The only `git merge` allowed: the orchestrator runs `git -C $WT merge origin/$DEFAULT` to resolve a PR conflict on its own `scrum/*` branch. Agents never run `git merge`.
+- The only merge is `gh pr merge <scrum/id> --squash`, after checks pass.
 - Python is stdlib only. The dashboard has no build step and exactly one CDN script, pinned to `marked@12.0.2`.
 - Tests run with `python3 -m unittest discover -s tests -v` from the repo root.
 
 ## Review Focus
 
-1. **Two `/factory` sessions create jobs at the same moment.** Expected: unique ids and no lost board entries. Test: `test_concurrent_new_jobs_get_unique_ids`, Task 1.
+1. **Two `/trevskills-scrum` sessions create jobs at the same moment.** Expected: unique ids and no lost board entries. Test: `test_concurrent_new_jobs_get_unique_ids`, Task 1.
 2. **A reviewer decorates or mangles its first line** (bold, heading, lowercase, BOM, leading blank lines, prose). Expected: decorated verdicts parse, and garbage reads as `INVALID`, never as PASS. Tests: `test_first_word_*`, Task 1.
 3. **`board.json` is corrupt or hand-edited badly.** Expected: a clear error, and the board is never silently replaced with an empty one. Test: `test_corrupt_board_is_not_overwritten`, Task 1.
 4. **The dashboard faces an empty project**: no `board.json`, a job with zero rounds, a 404 on a markdown file, or the CDN offline. Expected: an empty-state line or plain text, never a blank page or a JS crash. Fixture plus browser check, Task 4.
@@ -51,35 +51,35 @@ Also pinned: a job id containing `../` is rejected (`test_rejects_path_traversal
 ## File Structure
 
 ```
-software-factory/
+trevskills-scrum/
   README.md                      # what it is, install, commands, loop diagram
   install.sh                     # symlinks skill + agents into ~/.claude
   .gitignore
   agents/
-    factory-spec-writer.md       # writes spec.md
-    factory-builder.md           # writes code + commits in the worktree, writes build.md
-    factory-review-security.md   # writes round-N/review-security.md
-    factory-review-ux.md         # writes round-N/review-ux.md
-    factory-review-ui.md         # writes round-N/review-ui.md
-    factory-review-code.md       # writes round-N/review-code.md
-    factory-approver.md          # writes decision.md
-  skills/factory/
+    scrum-spec-writer.md       # writes spec.md
+    scrum-builder.md           # writes code + commits in the worktree, writes build.md
+    scrum-review-security.md   # writes round-N/review-security.md
+    scrum-review-ux.md         # writes round-N/review-ux.md
+    scrum-review-ui.md         # writes round-N/review-ui.md
+    scrum-review-code.md       # writes round-N/review-code.md
+    scrum-approver.md          # writes decision.md
+  skills/trevskills-scrum/
     SKILL.md                     # the orchestrator
     board.py                     # the only writer of board.json
-    dashboard.html               # symlinked into each project's factory/
+    dashboard.html               # symlinked into each project's scrum/
   tests/
     test_board.py
     test_contracts.py
     test_install.py
-    fixture/factory/...          # sample board + job files for the dashboard
+    fixture/scrum/...          # sample board + job files for the dashboard
   docs/spec.md, docs/plans/...
 ```
 
-Each project gets this, created by `/factory` on its first run and gitignored through `.git/info/exclude`:
+Each project gets this, created by `/trevskills-scrum` on its first run and gitignored through `.git/info/exclude`:
 
 ```
-factory/
-  board.json  backlog.md  project.md  dashboard.html -> ~/.claude/skills/factory/dashboard.html
+scrum/
+  board.json  backlog.md  project.md  dashboard.html -> ~/.claude/skills/trevskills-scrum/dashboard.html
   jobs/<id>/
     feature.md  spec.md  build.md  decision.md  rework.md  ci.md
     round-N/  check.md  review-security.md  review-ux.md  review-ui.md  review-code.md  decision.md
@@ -90,12 +90,12 @@ factory/
 ### Task 1: board.py (the board's only writer)
 
 **Files:**
-- Create: `skills/factory/board.py`
+- Create: `skills/trevskills-scrum/board.py`
 - Create: `.gitignore`
 - Test: `tests/test_board.py`
 
 **Interfaces:**
-- Produces, as a CLI (default `--dir factory`):
+- Produces, as a CLI (default `--dir scrum`):
   - `board.py new "<title>"` prints the new job id, e.g. `004-rate-limiting`.
   - `board.py set <id> key=value ...` sets fields. Keys are `stage round limit pr reason worktree builder base`. Stages are `spec build check review approve merging done needs-human`. An empty value means null.
   - `board.py sync <id>` re-reads `jobs/<id>/`, updates the board, and prints JSON: `{"round": int, "complete": bool, "verdict": "PASS"|"CHANGES"|"INVALID"|null, "invalid": [reviewer...], "check": "PASS"|"FAIL"|"pending"|null, "decision": "APPROVE"|"REWORK"|"ESCALATE"|"INVALID"|null}`
@@ -105,8 +105,8 @@ factory/
 - [ ] **Step 1: Create the branch and `.gitignore`**
 
 ```bash
-cd ~/Developer/repos/software-factory
-git switch -c feat/factory-v1
+cd ~/Developer/repos/trevskills-scrum
+git switch -c feat/scrum-v1
 printf '__pycache__/\n*.pyc\n' > .gitignore
 ```
 
@@ -119,16 +119,16 @@ import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "skills" / "factory"))
+sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 import board  # noqa: E402
 
-BOARD_PY = ROOT / "skills" / "factory" / "board.py"
+BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
 
 
 class BoardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "factory"
+        self.root = Path(self.tmp.name) / "scrum"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -148,7 +148,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(job_id, "001-add-rate-limiting")
         self.assertTrue((self.root / "jobs" / job_id).is_dir())
         job = self.jobs()[0]
-        self.assertEqual(job["branch"], "factory/001-add-rate-limiting")
+        self.assertEqual(job["branch"], "scrum/001-add-rate-limiting")
         self.assertEqual(job["stage"], "spec")
         self.assertEqual(job["limit"], 2)
         self.assertEqual(job["reviews"], {r: "pending" for r in board.REVIEWERS})
@@ -285,18 +285,18 @@ if __name__ == "__main__":
 Run: `python3 -m unittest discover -s tests -v`
 Expected: ERROR with `ModuleNotFoundError: No module named 'board'`.
 
-- [ ] **Step 4: Write `skills/factory/board.py`**
+- [ ] **Step 4: Write `skills/trevskills-scrum/board.py`**
 
 ```python
 #!/usr/bin/env python3
-"""The software factory's board. Only the /factory orchestrator calls this; nothing else writes board.json.
+"""The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base (empty value = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
-from the files. --dir points at the project's factory/ folder (default ./factory).
+from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, json, os, re, sys
 from contextlib import contextmanager
@@ -371,7 +371,7 @@ def cmd_new(root, title):
         job_id = f"{max(nums, default=0) + 1:03d}-{slug(title)}"
         (jobs_dir / job_id).mkdir()
         board["jobs"].append({
-            "id": job_id, "title": title, "branch": f"factory/{job_id}", "stage": "spec", "round": 0, "limit": 2,
+            "id": job_id, "title": title, "branch": f"scrum/{job_id}", "stage": "spec", "round": 0, "limit": 2,
             "reviews": {r: "pending" for r in REVIEWERS}, "rounds": [], "files": [],
             "pr": None, "reason": None, "worktree": None, "builder": None, "base": None, "updatedAt": now(),
         })
@@ -418,7 +418,7 @@ def cmd_sync(root, job_id):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dir", type=Path, default=Path("factory"))
+    p.add_argument("--dir", type=Path, default=Path("scrum"))
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("new").add_argument("title")
     s = sub.add_parser("set")
@@ -448,9 +448,9 @@ Expected: all tests in `test_board.py` PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-chmod +x skills/factory/board.py
-git add .gitignore skills/factory/board.py tests/test_board.py docs/
-git commit -m "Add factory board: locked, file-derived job state
+chmod +x skills/trevskills-scrum/board.py
+git add .gitignore skills/trevskills-scrum/board.py tests/test_board.py docs/
+git commit -m "Add scrum board: locked, file-derived job state
 
 - board.py new/set/sync, the single writer of board.json
 - verdicts parsed from first lines, tolerant of markdown, garbage = INVALID
@@ -464,12 +464,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: The seven agents
 
 **Files:**
-- Create: `agents/factory-spec-writer.md`, `agents/factory-builder.md`, `agents/factory-review-security.md`, `agents/factory-review-ux.md`, `agents/factory-review-ui.md`, `agents/factory-review-code.md`, `agents/factory-approver.md`
+- Create: `agents/scrum-spec-writer.md`, `agents/scrum-builder.md`, `agents/scrum-review-security.md`, `agents/scrum-review-ux.md`, `agents/scrum-review-ui.md`, `agents/scrum-review-code.md`, `agents/scrum-approver.md`
 - Test: `tests/test_contracts.py`
 
 **Interfaces:**
 - Consumes: the job folder layout and first-line contracts from Task 1.
-- Produces: subagent types `factory-spec-writer`, `factory-builder`, `factory-review-security`, `factory-review-ux`, `factory-review-ui`, `factory-review-code`, `factory-approver`. Every spawn prompt from the orchestrator (Task 3) passes exactly these lines: `JOB_DIR=<abs path>`, `WORKTREE=<abs path or none>`, `BASE=<base ref>`, `ROUND=<n>`, `PROJECT=<abs path to factory/project.md>`.
+- Produces: subagent types `scrum-spec-writer`, `scrum-builder`, `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code`, `scrum-approver`. Every spawn prompt from the orchestrator (Task 3) passes exactly these lines: `JOB_DIR=<abs path>`, `WORKTREE=<abs path or none>`, `BASE=<base ref>`, `ROUND=<n>`, `PROJECT=<abs path to scrum/project.md>`.
 
 - [ ] **Step 1: Write the failing contract test**
 
@@ -481,13 +481,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = {
-    "factory-spec-writer": "opus", "factory-builder": "opus", "factory-review-security": "opus",
-    "factory-review-ux": "sonnet", "factory-review-ui": "sonnet", "factory-review-code": "sonnet",
-    "factory-approver": "opus",
+    "scrum-spec-writer": "opus", "scrum-builder": "opus", "scrum-review-security": "opus",
+    "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
+    "scrum-approver": "opus",
 }
 FIRST_LINE = {
-    "factory-builder": "STATUS: READY", "factory-approver": "ESCALATE", "factory-review-security": "VERDICT: PASS",
-    "factory-review-ux": "VERDICT: PASS", "factory-review-ui": "VERDICT: PASS", "factory-review-code": "VERDICT: PASS",
+    "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
+    "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
 }
 
 
@@ -532,17 +532,17 @@ The `SKILL.md` checks are added to this file in Task 3.
 Run: `python3 -m unittest tests.test_contracts -v`
 Expected: FAIL in `test_exactly_the_expected_agents_exist`, because the set is empty.
 
-- [ ] **Step 3: Write `agents/factory-spec-writer.md`**
+- [ ] **Step 3: Write `agents/scrum-spec-writer.md`**
 
 ```markdown
 ---
-name: factory-spec-writer
-description: Factory step 1. Turns a feature request (feature.md) into a testable spec.md. Spawned only by the /factory orchestrator.
+name: scrum-spec-writer
+description: Scrum step 1. Turns a feature request (feature.md) into a testable spec.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 ---
 
-You are the spec writer in an unattended software factory. **No human is watching.** Never ask questions; when something is unclear, choose the most reasonable reading and record it under Assumptions.
+You are the spec writer in an unattended scrum team. **No human is watching.** Never ask questions; when something is unclear, choose the most reasonable reading and record it under Assumptions.
 
 **Inputs** (paths are in your prompt): `JOB_DIR/feature.md` (the request), `PROJECT` (the repo profile: stack, commands, conventions), and the repository itself (read-only). Read the convention files that `PROJECT` lists before writing.
 
@@ -568,19 +568,19 @@ Rules:
 - Write no code and touch no file except `spec.md`. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 ```
 
-- [ ] **Step 4: Write `agents/factory-builder.md`**
+- [ ] **Step 4: Write `agents/scrum-builder.md`**
 
 ```markdown
 ---
-name: factory-builder
-description: Factory builder. Implements spec.md in the job's worktree, commits on its factory/<id> branch, and writes build.md; it is resumed for each fix round. Spawned only by the /factory orchestrator.
+name: scrum-builder
+description: Scrum builder. Implements spec.md in the job's worktree, commits on its scrum/<id> branch, and writes build.md; it is resumed for each fix round. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
 ---
 
-You are the builder in an unattended software factory. **No human is watching.** Never ask questions; make the reasonable call and note it in build.md.
+You are the builder in an unattended scrum team. **No human is watching.** Never ask questions; make the reasonable call and note it in build.md.
 
-**Inputs** (paths are in your prompt): `JOB_DIR/spec.md`, `PROJECT` (stack, commands, conventions — read every convention file it lists), and `WORKTREE` (your checkout, already on branch `factory/<id>`).
+**Inputs** (paths are in your prompt): `JOB_DIR/spec.md`, `PROJECT` (stack, commands, conventions — read every convention file it lists), and `WORKTREE` (your checkout, already on branch `scrum/<id>`).
 
 **First run:**
 1. `cd WORKTREE`. Run the project's install command from `PROJECT` if dependencies are missing.
@@ -614,12 +614,12 @@ You are the builder in an unattended software factory. **No human is watching.**
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.
 ```
 
-- [ ] **Step 5: Write `agents/factory-review-security.md`**
+- [ ] **Step 5: Write `agents/scrum-review-security.md`**
 
 ```markdown
 ---
-name: factory-review-security
-description: Factory security reviewer. Reviews one round's diff for exploitable problems and writes round-N/review-security.md. Spawned only by the /factory orchestrator.
+name: scrum-review-security
+description: Scrum security reviewer. Reviews one round's diff for exploitable problems and writes round-N/review-security.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 ---
@@ -652,12 +652,12 @@ You review one build round for security. **No human is watching**, so never ask 
 - Don't edit code. Bash is only for read-only commands (`git diff`, `grep`, running tests). Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 ```
 
-- [ ] **Step 6: Write `agents/factory-review-ux.md`**
+- [ ] **Step 6: Write `agents/scrum-review-ux.md`**
 
 ```markdown
 ---
-name: factory-review-ux
-description: Factory UX reviewer. Reviews one round's user flows, states, copy and accessibility, and writes round-N/review-ux.md. Spawned only by the /factory orchestrator.
+name: scrum-review-ux
+description: Scrum UX reviewer. Reviews one round's user flows, states, copy and accessibility, and writes round-N/review-ux.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---
@@ -692,12 +692,12 @@ You review one build round for user experience. **No human is watching**, so nev
 - Don't edit code. Bash is read-only. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 ```
 
-- [ ] **Step 7: Write `agents/factory-review-ui.md`**
+- [ ] **Step 7: Write `agents/scrum-review-ui.md`**
 
 ```markdown
 ---
-name: factory-review-ui
-description: Factory UI design reviewer. Reviews one round's visual consistency, theming and layout, and writes round-N/review-ui.md. Spawned only by the /factory orchestrator.
+name: scrum-review-ui
+description: Scrum UI design reviewer. Reviews one round's visual consistency, theming and layout, and writes round-N/review-ui.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---
@@ -731,12 +731,12 @@ You review one build round for visual design. **No human is watching**, so never
 - Don't edit code. Bash is read-only. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 ```
 
-- [ ] **Step 8: Write `agents/factory-review-code.md`**
+- [ ] **Step 8: Write `agents/scrum-review-code.md`**
 
 ```markdown
 ---
-name: factory-review-code
-description: Factory code reviewer. Reviews one round's correctness against the acceptance criteria, its tests, conventions and simplicity, and writes round-N/review-code.md. Spawned only by the /factory orchestrator.
+name: scrum-review-code
+description: Scrum code reviewer. Reviews one round's correctness against the acceptance criteria, its tests, conventions and simplicity, and writes round-N/review-code.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---
@@ -767,17 +767,17 @@ You review one build round for code quality. **No human is watching**, so never 
 - Don't edit code. Bash is for read-only commands and running tests. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 ```
 
-- [ ] **Step 9: Write `agents/factory-approver.md`**
+- [ ] **Step 9: Write `agents/scrum-approver.md`**
 
 ```markdown
 ---
-name: factory-approver
-description: Factory approver. Makes the final call on a job (APPROVE, REWORK or ESCALATE) and writes decision.md; it escalates to a human only on hard stops. Spawned only by the /factory orchestrator.
+name: scrum-approver
+description: Scrum approver. Makes the final call on a job (APPROVE, REWORK or ESCALATE) and writes decision.md; it escalates to a human only on hard stops. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 ---
 
-You are the final gate of an unattended software factory, and a senior engineer who ships. **The human wants to be asked almost never.** Your job is to decide, not to defer.
+You are the final gate of an unattended scrum team, and a senior engineer who ships. **The human wants to be asked almost never.** Your job is to decide, not to defer.
 
 **Inputs** (paths are in your prompt): everything in `JOB_DIR` (`spec.md`, `build.md`, every `round-*/` folder with its check and reviews, any earlier `round-*/decision.md`, `rework.md`, `ci.md`), `PROJECT`, and the full diff (`git -C WORKTREE diff BASE...HEAD`, plus `--name-only`).
 
@@ -807,7 +807,7 @@ Judge hard stops from the actual diff (`--name-only` and content), not from the 
 **APPROVE** when a reasonable senior engineer would ship it:
 - **All reviews PASS and the check passed.** Approve; Rulings may be empty.
 - **Findings remain at the round limit.** Rule on each one: `override` (wrong or not worth it, give a reason) or `defer` (real but non-urgent, add it to Follow-ups).
-- **`check.md` is FAIL.** Approve only if the same failures already happen on `BASE`. To check, run `git -C WORKTREE worktree add --detach /tmp/factory-base-<id> BASE`, run the failing command there, then `git -C WORKTREE worktree remove --force /tmp/factory-base-<id>`. Otherwise use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — checks fail`.
+- **`check.md` is FAIL.** Approve only if the same failures already happen on `BASE`. To check, run `git -C WORKTREE worktree add --detach /tmp/scrum-base-<id> BASE`, run the failing command there, then `git -C WORKTREE worktree remove --force /tmp/scrum-base-<id>`. Otherwise use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — checks fail`.
 
 Don't edit code. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, any push, or any `gh` command.
 ```
@@ -821,7 +821,7 @@ Expected: all tests PASS.
 
 ```bash
 git add agents tests/test_contracts.py
-git commit -m "Add the seven factory agents
+git commit -m "Add the seven scrum agents
 
 - spec-writer, builder, four reviewers, approver; one output file each
 - reviewers block only on confidence >= 80; approver escalates on hard stops only
@@ -835,12 +835,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: The orchestrator skill
 
 **Files:**
-- Create: `skills/factory/SKILL.md`
+- Create: `skills/trevskills-scrum/SKILL.md`
 - Modify: `tests/test_contracts.py` (add the SKILL.md checks)
 
 **Interfaces:**
 - Consumes: the `board.py` CLI (Task 1); the agent names and the prompt keys `JOB_DIR WORKTREE BASE ROUND PROJECT` (Task 2).
-- Produces: the `/factory` skill with subcommands `<feature>`, `next`, `approve <id>`, `rework <id> <feedback>`, and no args.
+- Produces: the `/trevskills-scrum` skill with subcommands `<feature>`, `next`, `approve <id>`, `rework <id> <feedback>`, and no args.
 
 - [ ] **Step 1: Add the failing SKILL.md tests to `tests/test_contracts.py`**
 
@@ -848,16 +848,16 @@ Add these methods to `ContractTest`:
 
 ```python
     def test_skill_references_every_agent_and_board_command(self):
-        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for name in AGENTS:
             self.assertIn(name, text)
         for cmd in ("board.py", " new ", " set ", " sync "):
             self.assertIn(cmd, text)
-        fm = frontmatter(ROOT / "skills" / "factory" / "SKILL.md")
-        self.assertEqual(fm.get("name"), "factory")
+        fm = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")
+        self.assertEqual(fm.get("name"), "trevskills-scrum")
 
     def test_skill_only_merges_via_gh_squash(self):
-        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("gh pr merge", text)
         self.assertIn("--squash", text)
         for line in text.splitlines():
@@ -871,19 +871,19 @@ Add these methods to `ContractTest`:
 Run: `python3 -m unittest tests.test_contracts -v`
 Expected: ERROR with `FileNotFoundError: ... SKILL.md`.
 
-- [ ] **Step 3: Write `skills/factory/SKILL.md`**
+- [ ] **Step 3: Write `skills/trevskills-scrum/SKILL.md`**
 
 ````markdown
 ---
-name: factory
-description: Run the software factory. "/factory <feature>" builds a feature end to end (spec → build → check → 4 parallel reviews → approver → squash-merged PR). Also "/factory next", "/factory approve <id>", "/factory rework <id> <feedback>", and bare "/factory" for status.
+name: trevskills-scrum
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", and bare "/trevskills-scrum" for status.
 ---
 
-# Software Factory: orchestrator
+# Trevskills Scrum: orchestrator
 
 The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. It never writes code, and it never reads diffs or reviews beyond their first lines, which keeps its context small. Agents get their context from files, never from this conversation.
 
-This skill is a sanctioned exception to the global git rules: it may push its own `factory/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
+This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git merge`, `git reset`, `git rebase`, or `--force`
 - never push `main`/`master`
 - never `--auto` or `--admin`
@@ -895,16 +895,16 @@ Run from the repo's **main checkout**, not a worktree:
 
 ```bash
 test "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" || echo "NOT MAIN CHECKOUT"
-REPO="$(git rev-parse --show-toplevel)"; F="$REPO/factory"
-BOARD="python3 $HOME/.claude/skills/factory/board.py --dir $F"
+REPO="$(git rev-parse --show-toplevel)"; F="$REPO/scrum"
+BOARD="python3 $HOME/.claude/skills/trevskills-scrum/board.py --dir $F"
 ```
 
 If this isn't the main checkout, stop and say so. If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
 ### First-run setup (once per repo)
 
-1. Run `mkdir -p "$F/jobs"`, then `ln -sfn "$HOME/.claude/skills/factory/dashboard.html" "$F/dashboard.html"`.
-2. Add `factory/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there. This keeps your tracked `.gitignore` untouched.
+1. Run `mkdir -p "$F/jobs"`, then `ln -sfn "$HOME/.claude/skills/trevskills-scrum/dashboard.html" "$F/dashboard.html"`.
+2. Add `scrum/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there. This keeps your tracked `.gitignore` untouched.
 3. If `$F/backlog.md` is missing, create it containing `# Backlog` plus one blank line.
 4. Detect the project and write `$F/project.md`:
    - Read the repo `CLAUDE.md`/`AGENTS.md`, every `CLAUDE.md` in parent folders up to `$HOME`, and `.claude/rules/*.md` at each of those levels.
@@ -912,7 +912,7 @@ If this isn't the main checkout, stop and say so. If `$F/project.md` is missing,
    - Prefer commands written explicitly in CLAUDE.md. Otherwise use package scripts (`test`, `lint`, `typecheck`, `build`). For TypeScript with no typecheck script, use `npx tsc --noEmit`. Write `none` when a command doesn't exist. Never invent a test runner.
 
 ```markdown
-# Project profile (written by /factory; edit freely)
+# Project profile (written by /trevskills-scrum; edit freely)
 - Stack: <language / framework>
 - Package manager: <npm|pnpm|yarn|pip|...>
 - Install: <command>
@@ -925,23 +925,23 @@ If this isn't the main checkout, stop and say so. If `$F/project.md` is missing,
 - Notes: <anything an agent must know, e.g. "tests need .env">
 ```
 
-5. Tell the user: `Dashboard: cd factory && python3 -m http.server 8765` → http://localhost:8765/dashboard.html
+5. Tell the user: `Dashboard: cd scrum && python3 -m http.server 8765` → http://localhost:8765/dashboard.html
 
 ## Commands
 
 For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `worktree`, `BASE` is its `base`, and `DEFAULT` is `BASE` with the `origin/` prefix removed. `N` is its `round`.
 
-- **`/factory`** (no args): print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
-- **`/factory next`**: take the first `- [ ] ` line in `$F/backlog.md`. If there is none, say the backlog is empty and stop. Run **New job** with that text. Once the id exists, change that line to `- [x] <text> → <id>`.
-- **`/factory <feature text>`**: run **New job**.
-- **`/factory approve <id>`**: the job must be `needs-human`. Write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>`. If the reason starts `schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop if they haven't confirmed. Then run **Merge**.
-- **`/factory rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `$BOARD set <id> stage=build reason= limit=<round+2>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/factory-<id>" factory/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
+- **`/trevskills-scrum`** (no args): print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
+- **`/trevskills-scrum next`**: take the first `- [ ] ` line in `$F/backlog.md`. If there is none, say the backlog is empty and stop. Run **New job** with that text. Once the id exists, change that line to `- [x] <text> → <id>`.
+- **`/trevskills-scrum <feature text>`**: run **New job**.
+- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. Write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>`. If the reason starts `schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop if they haven't confirmed. Then run **Merge**.
+- **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `$BOARD set <id> stage=build reason= limit=<round+2>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
 
 ## New job
 
 1. `ID=$($BOARD new "<title>")`. The title is the feature's first line, at most 60 characters. Write the full feature text to `$F/jobs/$ID/feature.md`.
 2. **Base:** run `git fetch origin` (skip it if there is no remote). `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`, then `BASE=origin/$DEFAULT`. With no remote, use the current branch, but only if it's `main` or `master`; otherwise stop. Run `$BOARD set $ID base=$BASE`.
-3. **Spec:** spawn `factory-spec-writer` and wait for it. Prompt:
+3. **Spec:** spawn `scrum-spec-writer` and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID
    WORKTREE=none
@@ -953,12 +953,12 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing"` and stop.
 4. **Worktree:**
    ```bash
-   WT="$REPO/.claude/worktrees/factory-$ID"
-   git worktree add "$WT" -b "factory/$ID" "$BASE"
+   WT="$REPO/.claude/worktrees/scrum-$ID"
+   git worktree add "$WT" -b "scrum/$ID" "$BASE"
    for e in "$REPO"/.env*; do [ -e "$e" ] && ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
    Then `$BOARD set $ID worktree=$WT stage=build`.
-5. **Build:** spawn `factory-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `$BOARD set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `$BOARD set $ID stage=needs-human reason="blocked: <first reason line>"` and stop.
+5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `$BOARD set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `$BOARD set $ID stage=needs-human reason="blocked: <first reason line>"` and stop.
 6. Continue at **Check gate**.
 
 ## Check gate
@@ -972,7 +972,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 ## Review (WAIT FOR ALL)
 
 1. Run `$BOARD set $ID stage=review`.
-2. Spawn **all four reviewers in ONE message**, in the background: `factory-review-security`, `factory-review-ux`, `factory-review-ui`, `factory-review-code`. Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`
+2. Spawn **all four reviewers in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code`. Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`
 3. **WAIT FOR ALL.** Do nothing else until all four have completed. Then run `$BOARD sync $ID`.
    - `complete` must be `true`. If a file is missing, re-spawn only that reviewer, once.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
@@ -984,7 +984,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 ## Approve
 
-1. Run `$BOARD set $ID stage=approve`. Spawn `factory-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
+1. Run `$BOARD set $ID stage=approve`. Spawn `scrum-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
 2. Copy `decision.md` into `round-$N/decision.md`; that's how the approver later sees whether REWORK has already been used. Run `$BOARD sync $ID` and read `decision`.
 3. Append each `## Follow-ups` bullet in `decision.md` to `$F/backlog.md` as `- [ ] <item> (from $ID)`.
 4. Route:
@@ -992,34 +992,34 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    - `REWORK`: run `$BOARD set $ID limit=$((N+1)) stage=build`. Resume the builder with `The approver requested rework: read JOB_DIR/decision.md (Rulings marked fix-now), fix, commit, update build.md.` Then go to **Check gate**.
    - `ESCALATE` or `INVALID`: run `$BOARD set $ID stage=needs-human reason="<second line of decision.md>"`. Report and stop. For INVALID, use reason `approver output unreadable`.
 
-## Merge (APPROVE, or /factory approve)
+## Merge (APPROVE, or /trevskills-scrum approve)
 
 The steps below reuse the lessons from `/trevskills-commitpush`.
 
 1. **Preconditions:**
-   - `command -v gh && gh auth status` must succeed. If not, run `stage=needs-human reason="gh unavailable; branch factory/$ID is local"` and stop.
+   - `command -v gh && gh auth status` must succeed. If not, run `stage=needs-human reason="gh unavailable; branch scrum/$ID is local"` and stop.
    - `git -C "$WT" status --porcelain` must be empty. If it isn't, resume the builder once with `Commit or remove uncommitted changes.`
-2. Run `$BOARD set $ID stage=merging`. Then `git -C "$WT" push -u origin "factory/$ID"`. That pushes the factory branch only.
-3. **PR.** Run `gh pr view "factory/$ID" --json number,url,state`:
+2. Run `$BOARD set $ID stage=merging`. Then `git -C "$WT" push -u origin "scrum/$ID"`. That pushes the scrum branch only.
+3. **PR.** Run `gh pr view "scrum/$ID" --json number,url,state`:
    - `OPEN`: reuse it.
    - `MERGED`: run `stage=done` and stop.
    - `CLOSED`: run `stage=needs-human reason="PR was closed by someone"` and stop.
-   - No PR: write the body to a temp file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the factory approver. Spec, reviews and decision: factory/jobs/$ID/`, then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "factory/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
+   - No PR: write the body to a temp file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/`, then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
 
    Then `$BOARD set $ID pr=<url>`.
 4. **Checks.** Run this in the **background**, because foreground `sleep` is blocked:
    ```bash
-   for i in 1 2 3 4; do out=$(gh pr checks "factory/$ID" --watch --fail-fast --interval 15 2>&1); code=$?
+   for i in 1 2 3 4; do out=$(gh pr checks "scrum/$ID" --watch --fail-fast --interval 15 2>&1); code=$?
      echo "$out" | grep -q "no checks reported" || break; sleep 20; done; echo "exit=$code"; echo "$out" | tail -40
    ```
    - `exit=0`: continue to step 5.
    - Still "no checks reported": the repo has no CI. Continue, and note "no CI ran" in the final report.
    - Any other failure: write the failing output to `$F/jobs/$ID/ci.md`, resume the builder with `CI failed: read JOB_DIR/ci.md, fix, commit.`, push again, and re-check. Allow at most **2** CI fix attempts. After that, run `stage=needs-human reason="CI failing"` and stop.
-5. **Conflicts.** Run `gh pr view "factory/$ID" --json mergeable --jq .mergeable`. If it returns `CONFLICTING`, resolve it. This is the one sanctioned `git merge`, and it only ever goes into this job's own branch. Allow at most **2** attempts; after that, run `stage=needs-human reason="conflicts with $DEFAULT"` and stop. Each attempt:
+5. **Conflicts.** Run `gh pr view "scrum/$ID" --json mergeable --jq .mergeable`. If it returns `CONFLICTING`, resolve it. This is the one sanctioned `git merge`, and it only ever goes into this job's own branch. Allow at most **2** attempts; after that, run `stage=needs-human reason="conflicts with $DEFAULT"` and stop. Each attempt:
    1. `git -C "$WT" fetch origin`, then `git -C "$WT" merge "origin/$DEFAULT" --no-edit`.
    2. If that merge itself conflicts, resume the builder with `The default branch was merged into your branch and has conflicts: resolve them, commit, update build.md.`
    3. Run `$BOARD set $ID limit=$((N+1))` and go to **Check gate**. That gives a fresh check and full review round, then the approver, then Merge again, reusing the open PR.
-6. **Merge:** `gh pr merge "factory/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`.
+6. **Merge:** `gh pr merge "scrum/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`.
 7. **Clean up:**
    - Run `git worktree remove "$WT"`. If git refuses because of local changes, leave the worktree in place and mention it.
    - Run `git fetch origin`.
@@ -1028,14 +1028,14 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
 ## Resuming the builder
 
 Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored agent id) with a message naming the exact file(s) to read. If SendMessage fails because the agent no longer exists (for example after a session restart):
-1. Spawn a fresh `factory-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
+1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `$BOARD set $ID builder=<new id>`.
 
 The orchestrator never edits code or review files itself.
 
 ## Final report
 
-End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, and, for needs-human, the exact reason and the next command (`/factory approve <id>` or `/factory rework <id> "<feedback>"`).
+End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).
 ````
 
 - [ ] **Step 4: Run the tests and confirm they pass**
@@ -1046,8 +1046,8 @@ Expected: all tests PASS. `test_skill_only_merges_via_gh_squash` requires every 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add skills/factory/SKILL.md tests/test_contracts.py
-git commit -m "Add /factory orchestrator skill
+git add skills/trevskills-scrum/SKILL.md tests/test_contracts.py
+git commit -m "Add /trevskills-scrum orchestrator skill
 
 - setup, project detection, new/next/approve/rework commands
 - check gate, wait-for-all review rounds, approver routing
@@ -1061,35 +1061,35 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: Dashboard
 
 **Files:**
-- Create: `skills/factory/dashboard.html`
-- Create: `tests/fixture/factory/board.json`, `tests/fixture/factory/jobs/003-rate-limiting/spec.md`, `tests/fixture/factory/jobs/003-rate-limiting/round-1/review-security.md`, `tests/fixture/factory/jobs/002-stripe-refunds/decision.md`, and the symlink `tests/fixture/factory/dashboard.html`
+- Create: `skills/trevskills-scrum/dashboard.html`
+- Create: `tests/fixture/scrum/board.json`, `tests/fixture/scrum/jobs/003-rate-limiting/spec.md`, `tests/fixture/scrum/jobs/003-rate-limiting/round-1/review-security.md`, `tests/fixture/scrum/jobs/002-stripe-refunds/decision.md`, and the symlink `tests/fixture/scrum/dashboard.html`
 
 **Interfaces:**
 - Consumes: the `board.json` job shape from Task 1 (`id title stage round reviews rounds[{check,security,ux,ui,code}] files pr reason updatedAt`), and files under `jobs/<id>/<relpath>`.
-- Produces: `dashboard.html`, served from any `factory/` folder.
+- Produces: `dashboard.html`, served from any `scrum/` folder.
 
 - [ ] **Step 1: Write the fixture**
 
-`tests/fixture/factory/board.json`:
+`tests/fixture/scrum/board.json`:
 
 ```json
 {
   "jobs": [
-    {"id": "001-dark-mode", "title": "Dark mode toggle", "branch": "factory/001-dark-mode", "stage": "done", "round": 1, "limit": 2,
+    {"id": "001-dark-mode", "title": "Dark mode toggle", "branch": "scrum/001-dark-mode", "stage": "done", "round": 1, "limit": 2,
      "reviews": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}],
      "files": [], "pr": "https://github.com/example/repo/pull/12", "reason": null, "updatedAt": "2026-10-12T10:00:00+00:00"},
-    {"id": "002-stripe-refunds", "title": "Stripe refunds", "branch": "factory/002-stripe-refunds", "stage": "needs-human", "round": 2, "limit": 2,
+    {"id": "002-stripe-refunds", "title": "Stripe refunds", "branch": "scrum/002-stripe-refunds", "stage": "needs-human", "round": 2, "limit": 2,
      "reviews": {"security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
                 {"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "PASS"}],
      "files": ["decision.md", "missing.md"], "pr": null, "reason": "Hard stop: money — refund amount calculation changed", "updatedAt": "2026-10-12T11:00:00+00:00"},
-    {"id": "003-rate-limiting", "title": "Rate limiting on login", "branch": "factory/003-rate-limiting", "stage": "review", "round": 2, "limit": 2,
+    {"id": "003-rate-limiting", "title": "Rate limiting on login", "branch": "scrum/003-rate-limiting", "stage": "review", "round": 2, "limit": 2,
      "reviews": {"security": "CHANGES", "ux": "PASS", "ui": "pending", "code": "PASS"},
      "rounds": [{"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "INVALID", "code": "PASS"},
                 {"check": "PASS", "security": "CHANGES", "ux": "PASS", "ui": "pending", "code": "PASS"}],
      "files": ["spec.md", "round-1/review-security.md"], "pr": null, "reason": null, "updatedAt": "2020-01-01T00:00:00+00:00"},
-    {"id": "004-csv-export", "title": "CSV export for orders", "branch": "factory/004-csv-export", "stage": "spec", "round": 0, "limit": 2,
+    {"id": "004-csv-export", "title": "CSV export for orders", "branch": "scrum/004-csv-export", "stage": "spec", "round": 0, "limit": 2,
      "reviews": {"security": "pending", "ux": "pending", "ui": "pending", "code": "pending"},
      "rounds": [], "files": [], "pr": null, "reason": null, "updatedAt": "2099-01-01T00:00:00+00:00"}
   ]
@@ -1124,9 +1124,9 @@ ESCALATE
 Hard stop: money — refund amount calculation changed in src/lib/refunds.ts
 ```
 
-Then: `cd tests/fixture/factory && ln -s ../../../skills/factory/dashboard.html dashboard.html`
+Then: `cd tests/fixture/scrum && ln -s ../../../skills/trevskills-scrum/dashboard.html dashboard.html`
 
-- [ ] **Step 2: Write `skills/factory/dashboard.html`**
+- [ ] **Step 2: Write `skills/trevskills-scrum/dashboard.html`**
 
 ```html
 <!doctype html>
@@ -1134,7 +1134,7 @@ Then: `cd tests/fixture/factory && ln -s ../../../skills/factory/dashboard.html 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Software Factory</title>
+<title>Trevskills Scrum</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
@@ -1176,7 +1176,7 @@ article a{color:var(--accent)}
 </style>
 </head>
 <body>
-<header><h1>Software Factory</h1><span id="status" aria-live="polite">loading…</span></header>
+<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span></header>
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><article id="doc"></article></dialog>
 <script>
@@ -1215,7 +1215,7 @@ function render() {
 async function poll() {
   try {
     const res = await fetch("board.json", {cache: "no-store"});
-    if (!res.ok) { $("status").textContent = "No board.json yet. Run /factory in this repo."; jobs = []; render(); return; }
+    if (!res.ok) { $("status").textContent = "No board.json yet. Run /trevskills-scrum in this repo."; jobs = []; render(); return; }
     const text = await res.text();
     if (text !== lastText) { jobs = JSON.parse(text).jobs || []; lastText = text; render(); }
     $("status").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`;
@@ -1272,7 +1272,7 @@ setInterval(poll, 2000);
 
 - [ ] **Step 3: Verify in a browser against the fixture**
 
-Run in the background: `cd tests/fixture/factory && python3 -m http.server 8799`
+Run in the background: `cd tests/fixture/scrum && python3 -m http.server 8799`
 Using the Playwright MCP, navigate to `http://localhost:8799/dashboard.html` and check:
 1. There are 8 columns. `003-rate-limiting` sits in **review** with two chip rows. Its R1 `ui` chip is purple (INVALID), its R2 `ui` chip is dashed (pending), and it shows "stale since …".
 2. `002-stripe-refunds` sits in **needs-human** with a red border and the "Hard stop: money…" reason.
@@ -1288,8 +1288,8 @@ Take a screenshot (`dashboard-fixture.png` in the scratchpad) for the final repo
 - [ ] **Step 4: Commit**
 
 ```bash
-git add skills/factory/dashboard.html tests/fixture
-git commit -m "Add factory dashboard
+git add skills/trevskills-scrum/dashboard.html tests/fixture
+git commit -m "Add scrum dashboard
 
 - one static file polling board.json; jobs move across stage columns
 - per-round reviewer chips, needs-human highlighted, stale jobs flagged
@@ -1307,8 +1307,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `tests/test_install.py`
 
 **Interfaces:**
-- Consumes: the `agents/*.md` and `skills/factory/` layout.
-- Produces: the symlinks `$CLAUDE_HOME/skills/factory` → `<repo>/skills/factory` and `$CLAUDE_HOME/agents/<name>.md` → `<repo>/agents/<name>.md`. `CLAUDE_HOME` defaults to `~/.claude`.
+- Consumes: the `agents/*.md` and `skills/trevskills-scrum/` layout.
+- Produces: the symlinks `$CLAUDE_HOME/skills/trevskills-scrum` → `<repo>/skills/trevskills-scrum` and `$CLAUDE_HOME/agents/<name>.md` → `<repo>/agents/<name>.md`. `CLAUDE_HOME` defaults to `~/.claude`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1331,7 +1331,7 @@ class InstallTest(unittest.TestCase):
             home = Path(t)
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
-            self.assertEqual((home / "skills" / "factory").resolve(), ROOT / "skills" / "factory")
+            self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
             for agent in (ROOT / "agents").glob("*.md"):
                 self.assertEqual((home / "agents" / agent.name).resolve(), agent)
 
@@ -1339,7 +1339,7 @@ class InstallTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)
             (home / "agents").mkdir(parents=True)
-            real = home / "agents" / "factory-builder.md"
+            real = home / "agents" / "scrum-builder.md"
             real.write_text("mine")
             result = self.run_install(home)
             self.assertNotEqual(result.returncode, 0)
@@ -1360,7 +1360,7 @@ Expected: FAIL, because `bash: .../install.sh: No such file or directory` gives 
 
 ```bash
 #!/usr/bin/env bash
-# Links the factory into ~/.claude so /factory works in every repo. Safe to re-run; edits here go live instantly.
+# Links the scrum into ~/.claude so /trevskills-scrum works in every repo. Safe to re-run; edits here go live instantly.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 dest="${CLAUDE_HOME:-$HOME/.claude}"
@@ -1377,9 +1377,9 @@ for f in "$here"/agents/*.md; do
   t="$dest/agents/$(basename "$f")"
   if [ -e "$t" ] && [ ! -L "$t" ]; then echo "refusing to replace real file: $t" >&2; exit 1; fi
 done
-link "$here/skills/factory" "$dest/skills/factory"
+link "$here/skills/trevskills-scrum" "$dest/skills/trevskills-scrum"
 for f in "$here"/agents/*.md; do link "$f" "$dest/agents/$(basename "$f")"; done
-echo "Done. In any repo: /factory <feature>"
+echo "Done. In any repo: /trevskills-scrum <feature>"
 ```
 
 Then: `chmod +x install.sh`
@@ -1392,9 +1392,9 @@ Expected: all tests PASS.
 - [ ] **Step 5: Write `README.md`**
 
 ````markdown
-# Software Factory
+# Trevskills Scrum
 
-`/factory <feature>` turns a feature request into a squash-merged PR. A spec writer, a builder, four parallel reviewers and an approver hand off through markdown files, and a one-file dashboard shows each job's progress.
+`/trevskills-scrum <feature>` turns a feature request into a squash-merged PR. A spec writer, a builder, four parallel reviewers and an approver hand off through markdown files, and a one-file dashboard shows each job's progress.
 
 ```
 feature → spec-writer → builder → check gate → security · ux · ui · code → approver
@@ -1411,27 +1411,27 @@ feature → spec-writer → builder → check gate → security · ux · ui · c
 
 ```bash
 brew install gh && gh auth login   # needed to open and merge PRs
-./install.sh                       # links skills/factory and agents/* into ~/.claude
+./install.sh                       # links skills/trevskills-scrum and agents/* into ~/.claude
 ```
 
 ## Use (in any repo, from its main checkout)
 
 | Command | Does |
 | --- | --- |
-| `/factory <feature>` | runs a new job |
-| `/factory next` | runs the first `- [ ]` item in `factory/backlog.md` |
-| `/factory approve <id>` | merges a needs-human job |
-| `/factory rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |
-| `/factory` | shows the board |
+| `/trevskills-scrum <feature>` | runs a new job |
+| `/trevskills-scrum next` | runs the first `- [ ]` item in `scrum/backlog.md` |
+| `/trevskills-scrum approve <id>` | merges a needs-human job |
+| `/trevskills-scrum rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |
+| `/trevskills-scrum` | shows the board |
 
-Dashboard: `cd factory && python3 -m http.server 8765`, then open http://localhost:8765/dashboard.html
+Dashboard: `cd scrum && python3 -m http.server 8765`, then open http://localhost:8765/dashboard.html
 
-The first run writes `factory/project.md` (stack, test/lint/build commands, convention files). Edit it if detection got something wrong. To run several jobs at once, open several Claude sessions; each job gets its own worktree.
+The first run writes `scrum/project.md` (stack, test/lint/build commands, convention files). Edit it if detection got something wrong. To run several jobs at once, open several Claude sessions; each job gets its own worktree.
 
-## Change the factory
+## Change the scrum
 
-- Agents: `agents/factory-*.md`. A repo can override one with its own `.claude/agents/<same name>.md`.
-- The loop: `skills/factory/SKILL.md`
+- Agents: `agents/scrum-*.md`. A repo can override one with its own `.claude/agents/<same name>.md`.
+- The loop: `skills/trevskills-scrum/SKILL.md`
 - Tests: `python3 -m unittest discover -s tests -v`
 ````
 
@@ -1455,31 +1455,31 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: evidence that `/factory` is discovered and that one job runs from spec to approve.
+- Produces: evidence that `/trevskills-scrum` is discovered and that one job runs from spec to approve.
 
 - [ ] **Step 1: Install for real and confirm Claude Code sees it**
 
 ```bash
 ./install.sh
-ls -l ~/.claude/skills/factory ~/.claude/agents/
+ls -l ~/.claude/skills/trevskills-scrum ~/.claude/agents/
 ```
 
-Expected: 8 symlinks. Then in a **new** Claude Code session, run `/agents` and confirm the seven `factory-*` agents are listed, and type `/factory` and confirm the skill loads. If symlinked agents or skills are not discovered, stop and report it; don't switch to copying files without asking.
+Expected: 8 symlinks. Then in a **new** Claude Code session, run `/agents` and confirm the seven `scrum-*` agents are listed, and type `/trevskills-scrum` and confirm the skill loads. If symlinked agents or skills are not discovered, stop and report it; don't switch to copying files without asking.
 
 - [ ] **Step 2: Smoke run without a remote**
 
 Create a scratch repo (not under `~/Developer`):
 
 ```bash
-S=/private/tmp/claude-501/factory-smoke && mkdir -p $S && cd $S && git init -q -b main
+S=/private/tmp/claude-501/scrum-smoke && mkdir -p $S && cd $S && git init -q -b main
 printf '{"name":"smoke","scripts":{"test":"node --test"}}\n' > package.json
 printf 'export const add = (a, b) => a + b;\n' > math.mjs
 printf 'import test from "node:test"; import assert from "node:assert"; import {add} from "./math.mjs";\ntest("add", () => assert.equal(add(1,2),3));\n' > math.test.mjs
 git add -A && git commit -qm "init"
 ```
 
-In a Claude session in `$S`, run `/factory add a multiply(a, b) function with tests`. Expected:
-- `factory/project.md` is created, with Test `npm test`.
+In a Claude session in `$S`, run `/trevskills-scrum add a multiply(a, b) function with tests`. Expected:
+- `scrum/project.md` is created, with Test `npm test`.
 - The job moves spec → build → check → review → approve, and the dashboard shows it live.
 - Because there's no remote, the job stops at **Merge** step 1 with `needs-human reason="gh unavailable…"` or a push failure. That's expected for this smoke test.
 - Its round-1 files all exist, and `decision.md` starts `APPROVE`.
@@ -1494,5 +1494,5 @@ git add -A && git commit -m "Tighten orchestrator wording from smoke run
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Then hand off with `/trevskills-commitpush` (Path B, branch `feat/factory-v1`). That needs a GitHub remote: create the repo first, with `gh repo create software-factory --private --source . --push=false`, **only if Trevor says so**.
+Then hand off with `/trevskills-commitpush` (Path B, branch `feat/scrum-v1`). That needs a GitHub remote: create the repo first, with `gh repo create trevskills-scrum --private --source . --push=false`, **only if Trevor says so**.
 ````
