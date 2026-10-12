@@ -42,6 +42,24 @@ class ContractTest(unittest.TestCase):
             self.assertIn("prisma migrate", text, name)
             self.assertIn("git merge", text, name)
 
+    def test_skill_references_every_agent_and_board_command(self):
+        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        for name in AGENTS:
+            self.assertIn(name, text)
+        for cmd in ("board.py", " new ", " set ", " sync "):
+            self.assertIn(cmd, text)
+        fm = frontmatter(ROOT / "skills" / "factory" / "SKILL.md")
+        self.assertEqual(fm.get("name"), "factory")
+
+    def test_skill_only_merges_via_gh_squash(self):
+        text = (ROOT / "skills" / "factory" / "SKILL.md").read_text()
+        self.assertIn("gh pr merge", text)
+        self.assertIn("--squash", text)
+        for line in text.splitlines():
+            for banned in ("--auto", "--admin", "--force", "git push origin main"):
+                if banned in line:
+                    self.assertIn("never", line.lower(), f"{banned!r} outside a 'never' line: {line}")
+
 
 if __name__ == "__main__":
     unittest.main()
