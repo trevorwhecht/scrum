@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software Factory</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
+  --pass:#1e8449;--changes:#c4520f;--invalid:#7a3fd6;--human:#d32f2f;--pending:#c8c4ba}
+@media (prefers-color-scheme:dark){:root{--bg:#131312;--card:#1d1c1a;--ink:#ecebe6;--muted:#9b978e;--line:#2f2d2a;--pending:#55524c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:baseline;gap:12px;padding:16px}
+h1{font-size:16px;margin:0}
+#status{color:var(--muted);font-size:12px}
+main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
+.col h2{white-space:nowrap;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.col.human h2{color:var(--human)}
+.card{display:block;width:100%;text-align:left;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);
+  border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+.card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
+.card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
+.id{font:12px ui-monospace,monospace;color:var(--muted)}
+.title{display:block;margin:2px 0 4px;font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin-top:4px}
+.row b{font:600 11px ui-monospace,monospace;color:var(--muted);width:22px}
+.chip{font-size:11px;padding:1px 5px;border-radius:99px;color:#fff;background:var(--pending)}
+.chip.PASS{background:var(--pass)}.chip.CHANGES,.chip.FAIL{background:var(--changes)}.chip.INVALID{background:var(--invalid)}
+.chip.pending{background:transparent;color:var(--muted);border:1px dashed var(--pending)}
+.meta{display:block;font-size:12px;color:var(--muted);margin-top:6px}
+.reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
+.stale{color:var(--changes)}
+.empty{color:var(--muted);font-size:12px}
+dialog{width:min(900px,94vw);max-height:88dvh;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);padding:0}
+dialog::backdrop{background:#0007}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;padding:10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
+.tabs button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
+.tabs button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.tabs .close{margin-left:auto}
+article{padding:4px 20px 20px;overflow-wrap:anywhere}
+article pre{overflow-x:auto;background:var(--bg);padding:8px;border-radius:6px;white-space:pre-wrap}
+article a{color:var(--accent)}
+@media (max-width:640px){main{grid-template-columns:1fr!important}}
+</style>
+</head>
+<body>
+<header><h1>Software Factory</h1><span id="status" aria-live="polite">loading…</span></header>
+<main id="board"></main>
+<dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><article id="doc"></article></dialog>
+<script>
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
+const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
+const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+// Agents write the markdown, so any raw HTML in it is shown as text, never run.
+if (window.marked) marked.use({renderer: {html: h => esc(typeof h === "object" ? h.text : h)}});
+const $ = id => document.getElementById(id);
+let jobs = [], lastText = "";
+
+const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
+const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
+
+function card(job) {
+  const human = job.stage === "needs-human";
+  const stale = !["done", "needs-human"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  return `<button class="card${human ? " human" : ""}" data-id="${esc(job.id)}">
+    <span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
+    ${(job.rounds || []).map(roundRow).join("")}
+    ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
+    <span class="meta">${job.pr ? "PR ready · " : ""}${stale ? `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>` : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>
+  </button>`;
+}
+
+function render() {
+  const extra = [...new Set(jobs.map(j => j.stage).filter(s => !STAGES.includes(s)))];
+  const cols = [...STAGES, ...extra];
+  // Empty stages stay visible but narrow, so the columns holding jobs get the room.
+  $("board").style.gridTemplateColumns = cols.map(s => jobs.some(j => j.stage === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  $("board").innerHTML = cols.map(stage => {
+    const inCol = jobs.filter(j => j.stage === stage);
+    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2>${esc(stage)} · ${inCol.length}</h2>
+      ${inCol.map(card).join("") || '<p class="empty">—</p>'}</section>`;
+  }).join("");
+}
+
+async function poll() {
+  try {
+    const res = await fetch("board.json", {cache: "no-store"});
+    if (!res.ok) { $("status").textContent = "No board.json yet. Run /factory in this repo."; jobs = []; render(); return; }
+    const text = await res.text();
+    if (text !== lastText) { jobs = JSON.parse(text).jobs || []; lastText = text; render(); }
+    $("status").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $("status").textContent = `Can't read board.json (${e.message}). Showing the last good state.`;
+  }
+}
+
+async function show(job, file) {
+  [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
+  const url = `jobs/${encodeURIComponent(job.id)}/${file.split("/").map(encodeURIComponent).join("/")}`;
+  try {
+    const res = await fetch(url, {cache: "no-store"});
+    if (!res.ok) throw new Error(`${res.status}`);
+    const md = await res.text();
+    $("doc").innerHTML = window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
+  } catch (e) {
+    $("doc").innerHTML = `<p class="empty">Couldn't load ${esc(file)} (${esc(e.message)}).</p>`;
+  }
+}
+
+function open(job) {
+  $("viewer").dataset.job = job.id;
+  const files = job.files || [];
+  const pr = job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "";
+  $("tabs").innerHTML = files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
+    + pr + '<button class="close" aria-label="Close">✕</button>';
+  $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
+  $("viewer").showModal();
+  const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
+  if (first) show(job, first);
+}
+
+$("board").addEventListener("click", e => {
+  const el = e.target.closest(".card");
+  const job = el && jobs.find(j => j.id === el.dataset.id);
+  if (job) open(job);
+});
+$("tabs").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.classList.contains("close")) return $("viewer").close();
+  const job = jobs.find(j => j.id === $("viewer").dataset.job);
+  if (job) show(job, b.dataset.file);
+});
+$("viewer").addEventListener("click", e => { if (e.target === $("viewer")) $("viewer").close(); });
+
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
