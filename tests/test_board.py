@@ -1,0 +1,163 @@
+import json, subprocess, sys, tempfile, unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "skills" / "factory"))
+import board  # noqa: E402
+
+BOARD_PY = ROOT / "skills" / "factory" / "board.py"
+
+
+class BoardTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "factory"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def jobs(self):
+        return json.loads((self.root / "board.json").read_text())["jobs"]
+
+    def write(self, rel, text):
+        p = self.root / "jobs" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    # --- new ---
+    def test_new_creates_job_folder_and_entry(self):
+        job_id = board.cmd_new(self.root, "Add Rate Limiting!")
+        self.assertEqual(job_id, "001-add-rate-limiting")
+        self.assertTrue((self.root / "jobs" / job_id).is_dir())
+        job = self.jobs()[0]
+        self.assertEqual(job["branch"], "factory/001-add-rate-limiting")
+        self.assertEqual(job["stage"], "spec")
+        self.assertEqual(job["limit"], 2)
+        self.assertEqual(job["reviews"], {r: "pending" for r in board.REVIEWERS})
+
+    def test_new_numbers_continue_past_existing_folders(self):
+        (self.root / "jobs" / "007-old").mkdir(parents=True)
+        self.assertTrue(board.cmd_new(self.root, "next").startswith("008-"))
+
+    def test_new_with_symbol_only_title_gets_fallback_slug(self):
+        self.assertEqual(board.cmd_new(self.root, "!!!"), "001-job")
+
+    def test_concurrent_new_jobs_get_unique_ids(self):
+        procs = [subprocess.Popen([sys.executable, str(BOARD_PY), "--dir", str(self.root), "new", f"job {i}"],
+                                  stdout=subprocess.PIPE, text=True) for i in range(8)]
+        ids = [p.communicate()[0].strip() for p in procs]
+        self.assertEqual(len(set(ids)), 8)
+        self.assertEqual(len(self.jobs()), 8)
+
+    # --- set ---
+    def test_set_updates_fields_and_casts_round(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=review", "round=2", "pr=https://x/1", "reason="])
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["round"], job["pr"], job["reason"]), ("review", 2, "https://x/1", None))
+
+    def test_set_rejects_unknown_field_and_bad_stage_without_writing(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, job_id, ["stage=review", "colour=red"])
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, job_id, ["stage=shipping"])
+        self.assertEqual(self.jobs()[0]["stage"], "spec")
+
+    def test_set_unknown_job_fails(self):
+        board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, "999-nope", ["stage=done"])
+
+    def test_rejects_path_traversal_id(self):
+        board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_sync(self.root, "../../etc")
+
+    def test_corrupt_board_is_not_overwritten(self):
+        job_id = board.cmd_new(self.root, "x")
+        (self.root / "board.json").write_text("{not json")
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, job_id, ["stage=done"])
+        self.assertEqual((self.root / "board.json").read_text(), "{not json")
+
+    # --- first_word ---
+    def test_first_word_tolerates_decoration(self):
+        allowed = ("PASS", "CHANGES")
+        for text in ["VERDICT: PASS\n", "**VERDICT: PASS**", "# Verdict: pass", "\n\n  verdict:PASS — fine",
+                     "﻿VERDICT: CHANGES"]:
+            p = self.write("t/r.md", text)
+            self.assertIn(board.first_word(p, allowed), allowed, text)
+
+    def test_first_word_garbage_is_invalid_not_pass(self):
+        p = self.write("t/r.md", "Looks good to me!\nVERDICT: PASS")
+        self.assertEqual(board.first_word(p, ("PASS", "CHANGES")), "INVALID")
+        p = self.write("t/e.md", "")
+        self.assertEqual(board.first_word(p, ("PASS", "CHANGES")), "INVALID")
+
+    def test_first_word_missing_file_is_none(self):
+        self.assertIsNone(board.first_word(self.root / "nope.md", ("PASS",)))
+
+    # --- sync ---
+    def test_sync_incomplete_round_is_not_complete(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.write(f"{job_id}/spec.md", "# spec")
+        self.write(f"{job_id}/round-1/check.md", "CHECK: PASS")
+        self.write(f"{job_id}/round-1/review-security.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-1/review-ux.md", "VERDICT: CHANGES")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual(status["round"], 1)
+        self.assertFalse(status["complete"])
+        self.assertIsNone(status["verdict"])
+        self.assertEqual(status["check"], "PASS")
+        job = self.jobs()[0]
+        self.assertEqual(job["reviews"], {"security": "PASS", "ux": "CHANGES", "ui": "pending", "code": "pending"})
+        self.assertIn("round-1/review-ux.md", job["files"])
+        self.assertIn("spec.md", job["files"])
+
+    def test_sync_complete_rounds_and_verdicts(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: CHANGES" if r == "code" else "VERDICT: PASS")
+            self.write(f"{job_id}/round-2/review-{r}.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-10/check.md", "CHECK: FAIL")  # sorted numerically, not as text
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual(status["round"], 10)
+        job = self.jobs()[0]
+        self.assertEqual(job["rounds"][0]["code"], "CHANGES")
+        self.assertEqual(job["rounds"][1]["code"], "PASS")
+        self.assertEqual(job["rounds"][2]["check"], "FAIL")
+
+    def test_sync_reports_pass_changes_and_invalid(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["verdict"], "PASS")
+        self.write(f"{job_id}/round-1/review-ui.md", "VERDICT: CHANGES")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["verdict"], "CHANGES")
+        self.write(f"{job_id}/round-1/review-ux.md", "I think it's fine")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertTrue(status["complete"])
+        self.assertEqual((status["verdict"], status["invalid"]), ("INVALID", ["ux"]))
+
+    def test_sync_reads_decision(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.assertIsNone(board.cmd_sync(self.root, job_id)["decision"])
+        self.write(f"{job_id}/decision.md", "**ESCALATE**\nHard stop: auth")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["decision"], "ESCALATE")
+
+    def test_cli_set_and_sync(self):
+        run = lambda *a: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *a],
+                                        capture_output=True, text=True)
+        job_id = run("new", "cli job").stdout.strip()
+        self.assertEqual(run("set", job_id, "stage=build").returncode, 0)
+        out = run("sync", job_id)
+        self.assertEqual(json.loads(out.stdout)["round"], 0)
+        bad = run("set", job_id, "nope=1")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("nope", bad.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
