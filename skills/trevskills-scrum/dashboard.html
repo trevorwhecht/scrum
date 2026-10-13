@@ -272,7 +272,7 @@ function card(job) {
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
+    ${human && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
@@ -422,16 +422,20 @@ async function openTerminal(key) {
   redrawTerm(key);
 }
 
-// Next step for a needs-human job, picked from the reason prefix the orchestrator writes.
-const nextStep = (reason, worktree) =>
-  /^obsolete/.test(reason) ? "Abort this job."
-  : /^(blocked|spec writer)/.test(reason) ? "Send back to builder with feedback, or abort."
-  : /Hard stop: schema/.test(reason) ? "Approve & merge runs /trevskills-migrate first. Tick the box only if you already ran it."
-  : worktree ? "Approve & merge, or send back to builder."
-  : "Send back to builder, or abort.";
-const waitingBanner = job => job.stage !== "needs-human" ? "" : `<div class="waiting"
-    data-agent-hint="This job stopped and needs Trevor. The first line is the reason the orchestrator recorded; the second is the suggested next action.">
-    <b>Waiting on you</b><p>${esc(job.reason || "No reason recorded.")}</p><p>${esc(nextStep(job.reason || "", job.worktree))}</p></div>`;
+// Splits a needs-human reason into problem and fix on the first " Fix: " the orchestrator writes.
+const splitReason = reason => {
+  const r = reason || "", i = r.indexOf(" Fix: ");
+  if (i < 0) return {problem: r || "No reason recorded.", fix: "Click Discuss first."};
+  const fix = r.slice(i + 6);
+  return {problem: r.slice(0, i), fix: fix.charAt(0).toUpperCase() + fix.slice(1)};
+};
+const waitingBanner = job => {
+  if (job.stage !== "needs-human") return "";
+  const {problem, fix} = splitReason(job.reason);
+  return `<div class="waiting"
+    data-agent-hint="This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix.">
+    <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
+};
 
 function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
