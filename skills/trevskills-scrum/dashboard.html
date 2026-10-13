@@ -1015,7 +1015,7 @@ $("aiList").addEventListener("submit", async e => {
 });
 $("aiList").addEventListener("click", async e => {
   if (e.target.id !== "aiUndo") return;
-  if (await aiWrite("undo", {}, "Undoing…", "Couldn't undo. Is serve.py running?")) {
+  if (await aiWrite("undo", {version: aiItem.version}, "Undoing…", "Couldn't undo. Is serve.py running?")) {
     $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true; aiDisarm();
     $("aiStatus").textContent = "Undone"; $("aiUndo").hidden = true;
   }
