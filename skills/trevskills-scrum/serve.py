@@ -121,11 +121,13 @@ def add_skill(path, skill):
         elif lines[at].split(":", 1)[1].strip():  # one-line `skills: a, b` becomes a block list
             lines[at:at + 1] = ["skills:"] + [f"  - {s}" for s in have + [skill]]
         else:
-            end = at + 1
-            while end < len(lines) and ITEM.fullmatch(lines[end]):
-                end += 1
-            indent = ITEM.fullmatch(lines[end - 1]).group(1) if end > at + 1 else "  "
-            lines.insert(end, f"{indent}- {skill}")
+            items, i = [], at + 1  # skip blank and `#` comment lines; stop at anything else
+            while i < len(lines) and (ITEM.fullmatch(lines[i]) or lines[i].lstrip()[:1] in ("", "#")):
+                if ITEM.fullmatch(lines[i]):
+                    items.append(i)
+                i += 1
+            indent = ITEM.fullmatch(lines[items[0]]).group(1) if items else "  "
+            lines.insert(items[-1] + 1 if items else at + 1, f"{indent}- {skill}")
         path.write_text(text[:m.start(1)] + "\n".join(lines) + text[m.end(1):])
 
 

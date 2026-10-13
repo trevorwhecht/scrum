@@ -212,6 +212,23 @@ class ServeTest(unittest.TestCase):
                          ["grill-me", "find-skills"])
         self.assertIn("skills:\n  - grill-me\n  - find-skills\n---", (self.agents / "scrum-builder.md").read_text())
 
+    def test_add_skill_skips_blank_and_comment_lines_in_block(self):
+        self.fake_agents_and_claude_home()
+        path = self.agents / "scrum-builder.md"
+        cases = [  # (skills block as written, expected block after adding grill-me)
+            ("skills:\n# picked by hand\n\n    - a\n    - b\n", "skills:\n# picked by hand\n\n    - a\n    - b\n    - grill-me\n"),
+            ("skills:\n  - a\n  # note\n  - b\n", "skills:\n  - a\n  # note\n  - b\n  - grill-me\n"),
+            ("skills:\n  - a\n  - b\n\n# next up\ncolor: blue\n", "skills:\n  - a\n  - b\n  - grill-me\n\n# next up\ncolor: blue\n"),
+            ("skills:\n  # none yet\n\n", "skills:\n  - grill-me\n  # none yet\n\n"),
+        ]
+        for block, want in cases:
+            path.write_text(BUILDER.replace("model: opus\n", "model: opus\n" + block))
+            code, agent = self.req("POST", "/api/agents/scrum-builder/skills", {"skill": "grill-me"})
+            expected = ["grill-me"] if "- a" not in block else ["a", "b", "grill-me"]
+            self.assertEqual((code, agent["skills"]), (200, expected), block)
+            self.assertEqual(path.read_text(), BUILDER.replace("model: opus\n", "model: opus\n" + want), block)
+            self.assertEqual(self.serve.read_agent(path)["skills"], expected, block)
+
     def test_add_skill_rejects_unknown_agent_unknown_skill_and_foreign_origin(self):
         self.fake_agents_and_claude_home()
         before = {p.name: p.read_text() for p in self.agents.iterdir()}
