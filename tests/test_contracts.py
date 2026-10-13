@@ -6,12 +6,13 @@ AGENTS = {
     "scrum-spec-writer": "opus", "scrum-builder": "opus", "scrum-review-security": "opus",
     "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
     "scrum-approver": "opus", "scrum-debugger": "opus",
+    "scrum-digest-reader": "sonnet", "scrum-digester": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
-    "scrum-debugger": "ASSESSMENT: READY",
+    "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
 }
 
 
@@ -48,7 +49,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for name in AGENTS:
             self.assertIn(name, text)
-        for cmd in ("board.py", " new ", " set ", " sync "):
+        for cmd in ("board.py", " new ", " set ", " sync ", "digest-due", "digest-start", "digest-trim"):
             self.assertIn(cmd, text)
         fm = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")
         self.assertEqual(fm.get("name"), "trevskills-scrum")
@@ -276,6 +277,35 @@ class ContractTest(unittest.TestCase):
     def test_code_reviewer_fast_lane_is_diff_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("LANE=fast", "codex: skipped — fast lane"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_digest_agents_contract(self):
+        for name in ("scrum-digest-reader", "scrum-digester"):
+            self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
+                       "assessment.md", "notes.md"):
+            self.assertIn(phrase, reader, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
+                       "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once"):
+            self.assertIn(phrase, digester, phrase)
+
+    def test_skill_digest_flow(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("digest", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        self.assertIn("- **`/trevskills-scrum digest`**", text)
+        digest = self.section(text, "## Digest", "## Final report")
+        for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
+                       "error.md", "B digest-trim", "no remote"):
+            self.assertIn(phrase, digest, phrase)
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
+        self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
+
+    def test_dashboard_has_digest_dialog(self):
+        text = DASHBOARD.read_text()
+        for phrase in ('id="digest"', "Digest now", "Digesting…", "No digests", 'id="dgError" role="alert"', "data-decide"):
             self.assertIn(phrase, text, phrase)
 
     def test_dashboard_has_waiting_banner(self):
