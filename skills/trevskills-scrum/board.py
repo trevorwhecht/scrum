@@ -242,7 +242,7 @@ def cmd_abort(root, job_id, requeue, reason=None):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
         job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now())
         if requeue:
-            text = clean(feature.read_text() if feature.exists() else job["title"]) or job["title"]
+            text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
             lines, _ = read_backlog(root)
             lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
             write_backlog(root, lines)

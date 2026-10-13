@@ -210,6 +210,12 @@ class BacklogTest(unittest.TestCase):
         self.assertIn("plan.json", r.stderr)
         self.assertEqual(self.text(), before)
 
+    def test_abort_requeue_keeps_long_feature_text(self):
+        job_id = board.cmd_new(self.root, "Long merged item")
+        (self.root / "jobs" / job_id / "feature.md").write_text("r" * 1000 + "\n")
+        board.cmd_abort(self.root, job_id, requeue=True)
+        self.assertTrue(self.text().endswith("- [ ] " + "r" * 1000 + "\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
