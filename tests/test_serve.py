@@ -206,6 +206,37 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((argv[0], argv[-1]), ("osascript", os.path.realpath(self.root / "runs" / "h.log")))
         self.assertIn("quoted form of", argv[2])
 
+    def test_terminal_closed_tab_falls_back_to_log(self):
+        (self.root / "runs").mkdir(exist_ok=True)
+        (self.root / "runs" / "c.log").write_text("x")
+        job_id = self.job("closed tab", "tty=ttys007", "term=Apple_Terminal", "runlog=runs/c.log")
+        with mock.patch.object(self.serve.subprocess, "run") as run:
+            run.side_effect = [mock.Mock(returncode=0, stdout="missing\n", stderr=""), mock.Mock(returncode=0, stdout="", stderr="")]
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {})
+        self.assertEqual(code, 200, out)
+        self.assertIn("ttys007", out["message"])
+        self.assertEqual(run.call_args.args[0][-1], os.path.realpath(self.root / "runs" / "c.log"))
+        job_id = self.job("closed tab no log", "tty=ttys008")
+        with mock.patch.object(self.serve.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="missing\n", stderr="")
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {})[0], 404)
+
+    def test_discuss_opens_interactive_claude_with_note_as_argv(self):
+        job_id = self.job("discuss me")
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {})[0], 409)  # not needs-human
+            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"])
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": "it's'; rm -rf ~"})
+        self.assertEqual(code, 200, out)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        self.assertIn("quoted form of", argv[2])
+        self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
+        self.assertEqual(argv[4:], [self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
+        popen.assert_not_called()
+        self.assertFalse(self.serve.running("repo", job_id))
+
     def test_terminal_none_errors(self):
         code, out, run, popen = self.terminal(self.job("nothing"))
         self.assertTrue(400 <= code < 500)

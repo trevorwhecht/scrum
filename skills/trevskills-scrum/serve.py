@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
-files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, run now, abort).
+files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
 
@@ -516,12 +516,36 @@ end run""",
   end tell
   return "missing"
 end run"""}
-TAIL_SCRIPT = """on run argv
+NEW_WINDOW_SCRIPT = """on run argv
+  set cmd to "cd " & quoted form of item 1 of argv
+  set sep to " && "
+  repeat with a in rest of argv
+    set cmd to cmd & sep & quoted form of (a as text)
+    set sep to " "
+  end repeat
   tell application "Terminal"
-    do script "tail -f " & quoted form of item 1 of argv
+    do script cmd
     activate
   end tell
-end run"""
+end run"""  # argv: a directory, then the command's words; each is shell-quoted, so nothing in them runs as shell
+
+
+def osa_new_window(cwd, *words):
+    return ["osascript", "-e", NEW_WINDOW_SCRIPT, str(cwd), *words]
+
+
+def run_terminal(tries):
+    """Try each (cmd, message) in turn; a tab script that finds no tab ("missing") falls through to the next."""
+    for cmd, message in tries:
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+        except (subprocess.SubprocessError, OSError) as e:
+            return 500, {"error": f"couldn't open the terminal ({e})"}
+        if out.returncode:
+            return 500, {"error": (out.stderr.strip().splitlines() or ["couldn't open the terminal"])[-1]}
+        if out.stdout.strip() != "missing":
+            return 200, {"message": message}
+    return None
 
 
 def open_terminal(project, root, job_id):
@@ -543,25 +567,19 @@ def open_terminal(project, root, job_id):
         log = os.path.realpath(root / runlog) if isinstance(runlog, str) else ""
         if not log.startswith(runs) or not log.endswith(".log") or not os.path.isfile(log):
             return 400, {"error": "run log is missing or outside scrum/runs/"}
+    tries = []  # the recorded tab first; when it's been closed, the latest run log
     if tty and term == "ghostty":
-        cmd, message = ["open", "-a", "Ghostty"], f"Ghostty is open. Look for the tab on {tty}."
+        tries.append((["open", "-a", "Ghostty"], f"Ghostty is open. Look for the tab on {tty}."))
     elif tty:
-        cmd, message = ["osascript", "-e", TERM_SCRIPTS[term or "Apple_Terminal"], f"/dev/{tty}"], None
-    elif log and term == "ghostty" and os.path.isdir("/Applications/Ghostty.app"):
-        cmd, message = ["open", "-na", "Ghostty", "--args", "-e", "tail", "-f", log], None
+        tries.append((["osascript", "-e", TERM_SCRIPTS[term or "Apple_Terminal"], f"/dev/{tty}"], None))
+    if log and term == "ghostty" and os.path.isdir("/Applications/Ghostty.app"):
+        tries.append((["open", "-na", "Ghostty", "--args", "-e", "tail", "-f", log], None))
     elif log:
-        cmd, message = ["osascript", "-e", TAIL_SCRIPT, log], None
-    else:
+        tries.append((osa_new_window(root / "runs", "tail", "-f", log), f"The tab on {tty} is closed; showing the latest run log." if tty else None))
+    if not tries:
         return 409, {"error": "no terminal recorded for this job"}
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
-    except (subprocess.SubprocessError, OSError) as e:
-        return 500, {"error": f"couldn't open the terminal ({e})"}
-    if out.returncode:
-        return 500, {"error": (out.stderr.strip().splitlines() or ["couldn't open the terminal"])[-1]}
-    if out.stdout.strip() == "missing":
-        return 404, {"error": f"no open tab on {tty}"}
-    return 200, {"id": job_id, "message": message}
+    code, obj = run_terminal(tries) or (404, {"error": f"no open tab on {tty}, and no run log to show"})
+    return code, {"id": job_id, **obj} if code == 200 else obj
 
 
 # --- AI-Settings security scan: static, read-only. Reads files only; never runs a hook or touches an MCP server. ----
@@ -1154,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort|terminal))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1205,6 +1223,12 @@ class Handler(BaseHTTPRequestHandler):
         if action == "approve":
             note = " — Trevor confirms /trevskills-migrate has already been run for this job." if body.get("migrated") else ""
             spawn(project, root, job_id, action, f"/trevskills-scrum approve {job_id}{note}")
+        elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
+            note = board.clean(body.get("feedback") or "")
+            prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
+            # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
+            code, obj = run_terminal([(osa_new_window(root.parent, CLAUDE, prompt), "Discussion opened in a new Terminal window.")])
+            return code, {"id": job_id, **obj} if code == 200 else obj
         else:
             feedback = board.clean(body.get("feedback") or "")
             if not feedback:

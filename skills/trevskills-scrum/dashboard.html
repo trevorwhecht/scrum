@@ -349,7 +349,7 @@ async function openTerminal(key) {
 const nextStep = (reason, worktree) =>
   /^obsolete/.test(reason) ? "Abort this job."
   : /^(blocked|spec writer)/.test(reason) ? "Send back to builder with feedback, or abort."
-  : /Hard stop: schema/.test(reason) ? "Run /trevskills-migrate in the worktree, tick the box, then Approve & merge."
+  : /Hard stop: schema/.test(reason) ? "Approve & merge runs /trevskills-migrate first. Tick the box only if you already ran it."
   : worktree ? "Approve & merge, or send back to builder."
   : "Send back to builder, or abort.";
 const waitingBanner = job => job.stage !== "needs-human" ? "" : `<div class="waiting"
@@ -366,15 +366,16 @@ function renderActions(job) {
   if (job.stage !== "needs-human") return el.innerHTML = why + last + termForm(job) + abortForm(job) + err;
   const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
-      ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
+      ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (obsolete ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
+      <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
       <button class="btn" type="submit">Send back to builder</button></form>`) + termForm(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
-  const form = e.target, act = form.dataset.act, key = $("viewer").dataset.key, btn = form.querySelector("button");
+  const form = e.target, btn = e.submitter || form.querySelector("button"), act = btn.dataset.act || form.dataset.act, key = $("viewer").dataset.key;
   const job = jobs.find(j => j.key === key);
   if (act === "terminal") return openTerminal(key);
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
@@ -386,6 +387,7 @@ $("actions").addEventListener("submit", async e => {
   try {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked} : {feedback: form.feedback.value};
     await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
+    if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();
     renderActions(jobs.find(j => j.key === key));
   } catch (err) {

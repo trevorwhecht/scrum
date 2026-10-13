@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", and bare "/trevskills-scrum" for status.
 ---
 
 # Trevskills Scrum: orchestrator
@@ -12,7 +12,7 @@ This skill is a sanctioned exception to the global git rules: it may push its ow
 - never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
 - never push `main`/`master`
 - never `--auto` or `--admin`
-- never `prisma migrate` or `prisma db push`
+- never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from **approve** on a `Hard stop: schema` job. Sub-agents never migrate
 
 ## Setup (start of every invocation)
 
@@ -36,7 +36,7 @@ If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every
 
 If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
-**Record your terminal** (New job, `start`, `approve`, `rework`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
+**Record your terminal** (New job, `start`, `approve`, `rework`, `discuss`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
 
 ```bash
 T=$(ps -o tty= -p $PPID | tr -d ' '); case "$T" in ttys[0-9]*) B set $ID tty=$T ;; esac
@@ -81,8 +81,14 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 - Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2.
-- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. Also run Merge step 1's **main checkout guard**; while it fails, **refuse** with the same `main checkout not clean: <first files or 'not on <default>'>` message and don't write `human-approval.md`. Once it passes, continue. If the reason contains `Hard stop: schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop until they confirm. A prompt that says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard after he ticked that box) counts as that confirmation. Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
+- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. Also run Merge step 1's **main checkout guard**; while it fails, **refuse** with the same `main checkout not clean: <first files or 'not on <default>'>` message and don't write `human-approval.md`. Once it passes, continue. If the reason contains `Hard stop: schema`, Trevor's approve is the go-ahead to migrate: `cd "$WT"` and invoke `/trevskills-migrate` there with args `base=$BASE`, following it exactly. If it stops or any check fails, run `B set <id> stage=needs-human reason="migrate stopped: <one line why>"` and stop; never work around it. On success, commit what it generated (`git -C "$WT" add prisma/migrations && git -C "$WT" commit -m "Add migration"`) and `cd "$REPO"`. Skip the migrate step when the prompt says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard when he ticks that box). Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
 - **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `B set <id> stage=build reason= limit=<round+2>`, then **record your terminal** with `ID=<id>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
+- **`/trevskills-scrum discuss <id> [<note>]`**: an interactive talk-through before anything goes back to the builder. The dashboard's Discuss first button opens it in a new terminal, with whatever Trevor typed as the note. The job must be `needs-human`. **Record your terminal** with `ID=<id>`. Read only the board `reason`, the first lines and `## Rulings` of `decision.md`, `rework.md`, and `migrate-stop.md` if it exists. Then tell Trevor in plain words:
+  1. What is stopping the job.
+  2. Whether a rework can clear it. A `Hard stop:` never clears through rework: the builder can fix code, but the approver stops again on the same hard stop. Only `approve` clears it (for `Hard stop: schema`, approve runs `/trevskills-migrate`).
+  3. What his note would actually do: change code (rework), give the go-ahead (approve), or neither.
+
+  Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
 
 ## New job
 
@@ -203,4 +209,4 @@ The orchestrator never edits code or review files itself, except for two sanctio
 
 ## Final report
 
-End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, for merged jobs whether main was fast-forwarded (`main updated`, or `main not updated: <reason>`) the restart outcome (`restarted + verified`, `restart failed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and whether the change is live (`live`, or `merged, not live: <why>` as written to the board), and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).
+End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, for merged jobs whether main was fast-forwarded (`main updated`, or `main not updated: <reason>`) the restart outcome (`restarted + verified`, `restart failed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and whether the change is live (`live`, or `merged, not live: <why>` as written to the board), and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>`, `/trevskills-scrum rework <id> "<feedback>"`, or `/trevskills-scrum discuss <id>` when it's unclear which).

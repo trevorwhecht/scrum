@@ -58,7 +58,7 @@ feature → spec-writer (opus) → builder (opus) → CHECK GATE (test/typecheck
   - `decision.md` starts `APPROVE|REWORK|ESCALATE`
 - WAIT FOR ALL: a round is complete only when all 4 review files exist. Never resume the builder mid-round.
 - The orchestrator is the only process that writes `board.json`, and it does so only through `board.py`, which uses a file lock and an atomic replace.
-- No agent ever runs `prisma migrate`, `prisma db push`, `reset`, `rebase`, or force-push. The only `git merge` anywhere is the orchestrator's conflict step: `origin/<default>` into its own `scrum/*` branch.
+- No agent ever runs `prisma migrate`, `prisma db push`, `reset`, `rebase`, or force-push. Migrations happen only through `/trevskills-migrate`, which the orchestrator invokes after Trevor approves a schema job. The only `git merge` anywhere is the orchestrator's conflict step: `origin/<default>` into its own `scrum/*` branch.
 
 ## Commands
 
@@ -66,4 +66,5 @@ feature → spec-writer (opus) → builder (opus) → CHECK GATE (test/typecheck
 - `/trevskills-scrum next`: run the first unchecked item in `scrum/backlog.md`
 - `/trevskills-scrum approve <id>`: merge a needs-human job
 - `/trevskills-scrum rework <id> <feedback>`: send a job back to the builder
+- `/trevskills-scrum discuss <id> [<note>]`: talk a stopped job through interactively, then approve or rework as agreed
 - `/trevskills-scrum`: show the board and the command that serves the dashboard
