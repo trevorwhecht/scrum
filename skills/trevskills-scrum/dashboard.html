@@ -206,7 +206,7 @@ function card(job) {
     ${tag(job.project)}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
-    ${job.stage === "aborted" ? '<span class="reason">Aborted</span>' : ""}
+    ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
@@ -345,7 +345,8 @@ function renderActions(job) {
   const err = '<p class="error" role="alert"></p>';
   if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = last + termForm(job) + abortForm(job) + err;
+  const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
+  if (job.stage !== "needs-human") return el.innerHTML = why + last + termForm(job) + abortForm(job) + err;
   const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}

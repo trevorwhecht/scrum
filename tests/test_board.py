@@ -258,6 +258,25 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=done"])
         with self.assertRaises(SystemExit):
             board.cmd_abort(self.root, job_id, requeue=False)
+        aborted = board.cmd_new(self.root, "y")
+        board.cmd_abort(self.root, aborted, requeue=False)
+        with self.assertRaises(SystemExit):
+            board.cmd_abort(self.root, aborted, requeue=False, reason="again")
+
+    def test_abort_stores_custom_reason(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_abort(self.root, job_id, requeue=False, reason="obsolete: duplicate of #14")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("aborted", "obsolete: duplicate of #14"))
+        cli = board.cmd_new(self.root, "y")
+        board.main(["--dir", str(self.root), "abort", cli, "--requeue", "--reason", "obsolete: it's done"])
+        job = next(j for j in self.jobs() if j["id"] == cli)
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "obsolete: it's done"))
+        self.assertEqual(board.backlog_items(self.root)[-1]["text"], "y")
+
+    def test_abort_default_reason_unchanged(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.main(["--dir", str(self.root), "abort", job_id])
+        self.assertTrue(self.jobs()[0]["reason"].startswith("Aborted by Trevor "))
 
 
 if __name__ == "__main__":
