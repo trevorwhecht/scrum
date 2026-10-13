@@ -8,11 +8,14 @@
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
+  board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
+  board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
+  board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, json, os, re, sys
+import argparse, fcntl, json, os, re, shutil, sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -290,6 +293,67 @@ def job_files(d):
     return sorted(str(p.relative_to(d)) for p in d.rglob("*.md")) if d.is_dir() else []
 
 
+# --- digests: scrum/digests/<NNN>/jobs.txt lists the done jobs one digest learned from ---
+DIGEST_RE = re.compile(r"^\d{3}$")
+TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
+
+
+def digested_ids(root):
+    """Every job id listed in any digest's jobs.txt."""
+    return {line.strip() for f in (Path(root) / "digests").glob("*/jobs.txt")
+            for line in f.read_text().splitlines() if line.strip()}
+
+
+def undigested(root, board):
+    seen = digested_ids(root)
+    return [j["id"] for j in board["jobs"] if j.get("stage") == "done" and j["id"] not in seen]
+
+
+def cmd_digest_due(root):
+    path = Path(root) / "board.json"
+    n = len(undigested(root, json.loads(path.read_text()) if path.exists() else {"jobs": []}))
+    return {"due": n >= 10, "undigested": n}
+
+
+def cmd_digest_start(root):
+    """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job."""
+    with locked_board(root) as board:
+        jobs = undigested(root, board)
+        if not jobs:
+            return {"id": None, "jobs": []}
+        d = Path(root) / "digests"
+        d.mkdir(exist_ok=True)
+        digest_id = f"{max((int(p.name) for p in d.iterdir() if DIGEST_RE.fullmatch(p.name)), default=0) + 1:03d}"
+        (d / digest_id).mkdir()
+        (d / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        return {"id": digest_id, "jobs": jobs}
+
+
+def cmd_digest_trim(root, digest_id):
+    """Slim each listed done job's folder to feature.md, spec.md and decision.md; returns the trimmed ids. Idempotent."""
+    d = Path(root) / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
+        raise SystemExit(f"no digest {digest_id!r}")
+    listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
+    trimmed = []
+    with locked_board(root) as board:
+        for job in board["jobs"]:
+            folder = Path(root) / "jobs" / job["id"]
+            if job["id"] not in listed or job.get("stage") != "done" or not folder.is_dir():
+                continue
+            for p in folder.iterdir():
+                if p.name in TRIM_KEEP and p.is_file():
+                    continue
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink()
+            job["files"] = job_files(folder)
+            trimmed.append(job["id"])
+        (d / "trimmed").write_text(now() + "\n")
+    return trimmed
+
+
 def cmd_set(root, job_id, pairs):
     files = job_files(Path(root) / "jobs" / check_id(job_id))
     with locked_board(root) as board:
@@ -349,6 +413,9 @@ def main(argv=None):
     ab.add_argument("id")
     ab.add_argument("--requeue", action="store_true")
     ab.add_argument("--reason")
+    sub.add_parser("digest-due")
+    sub.add_parser("digest-start")
+    sub.add_parser("digest-trim").add_argument("digest")
     a = p.parse_args(argv)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
@@ -362,6 +429,12 @@ def main(argv=None):
         cmd_register(a.repo)
     elif a.cmd == "abort":
         cmd_abort(a.dir, a.id, a.requeue, a.reason)
+    elif a.cmd == "digest-due":
+        print(json.dumps(cmd_digest_due(a.dir)))
+    elif a.cmd == "digest-start":
+        print(json.dumps(cmd_digest_start(a.dir)))
+    elif a.cmd == "digest-trim":
+        print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     else:
         cmd_backlog_add(a.dir, a.items)
 

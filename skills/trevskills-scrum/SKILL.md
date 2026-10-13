@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), and bare "/trevskills-scrum" for status.
 ---
 
 # Trevskills Scrum: orchestrator
@@ -89,6 +89,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
   3. What his note would actually do: change code (rework), give the go-ahead (approve), or neither.
 
   Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
+- **`/trevskills-scrum digest`**: run **Digest**. The dashboard's Digest now button starts it headless.
 
 ## New job
 
@@ -239,6 +240,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
      2. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 -sTCP:LISTEN | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
      3. **Verify:** a 200 is not enough; the served content must contain this job's change. Fetch the changed page or endpoint and find the verify string in it, e.g. `curl -sf localhost:8765/<path> | grep -F '<verify string>'` (retry in the background for a few seconds while it starts). No match is `verify failed`.
    - **Mark done, only now.** If the guard, the fast-forward, the restart or the verify failed, run `B set $ID stage=done reason="merged, not live: <why>"`, where `<why>` is `not on <default>`, `uncommitted changes`, `fast-forward failed`, `restart failed` or `verify failed`. Otherwise (including `Restart: none` after a successful fast-forward) run `B set $ID stage=done reason=`. The dashboard card shows the `merged, not live` reason as a warning; Trevor clears it with `B set <id> reason=` once he has made the change live.
+   - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 
 ## Resuming the builder
 
@@ -247,6 +249,27 @@ Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored
 2. Run `B set $ID builder=<new id>`.
 
 The orchestrator never edits code or review files itself, except for three sanctioned review files: the UI/UX skip files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
+
+## Digest
+
+Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never pushes, merges or opens a PR. It never edits an agent, skill, rule or memory file itself: Trevor approves or rejects each proposal in the dashboard's **Digest** dialog, and the dashboard trims the digested job folders once the last one is decided.
+
+1. Run `B digest-start`. Under the board lock it claims every `done` job that's in no earlier digest and prints `{"id", "jobs"}`. If `id` is null, say there is nothing to digest and stop. Otherwise `D=$F/digests/<id>`.
+2. Spawn `scrum-digest-reader` and wait for it. Prompt:
+   ```
+   DIGEST_DIR=$D
+   JOBS_DIR=$F/jobs
+   Write notes.md for this digest.
+   ```
+   If `$D/notes.md` is missing or its first line isn't exactly `DIGEST NOTES` (`head -1 "$D/notes.md"`), spawn it once more. If it still fails, write `$D/error.md` containing the one line `digest reader produced no notes` and stop.
+3. Spawn `scrum-digester` and wait for it. Prompt:
+   ```
+   DIGEST_DIR=$D
+   PROJECT=$F/project.md
+   Write proposals.json for this digest.
+   ```
+   If `python3 -m json.tool "$D/proposals.json"` fails, or the file has no `proposals` list (`python3 -c 'import json,sys; sys.exit(not isinstance(json.load(open(sys.argv[1])).get("proposals"), list))' "$D/proposals.json"` exits non-zero), spawn it once more. If it still fails, write `$D/error.md` containing the one line `digester produced no valid proposals` and stop.
+4. If the `proposals` list is empty, run `B digest-trim <id>`. Otherwise report how many proposals wait in the dashboard's **Digest** dialog.
 
 ## Final report
 

@@ -1070,6 +1070,112 @@ def ai_research(item_id):
     return 202, {"key": key, "log": log, "project": project}
 
 
+# --- Digest: scrum/digests/<NNN>/proposals.json is agent-written, so it's untrusted. A target is written only when it is
+# an editable AI-Settings item outside every registered repo; a repo file becomes a backlog item instead, so main stays clean.
+DIGEST_LOCK = threading.Lock()
+PROPOSAL_KEYS = ("id", "target", "why", "old", "new")
+PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected")
+
+
+def valid_proposal(p):
+    """The proposal with its status, or None when a key is missing, a value isn't a string, or it changes nothing."""
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
+        return None
+    if p.get("status", "pending") not in PROPOSAL_STATUSES:
+        return None
+    return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending")}
+
+
+def read_proposals(path):
+    """(whole file, its raw proposal list); a missing or malformed file gives ({}, [])."""
+    data = as_dict(load_json(path))
+    raw = data.get("proposals")
+    return data, raw if isinstance(raw, list) else []
+
+
+def digests(project, root):
+    d, out = root / "digests", []
+    for p in sorted((x for x in d.iterdir() if x.is_dir() and board.DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
+        jobs = (p / "jobs.txt").read_text().split() if (p / "jobs.txt").is_file() else []
+        error = (p / "error.md").read_text(errors="replace").strip().splitlines() if (p / "error.md").is_file() else []
+        out.append({"id": p.name, "jobs": jobs, "error": error[0] if error else None, "trimmed": (p / "trimmed").exists(),
+                    "proposals": [v for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
+    return {"running": running(project, "digest"), "undigested": board.cmd_digest_due(root)["undigested"], "digests": out}
+
+
+def digest_now(project, root):
+    with DIGEST_LOCK:  # two quick clicks must not both pass the running() check
+        if running(project, "digest"):
+            return 409, {"error": "a digest is already running"}
+        if not board.cmd_digest_due(root)["undigested"]:
+            return 409, {"error": "nothing new to digest"}
+        return 202, {"log": spawn(project, root, "digest", "digest", "/trevskills-scrum digest")}
+
+
+def repo_of(target):
+    """(registered repo, path relative to it) when target's real path is inside one, else None."""
+    real = os.path.realpath(target)
+    return next(((Path(r), os.path.relpath(real, os.path.realpath(r))) for r in board.projects().values()
+                 if real.startswith(os.path.realpath(r) + os.sep)), None)
+
+
+def editable_path(target):
+    """The path of the editable AI-Settings item at target (same real file), or None. Only Global and the scopes the file
+    sits under can list it, so no other scope's inventory is built."""
+    real, given = os.path.realpath(target), os.path.abspath(target)
+    for sid, (_, _, root) in ai_scopes().items():
+        under = root and os.path.realpath(root) + os.sep
+        if under and not (real.startswith(under) or given.startswith(under)):
+            continue
+        for items in (ai_inventory(sid) or {}).values():
+            if hit := next((it["path"] for it in items if it["editable"] and os.path.realpath(it["path"]) == real), None):
+                return hit
+    return None
+
+
+def digest_decide(root, digest_id, pid, decision):
+    """Approve or reject one pending proposal. The last decision in a digest trims its job folders."""
+    if decision not in ("approve", "reject"):
+        return 400, {"error": "decision must be approve or reject"}
+    path = root / "digests" / digest_id / "proposals.json"
+    with DIGEST_LOCK:
+        data, raw = read_proposals(path)
+        entry = next((p for p in raw if (v := valid_proposal(p)) and v["id"] == pid), None)
+        if entry is None:
+            return 404, {"error": "no such proposal"}
+        prop = valid_proposal(entry)
+        if prop["status"] != "pending":
+            return 409, {"error": f"proposal is already {prop['status']}"}
+        if decision == "reject":
+            status = "rejected"
+        elif repo := repo_of(prop["target"]):
+            board.backlog_op(repo[0] / "scrum", "add", text=f"Apply digest {digest_id} {pid} to {repo[1]}: see {path}")
+            status = "queued"
+        else:
+            target = editable_path(prop["target"]) if os.path.isabs(prop["target"]) else None
+            if not target:
+                return 403, {"error": "target is not editable"}
+            try:
+                text = Path(target).read_bytes().decode()
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            if text.count(prop["old"]) != 1:
+                return 409, {"error": "proposal no longer applies"}
+            try:
+                ai_backup(target)
+                Path(target).write_bytes(text.replace(prop["old"], prop["new"], 1).encode())  # in place: keeps a symlink
+            except OSError as e:
+                return 500, {"error": str(e)}
+            status = "applied"
+        entry["status"] = status
+        tmp = path.with_name("proposals.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+        if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
+            board.cmd_digest_trim(root, digest_id)
+    return 200, prop | {"status": status}
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -1134,6 +1240,10 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/digests", path):
+            project = unquote(m.group(1))
+            root = scrum_dir(project)
+            return self.send_json(200, digests(project, root)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/p/([^/]+(?:%2F[^/]+)?)/(.+)", path):
             return self.send_project_file(unquote(m.group(1)), unquote(m.group(2)))
         self.send_json(404, {"error": "not found"})
@@ -1172,7 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1209,6 +1319,11 @@ class Handler(BaseHTTPRequestHandler):
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
+        if rest == "/digest":
+            return digest_now(project, root)
+        if rest.startswith("/digests/"):
+            _, _, digest_id, pid = rest.split("/", 3)
+            return digest_decide(root, digest_id, unquote(pid), body.get("decision"))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
         if action == "terminal":
             return open_terminal(project, root, job_id)

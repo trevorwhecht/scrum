@@ -58,7 +58,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
-#filter,#blProject,#aiScope{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+#filter,#blProject,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
@@ -82,7 +82,7 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 .pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
 .pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
 #agents,#aiSettings{width:min(1400px,96vw);max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
-#agents .tabs,#aiSettings .tabs{align-items:center}
+#agents .tabs,#aiSettings .tabs,#digest .tabs{align-items:center}
 #agents [hidden],#aiSettings [hidden]{display:none}
 #agents .tabs button,#agents .btn,#aiSettings .tabs button,#aiCats button{min-height:44px;min-width:44px}
 #agents article{display:grid;gap:10px;padding-top:14px}
@@ -127,7 +127,18 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 #aiList h3{font-size:13px;margin:10px 0 0}
 .node.audit{justify-content:flex-start}.audit .acts{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .audit .acts a{display:inline-flex;align-items:center;min-height:44px}
-@media (max-width:640px){#agents,#aiSettings{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article{padding-inline:12px}
+#digest{overscroll-behavior:contain}
+#digest article{display:grid;gap:10px;padding-top:14px}
+#digest .btn,#digest .tabs button,#dgProject{min-height:44px;min-width:44px}
+#dgNow{justify-self:start}
+.dg{display:grid;gap:8px}.dg h3{font-size:13px;margin:6px 0 0}
+.prop{display:grid;gap:6px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--card)}
+.prop .path{font:600 12px ui-monospace,monospace;overflow-wrap:anywhere}
+.prop .diff{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.prop .diff div{min-width:0}.prop pre{margin:4px 0 0}
+.prop .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:640px){#agents,#aiSettings,#digest{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article{padding-inline:12px}
+  .prop .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
@@ -138,6 +149,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
+  <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Agents</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
@@ -148,6 +160,14 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
     <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
+  </article>
+</dialog>
+<dialog id="digest" aria-label="Digest">
+  <div class="tabs"><b>Digest</b><select id="dgProject" aria-label="Digest project"></select><button class="close" type="button" aria-label="Close">✕</button></div>
+  <article>
+    <button class="btn primary" id="dgNow" type="button" data-agent-hint="Starts /trevskills-scrum digest headless: a Sonnet agent reads every done job not yet digested, and an Opus agent proposes edits to agents, rules, skills and memory. Disabled while one runs or when there is nothing new.">Digest now</button>
+    <p class="error" id="dgError" role="alert"></p>
+    <div id="dgList"></div>
   </article>
 </dialog>
 <dialog id="agents" aria-label="Agents">
@@ -282,6 +302,7 @@ async function poll() {
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
+    if ($("digest").open) loadDigests();
     tickAgo();
   } catch (e) {
     $("status").textContent = `Can't reach the dashboard server (${e.message}). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py`;
@@ -421,9 +442,14 @@ async function backlogCall(fn) {
   renderBacklog();
 }
 
+// A dialog's project picker opens on the board filter, else the last project picked there, else the first.
+function pickProject(sel, key) {
+  renderSelect(sel, filter || store.get(key) || projects[0] || "", false);
+  if (!sel.value && projects.length) sel.value = projects[0];
+}
+
 $("backlogBtn").addEventListener("click", () => {
-  renderSelect($("blProject"), filter || store.get("scrum.backlogProject") || projects[0] || "", false);
-  if (!$("blProject").value && projects.length) $("blProject").value = projects[0];
+  pickProject($("blProject"), "scrum.backlogProject");
   renderBacklog();
   $("backlog").showModal();
 });
@@ -452,6 +478,73 @@ $("blList").addEventListener("change", e => {
     ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
 });
 $("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
+
+// Digest: proposals from scrum/digests/<NNN>/proposals.json. Approve applies a global edit (backed up) or queues a repo
+// edit on that repo's backlog; serve.py decides which. The last decision in a digest trims its job folders.
+let digestData = null, digestText = "";
+const dgProject = () => $("dgProject").value;
+const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
+    <span class="path">${esc(p.target)}</span><span>${esc(p.why)}</span>
+    <div class="diff"><div><span class="note">Old</span><pre>${esc(p.old)}</pre></div><div><span class="note">New</span><pre>${esc(p.new)}</pre></div></div>
+    <div class="acts">${p.status === "pending"
+      ? `<button class="btn primary" type="button" data-decide="approve" data-agent-hint="A file outside every registered repo is edited in place after a backup to ~/.claude/backups/ai-settings/. A file inside a repo is not touched: the edit is added to that repo's backlog instead.">Approve</button>
+         <button class="btn" type="button" data-decide="reject">Reject</button>`
+      : `<span class="note" role="status">${esc(p.status)}</span>`}</div></div>`;
+
+function renderDigests() {
+  $("dgNow").hidden = !projects.length;
+  if (!projects.length) return $("dgList").innerHTML = '<p class="note">No projects yet. Run /trevskills-scrum in a repo first.</p>';
+  const d = digestData;
+  $("dgNow").disabled = !d || d.running || !d.undigested;
+  $("dgNow").textContent = d?.running ? "Digesting…" : "Digest now";
+  if (!d) return $("dgList").innerHTML = '<p class="empty">loading…</p>';
+  $("dgList").innerHTML = d.digests.map(g => `<section class="dg"><h3>Digest ${esc(g.id)} · ${g.jobs.length} job${g.jobs.length === 1 ? "" : "s"}</h3>
+      ${g.error ? `<p class="error">${esc(g.error)}</p>` : g.proposals.map(p => propRow(g.id, p)).join("") || '<p class="empty">No proposals</p>'}</section>`).join("")
+    || '<p class="empty">No digests</p>';
+}
+
+async function loadDigests() {
+  const p = dgProject();
+  if (!p) return renderDigests();
+  const data = await getJson(`api/p/${enc(p)}/digests`, null, STALE);
+  if (dgProject() !== p) return;  // a newer project pick is already loading
+  if (!data?.digests) return $("dgError").textContent = data || "Couldn't load digests. Is serve.py running?";
+  const text = JSON.stringify(data);
+  if (text === digestText) return;  // unchanged: keep the DOM (and focus) as it is
+  digestText = text; digestData = data;
+  renderDigests();
+}
+
+async function digestCall(url, body) {
+  $("dgError").textContent = "";
+  try { await post(url, body); } catch (err) { $("dgError").textContent = err.message; }
+  digestText = "";  // re-render even if nothing changed, so a failed click's buttons come back
+  await loadDigests();
+}
+
+$("digestBtn").addEventListener("click", () => {
+  pickProject($("dgProject"), "scrum.digestProject");
+  digestData = null; digestText = ""; $("dgError").textContent = "";
+  renderDigests();
+  $("digest").showModal();
+  loadDigests();
+});
+$("dgProject").addEventListener("change", e => {
+  store.set("scrum.digestProject", e.target.value);
+  digestData = null; digestText = ""; $("dgError").textContent = "";
+  renderDigests(); loadDigests();
+});
+$("dgNow").addEventListener("click", () => {
+  $("dgNow").disabled = true;
+  digestCall(`api/p/${enc(dgProject())}/digest`, {});
+});
+$("dgList").addEventListener("click", e => {
+  const b = e.target.closest("button[data-decide]");
+  if (!b) return;
+  const row = b.closest(".prop");
+  row.querySelectorAll("button").forEach(x => { x.disabled = true; });
+  digestCall(`api/p/${enc(dgProject())}/digests/${enc(row.dataset.digest)}/${enc(row.dataset.pid)}`, {decision: b.dataset.decide});
+});
 
 // The pipeline order is fixed by SKILL.md, so it lives here; everything about each agent comes from api/agents.
 const PIPELINE = [
