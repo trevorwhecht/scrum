@@ -7,12 +7,14 @@ files, and a small JSON API so the buttons can edit backlogs and start Claude ru
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
+AI-Settings is read-only except for Markdown instruction files (CLAUDE.md, CLAUDE.local.md, rules, memory): each save
+is backed up to <CLAUDE_HOME>/backups/ai-settings/ first and can be undone.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, threading, time
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -158,7 +160,7 @@ def installed_skills():
     return [{"name": n, "source": found[n][0]} for n in sorted(found)]
 
 
-# --- AI-Settings: a read-only view of every Claude Code config source -----------------------------------------------
+# --- AI-Settings: every Claude Code config source; only Markdown config and rules files are editable ----------------
 # Paths and precedence adapted from mcpware/cross-code-organizer (MIT)
 #   managed  /Library/Application Support/ClaudeCode/{managed-settings.json, managed-mcp.json}   (CLAUDE_MANAGED_DIR)
 #   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), commands/ agents/ rules/ *.md, CLAUDE.md,
@@ -297,6 +299,7 @@ def ai_inventory(scope_id):
         item_id += f"#{n}" if n > 1 else ""
         seen.add(item_id)
         out[cat].append({"id": item_id, "name": str(name), "scope": scope, "path": str(path), "status": "",
+                         "editable": cat in ("config", "rules") and not is_json and str(path).endswith(".md"),
                          "_json": is_json, "_entry": entry})
     for cat, items in out.items():
         if cat in NAMED:
@@ -321,20 +324,90 @@ def ai_settings_scope(scope_id):
          "items": [{k: v for k, v in it.items() if not k.startswith("_")} for it in inv[cat]]} for cat, label in CATEGORIES]}
 
 
+def ai_find(item_id):
+    """Only ids from a freshly built inventory resolve, so no client path is ever read or written."""
+    inv = ai_inventory(item_id.split("|", 1)[0]) if isinstance(item_id, str) and "|" in item_id else None
+    return next((x for items in (inv or {}).values() for x in items if x["id"] == item_id), None)
+
+
 def ai_settings_item(item_id):
-    """One item's path and content. Only ids from a freshly built inventory resolve, so no client path is ever read."""
-    inv = ai_inventory(item_id.split("|", 1)[0]) if "|" in item_id else None
-    it = next((x for items in (inv or {}).values() for x in items if x["id"] == item_id), None)
+    """One item's path, content and version (st_mtime_ns as a string, "" if the file can't be stat'ed)."""
+    it = ai_find(item_id)
     if not it:
         return None
+    try:
+        version = str(Path(it["path"]).stat().st_mtime_ns)
+    except OSError:
+        version = ""
     if it["_json"]:
         content = json.dumps(redact(it["_entry"]), indent=2)
     else:
         try:
-            content = Path(it["path"]).read_text(errors="replace")
+            content = Path(it["path"]).read_bytes().decode(errors="replace")  # bytes: keep \r\n as on disk
         except OSError:
             return None
-    return {k: v for k, v in it.items() if not k.startswith("_")} | {"content": content}
+    return {k: v for k, v in it.items() if not k.startswith("_")} | {"content": content, "version": version}
+
+
+def ai_backups():
+    return claude_home() / "backups" / "ai-settings"
+
+
+def ai_backup(path):
+    """Copy path's current bytes to <UTC timestamp>__<path with "/" encoded>; names sort oldest to newest."""
+    folder = ai_backups()
+    folder.mkdir(parents=True, exist_ok=True)
+    data, tail = Path(path).read_bytes(), "__" + quote(str(path), safe="")
+    while True:  # "x" never overwrites an older backup made in the same microsecond
+        try:
+            with open(folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + tail), "xb") as f:
+                return f.write(data)
+        except FileExistsError:
+            pass
+
+
+def ai_editable(item_id):
+    """(item, None) for an editable item, else (None, (code, error))."""
+    it = ai_find(item_id)
+    if not it:
+        return None, (404, {"error": "no such item"})
+    if not it["editable"]:
+        return None, (403, {"error": "this item is read-only"})
+    return it, None
+
+
+def ai_settings_save(item_id, content, version):
+    it, err = ai_editable(item_id)
+    if err:
+        return err
+    if not isinstance(content, str):
+        return 400, {"error": "content must be a string"}
+    try:
+        if str(Path(it["path"]).stat().st_mtime_ns) != version:
+            return 409, {"error": "file changed on disk"}
+        ai_backup(it["path"])
+        Path(it["path"]).write_bytes(content.encode())  # in place, so a symlinked rule keeps its link
+    except OSError as e:
+        return 500, {"error": str(e)}
+    return 200, ai_settings_item(item_id)
+
+
+def ai_settings_undo(item_id):
+    """Restore the newest backup of the item's path, backing up the current content first."""
+    it, err = ai_editable(item_id)
+    if err:
+        return err
+    name = quote(it["path"], safe="")  # the timestamp has no "__", so the first "__" splits it from the path
+    found = sorted(p for p in ai_backups().glob("*") if p.name.split("__", 1)[-1] == name) if ai_backups().is_dir() else []
+    if not found:
+        return 404, {"error": "no backup to undo"}
+    try:
+        data = found[-1].read_bytes()
+        ai_backup(it["path"])
+        Path(it["path"]).write_bytes(data)
+    except OSError as e:
+        return 500, {"error": str(e)}
+    return 200, ai_settings_item(item_id)
 
 
 def scrum_dir(project):
@@ -420,6 +493,10 @@ class Handler(BaseHTTPRequestHandler):
             body, path = body if isinstance(body, dict) else {}, urlparse(self.path).path
             if a := re.fullmatch(r"/api/agents/([^/]+)/skills", path):
                 code, obj = self.route_skill(unquote(a.group(1)), body.get("skill"))
+            elif path == "/api/ai-settings/save":
+                code, obj = ai_settings_save(body.get("id"), body.get("content"), body.get("version"))
+            elif path == "/api/ai-settings/undo":
+                code, obj = ai_settings_undo(body.get("id"))
             else:
                 m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
