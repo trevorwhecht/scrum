@@ -3,18 +3,16 @@
 `/trevskills-scrum <feature>` turns a feature request into a squash-merged PR. A spec writer, a builder, four parallel reviewers and an approver hand off through markdown files, and a one-file dashboard shows each job's progress.
 
 ```
-feature → spec-writer ⇄ spec critique → builder → check gate → security · ux · ui · code → approver
-          (revises once   (codex,          ▲      (tests/lint/build)  (wait for all 4;     │
-           on CHANGES)    experimental)    │                          code runs codex too) │
-                                           └───────── CHANGES, round < 2 ◄─────────────────┤
+feature → spec-writer → builder → check gate → security · ux · ui · code → approver
+                           ▲          (tests/lint/build)   (wait for all 4;     │
+                           │                               code runs codex too) │
+                           └──────── CHANGES, round < 2 ◄───────────────────────┤
                                                     APPROVE → PR → CI → squash-merge
                                                     REWORK  → one more round (once)
                                                     ESCALATE → needs-human (hard stops only)
 ```
 
-**Codex as a second model family.** Two steps use the Codex CLI, always read-only:
-- **Spec critique (experimental):** before the worktree is made, Codex reads spec.md and answers `SPEC: OK` or `SPEC: CHANGES`. On CHANGES the spec writer revises once. A Codex failure is noted and never blocks the job.
-- **Code review:** `scrum-review-code` runs `codex exec review` once per round, confirms each finding, and tags the ones it keeps `(codex)`. If Codex fails, the review notes `codex: skipped`; a skip is never a pass and never fails the round. Both engines share one rubric, `codex/AGENTS.md`.
+**Codex as a second model family, read-only only.** `scrum-review-code` runs `codex exec review` in the background once per round while it does its own review, confirms each finding, and tags the ones it keeps `(codex)`. Codex never edits, never spawns agents, and adds no step: if it fails, or hasn't finished 10 minutes after it started, the review notes `codex: skipped`, which never passes or fails the round. Both engines share one rubric, `codex/AGENTS.md`.
 
 **Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The Opus approver decides everything else.
 

@@ -82,20 +82,21 @@ class ContractTest(unittest.TestCase):
         ):
             self.assertIn(phrase, text, phrase)
 
-    def test_skill_has_experimental_spec_critique_between_spec_and_worktree(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        step = text[text.index("3. **Spec:**"):text.index("4. **Worktree:**")]
-        for phrase in ("Spec critique (experimental)", "codex exec -s read-only", "spec-review.md",
-                       "SPEC: OK", "SPEC: CHANGES", "Revise spec.md per spec-review.md", "once", "never blocks"):
-            self.assertIn(phrase, step, phrase)
-        self.assertIn("spec-review.md", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+    def test_codex_runs_only_in_the_code_review(self):
+        # Rework: Codex is kept only for the read-only review; no spec critique, no extra step.
+        for path in [ROOT / "skills" / "trevskills-scrum" / "SKILL.md", *(ROOT / "agents").glob("*.md")]:
+            text = path.read_text()
+            self.assertNotIn("spec-review.md", text, path.name)
+            if path.name != "scrum-review-code.md":
+                self.assertNotIn("codex exec", text, path.name)
 
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
-                       "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8"):
+                       "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it"):
             self.assertIn(phrase, text, phrase)
+        self.assertEqual(text.count("codex exec"), 1)
 
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
@@ -121,8 +122,9 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Apache-2.0", rules)
         self.assertLess(len(rules.encode()), 32 * 1024)
         readme = (ROOT / "README.md").read_text()
-        for phrase in ("experimental", "codex exec review", "~/.codex/AGENTS.md"):
+        for phrase in ("read-only", "codex exec review", "~/.codex/AGENTS.md"):
             self.assertIn(phrase, readme, phrase)
+        self.assertNotIn("spec critique", readme.lower())
 
 
 if __name__ == "__main__":
