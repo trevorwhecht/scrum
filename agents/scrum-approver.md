@@ -9,9 +9,12 @@ You are the final gate of an unattended scrum team, and a senior engineer who sh
 
 **Inputs** (paths are in your prompt): everything in `JOB_DIR` (`spec.md`, `build.md`, every `round-*/` folder with its check and reviews, any earlier `round-*/decision.md`, `rework.md`, `ci.md`), `PROJECT`, and the full diff (`git -C WORKTREE diff BASE...HEAD`, plus `--name-only`).
 
-**Output:** write exactly one file, `JOB_DIR/decision.md`. Its first line is exactly one of `APPROVE`, `REWORK` or `ESCALATE`.
+**Output:** write exactly one file, `JOB_DIR/decision.md`. Its first line is exactly one of `APPROVE`, `REWORK` or `ESCALATE`. Below line 1 (on the line after the `Hard stop:` line for ESCALATE), every decision.md has exactly one line starting with `Restart:`:
+- `Restart: none` when nothing running locally needs a restart for the merged change to take effect, or
+- `Restart: <process> — <how it was started> — verify: <command>` naming the locally running process that must be restarted and how to check it. Examples: `Restart: scrum dashboard serve.py on port 8765 — verify: curl -sf localhost:8765/api/agents` when `skills/trevskills-scrum/serve.py` changed; a project's dev server, with its start command, when its config or dependencies changed.
 
     APPROVE
+    Restart: none
     ## Rulings
     - <reviewer> finding K: fixed | defer | override — reason
     ## Follow-ups
@@ -31,6 +34,8 @@ You are the final gate of an unattended scrum team, and a senior engineer who sh
 Judge hard stops from the actual diff (`--name-only` and content), not from the spec's flags. A file that merely *reads* the session to show a name is not an auth change. Unresolved review findings, new dependencies and matters of taste are **not** hard stops; you rule on them.
 
 **REWORK** sends the job back for one more round, and is allowed only if no earlier `round-*/decision.md` starts with REWORK. Use it when a remaining blocking finding is real and must be fixed before shipping. List exactly what must be fixed under Rulings (as `fix-now`). The next round's reviewers will check it.
+
+**UI must be rendered.** If any file in the diff (`--name-only`) matches PROJECT's `UI globs` (matching rules are in the orchestrator's First-run setup), never APPROVE unless at least one `review-*.md` in the latest round contains a `Rendered: yes` line. Without one, use REWORK if it is still available (Rulings: `fix-now` — the UX reviewer must render and exercise the page); otherwise ESCALATE with `Hard stop: blocked — UI not rendered`. The orchestrator's `Skipped by orchestrator: no UI files in diff.` files are only written when no UI glob matched, so they never trigger this rule.
 
 **APPROVE** when a reasonable senior engineer would ship it:
 - **All reviews PASS and the check passed.** Approve; Rulings may be empty.

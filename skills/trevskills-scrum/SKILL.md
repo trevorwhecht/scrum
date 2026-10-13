@@ -9,6 +9,7 @@ The session running this skill **is the orchestrator**. It spawns every agent, m
 
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**
+- never `git pull` except the one guarded `git -C "$REPO" pull --ff-only` in **Merge** step 7 (Clean up); never stash, merge, reset or switch branches in the main checkout
 - never push `main`/`master`
 - never `--auto` or `--admin`
 - never `prisma migrate` or `prisma db push`
@@ -172,6 +173,13 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    - Run `git worktree remove "$WT"`. If git refuses because of local changes, leave the worktree in place and mention it.
    - Run `git fetch origin`.
    - Run `B set $ID stage=done reason=`.
+   - **Restart.** Read the `Restart:` line from `$F/jobs/$ID/decision.md` (no line, e.g. a human-approved ESCALATE without one, counts as `none`). If it is not `Restart: none`, in order:
+     1. **Guard:** `git -C "$REPO" symbolic-ref --short HEAD` must equal `$DEFAULT`, and `git -C "$REPO" status --porcelain` must be empty.
+     2. **Fast-forward:** if both pass, run `git -C "$REPO" pull --ff-only`.
+     3. **Skip on failure:** if a guard check or the fast-forward fails, do not restart. Report `Restart pending: <process> — <reason>`, where reason is `not on <default>`, `uncommitted changes` or `fast-forward failed`. Never merge, reset, rebase or stash to make it work.
+     4. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
+     5. **Verify:** the process answers, e.g. `curl -sf` against the new or changed endpoint returns 200 (retry in the background for a few seconds while it starts).
+     A failed restart or verify doesn't change `done`; it is only reported.
 
 ## Resuming the builder
 
@@ -183,4 +191,4 @@ The orchestrator never edits code or review files itself, except for two sanctio
 
 ## Final report
 
-End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).
+End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, the restart outcome for merged jobs (`restarted + verified`, `restart failed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).
