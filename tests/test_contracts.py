@@ -51,6 +51,10 @@ class ContractTest(unittest.TestCase):
         fm = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")
         self.assertEqual(fm.get("name"), "trevskills-scrum")
 
+    def test_skill_no_longer_links_a_per_project_dashboard(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertNotIn('"$F/dashboard.html"', text)
+
     def test_skill_only_merges_via_gh_squash(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("gh pr merge", text)
@@ -81,6 +85,7 @@ class ContractTest(unittest.TestCase):
             "Trevor confirms /trevskills-migrate",   # dashboard approve on schema jobs
             "was aborted",                           # dashboard Abort stops the orchestrator
             "sync $ID` right before",               # abort can land mid-merge
+            "register \"$REPO\"",                    # every repo joins the one dashboard
         ):
             self.assertIn(phrase, text, phrase)
 

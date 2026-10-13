@@ -27,11 +27,11 @@ Shell variables don't survive between Bash calls, so re-derive `REPO`, `F` and `
 
 **Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `$BOARD set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
 
-If this isn't the main checkout, stop and say so. If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
+If this isn't the main checkout, stop and say so. Run `$BOARD register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard. If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
 ### First-run setup (once per repo)
 
-1. Run `mkdir -p "$F/jobs"`, then `ln -sfn "$HOME/.claude/skills/trevskills-scrum/dashboard.html" "$F/dashboard.html"`.
+1. Run `mkdir -p "$F/jobs"`.
 2. Add `scrum/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there. This keeps your tracked `.gitignore` untouched.
 3. If `$F/backlog.md` is missing, create it containing `# Backlog` plus one blank line.
 4. Detect the project and write `$F/project.md`:
@@ -53,7 +53,7 @@ If this isn't the main checkout, stop and say so. If `$F/project.md` is missing,
 - Notes: <anything an agent must know, e.g. "tests need .env">
 ```
 
-5. Tell the user: `Dashboard: python3 ~/.claude/skills/trevskills-scrum/serve.py` (run from the repo root) → http://localhost:8765/dashboard.html. The dashboard's buttons (backlog edits, Run now, Approve, Send back) only work through serve.py.
+5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
 ## Commands
 
