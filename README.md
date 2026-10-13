@@ -4,7 +4,7 @@
 
 ```
 feature → spec-writer → builder → check gate → security · ux · ui · code → approver
-                           ▲          (tests/lint/build)   (wait for all 4;     │
+                           ▲          (tests/lint/build)   (wait for all;       │
                            │                               code runs codex too) │
                            └──────── CHANGES, round < 2 ◄───────────────────────┤
                                                     APPROVE → PR → CI → squash-merge
@@ -14,7 +14,9 @@ feature → spec-writer → builder → check gate → security · ux · ui · c
 
 **Codex as a second model family, read-only only.** `scrum-review-code` runs `codex exec review` in the background once per round while it does its own review, confirms each finding, and tags the ones it keeps `(codex)`. Codex never edits, never spawns agents, and adds no step: if it fails, or hasn't finished 10 minutes after it started, the review notes `codex: skipped`, which never passes or fails the round. Both engines share one rubric, `codex/AGENTS.md`.
 
-**Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The Opus approver decides everything else.
+**Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The approver decides everything else. It runs on Opus, or on Sonnet when the round is all green (check PASS, every review PASS, no schema files, not a conflict round).
+
+**Skips the ux and ui reviewers** when no file in the diff matches `UI globs` in `scrum/project.md`; the orchestrator writes their review files as `VERDICT: PASS`. A missing or `none` line means all four run.
 
 ## Install (once)
 

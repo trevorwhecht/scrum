@@ -73,7 +73,7 @@ class ContractTest(unittest.TestCase):
             "UNKNOWN",
             "still missing after the re-spawn",
             "refuse",                            # approve refuses jobs with nothing to merge
-            "board.py --dir",                    # next/backlog go through the locked board
+            'board.py" --dir "$F"',              # next/backlog go through the locked board
             " next",
             "backlog-add",
             "/trevskills-scrum start <id>",          # dashboard Run now hands off here
@@ -125,6 +125,61 @@ class ContractTest(unittest.TestCase):
         for phrase in ("read-only", "codex exec review", "~/.codex/AGENTS.md"):
             self.assertIn(phrase, readme, phrase)
         self.assertNotIn("spec critique", readme.lower())
+
+    def section(self, text, start, end):
+        return text[text.index(start):text.index(end, text.index(start))]
+
+    def test_skill_checks_prereqs_at_setup(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        setup = self.section(text, "## Setup", "## Commands")
+        for phrase in ("gh auth status", "git remote", "git remote add origin <url>", "brew install gh && gh auth login"):
+            self.assertIn(phrase, setup, phrase)
+        self.assertIn("gh unavailable", self.section(text, "## Merge", "## Resuming the builder"))
+
+    def test_skill_has_no_board_string_variable(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertNotIn("$BOARD", text)
+        self.assertNotIn("BOARD=", text)
+        self.assertIn('B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; }', text)
+        self.assertIn("board function `B`", text)
+
+    def test_skill_zsh_safe_snippets(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertNotIn('"$REPO"/.env*', text)
+        self.assertIn('find "$REPO" -maxdepth 1', text)
+        self.assertIn("git remote set-head origin -a", text)
+
+    def test_skill_project_template_has_ui_globs(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        template = self.section(text, "# Project profile", "```")
+        self.assertIn("- UI globs: <space-separated globs|none>", template)
+        self.assertIn("*.tsx *.jsx *.css *.scss *.html *.vue *.svelte components/ app/", text)
+
+    def test_skill_skips_ui_reviewers_without_ui_files(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review", "## Approve")
+        for phrase in ("Skipped by orchestrator: no UI files in diff.", "UI globs", "VERDICT: PASS",
+                       "never from the spec's `UI surface:` line"):
+            self.assertIn(phrase, review, phrase)
+
+    def test_skill_review_file_exceptions_named(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        line = next(l for l in text.splitlines() if "never edits code or review files" in l)
+        self.assertTrue("except" in line or "exception" in line, line)
+        self.assertIn("Reviewer produced no output.", line)
+
+    def test_skill_uses_sonnet_approver_only_when_green(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        approve = self.section(text, "## Approve", "## Merge")
+        self.assertIn('model: "sonnet"', approve)
+        self.assertIn("scrum-approver", approve)
+        self.assertIn("Opus", approve)
+        self.assertIn("Conflicts", approve)
+
+    def test_spec_writer_refines_existing_criteria(self):
+        path = ROOT / "agents" / "scrum-spec-writer.md"
+        self.assertIn("verbatim", path.read_text())
+        self.assertEqual(frontmatter(path).get("model"), "opus")
 
 
 if __name__ == "__main__":

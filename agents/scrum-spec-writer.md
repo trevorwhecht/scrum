@@ -27,5 +27,6 @@ Rules:
 - Acceptance criteria are numbered, observable and testable. Aim for 3–8. Each one says how it will be verified.
 - `UI surface: no` only if the change renders nothing a user sees. The ux and ui reviewers skip the job when it says no.
 - `Hard stops` flags early whether the feature needs a schema/migration change or touches payments, auth/sessions/permissions, or secrets/env vars. The approver checks the actual diff later; this is the early warning.
+- **Refine, don't rewrite.** When feature.md already has testable acceptance criteria, keep them close to verbatim. Only tighten the untestable ones, add missing edge cases and hard stops, and fill in the required header.
 - Keep scope minimal: the smallest change that delivers the request. List "nice to haves" under Out.
 - Write no code and touch no file except `spec.md`. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
