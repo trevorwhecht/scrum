@@ -731,17 +731,25 @@ class AiSettingsTest(unittest.TestCase):
         (self.reg / ".claude" / "settings.local.json").write_text("{}")
         (self.user / "plugins").mkdir()
         (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"p@x": []}}))
-        (self.managed / "managed-settings.json").write_text("{}")
+        (self.managed / "managed-settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
+        (self.managed / "managed-mcp.json").write_text(json.dumps({"mcpServers": {"m": {"command": "m"}}}))
         planted = self.plant_markdown()
         snap = lambda: {p: p.stat().st_mtime_ns for p in [*self.home.rglob("*"), *self.managed.rglob("*")]}
         before = snap()
         cats, _ = self.scope("r:reg")
-        for cat in ("settings", "hooks", "mcp", "plugins", "skills", "commands", "agents"):
-            self.assertTrue(cats[cat]["items"], cat)
-            for it in cats[cat]["items"]:
-                self.assertFalse(it["editable"], it["id"])
-                self.assertEqual(self.save(it, "pwned")[0], 403, it["id"])
-                self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 403, it["id"])
+        managed = [it for c in cats.values() for it in c["items"] if it["scope"] == "managed"]
+        self.assertEqual(sorted((it["path"], it["name"]) for it in managed),
+                         [(str(self.managed / "managed-mcp.json"), "m"), (str(self.managed / "managed-settings.json"), "Stop · *"),
+                          (str(self.managed / "managed-settings.json"), "managed-settings.json")])
+        for it in managed:
+            self.assertFalse(it["editable"], it["id"])
+            self.assertEqual(self.save(it, "{}")[0], 403, it["id"])
+            self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 403, it["id"])
+        for cat in ("settings", "hooks", "mcp", "plugins"):
+            mine = [it for it in cats[cat]["items"] if it["scope"] != "managed"]
+            self.assertTrue(mine, cat)
+            for it in mine:
+                self.assertTrue(it["editable"], it["id"])
         for bad in ("nope", "", None, 5, "global|config|user|/etc/passwd|x", f"r:reg|config|local|{self.home / '.claude.json'}|x",
                     f"global|rules|user|{self.user}/rules/../../.claude.json|x"):
             self.assertEqual(self.post("/api/ai-settings/save", {"id": bad, "content": "pwned", "version": "1"})[0], 404, bad)
@@ -782,6 +790,142 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(f.read_bytes(), b"old rule\r\nline")
         self.assertEqual(self.backups(), [])
 
+
+    # --- every non-managed item is editable: skills, agents, commands, and JSON entries spliced into their file ---
+
+    def test_save_markdown_skill_agent_command(self):
+        (self.user / "skills" / "s").mkdir(parents=True)
+        real_skill = self.reg / "shared-skill.md"
+        real_skill.write_text("old skill")
+        (self.user / "skills" / "s" / "SKILL.md").symlink_to(real_skill)
+        (self.reg / ".claude" / "agents").mkdir()
+        (self.reg / ".claude" / "agents" / "a.md").write_text("old agent")
+        files = {"skills": (self.user / "skills" / "s" / "SKILL.md", real_skill, "old skill"),
+                 "agents": (self.reg / ".claude" / "agents" / "a.md", self.reg / ".claude" / "agents" / "a.md", "old agent"),
+                 "commands": (self.user / "commands" / "c.md", self.user / "commands" / "c.md", "user c")}
+        cats, _ = self.scope("r:reg")
+        for cat, (f, real, old) in files.items():
+            it = next(i for i in cats[cat]["items"] if i["path"] == str(f))
+            self.assertTrue(it["editable"], cat)
+            before = len(self.backups())
+            code, data = self.save(it, f"new {cat}")
+            self.assertEqual((code, data["content"], real.read_text()), (200, f"new {cat}", f"new {cat}"), cat)
+            self.assertEqual(len(self.backups()), before + 1, cat)
+            code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+            self.assertEqual((code, data["content"], real.read_text()), (200, old, old), cat)
+        self.assertTrue((self.user / "skills" / "s" / "SKILL.md").is_symlink())
+
+    def json_item(self, sid, cat, path, name=None, scope=None):
+        return next(i for i in self.scope(sid)[0][cat]["items"]
+                    if i["path"] == str(path) and (name is None or i["name"] == name) and (scope is None or i["scope"] == scope))
+
+    def test_save_json_entry_splices_into_file(self):
+        settings = self.user / "settings.json"
+        settings.write_text(json.dumps({"model": "x", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "a"}]},
+                                                                          {"matcher": "m", "hooks": []}]}, "z": 1}))
+        (self.reg / ".mcp.json").write_text(json.dumps({"mcpServers": {"dup": {"command": "p"}, "other": {"command": "o"}}, "keep": True}))
+        (self.user / "plugins").mkdir()
+        plugins = self.user / "plugins" / "installed_plugins.json"
+        plugins.write_text(json.dumps({"version": 2, "plugins": {"a@x": [{"scope": "user"}], "b@x": [{"scope": "user"}]}}))
+        cj = self.home / ".claude.json"
+
+        hook = self.json_item("global", "hooks", settings, "Stop · m")
+        version = self.item(hook["id"])[1]["version"]
+        code, data = self.post("/api/ai-settings/save", {"id": hook["id"], "version": version, "confirm": True,
+                                                          "content": '{"matcher": "m", "hooks": [{"type": "command", "command": "b"}]}'})
+        self.assertEqual((code, json.loads(data["content"])), (200, {"matcher": "m", "hooks": [{"type": "command", "command": "b"}]}))
+        self.assertEqual(settings.read_text(), '{\n  "model": "x",\n  "hooks": {\n    "Stop": [\n      {\n        "hooks": [\n'
+                         '          {\n            "type": "command",\n            "command": "a"\n          }\n        ]\n      },\n'
+                         '      {\n        "matcher": "m",\n        "hooks": [\n          {\n            "type": "command",\n'
+                         '            "command": "b"\n          }\n        ]\n      }\n    ]\n  },\n  "z": 1\n}\n')
+
+        server = self.json_item("r:reg", "mcp", self.reg / ".mcp.json", "dup")
+        self.assertEqual(self.save(server, '{"command": "p2"}')[0], 200)
+        self.assertEqual(json.loads((self.reg / ".mcp.json").read_text()),
+                         {"mcpServers": {"dup": {"command": "p2"}, "other": {"command": "o"}}, "keep": True})
+
+        local = self.json_item("r:reg", "mcp", cj, "dup", "local")
+        self.assertEqual(self.save(local, '{"command": "l2", "args": ["-v"]}')[0], 200)
+        self.assertEqual(json.loads(cj.read_text()), {
+            "mcpServers": {"dup": {"command": "u", "env": {"API": SECRET}, "headers": {"X": SECRET}}},
+            "projects": {str(self.reg): {"mcpServers": {"dup": {"command": "l2", "args": ["-v"]}}}, str(self.listed): {},
+                         str(self.home / "gone"): {}, str(self.home): {}}})
+
+        plugin = self.json_item("global", "plugins", plugins, "a@x")
+        self.assertEqual(self.save(plugin, '[{"scope": "user", "version": "2"}]')[0], 200)
+        self.assertEqual(plugins.read_text(), '{\n  "version": 2,\n  "plugins": {\n    "a@x": [\n      {\n        "scope": "user",\n'
+                         '        "version": "2"\n      }\n    ],\n    "b@x": [\n      {\n        "scope": "user"\n      }\n    ]\n  }\n}\n')
+        self.assertEqual(len(self.backups()), 4)
+
+        version = self.item(plugin["id"])[1]["version"]
+        plugins.write_text('{"plugins": {"a@x": []}}')
+        os.utime(plugins, ns=(int(version) + 5_000_000, int(version) + 5_000_000))
+        self.assertEqual(self.save(plugin, "[]", version)[0], 409)
+        self.assertEqual(plugins.read_text(), '{"plugins": {"a@x": []}}')
+        self.assertEqual(len(self.backups()), 4)
+
+    def test_save_json_rejects_invalid_and_wrong_type(self):
+        settings = self.user / "settings.json"
+        settings.write_text('{"model": "x"}')
+        (self.user / "plugins").mkdir()
+        plugins = self.user / "plugins" / "installed_plugins.json"
+        plugins.write_text('{"plugins": {"a@x": []}}')
+        s_it = self.json_item("global", "settings", settings)
+        p_it = self.json_item("global", "plugins", plugins)
+        save = lambda it, content: self.serve.ai_settings_save(it["id"], content, self.item(it["id"])[1]["version"])
+        self.assertEqual(save(s_it, "{"), (400, {"error": "invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}))
+        self.assertEqual(save(s_it, "[1]"), (400, {"error": "must be a JSON object"}))
+        self.assertEqual(save(p_it, "{}"), (400, {"error": "must be a JSON array"}))
+        self.assertEqual(self.save(s_it, "nope")[0], 400)
+        self.assertEqual((settings.read_text(), plugins.read_text()), ('{"model": "x"}', '{"plugins": {"a@x": []}}'))
+        self.assertEqual(self.backups(), [])
+
+    def test_save_json_keeps_redacted_values(self):
+        mcp = self.reg / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"api": {"command": "x", "env": {"API_KEY": "s3cret"}, "headers": {"Authorization": "Bearer t"}},
+                                                  "raw": {"url": "u", "headers": "X-Key: abc"}}}))
+        settings = self.user / "settings.json"
+        settings.write_text(json.dumps({"apiKeyHelper": "/bin/get-key", "model": "a"}))
+        api = self.json_item("r:reg", "mcp", mcp, "api")
+        raw = self.json_item("r:reg", "mcp", mcp, "raw")
+        view = self.item(api["id"])[1]["content"]
+        self.assertNotIn("s3cret", view)
+        self.assertEqual(self.save(api, view)[0], 200)
+        self.assertEqual(self.save(raw, self.item(raw["id"])[1]["content"])[0], 200)
+        self.assertEqual(json.loads(mcp.read_text()), {"mcpServers": {
+            "api": {"command": "x", "env": {"API_KEY": "s3cret"}, "headers": {"Authorization": "Bearer t"}},
+            "raw": {"url": "u", "headers": "X-Key: abc"}}})
+        self.assertEqual(self.save(api, view.replace('"x"', '"y"'))[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["api"],
+                         {"command": "y", "env": {"API_KEY": "s3cret"}, "headers": {"Authorization": "Bearer t"}})
+        s_it = self.json_item("global", "settings", settings)
+        self.assertEqual(self.save(s_it, '{"apiKeyHelper": "[redacted]", "model": "b"}')[0], 200)
+        self.assertEqual(json.loads(settings.read_text()), {"apiKeyHelper": "/bin/get-key", "model": "b"})
+        before, backups = mcp.read_bytes(), len(self.backups())
+        bad = '{"command": "y", "env": {"API_KEY": "[redacted]", "NEW": "[redacted]"}}'
+        self.assertEqual(self.serve.ai_settings_save(api["id"], bad, self.item(api["id"])[1]["version"]),
+                         (400, {"error": "[redacted] at env.NEW has no saved value"}))
+        self.assertEqual((mcp.read_bytes(), len(self.backups())), (before, backups))
+
+    def test_save_permissions_or_hooks_needs_confirm(self):
+        settings = self.user / "settings.json"
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "model": "a", "hooks": {"Stop": [{"hooks": []}]}}))
+        s_it = self.json_item("global", "settings", settings)
+        hook = self.json_item("global", "hooks", settings)
+        version = lambda it: self.item(it["id"])[1]["version"]
+        allow = '{"permissions": {"allow": ["Bash(rm -rf /)"]}, "model": "a", "hooks": {"Stop": [{"hooks": []}]}}'
+        self.assertEqual(self.serve.ai_settings_save(s_it["id"], allow, version(s_it)), (428, {"error": "confirm required"}))
+        self.assertEqual(self.save(hook, '{"hooks": [{"type": "command", "command": "evil"}]}')[0], 428)
+        self.assertEqual(self.save(s_it, '{"permissions": {"allow": ["Bash(ls)"]}, "model": "a", "hooks": {}}')[0], 428)
+        self.assertEqual((json.loads(settings.read_text())["permissions"], self.backups()), ({"allow": ["Bash(ls)"]}, []))
+        self.assertEqual(self.save(s_it, '{"permissions": {"allow": ["Bash(ls)"]}, "model": "b", "hooks": {"Stop": [{"hooks": []}]}}')[0], 200)
+        self.assertEqual(self.save(hook, '{"hooks": []}')[0], 200)  # unchanged hook entry: no confirm needed
+        code, _ = self.post("/api/ai-settings/save", {"id": s_it["id"], "content": allow, "version": version(s_it), "confirm": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(settings.read_text()),
+                         {"permissions": {"allow": ["Bash(rm -rf /)"]}, "model": "a", "hooks": {"Stop": [{"hooks": []}]}})
+        self.assertEqual(self.post("/api/ai-settings/save", {"id": s_it["id"], "content": allow.replace("rm", "dd"),
+                                                             "version": version(s_it), "confirm": "yes"})[0], 428)
 
 class AiSecurityTest(unittest.TestCase):
     """Page 3: the Security scan, on the same fake home as AiSettingsTest."""
@@ -987,7 +1131,7 @@ class AiAuditTest(unittest.TestCase):
                                ("plugins", "pl@mkt"): (5, 1), ("skills", "pl:ps"): (0, 1)})
         for r in rows.values():
             self.assertEqual(set(r), {"id", "name", "category", "scope", "lifetime", "recent", "tokens", "flags", "verdict", "reason", "disable",
-                                      "research"})
+                                      "research", "editable"})
         self.assertNotIn("settings", {r["category"] for r in rows.values()})
         self.assertEqual(self.get("/api/ai-settings/audit?scope=nope")[0], 404)
 
@@ -1384,9 +1528,8 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.statuses(), ["applied", "applied"])
 
     def test_approve_refuses_non_editable_and_stale(self):
-        (self.user / "agents").mkdir()
-        agent = self.user / "agents" / "a.md"
-        agent.write_text("old line\n")
+        agent = self.home / ".claude.json"  # an editable JSON item (MCP servers): digest approve still refuses it
+        agent.write_text(json.dumps({"mcpServers": {"x": {"command": "old line"}}}))
         outside = Path(self.tmp.name) / "outside.md"
         outside.write_text("old line\n")
         settings = self.user / "settings.json"
@@ -1403,6 +1546,9 @@ class DigestTest(unittest.TestCase):
         for pid in ("p4", "p5", "p6"):
             self.assertEqual(self.decide(pid, "approve"), (409, None), pid)
         self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p1", "approve"), (403, {"error": "target is not editable"}))
+        settings_it = next(i for i in AiSettingsTest.scope(self, "global")[0]["settings"]["items"] if i["path"] == str(settings))
+        self.assertTrue(settings_it["editable"])  # editable in AI-Settings, yet never a digest target
+        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p3", "approve"), (403, {"error": "target is not editable"}))
         self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p5", "approve"), (409, {"error": "proposal no longer applies"}))
         self.assertEqual(snap(), before)
         self.assertEqual(self.backups(), [])
