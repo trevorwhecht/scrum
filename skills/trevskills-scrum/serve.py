@@ -8,7 +8,8 @@ Projects come from the registry that /trevskills-scrum fills in (board.py regist
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings is read-only except for Markdown instruction files (CLAUDE.md, CLAUDE.local.md, rules, memory): each save
-is backed up to <CLAUDE_HOME>/backups/ai-settings/ first and can be undone.
+is backed up to <CLAUDE_HOME>/backups/ai-settings/ first and can be undone. Its Security scan only reads files: it never
+runs a hook, fetches anything or connects to an MCP server, and its findings never echo a config value.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timezone
@@ -556,6 +557,185 @@ def open_terminal(project, root, job_id):
     return 200, {"id": job_id, "message": message}
 
 
+# --- AI-Settings security scan: static, read-only. Reads files only; never runs a hook or touches an MCP server. ----
+# A finding never carries a config value (an env value, a token, a command, an allow entry): only a fixed sentence,
+# plus a server name and key for mcp-inline-secret.
+SEVERITY = {"high": 0, "medium": 1, "low": 2}
+NETWORK = re.compile(r"\b(curl|wget|nc|ncat)\b")
+BROAD = re.compile(r"Bash(\((\*|(npx|python3?|gh api|curl)(:| )\*)\))?")
+WILDCARD = re.compile(r"(\w+)(?:\((.+?)(?::| )\*\))?")
+ENTRY = re.compile(r"(\w+)\((.*)\)")
+VAR_REF = re.compile(r"\$\{\w+\}")
+TOKENISH = re.compile(r"--token=|--api-key=|[?&][\w-]*(token|key)=|Bearer |sk-|ghp_|github_pat_|xox[bp]-", re.I)
+INJECTION = re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\b.*\binstructions|do not tell the user"
+                       r"|without telling the user|you are now|reveal your system prompt|\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b", re.I)
+FIX = {
+    "hook-network": "Remove the network call from this hook, or move it into a reviewed local script.",
+    "hook-no-timeout": "Add a `timeout` (in seconds) to this hook.",
+    "skill-bare-bash": "Narrow `Bash` in `allowed-tools` to specific commands, like `Bash(git status:*)`.",
+    "allow-broad": "Replace this allow entry with the specific commands you need.",
+    "allow-duplicate": "Remove the duplicate allow entry.",
+    "allow-shadowed": "Remove this allow entry; a wildcard entry already allows it.",
+    "hook-orphan": "Delete this hook script, or reference it from a hook in settings.",
+    "skill-injection": "Review this third-party skill text and remove the plugin if you don't trust it.",
+}
+
+
+def find_line(text, value):
+    """1-based line of the first line holding value's JSON-encoded form (raw or ASCII-escaped), else None."""
+    needles = {json.dumps(value, ensure_ascii=False), json.dumps(value)}
+    return next((i for i, line in enumerate(text.splitlines(), 1) if any(n in line for n in needles)), None)
+
+
+def wildcards(allow):
+    """[(tool, prefix or None)] for `Tool(prefix *)`, `Tool(prefix:*)` and bare `Tool` entries."""
+    return [m.groups() for e in allow if (m := WILDCARD.fullmatch(e))]
+
+
+def covered(entry, cards):
+    m = ENTRY.fullmatch(entry)
+    return bool(m) and any(tool == m[1] and (prefix is None or m[2] == prefix or m[2].startswith((prefix + " ", prefix + ":")))
+                           for tool, prefix in cards)
+
+
+def scan_security():
+    """[{severity, rule, file, line, fix}] over every scope ai_scopes() knows. Each file is read once, by real path."""
+    user, home = claude_home(), user_home()
+    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    roots = [s[2] for s in ai_scopes().values() if s[2]]
+    seen, texts, findings, commands = set(), {}, [], []
+
+    def read(path, rule_set):
+        """(real path, text) the first time rule_set meets a file, else None. Each file is read from disk once."""
+        real = os.path.realpath(path)
+        if (rule_set, real) in seen or not os.path.isfile(real):
+            return None
+        seen.add((rule_set, real))
+        if real not in texts:
+            try:
+                texts[real] = Path(real).read_text(errors="replace")
+            except OSError:
+                texts[real] = None
+        return texts[real] is not None and (real, texts[real]) or None
+
+    def add(rule, severity, file, line, fix=None):
+        findings.append({"severity": severity, "rule": rule, "file": file, "line": line, "fix": fix or FIX[rule]})
+
+    def settings(path, user_cards):
+        got = read(path, "settings")
+        try:
+            data = got and json.loads(got[1])
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return []
+        real, text = got
+        for entries in as_dict(data.get("hooks")).values():
+            for e in entries if isinstance(entries, list) else []:
+                for h in as_dict(e).get("hooks") if isinstance(as_dict(e).get("hooks"), list) else []:
+                    cmd = as_dict(h).get("command")
+                    if not isinstance(cmd, str):
+                        continue
+                    commands.append(cmd)
+                    if NETWORK.search(cmd):
+                        add("hook-network", "high", real, find_line(text, cmd))
+                    if h.get("type") == "command" and "timeout" not in h:
+                        add("hook-no-timeout", "low", real, find_line(text, cmd))
+        allow = as_dict(data.get("permissions")).get("allow")
+        allow = [a for a in allow if isinstance(a, str)] if isinstance(allow, list) else []
+        cards, dupes = wildcards(allow), set()
+        for a in allow:
+            line = find_line(text, a)
+            if BROAD.fullmatch(a):
+                add("allow-broad", "high", real, line)
+            if allow.count(a) > 1 and a not in dupes:
+                dupes.add(a)
+                add("allow-duplicate", "low", real, line)
+            own = WILDCARD.fullmatch(a)
+            if covered(a, [c for c in cards if not own or own.groups() != c]) or covered(a, user_cards):
+                add("allow-shadowed", "low", real, line)
+        return cards
+
+    def mcp(path, server_maps):
+        got = read(path, "mcp")
+        if not got:
+            return
+        real, text = got
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return
+        for servers in server_maps(data):
+            for name, s in as_dict(servers).items():
+                s, line = as_dict(s), find_line(text, name)
+                for field in ("env", "headers"):
+                    for k, v in as_dict(s.get(field)).items():
+                        if v not in ("", None) and not (isinstance(v, str) and VAR_REF.fullmatch(v.strip())):
+                            add("mcp-inline-secret", "high", real, line,
+                                f"Move `{k}` for server `{name}` into an env var reference like `${{{k}}}`.")
+                for field in ("args", "url"):
+                    vals = s.get(field) if isinstance(s.get(field), list) else [s.get(field)]
+                    if any(isinstance(v, str) and TOKENISH.search(v) for v in vals):
+                        add("mcp-inline-secret", "high", real, line,
+                            f"Move the token in `{field}` for server `{name}` into an env var reference like `${{TOKEN}}`.")
+
+    def skill(path):
+        got = read(path, "skill")
+        m = got and FRONTMATTER.match(got[1])
+        if not m:
+            return
+        key = None
+        for i, line in enumerate(m.group(1).splitlines(), 2):
+            if (item := ITEM.fullmatch(line)) and key == "allowed-tools":
+                val = item.group(2)
+            elif ":" in line and not line[:1].isspace():
+                key, _, val = (x.strip() for x in line.partition(":"))
+                if key != "allowed-tools":
+                    continue
+            else:
+                continue
+            if "Bash" in re.split(r"[\s,\[\]\"']+", re.sub(r"\([^)]*\)", "()", val)):
+                add("skill-bare-bash", "medium", got[0], i)
+
+    user_cards = settings(user / "settings.json", [])
+    settings(managed / "managed-settings.json", user_cards)
+    for root in roots:
+        for f in ("settings.json", "settings.local.json"):
+            settings(root / ".claude" / f, user_cards)
+    mcp(managed / "managed-mcp.json", lambda d: [as_dict(d).get("mcpServers")])
+    mcp(home / ".claude.json", lambda d: [as_dict(d).get("mcpServers")]
+        + [as_dict(p).get("mcpServers") for p in as_dict(as_dict(d).get("projects")).values()])
+    for root in roots:
+        mcp(root / ".mcp.json", lambda d: [as_dict(d).get("mcpServers")])
+
+    plugin_dirs = [p.parent for src, p in skill_files().values() if src != "user"]
+    for p in [*user.glob("skills/*/SKILL.md"), *(d / "SKILL.md" for d in plugin_dirs),
+              *(p for root in roots for p in (root / ".claude").glob("skills/*/SKILL.md"))]:
+        skill(p)
+    for d in plugin_dirs:
+        for p in sorted(d.rglob("*.md")):
+            try:
+                if p.stat().st_size > 1_000_000:  # fixed cap: skill text is small; anything bigger isn't prose
+                    continue
+            except OSError:
+                continue
+            if got := read(p, "injection"):
+                for i, line in enumerate(got[1].splitlines(), 1):
+                    if INJECTION.search(line):
+                        add("skill-injection", "medium", got[0], i)
+
+    for d in [user / "hooks", *(root / ".claude" / "hooks" for root in roots)]:
+        try:
+            files = sorted(e.path for e in os.scandir(d) if e.is_file() and not e.name.startswith("."))
+        except OSError:
+            continue
+        for f in files:
+            if read(f, "orphan") and not any(os.path.basename(f) in c for c in commands):
+                add("hook-orphan", "low", os.path.realpath(f), None)
+
+    return sorted(findings, key=lambda f: (SEVERITY[f["severity"]], f["file"], f["line"] or 0))
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -602,6 +782,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, groups)
             data = ai_settings_scope(scope)
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such scope"})
+        if path == "/api/ai-settings/security":
+            return self.send_json(200, {"findings": scan_security()})
         if path == "/api/ai-settings/item":
             data = ai_settings_item(parse_qs(urlparse(self.path).query).get("id", [""])[0])
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such item"})

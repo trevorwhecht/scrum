@@ -116,6 +116,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .node .chip{color:#fff}.node .chip.pending{color:var(--muted)}
 .node .path{flex-basis:100%;overflow-wrap:anywhere}
 .node.over{opacity:.55}
+.node.finding{justify-content:flex-start}.finding .path{color:var(--ink)}
+.node .chip.high{background:var(--human)}.node .chip.medium{background:var(--changes)}
 #aiEdit{display:grid;gap:8px}
 #aiText{width:100%;min-height:50dvh;font:13px/1.5 ui-monospace,monospace}
 #aiEdit div{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -556,6 +558,7 @@ $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks th
 const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "This Mac"]];
 const AI_LOADING = '<p class="empty">loading…</p>';
 let aiData = null, aiCat = "", aiItem = null;  // aiItem: the editable item on screen, with its last saved version
+let aiFindings = null;  // the last Security scan; it covers every scope, so a scope change keeps it
 const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
 const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
     <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
@@ -563,7 +566,9 @@ const aiRow = it => `<button class="node${it.status === "overridden" ? " over" :
 
 function renderAi() {
   $("aiBack").hidden = true;
-  $("aiCats").innerHTML = aiData.categories.map(c => `<button type="button" data-cat="${esc(c.key)}" aria-pressed="${c.key === aiCat}"><span>${esc(c.label)}</span><span>${c.count}</span></button>`).join("");
+  $("aiCats").innerHTML = aiData.categories.map(c => `<button type="button" data-cat="${esc(c.key)}" aria-pressed="${c.key === aiCat}"><span>${esc(c.label)}</span><span>${c.count}</span></button>`).join("")
+    + `<button type="button" data-cat="security" aria-pressed="${aiCat === "security"}" data-agent-hint="Scans every scope's config files for risky hooks, allow rules, skills and MCP secrets. Reads files only."><span>Security</span><span>${aiFindings ? aiFindings.length : ""}</span></button>`;
+  if (aiCat === "security") return renderFindings();
   const cat = aiData.categories.find(c => c.key === aiCat);
   $("aiList").innerHTML = cat.items.map(aiRow).join("") || '<p class="empty">None</p>';
 }
@@ -575,13 +580,13 @@ async function aiLoadScope() {
   if ($("aiScope").value !== sid) return;  // a newer scope pick is already loading
   if (!data) return aiFail();
   aiData = data;
-  if (!aiData.categories.some(c => c.key === aiCat)) aiCat = aiData.categories[0].key;
+  if (aiCat !== "security" && !aiData.categories.some(c => c.key === aiCat)) aiCat = aiData.categories[0].key;
   renderAi();
 }
 
 $("aiBtn").addEventListener("click", async () => {
   $("aiError").textContent = ""; $("aiScope").innerHTML = ""; $("aiCats").innerHTML = ""; $("aiBack").hidden = true;
-  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = "";
+  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = ""; aiFindings = null;
   $("aiSettings").showModal();
   const scopes = await getJson("api/ai-settings", null);
   if (!scopes) return aiFail();
@@ -594,8 +599,25 @@ $("aiScope").addEventListener("change", aiLoadScope);
 $("aiBack").addEventListener("click", renderAi);
 $("aiCats").addEventListener("click", e => {
   const b = e.target.closest("button[data-cat]");
-  if (b && aiData) { aiCat = b.dataset.cat; renderAi(); }
+  if (!b || !aiData) return;
+  aiCat = b.dataset.cat; $("aiError").textContent = "";
+  if (aiCat === "security") aiFindings = null;  // every click runs a fresh scan
+  renderAi();
 });
+const findingRow = f => `<div class="node finding"><span class="chip ${f.severity === "low" ? "pending" : esc(f.severity)}">${esc(f.severity)}</span>
+    <b>${esc(f.file)}${f.line == null ? "" : `:${esc(f.line)}`}</b><span class="path">${esc(f.fix)}</span></div>`;
+async function renderFindings() {
+  if (aiFindings) {
+    $("aiList").innerHTML = aiFindings.map(findingRow).join("") || '<p class="empty">No risky config found</p>';
+    return;
+  }
+  $("aiError").textContent = ""; $("aiList").innerHTML = AI_LOADING;
+  const data = await getJson("api/ai-settings/security", null);
+  if (aiCat !== "security" || !$("aiBack").hidden || aiFindings) return;  // moved on, or a newer scan already landed
+  if (!data?.findings) { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't run the security scan. Is serve.py running?"; return; }
+  aiFindings = data.findings;
+  renderAi();
+}
 $("aiList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-id]");
   if (!b) return;
