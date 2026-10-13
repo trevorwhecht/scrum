@@ -797,6 +797,9 @@ $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks th
 const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "This Mac"]];
 const AI_LOADING = '<p class="empty">loading…</p>';
 let aiData = null, aiCat = "", aiItem = null;  // aiItem: the editable item on screen, with its last saved version
+let aiOpenedId = "";  // data-id of the last item opened, so Back can refocus its row
+// Moves focus to el only when focus was lost (body, the dialog, a removed node, or `also`), never away from where the user went.
+const aiRefocus = (el, also) => { const a = document.activeElement; if (el && (!a || a === document.body || a === $("aiSettings") || a === also || !a.isConnected)) el.focus(); };
 let aiFindings = null;  // the last Security scan; it covers every scope, so a scope change keeps it
 let aiAudit = null, aiOff = new Set();  // the current scope's audit, and rows Disabled on this visit (they offer Undo)
 const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
@@ -839,7 +842,11 @@ $("aiBtn").addEventListener("click", async () => {
   aiLoadScope();
 });
 $("aiScope").addEventListener("change", aiLoadScope);
-$("aiBack").addEventListener("click", renderAi);
+$("aiBack").addEventListener("click", () => {
+  renderAi();  // hides Back while it still has focus, so Back itself counts as lost focus
+  aiRefocus([...$("aiList").querySelectorAll("button[data-id]")].find(x => x.dataset.id === aiOpenedId)
+    || $("aiCats").querySelector('[aria-pressed="true"]'), $("aiBack"));
+});
 $("aiCats").addEventListener("click", e => {
   const b = e.target.closest("button[data-cat]");
   if (!b || !aiData) return;
@@ -928,16 +935,21 @@ $("aiList").addEventListener("click", async e => {
     audit.rows = audit.rows.map(r => r.id === id ? row : r);
     on ? aiOff.delete(id) : aiOff.add(id);
     renderAudit();
+    aiRefocus([...$("aiList").querySelectorAll("button[data-toggle]")].find(x => x.dataset.row === id)
+      || [...$("aiList").querySelectorAll("button[data-research]")].find(x => x.dataset.research === id));
   } catch {
     if (aiAudit !== audit) return;
     b.disabled = false; $("aiError").textContent = "Couldn't change this setting. Is serve.py running?";
+    aiRefocus(b);
   }
 });
 $("aiList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-id]");
   if (!b) return;
   const sid = $("aiScope").value;
+  aiOpenedId = b.dataset.id;
   $("aiError").textContent = ""; $("aiBack").hidden = false; $("aiList").innerHTML = AI_LOADING;
+  aiRefocus($("aiBack"));
   const it = await getJson(`api/ai-settings/item?id=${enc(b.dataset.id)}`, null);
   if ($("aiScope").value !== sid || $("aiBack").hidden) return;  // moved on while loading
   if (!it) return aiFail();
