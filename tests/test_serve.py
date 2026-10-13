@@ -1,4 +1,4 @@
-import json, os, sys, tempfile, threading, time, unittest, urllib.request, urllib.error
+import json, os, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from unittest import mock
 from pathlib import Path
 
@@ -31,6 +31,7 @@ class ServeTest(unittest.TestCase):
         stub.chmod(0o755)
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"))
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
+        serve.CLAUDE = str(stub)  # another test class may have imported serve first
         cls.serve = serve
         cls.root = base / "repo" / "scrum"
         (cls.root / "jobs").mkdir(parents=True)
@@ -252,6 +253,169 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(e.exception.code, 403)
         self.assertEqual({p.name: p.read_text() for p in self.agents.iterdir()}, before)
         self.assertEqual((self.agents.parent / "outside.md").read_text(), BUILDER)
+
+
+SECRET = "sk-planted-secret-123"
+
+
+class AiSettingsTest(unittest.TestCase):
+    """A fake home: CLAUDE_HOME, ~/.claude.json, one registered project, one listed only in ~/.claude.json, one found by
+    the walk, plus .claude dirs under node_modules and Library that the walk must skip."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        home = self.home = Path(os.path.realpath(self.tmp.name)) / "home"
+        self.user, self.managed = home / ".claude", Path(self.tmp.name) / "managed"
+        self.reg, self.listed, self.walked = home / "reg", home / "listed", home / "code" / "x"
+        for d in (self.user / "commands", self.reg / "scrum", self.reg / ".claude" / "commands", self.listed, self.walked / ".claude",
+                  home / "node_modules" / "y" / ".claude", home / "Library" / "z" / ".claude", self.managed):
+            d.mkdir(parents=True)
+        (self.user / "commands" / "c.md").write_text("user c")
+        (self.reg / ".claude" / "commands" / "c.md").write_text("project c <script>alert(1)</script>")
+        (self.reg / ".mcp.json").write_text(json.dumps({"mcpServers": {"dup": {"command": "p"}}}))
+        (home / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"dup": {"command": "u", "env": {"API": SECRET}, "headers": {"X": SECRET}}},
+            "projects": {str(self.reg): {"mcpServers": {"dup": {"command": "l"}}}, str(self.listed): {},
+                         str(home / "gone"): {}, str(home): {}}}))
+        registry = Path(self.tmp.name) / "projects.json"
+        registry.write_text(json.dumps([str(self.reg)]))
+        patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(self.user), CLAUDE_MANAGED_DIR=str(self.managed),
+                                  SCRUM_REGISTRY=str(registry))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import serve  # noqa: E402
+        self.serve = serve
+        self.server = serve.make_server(0)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.server.server_address[1]}{path}") as res:
+                body = res.read().decode()
+                return res.status, json.loads(body), body
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code, None, ""
+
+    def scope(self, sid):
+        code, data, _ = self.get(f"/api/ai-settings?scope={urllib.parse.quote(sid)}")
+        self.assertEqual(code, 200, sid)
+        return {c["key"]: c for c in data["categories"]}, [c["key"] for c in data["categories"]]
+
+    def item(self, item_id):
+        return self.get(f"/api/ai-settings/item?id={urllib.parse.quote(item_id)}")
+
+    def test_scope_discovery(self):
+        code, data, _ = self.get("/api/ai-settings")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["global"], [{"id": "global", "label": "Global"}])
+        self.assertEqual(data["registered"], [{"id": "r:reg", "label": "reg"}])
+        self.assertEqual([s["label"] for s in data["mac"]], ["code/x", "listed"])
+
+    def test_inventory_counts(self):
+        (self.user / "skills" / "s").mkdir(parents=True)
+        (self.user / "skills" / "s" / "SKILL.md").write_text("x")
+        (self.user / "skills" / "no-md").mkdir()
+        for sub in ("agents", "rules", "projects/-p/memory"):
+            (self.user / sub).mkdir(parents=True)
+        (self.user / "agents" / "a.md").write_text("x")
+        (self.user / "rules" / "r.md").write_text("x")
+        (self.user / "CLAUDE.md").write_text("x")
+        (self.user / "projects" / "-p" / "memory" / "m.md").write_text("x")
+        (self.user / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}], "PreToolUse": [{"matcher": "Bash", "hooks": []}]}}))
+        (self.user / "plugins").mkdir()
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"p@x": [{"scope": "user", "installPath": "/nope"}]}}))
+        (self.reg / "CLAUDE.md").write_text("x")
+        (self.reg / "CLAUDE.local.md").write_text("x")
+        (self.reg / ".claude" / "settings.local.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
+        (self.managed / "managed-settings.json").write_text("{}")
+        order = ["skills", "mcp", "commands", "agents", "rules", "config", "hooks", "plugins", "settings"]
+        want = {"global": [1, 1, 1, 1, 1, 2, 2, 1, 2], "r:reg": [1, 3, 2, 1, 1, 4, 3, 1, 3],
+                "m:code/x": [1, 1, 1, 1, 1, 2, 2, 1, 2], "m:listed": [1, 1, 1, 1, 1, 2, 2, 1, 2]}
+        for sid, counts in want.items():
+            cats, keys = self.scope(sid)
+            self.assertEqual(keys, order, sid)
+            self.assertEqual([cats[k]["count"] for k in order], counts, sid)
+            for c in cats.values():
+                self.assertEqual(c["count"], len(c["items"]))
+                for it in c["items"]:
+                    self.assertTrue({"id", "name", "scope", "path", "status"} <= set(it), it)
+                    self.assertIn(it["scope"], ("managed", "local", "project", "user"))
+        cats, _ = self.scope("r:reg")
+        self.assertEqual([i["scope"] for i in cats["settings"]["items"]], ["managed", "local", "user"])
+        self.assertEqual(sorted(i["name"] for i in cats["hooks"]["items"]), ["PreToolUse · Bash", "Stop · *", "Stop · *"])
+        self.assertEqual(self.get("/api/ai-settings?scope=nope")[0], 404)
+        self.assertEqual(self.get("/api/ai-settings?scope=m:node_modules/y")[0], 404)
+
+    def test_missing_and_malformed_sources(self):
+        for f in (self.home / ".claude.json", self.reg / ".mcp.json"):
+            f.write_text("{not json")
+        (self.user / "settings.json").write_text("[1, 2]")
+        (self.reg / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": "nope", "Pre": [1]}}))
+        (self.user / "plugins").mkdir()
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": [1]}))
+        (self.managed / "managed-mcp.json").write_text(json.dumps({"mcpServers": "x"}))
+        cats, _ = self.scope("r:reg")
+        self.assertEqual({k: c["count"] for k, c in cats.items()},
+                         {"skills": 0, "mcp": 0, "commands": 2, "agents": 0, "rules": 0, "config": 0, "hooks": 0, "plugins": 0, "settings": 1})
+        code, data, _ = self.get("/api/ai-settings")
+        self.assertEqual((code, [s["label"] for s in data["mac"]]), (200, ["code/x"]))
+
+    def test_precedence(self):
+        cats, _ = self.scope("r:reg")
+        self.assertEqual({(i["scope"], i["status"]) for i in cats["mcp"]["items"]},
+                         {("local", "wins"), ("project", "overridden"), ("user", "overridden")})
+        self.assertEqual({(i["scope"], i["status"]) for i in cats["commands"]["items"]}, {("project", "wins"), ("user", "overridden")})
+        cats, _ = self.scope("global")
+        self.assertEqual([(i["scope"], i["status"]) for i in cats["mcp"]["items"]], [("user", "")])
+
+    def test_item_detail(self):
+        cats, _ = self.scope("r:reg")
+        cmd = next(i for i in cats["commands"]["items"] if i["scope"] == "project")
+        code, data, _ = self.item(cmd["id"])
+        self.assertEqual((code, data["path"], data["content"]), (200, str(self.reg / ".claude" / "commands" / "c.md"),
+                                                                 "project c <script>alert(1)</script>"))
+        local = next(i for i in cats["mcp"]["items"] if i["scope"] == "local")
+        code, data, _ = self.item(local["id"])
+        self.assertEqual((code, json.loads(data["content"]), data["path"]), (200, {"command": "l"}, str(self.home / ".claude.json")))
+
+    def test_item_rejects_unknown_and_traversal(self):
+        for bad in ("", "nope", "global|commands|user|/etc/passwd|passwd", "../../etc/passwd",
+                    f"r:reg|config|project|{self.reg}/../../../../etc/passwd|passwd", "m:../..|config|project|/etc/hosts|hosts"):
+            self.assertEqual(self.item(bad)[0], 404, bad)
+
+    def test_secrets_redacted(self):
+        (self.reg / ".mcp.json").write_text(json.dumps({"mcpServers": {"dup": {"command": "p", "env": {"K": SECRET}},
+                                                                       "h": {"url": "u", "headers": {"Authorization": SECRET}}}}))
+        (self.managed / "managed-mcp.json").write_text(json.dumps({"mcpServers": {"m": {"env": {"K": SECRET}}}}))
+        (self.user / "settings.json").write_text(json.dumps({"env": {"PLAIN": SECRET}, "nested": [{"my_api-key": SECRET, "apiKey": SECRET}],
+                                                             "x": {"Password": SECRET, "ok": "visible"}}))
+        _, _, body = self.get("/api/ai-settings?scope=r%3Areg")
+        self.assertNotIn(SECRET, body)
+        cats, _ = self.scope("r:reg")
+        for cat in ("mcp", "settings"):
+            for it in cats[cat]["items"]:
+                code, data, body = self.item(it["id"])
+                self.assertEqual(code, 200)
+                self.assertNotIn(SECRET, body, it["id"])
+        settings = next(i for i in cats["settings"]["items"] if i["scope"] == "user")
+        content = json.loads(self.item(settings["id"])[1]["content"])
+        self.assertEqual(content, {"env": {"PLAIN": "[redacted]"}, "nested": [{"my_api-key": "[redacted]", "apiKey": "[redacted]"}],
+                                   "x": {"Password": "[redacted]", "ok": "visible"}})
+
+    def test_read_only(self):
+        snap = lambda: {p: p.stat().st_mtime_ns for p in self.home.rglob("*")}
+        before = snap()
+        self.get("/api/ai-settings")
+        for sid in ("global", "r:reg", "m:listed", "m:code/x"):
+            cats, _ = self.scope(sid)
+            for c in cats.values():
+                for it in c["items"]:
+                    self.item(it["id"])
+        self.assertEqual(snap(), before)
 
 
 if __name__ == "__main__":
