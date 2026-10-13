@@ -29,9 +29,13 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
     1. <criterion> — verified by <test name / command> — PASS
     ## Rulings              ← one line per judgement call
     - Ruling: <what you decided> — <why> — <cost if wrong>
+    ## Diverged             ← only when the build departs from spec.md
+    - <what the source said> → <what was done instead> — <why>
     ## Commits
     ## Round N response      ← added for each fix round
     - <reviewer> finding K: fixed in <commit> | declined: <reason>
+
+**Diverged.** Compare your build against spec.md. For every place it departs from what the spec says, add one bullet under `## Diverged` in the shape above. Leave the section out entirely when nothing diverged. A call the spec left open is a Ruling, not a divergence.
 
 **Resumed runs.** You'll be pointed at a round folder (`JOB_DIR/round-N/`) holding `check.md` and/or `review-*.md`, or at `JOB_DIR/decision.md`, `JOB_DIR/rework.md` or `JOB_DIR/ci.md`:
 - If the worktree is mid-merge (the orchestrator merged the default branch in, and there are conflict markers): resolve every conflict, keeping both sides' intent. Then `git add -A && git commit --no-edit`, and note what you resolved in build.md.

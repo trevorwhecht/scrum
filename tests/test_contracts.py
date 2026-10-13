@@ -502,6 +502,61 @@ class ContractTest(unittest.TestCase):
                        "width:${pct}%"):
             self.assertIn(phrase, card, phrase)
 
+    def test_agents_document_diverged_section(self):
+        for name in ("scrum-spec-writer", "scrum-builder", "scrum-debugger"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            self.assertIn("## Diverged", text, name)
+            self.assertIn("→", text, name)
+        for name in ("scrum-review-security", "scrum-review-ux", "scrum-review-ui", "scrum-review-code", "scrum-approver"):
+            self.assertNotIn("## Diverged", (ROOT / "agents" / f"{name}.md").read_text(), name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        template = builder[builder.index("STATUS: READY"):builder.index("## Round N response")]
+        self.assertIn("## Diverged", template)
+
+    def test_dashboard_card_has_diverged_badge(self):
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        self.assertIn("job.diverged", card)
+        self.assertIn('class="badge"', card)
+        self.assertIn("laneLabel(job)", card)
+        css = re.search(r"^\.badge\{[^}]*\}", text, re.M).group(0)
+        self.assertIn("var(--changes)", css)
+        self.assertNotRegex(css, r"#[0-9a-fA-F]{3}")
+
+    def node_eval(self, func, expr):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index(f"function {func}(")
+        src = text[start:text.index("\n}\n", start) + 3]
+        helpers = "\n".join(re.search(rf"^const {h} = .*$", text, re.M).group(0) for h in ("esc", "laneOf"))
+        out = subprocess.run([node, "-e", f"{helpers}\n{src}\nconsole.log(JSON.stringify({expr}))"],
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    def test_dashboard_extracts_diverged_bullets(self):
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("# x\\n## Diverged\\n- a\\n- b\\n## Next\\n- c")'), ["a", "b"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n- none")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Summary\\n- a")'), [])
+
+    def test_dashboard_lane_label(self):
+        cases = [({}, "standard"), ({"lane": None}, "standard"), ({"lane": "fast"}, "fast"), ({"lane": "debug"}, "debug"),
+                 ({"lane": "standard", "files": ["promoted.md"]}, "fast→standard"),
+                 ({"lane": "fast", "files": ["promoted.md"]}, "fast"), ({"lane": "epic"}, "epic")]
+        self.assertEqual(self.node_eval("laneLabel", f"{json.dumps([c[0] for c in cases])}.map(laneLabel)"),
+                         [c[1] for c in cases])
+
+    def test_dashboard_has_lane_filter(self):
+        text = DASHBOARD.read_text()
+        for phrase in ('id="laneFilter"', 'aria-label="Show lane"', "scrum.lane", '<option value="">All lanes</option>',
+                       "<option>fast</option>", "<option>standard</option>", "<option>debug</option>"):
+            self.assertIn(phrase, text, phrase)
+        self.assertNotIn("<option>epic</option>", text)
+        shown = re.search(r"^const shown = .*$", text, re.M).group(0)
+        self.assertIn("lane", shown)
+        self.assertRegex(text, r"@media \(max-width:640px\)\{[^\n]*#laneFilter[^\n]*font-size:16px")
+
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         self.assertIn("Dashboard server is out of date. Restart serve.py.", text)

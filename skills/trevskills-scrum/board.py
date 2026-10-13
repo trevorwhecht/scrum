@@ -293,6 +293,21 @@ def job_files(d):
     return sorted(str(p.relative_to(d)) for p in d.rglob("*.md")) if d.is_dir() else []
 
 
+def diverged(d):
+    """True if spec.md, build.md or assessment.md has a `## Diverged` section with a bullet that isn't `- none`."""
+    for name in ("spec.md", "build.md", "assessment.md"):
+        p = d / name
+        if not p.is_file():
+            continue
+        inside = False
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("## "):
+                inside = line == "## Diverged"
+            elif inside and line.startswith("- ") and line[2:].strip().lower() != "none":
+                return True
+    return False
+
+
 # --- digests: scrum/digests/<NNN>/jobs.txt lists the done jobs one digest learned from ---
 DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
@@ -348,14 +363,15 @@ def cmd_digest_trim(root, digest_id):
                     shutil.rmtree(p)
                 else:
                     p.unlink()
-            job["files"] = job_files(folder)
+            job["files"], job["diverged"] = job_files(folder), diverged(folder)
             trimmed.append(job["id"])
         (d / "trimmed").write_text(now() + "\n")
     return trimmed
 
 
 def cmd_set(root, job_id, pairs):
-    files = job_files(Path(root) / "jobs" / check_id(job_id))
+    d = Path(root) / "jobs" / check_id(job_id)
+    files, div = job_files(d), diverged(d)
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         for pair in pairs:
@@ -367,7 +383,7 @@ def cmd_set(root, job_id, pairs):
             if value and key in SHAPES and not SHAPES[key].fullmatch(value):
                 raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
             job[key] = int(value) if key in ("round", "limit") else (value or None)
-        job["files"] = files
+        job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
 
 
@@ -388,7 +404,7 @@ def cmd_sync(root, job_id):
     reviews = {r: last[r] for r in REVIEWERS} if last else {r: "pending" for r in REVIEWERS}
     with locked_board(root) as board:
         job = live(board, job_id)
-        job.update(rounds=rounds, files=files, reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
+        job.update(rounds=rounds, files=files, diverged=diverged(d), reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
     complete = bool(last) and "pending" not in reviews.values()
     invalid = [r for r, v in reviews.items() if v == "INVALID"]
     verdict = None if not complete else "INVALID" if invalid else \
