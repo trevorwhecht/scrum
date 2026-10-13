@@ -39,7 +39,12 @@ brew install gh && gh auth login   # needed to open and merge PRs
 
 ## Dashboard
 
-From the repo root: `python3 ~/.claude/skills/trevskills-scrum/serve.py`, then open http://localhost:8765
+One dashboard shows every project. Each repo joins it automatically the first time `/trevskills-scrum` runs there, and its jobs and backlog stay in that repo's `scrum/` folder.
+
+- **App:** run `./app/make-app.sh` once to build **Trevskills Scrum.app** in `~/Applications`, then drag it to your Dock. Clicking it starts the server if needed and opens the dashboard in its own window.
+- **Or by hand:** `python3 ~/.claude/skills/trevskills-scrum/serve.py`, then open http://localhost:8765.
+
+Each card carries a project tag, and the **All projects** menu filters to one project.
 
 - Cards move across the stages, and each review round is one row of reviewer chips.
 - A stuck (needs-human) card opens with **Approve & merge** and **Send back to builder**. Each click starts a background `claude -p` run, logged to `scrum/runs/`, and the card shows "● running" until it finishes.

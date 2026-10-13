@@ -6,6 +6,8 @@
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
+  board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
+  board.py abort <id> [--requeue]  mark a job aborted (terminal); --requeue puts it back on the backlog
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
@@ -16,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
-STAGES = ("spec", "build", "check", "review", "approve", "merging", "done", "needs-human")
+STAGES = ("spec", "build", "check", "review", "approve", "merging", "done", "needs-human", "aborted")
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base")
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
@@ -69,6 +71,14 @@ def find(board, job_id):
         if job["id"] == job_id:
             return job
     raise SystemExit(f"no job {job_id!r} on the board")
+
+
+def live(board, job_id):
+    """find() for the orchestrator: an aborted job refuses every further write, so a running session stops."""
+    job = find(board, job_id)
+    if job["stage"] == "aborted":
+        raise SystemExit(f"job {job_id} was aborted by Trevor; stop working on it")
+    return job
 
 
 def slug(title):
@@ -212,6 +222,58 @@ def cmd_next(root, index=None):
         return {"id": job_id, "feature": item["text"]}
 
 
+def cmd_abort(root, job_id, requeue):
+    """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
+    feature = Path(root) / "jobs" / check_id(job_id) / "feature.md"
+    with locked_board(root) as board:
+        job = find(board, job_id)
+        if job["stage"] in ("done", "aborted"):
+            raise SystemExit(f"job {job_id} is already {job['stage']}")
+        job.update(stage="aborted", reason=f"Aborted by Trevor {now()}", updatedAt=now())
+        if requeue:
+            text = clean(feature.read_text() if feature.exists() else job["title"]) or job["title"]
+            lines, _ = read_backlog(root)
+            lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+            write_backlog(root, lines)
+
+
+# --- the project list behind the one all-projects dashboard ---
+def registry_path():
+    return Path(os.environ.get("SCRUM_REGISTRY") or Path.home() / ".claude" / "trevskills-scrum" / "projects.json")
+
+
+def read_registry():
+    try:
+        paths = json.loads(registry_path().read_text())
+        return [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def cmd_register(repo):
+    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name("projects.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        paths = read_registry()
+        repo = str(Path(repo).resolve())
+        if repo not in paths:
+            tmp = path.with_name("projects.json.tmp")
+            tmp.write_text(json.dumps(paths + [repo], indent=2) + "\n")
+            os.replace(tmp, path)
+
+
+def projects():
+    """{display name: repo path} for registered repos that still have a scrum/ folder. Names are the folder
+    name, or parent/folder when two repos share one."""
+    repos = [Path(p) for p in read_registry() if (Path(p) / "scrum").is_dir()]
+    counts = {}
+    for r in repos:
+        counts[r.name] = counts.get(r.name, 0) + 1
+    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
+
+
 def cmd_backlog_add(root, items):
     for item in items:
         if clean(item):
@@ -220,7 +282,7 @@ def cmd_backlog_add(root, items):
 
 def cmd_set(root, job_id, pairs):
     with locked_board(root) as board:
-        job = find(board, check_id(job_id))
+        job = live(board, check_id(job_id))
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:
@@ -247,7 +309,7 @@ def cmd_sync(root, job_id):
     last_n = int(round_dirs[-1].name[6:]) if round_dirs else 0
     reviews = {r: last[r] for r in REVIEWERS} if last else {r: "pending" for r in REVIEWERS}
     with locked_board(root) as board:
-        job = find(board, job_id)
+        job = live(board, job_id)
         job.update(rounds=rounds, files=files, reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
     complete = bool(last) and "pending" not in reviews.values()
     invalid = [r for r, v in reviews.items() if v == "INVALID"]
@@ -268,6 +330,10 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("register").add_argument("repo", type=Path)
+    ab = sub.add_parser("abort")
+    ab.add_argument("id")
+    ab.add_argument("--requeue", action="store_true")
     a = p.parse_args(argv)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
@@ -277,6 +343,10 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "register":
+        cmd_register(a.repo)
+    elif a.cmd == "abort":
+        cmd_abort(a.dir, a.id, a.requeue)
     else:
         cmd_backlog_add(a.dir, a.items)
 

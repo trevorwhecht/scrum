@@ -194,6 +194,32 @@ class BoardTest(unittest.TestCase):
         self.write(f"{job_id}/decision.md", "REWORK")  # root copy is not double-counted
         self.assertEqual(board.cmd_sync(self.root, job_id)["reworks"], 2)
 
+    # --- abort ---
+    def test_abort_marks_job_and_blocks_further_orchestrator_writes(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_abort(self.root, job_id, requeue=False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertTrue(job["reason"].startswith("Aborted by Trevor"))
+        for call in (lambda: board.cmd_set(self.root, job_id, ["stage=review"]), lambda: board.cmd_sync(self.root, job_id)):
+            with self.assertRaises(SystemExit) as e:
+                call()
+            self.assertIn("was aborted", str(e.exception))
+        self.assertEqual(self.jobs()[0]["stage"], "aborted")
+
+    def test_abort_requeues_full_feature_text(self):
+        job_id = board.cmd_new(self.root, "Short title")
+        (self.root / "jobs" / job_id / "feature.md").write_text("Short title\nwith the full details on line two\n")
+        board.cmd_abort(self.root, job_id, requeue=True)
+        items = board.backlog_items(self.root)
+        self.assertEqual((items[-1]["done"], items[-1]["text"]), (False, "Short title with the full details on line two"))
+
+    def test_abort_refuses_done_or_already_aborted_jobs(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=done"])
+        with self.assertRaises(SystemExit):
+            board.cmd_abort(self.root, job_id, requeue=False)
+
 
 if __name__ == "__main__":
     unittest.main()

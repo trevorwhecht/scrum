@@ -25,7 +25,9 @@ B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; 
 
 Shell variables and functions don't survive between Bash calls, so re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call. `B` is a function, not a string variable, so it works in both bash and zsh.
 
-If this isn't the main checkout, stop and say so.
+**Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `B set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
+
+If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard.
 
 **Prerequisites (every command that runs a job: new job, `next`, `start`, `approve`, `rework`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
@@ -35,7 +37,7 @@ If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to
 
 ### First-run setup (once per repo)
 
-1. Run `mkdir -p "$F/jobs"`, then `ln -sfn "$HOME/.claude/skills/trevskills-scrum/dashboard.html" "$F/dashboard.html"`.
+1. Run `mkdir -p "$F/jobs"`.
 2. Add `scrum/` and `.claude/worktrees/` to `$(git rev-parse --git-common-dir)/info/exclude` unless they're already there. This keeps your tracked `.gitignore` untouched.
 3. If `$F/backlog.md` is missing, create it containing `# Backlog` plus one blank line.
 4. Detect the project and write `$F/project.md`:
@@ -59,7 +61,7 @@ If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to
 - Notes: <anything an agent must know, e.g. "tests need .env">
 ```
 
-5. Tell the user: `Dashboard: python3 ~/.claude/skills/trevskills-scrum/serve.py` (run from the repo root) → http://localhost:8765/dashboard.html. The dashboard's buttons (backlog edits, Run now, Approve, Send back) only work through serve.py.
+5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
 ## Commands
 
@@ -165,7 +167,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    1. `git -C "$WT" fetch origin`, then `git -C "$WT" merge "origin/$DEFAULT" --no-edit`.
    2. If that merge itself conflicts, resume the builder with `The default branch was merged into your branch and has conflicts: resolve them, commit, update build.md.`
    3. Run `B set $ID limit=$((N+1))` and go to **Check gate**. That gives a fresh check and full review round, then the approver, then Merge again, reusing the open PR.
-6. **Merge:** re-run the schema guard from step 1. Then `gh pr merge "scrum/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`. If the merge fails (branch protection, a required review, anything else), run `B set $ID stage=needs-human reason="merge refused: <first line of stderr>"` and stop.
+6. **Merge:** re-run the schema guard from step 1, and run `B sync $ID` right before merging; if it says the job was aborted, stop. Then `gh pr merge "scrum/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`. If the merge fails (branch protection, a required review, anything else), run `B set $ID stage=needs-human reason="merge refused: <first line of stderr>"` and stop.
 7. **Clean up:**
    - Run `git worktree remove "$WT"`. If git refuses because of local changes, leave the worktree in place and mention it.
    - Run `git fetch origin`.

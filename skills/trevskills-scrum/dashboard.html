@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trevskills Scrum</title>
+<link rel="icon" href="data:,">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
@@ -16,7 +17,8 @@ header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
 #status{color:var(--muted);font-size:12px}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
-.col h2{white-space:nowrap;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.col h2 span{white-space:nowrap}
+.col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
 .col.human h2{color:var(--human)}
 .card{display:block;width:100%;text-align:left;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
@@ -47,9 +49,14 @@ body:has(dialog[open]){overflow:hidden}
 .btn:hover:not(:disabled){border-color:var(--accent)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
+.btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
+.card.aborted{opacity:.55}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
-header .btn{margin-left:auto}
+#filter{margin-left:auto}
+#filter,#blProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+.tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
+header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
 .error{font-size:12px;color:var(--human);margin:0}
@@ -72,11 +79,13 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 </style>
 </head>
 <body>
-<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span><button class="btn" id="backlogBtn" type="button">Backlog</button></header>
+<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
+  <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
+  <button class="btn" id="backlogBtn" type="button">Backlog</button></header>
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
-  <div class="tabs"><b>Backlog</b><button class="close" type="button" aria-label="Close">✕</button></div>
+  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
     <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
@@ -85,79 +94,102 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 </dialog>
 <script>
 const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
+// Aborted jobs are finished too: they sit, dimmed, in the done column rather than a ninth column.
+const colOf = job => job.stage === "aborted" ? "done" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
+const PTS = [null, 1, 2, 3, 5, 8, 13];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 // Agents write the markdown, so any raw HTML in it is shown as text, never run.
 if (window.marked) marked.use({renderer: {html: h => esc(typeof h === "object" ? h.text : h)}});
 const $ = id => document.getElementById(id);
-let jobs = [], lastText = "", api = false, runs = {}, runsKey = "", backlog = [];
-const PTS = [null, 1, 2, 3, 5, 8, 13];
-const SERVE = "<code>python3 ~/.claude/skills/trevskills-scrum/serve.py</code>";
+const enc = encodeURIComponent;
+const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+               set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }};
 const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
   .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`); return data; });
+const getJson = (url, fallback) => fetch(url, {cache: "no-store"}).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
+
+let projects = [], jobs = [], runs = {}, backlogs = {}, lastText = "", filter = store.get("scrum.filter");
+const shown = () => jobs.filter(j => !filter || j.project === filter);
+const hue = p => [...p].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 17);
+const tag = p => `<span class="tag" style="--h:${hue(p)}">${esc(p)}</span>`;
 
 const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
 const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
 
 function card(job) {
-  const human = job.stage === "needs-human";
-  const stale = !["done", "needs-human"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
-  return `<button class="card${human ? " human" : ""}" data-id="${esc(job.id)}">
-    <span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
+  const human = job.stage === "needs-human", run = runs[job.key];
+  const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
+    ${tag(job.project)}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
-    ${runs[job.id]?.alive ? `<span class="running">● ${esc(runs[job.id].action)} running…</span>` : ""}
+    ${job.stage === "aborted" ? '<span class="reason">Aborted</span>' : ""}
+    ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
     <span class="meta">${job.pr ? "PR ready · " : ""}${stale ? `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>` : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>
   </button>`;
 }
 
 function render() {
-  const extra = [...new Set(jobs.map(j => j.stage).filter(s => !STAGES.includes(s)))];
-  const cols = [...STAGES, ...extra];
+  const list = shown();
+  const cols = [...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
-  $("board").style.gridTemplateColumns = cols.map(s => jobs.some(j => j.stage === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  $("board").style.gridTemplateColumns = cols.map(s => list.some(j => colOf(j) === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   $("board").innerHTML = cols.map(stage => {
-    const inCol = jobs.filter(j => j.stage === stage);
-    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2>${esc(stage)} · ${inCol.length}</h2>
+    const inCol = list.filter(j => colOf(j) === stage);
+    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2><span>${esc(stage)}</span> <span>· ${inCol.length}</span></h2>
       ${inCol.map(card).join("") || '<p class="empty">—</p>'}</section>`;
   }).join("");
+  const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
+  $("backlogBtn").textContent = `Backlog · ${open}`;
+  $("status").textContent = projects.length
+    ? `${list.length} job${list.length === 1 ? "" : "s"} · ${projects.length} project${projects.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`
+    : "No projects yet. Run /trevskills-scrum in a repo and it shows up here.";
 }
 
-// serve.py adds /api/*; under a plain file server the board is read-only and the buttons explain why.
-async function pollApi() {
-  try {
-    const [b, r] = await Promise.all([fetch("api/backlog", {cache: "no-store"}), fetch("api/runs", {cache: "no-store"})]);
-    if (!b.ok || !r.ok) throw new Error();
-    api = true;
-    const items = await b.json();
-    runs = Object.fromEntries((await r.json()).map(x => [x.id, x]));
-    if (JSON.stringify(items) !== JSON.stringify(backlog)) { backlog = items; if ($("backlog").open && !editingBacklog()) renderBacklog(); }
-    $("backlogBtn").textContent = `Backlog · ${backlog.filter(i => !i.done).length}`;
-  } catch { api = false; runs = {}; }
+function renderSelect(sel, value, withAll) {
+  const want = (withAll ? [""] : []).concat(projects).join("\n");
+  if (sel.dataset.list !== want) {
+    sel.dataset.list = want;
+    sel.innerHTML = (withAll ? '<option value="">All projects</option>' : "") + projects.map(p => `<option>${esc(p)}</option>`).join("");
+  }
+  sel.value = value;
 }
 
 async function poll() {
-  await pollApi();
   try {
-    const res = await fetch("board.json", {cache: "no-store"});
-    if (!res.ok) { $("status").textContent = "No board.json yet. Run /trevskills-scrum in this repo."; jobs = []; render(); return; }
-    const text = await res.text(), key = JSON.stringify(runs);
-    if (text !== lastText || key !== runsKey) {
-      jobs = JSON.parse(text).jobs || []; lastText = text; render();
-      const open = $("viewer").open && jobs.find(j => j.id === $("viewer").dataset.job);
-      if (open && key !== runsKey && !$("actions").contains(document.activeElement)) renderActions(open);
-      runsKey = key;
+    const res = await fetch("api/projects", {cache: "no-store"});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    projects = (await res.json()).map(p => p.name);
+    if (filter && !projects.includes(filter)) filter = "";
+    const [boards, items, runList] = await Promise.all([
+      Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
+      getJson("api/runs", [])]);
+    const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
+    runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
+    const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
+    const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
+    backlogs = nextBacklogs;
+    renderSelect($("filter"), filter, true);
+    const text = JSON.stringify([all, runs, backlogs, filter]);
+    if (text !== lastText) {
+      jobs = all; lastText = text; render();
+      const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
+      if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
     }
-    $("status").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`;
+    if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
   } catch (e) {
-    $("status").textContent = `Can't read board.json (${e.message}). Showing the last good state.`;
+    $("status").textContent = `Can't reach the dashboard server (${e.message}). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py`;
   }
 }
 
+$("filter").addEventListener("change", e => { filter = e.target.value; store.set("scrum.filter", filter); lastText = ""; poll(); });
+
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
-  const url = `jobs/${encodeURIComponent(job.id)}/${file.split("/").map(encodeURIComponent).join("/")}`;
+  const url = `p/${enc(job.project)}/jobs/${enc(job.id)}/${file.split("/").map(enc).join("/")}`;
   try {
     const res = await fetch(url, {cache: "no-store"});
     if (!res.ok) throw new Error(`${res.status}`);
@@ -169,10 +201,10 @@ async function show(job, file) {
 }
 
 function open(job) {
-  $("viewer").dataset.job = job.id;
+  $("viewer").dataset.key = job.key;
   const files = job.files || [];
   const pr = job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "";
-  $("tabs").innerHTML = files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
+  $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   renderActions(job);
@@ -181,42 +213,54 @@ function open(job) {
   if (first) show(job, first);
 }
 
+// Abort works on any unfinished job: it stops a dashboard-started run and marks the job aborted (code is kept).
+const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
+    <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
+    <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+
 function renderActions(job) {
-  const el = $("actions"), run = runs[job.id], reason = job.reason || "";
-  const log = run ? ` · <a href="${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>`;
-  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = last;
-  if (!api) return el.innerHTML = `<p class="note">Approve and Send back need the dashboard server: ${SERVE}</p>`;
+  const el = $("actions"), run = runs[job.key], reason = job.reason || "";
+  const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
+  const err = '<p class="error" role="alert"></p>';
+  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>` + abortForm(job) + err;
+  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
+  if (job.stage !== "needs-human") return el.innerHTML = last + abortForm(job) + err;
   const canApprove = job.worktree && !/^(blocked|spec writer)/.test(reason);
   el.innerHTML = last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
-      <button class="btn" type="submit">Send back to builder</button></form><p class="error" role="alert"></p>`;
+      <button class="btn" type="submit">Send back to builder</button></form>` + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
-  const form = e.target, act = form.dataset.act, id = $("viewer").dataset.job, btn = form.querySelector("button");
+  const form = e.target, act = form.dataset.act, key = $("viewer").dataset.key, btn = form.querySelector("button");
+  const job = jobs.find(j => j.key === key);
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
+  if (act === "abort" && !form.dataset.armed) {
+    form.dataset.armed = "1"; form.querySelector("label").hidden = false;
+    btn.textContent = "Confirm abort"; btn.className = "btn danger"; return;
+  }
   btn.disabled = true;
   try {
-    await post(`api/jobs/${encodeURIComponent(id)}/${act}`, act === "approve" ? {migrated: !!form.migrated?.checked} : {feedback: form.feedback.value});
+    const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked} : {feedback: form.feedback.value};
+    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
     await poll();
-    renderActions(jobs.find(j => j.id === id));
+    renderActions(jobs.find(j => j.key === key));
   } catch (err) {
     btn.disabled = false;
     $("actions").querySelector(".error").textContent = err.message;
   }
 });
 
+const blProject = () => $("blProject").value;
 const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("blList").contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName));
 
 function renderBacklog() {
-  $("blAdd").hidden = !api;
-  if (!api) return $("blList").innerHTML = `<li class="note">Editing the backlog needs the dashboard server: ${SERVE}</li>`;
-  const open = backlog.filter(i => !i.done);
+  $("blAdd").hidden = !projects.length;
+  if (!projects.length) return $("blList").innerHTML = '<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>';
+  const open = (backlogs[blProject()] || []).filter(i => !i.done);
   $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}">
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
         ${PTS.map(p => `<option value="${p ?? ""}"${p === it.points ? " selected" : ""}>${p ?? "?"}</option>`).join("")}</select>
@@ -230,16 +274,22 @@ function renderBacklog() {
 
 async function backlogCall(fn) {
   $("blError").textContent = "";
-  try { await fn(); } catch (err) { $("blError").textContent = err.message; }
+  try { await fn(`api/p/${enc(blProject())}/backlog`); } catch (err) { $("blError").textContent = err.message; }
   await poll();
   renderBacklog();
 }
 
-$("backlogBtn").addEventListener("click", () => { renderBacklog(); $("backlog").showModal(); });
+$("backlogBtn").addEventListener("click", () => {
+  renderSelect($("blProject"), filter || store.get("scrum.backlogProject") || projects[0] || "", false);
+  if (!$("blProject").value && projects.length) $("blProject").value = projects[0];
+  renderBacklog();
+  $("backlog").showModal();
+});
+$("blProject").addEventListener("change", e => { store.set("scrum.backlogProject", e.target.value); renderBacklog(); });
 $("blAdd").addEventListener("submit", e => {
   e.preventDefault();
   const input = e.target.text;
-  backlogCall(async () => { await post("api/backlog", {op: "add", text: input.value}); input.value = ""; });
+  backlogCall(async url => { await post(url, {op: "add", text: input.value}); input.value = ""; });
 });
 $("blList").addEventListener("click", e => {
   const b = e.target.closest("button[data-do]");
@@ -251,25 +301,24 @@ $("blList").addEventListener("click", e => {
     return;
   }
   b.disabled = true;
-  backlogCall(() => act === "run" ? post("api/backlog/run", {index}).then(() => $("backlog").close())
-    : post("api/backlog", act === "delete" ? {op: "delete", index} : {op: "move", index, delta: act === "up" ? -1 : 1}));
+  backlogCall(url => act === "run" ? post(`${url}/run`, {index}).then(() => $("backlog").close())
+    : post(url, act === "delete" ? {op: "delete", index} : {op: "move", index, delta: act === "up" ? -1 : 1}));
 });
 $("blList").addEventListener("change", e => {
   const index = +e.target.closest("li").dataset.i;
-  backlogCall(() => post("api/backlog", e.target.tagName === "SELECT"
+  backlogCall(url => post(url, e.target.tagName === "SELECT"
     ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
 });
 $("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
 
 $("board").addEventListener("click", e => {
   const el = e.target.closest(".card");
-  const job = el && jobs.find(j => j.id === el.dataset.id);
+  const job = el && jobs.find(j => j.key === el.dataset.key);
   if (job) open(job);
 });
 $("tabs").addEventListener("click", e => {
-  const b = e.target.closest("button");
-  if (!b || b.classList.contains("close")) return;
-  const job = jobs.find(j => j.id === $("viewer").dataset.job);
+  const b = e.target.closest("button[data-file]");
+  const job = b && jobs.find(j => j.key === $("viewer").dataset.key);
   if (job) show(job, b.dataset.file);
 });
 document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e => {
