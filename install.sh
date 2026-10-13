@@ -17,6 +17,7 @@ link() {
 
 # Check everything first so a refusal leaves nothing half-installed.
 for f in "$here"/agents/*.md; do refuse_real "$dest/agents/$(basename "$f")"; done
+refuse_real "$dest/skills/trevskills-scrum"
 refuse_real "$codex/AGENTS.md"
 mkdir -p "$dest/skills" "$dest/agents" "$codex"
 link "$here/skills/trevskills-scrum" "$dest/skills/trevskills-scrum"
