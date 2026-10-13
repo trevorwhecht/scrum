@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trevskills Scrum</title>
+<link rel="icon" href="data:,">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
@@ -47,6 +48,8 @@ body:has(dialog[open]){overflow:hidden}
 .btn:hover:not(:disabled){border-color:var(--accent)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
+.btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
+.card.aborted{opacity:.55}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
 header .btn{margin-left:auto}
@@ -84,7 +87,7 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
   </article>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done", "aborted"];
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -102,8 +105,8 @@ const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || 
 
 function card(job) {
   const human = job.stage === "needs-human";
-  const stale = !["done", "needs-human"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
-  return `<button class="card${human ? " human" : ""}" data-id="${esc(job.id)}">
+  const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-id="${esc(job.id)}">
     <span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
@@ -181,28 +184,39 @@ function open(job) {
   if (first) show(job, first);
 }
 
+// Abort works on any unfinished job: it stops a dashboard-started run and marks the job aborted (code is kept).
+const abortForm = job => !api || ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
+    <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
+    <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+
 function renderActions(job) {
   const el = $("actions"), run = runs[job.id], reason = job.reason || "";
   const log = run ? ` · <a href="${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>`;
-  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = last;
+  const err = '<p class="error" role="alert"></p>';
+  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>` + abortForm(job) + err;
+  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
+  if (job.stage !== "needs-human") return el.innerHTML = last + abortForm(job) + err;
   if (!api) return el.innerHTML = `<p class="note">Approve and Send back need the dashboard server: ${SERVE}</p>`;
   const canApprove = job.worktree && !/^(blocked|spec writer)/.test(reason);
   el.innerHTML = last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
-      <button class="btn" type="submit">Send back to builder</button></form><p class="error" role="alert"></p>`;
+      <button class="btn" type="submit">Send back to builder</button></form>` + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
   const form = e.target, act = form.dataset.act, id = $("viewer").dataset.job, btn = form.querySelector("button");
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
+  if (act === "abort" && !form.dataset.armed) {
+    form.dataset.armed = "1"; form.querySelector("label").hidden = false;
+    btn.textContent = "Confirm abort"; btn.className = "btn danger"; return;
+  }
   btn.disabled = true;
   try {
-    await post(`api/jobs/${encodeURIComponent(id)}/${act}`, act === "approve" ? {migrated: !!form.migrated?.checked} : {feedback: form.feedback.value});
+    const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked} : {feedback: form.feedback.value};
+    await post(`api/jobs/${encodeURIComponent(id)}/${act}`, body);
     await poll();
     renderActions(jobs.find(j => j.id === id));
   } catch (err) {

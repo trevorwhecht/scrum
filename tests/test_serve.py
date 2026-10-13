@@ -124,6 +124,17 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/jobs/{job_id}/rework", {"feedback": "use the existing helper"})[0], 202)
         self.assertEqual(self.req("POST", "/api/jobs/..%2F..%2Fx/rework", {"feedback": "x"})[0], 400)
 
+    def test_abort_stops_running_job_and_can_requeue(self):
+        job_id = self.serve.board.cmd_new(self.root, "abort me")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"])
+        self.assertEqual(self.req("POST", f"/api/jobs/{job_id}/rework", {"feedback": "try again"})[0], 202)
+        self.assertTrue(self.serve.running(job_id))
+        self.assertEqual(self.req("POST", f"/api/jobs/{job_id}/abort", {"requeue": True})[0], 200)
+        self.assertTrue(self.wait_for(lambda: not self.serve.running(job_id)))
+        self.assertEqual([j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id][0]["stage"], "aborted")
+        self.assertIn("abort me", [i["text"] for i in self.serve.board.backlog_items(self.root) if not i["done"]])
+        self.assertEqual(self.req("POST", f"/api/jobs/{job_id}/abort", {})[0], 400)  # already aborted
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ BOARD="python3 $HOME/.claude/skills/trevskills-scrum/board.py --dir $F"
 
 Shell variables don't survive between Bash calls, so re-derive `REPO`, `F` and `BOARD` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call.
 
+**Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `$BOARD set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
+
 If this isn't the main checkout, stop and say so. If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
 ### First-run setup (once per repo)
@@ -150,7 +152,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    1. `git -C "$WT" fetch origin`, then `git -C "$WT" merge "origin/$DEFAULT" --no-edit`.
    2. If that merge itself conflicts, resume the builder with `The default branch was merged into your branch and has conflicts: resolve them, commit, update build.md.`
    3. Run `$BOARD set $ID limit=$((N+1))` and go to **Check gate**. That gives a fresh check and full review round, then the approver, then Merge again, reusing the open PR.
-6. **Merge:** re-run the schema guard from step 1. Then `gh pr merge "scrum/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`. If the merge fails (branch protection, a required review, anything else), run `$BOARD set $ID stage=needs-human reason="merge refused: <first line of stderr>"` and stop.
+6. **Merge:** re-run the schema guard from step 1, and run `$BOARD sync $ID` right before merging; if it says the job was aborted, stop. Then `gh pr merge "scrum/$ID" --squash --subject "<title> (#<number>)" --body-file "$BODY"`. Never use `--auto`, `--admin` or `--delete-branch`. If the merge fails (branch protection, a required review, anything else), run `$BOARD set $ID stage=needs-human reason="merge refused: <first line of stderr>"` and stop.
 7. **Clean up:**
    - Run `git worktree remove "$WT"`. If git refuses because of local changes, leave the worktree in place and mention it.
    - Run `git fetch origin`.

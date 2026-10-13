@@ -79,6 +79,8 @@ class ContractTest(unittest.TestCase):
             "/trevskills-scrum start <id>",          # dashboard Run now hands off here
             "serve.py",                              # dashboard buttons need the server
             "Trevor confirms /trevskills-migrate",   # dashboard approve on schema jobs
+            "was aborted",                           # dashboard Abort stops the orchestrator
+            "sync $ID` right before",               # abort can land mid-merge
         ):
             self.assertIn(phrase, text, phrase)
 

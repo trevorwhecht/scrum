@@ -8,7 +8,7 @@ Binds 127.0.0.1 only. Every request must carry a localhost Host header (blocks D
 must be a JSON POST from no origin or a localhost origin; a cross-site page can't send that without a CORS
 preflight, which this server never approves.
 """
-import argparse, json, os, re, subprocess, sys, threading, time
+import argparse, json, os, re, signal, subprocess, sys, threading, time
 from datetime import datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +32,17 @@ def running(job_id):
     with RUNS_LOCK:
         run = RUNS.get(job_id)
         return bool(run and run["proc"].poll() is None)
+
+
+def stop(job_id):
+    """Terminate a dashboard-started run and everything it spawned (it runs in its own process group)."""
+    with RUNS_LOCK:
+        run = RUNS.get(job_id)
+    if run and run["proc"].poll() is None:
+        try:
+            os.killpg(run["proc"].pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
 
 def spawn(root, job_id, action, prompt):
@@ -130,6 +141,11 @@ class Handler(SimpleHTTPRequestHandler):
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             spawn(root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
+        if m := re.fullmatch(r"/api/jobs/([^/]+)/abort", self.path):
+            job_id = board.check_id(m.group(1))
+            stop(job_id)
+            board.cmd_abort(root, job_id, bool(body.get("requeue")))
+            return 200, {"id": job_id, "stage": "aborted"}
         if m := re.fullmatch(r"/api/jobs/([^/]+)/(approve|rework)", self.path):
             job_id, action = board.check_id(m.group(1)), m.group(2)
             jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
