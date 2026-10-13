@@ -1315,8 +1315,15 @@ class Handler(BaseHTTPRequestHandler):
                 kwargs["delta"] = body.get("delta")
             return 200, board.backlog_op(root, op, **kwargs)
         if rest == "/backlog/run":
+            askme = body.get("askme")
+            if askme is not None and (type(askme) is not int or askme not in (1, 2, 3)):  # bool is an int subclass; reject it
+                raise SystemExit("askme must be 1, 2, 3 or null")
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
+            if askme:  # interactive, like discuss: questions first, then the same session runs the job
+                code, obj = run_terminal([(osa_new_window(root.parent, CLAUDE, f"/trevskills-scrum start {out['id']} askme {askme}"),
+                                           "Askme opened in a new Terminal window.")])
+                return code, {"id": out["id"], **obj} if code == 200 else obj
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
         if rest == "/digest":
