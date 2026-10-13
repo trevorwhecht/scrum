@@ -72,7 +72,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 - Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2.
-- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked` or `spec writer`; there is nothing approved to merge. If the reason contains `Hard stop: schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop until they confirm. A prompt that says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard after he ticked that box) counts as that confirmation. Then write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
+- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. If the reason contains `Hard stop: schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop until they confirm. A prompt that says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard after he ticked that box) counts as that confirmation. Then write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
 - **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `B set <id> stage=build reason= limit=<round+2>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
 
 ## New job
@@ -90,6 +90,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    Write spec.md for this job.
    ```
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing"` and stop.
+   3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change. Run `B set $ID stage=needs-human reason="obsolete: <rest of that line>"` and stop: create no worktree and spawn no builder.
 4. **Worktree:**
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"

@@ -121,6 +121,18 @@ class BoardTest(unittest.TestCase):
         self.assertIn("round-1/review-ux.md", job["files"])
         self.assertIn("spec.md", job["files"])
 
+    def test_set_refreshes_files_from_job_folder(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.write(f"{job_id}/spec.md", "# spec")
+        self.write(f"{job_id}/feature.md", "x")
+        board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=obsolete: done"])
+        self.assertEqual(self.jobs()[0]["files"], ["feature.md", "spec.md"])
+        (self.root / "jobs" / job_id / "spec.md").unlink()
+        (self.root / "jobs" / job_id / "feature.md").unlink()
+        (self.root / "jobs" / job_id).rmdir()
+        board.cmd_set(self.root, job_id, ["stage=needs-human"])  # missing folder: still succeeds
+        self.assertEqual(self.jobs()[0]["files"], [])
+
     def test_sync_complete_rounds_and_verdicts(self):
         job_id = board.cmd_new(self.root, "x")
         for r in board.REVIEWERS:

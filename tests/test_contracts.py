@@ -7,6 +7,7 @@ AGENTS = {
     "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
     "scrum-approver": "opus",
 }
+DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
@@ -189,6 +190,26 @@ class ContractTest(unittest.TestCase):
         self.assertIn("scrum-approver", approve)
         self.assertIn("Opus", approve)
         self.assertIn("Conflicts", approve)
+
+    def test_skill_defines_obsolete_stop(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("OBSOLETE:", text)
+        self.assertIn('reason="obsolete:', text)
+        new_job = text[text.index("## New job"):]
+        self.assertLess(new_job.index('reason="obsolete:'), new_job.index("git worktree add"))
+        approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
+        self.assertIn("obsolete", approve)
+
+    def test_spec_writer_documents_obsolete_marker(self):
+        self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+
+    def test_dashboard_has_waiting_banner(self):
+        self.assertIn("Waiting on you", DASHBOARD.read_text())
+
+    def test_dashboard_hides_approve_for_obsolete(self):
+        m = re.search(r"canApprove = [^;]*/\^\(([^)]*)\)/", DASHBOARD.read_text())
+        self.assertIsNotNone(m)
+        self.assertIn("obsolete", m.group(1).split("|"))
 
     def test_spec_writer_refines_existing_criteria(self):
         path = ROOT / "agents" / "scrum-spec-writer.md"
