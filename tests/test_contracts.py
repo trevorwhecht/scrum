@@ -75,7 +75,7 @@ class ContractTest(unittest.TestCase):
             "human-approval.md",
             '"reworks"',                         # REWORK-once enforced by the orchestrator
             "second rework",
-            'reason="worktree dirty"',           # no dead ends
+            "Uncommitted files in the job worktree",  # no dead ends
             "merge refused",
             "UNKNOWN",
             "still missing after the re-spawn",
@@ -144,7 +144,7 @@ class ContractTest(unittest.TestCase):
         setup = self.section(text, "## Setup", "## Commands")
         for phrase in ("gh auth status", "git remote", "git remote add origin <url>", "brew install gh && gh auth login"):
             self.assertIn(phrase, setup, phrase)
-        self.assertIn("gh unavailable", self.section(text, "## Merge", "## Resuming the builder"))
+        self.assertIn("GitHub CLI is not installed or not signed in", self.section(text, "## Merge", "## Resuming the builder"))
 
     def test_skill_has_no_board_string_variable(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -481,14 +481,14 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
         step1 = self.section(merge, "1. **Preconditions:**", "\n2. ")
-        for phrase in ("--untracked-files=no", "symbolic-ref --short HEAD", "main checkout not clean"):
+        for phrase in ("--untracked-files=no", "symbolic-ref --short HEAD", "Uncommitted change in"):
             self.assertIn(phrase, step1, phrase)
-        self.assertLess(merge.index("main checkout not clean"), merge.index("gh pr merge"))
-        self.assertLess(merge.index("main checkout not clean"), merge.index("push -u origin"))
+        self.assertLess(merge.index("Uncommitted change in"), merge.index("gh pr merge"))
+        self.assertLess(merge.index("Uncommitted change in"), merge.index("push -u origin"))
         self.assertEqual(text.count("pull --ff-only"), 1)
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
-        self.assertIn("main checkout not clean", approve)
-        self.assertLess(approve.index("main checkout not clean"), approve.index("human-approval.md"))
+        self.assertIn("Uncommitted change in", approve)
+        self.assertLess(approve.index("Uncommitted change in"), approve.index("human-approval.md"))
         self.assertIn("--untracked-files=no", self.section(text, "7. **Clean up:**", "## Resuming the builder"))
 
     def test_done_only_when_live(self):
@@ -536,6 +536,49 @@ class ContractTest(unittest.TestCase):
         out = subprocess.run([node, "-e", f"{src}\nconsole.log(JSON.stringify({jobs}.map(progress)))"],
                              capture_output=True, text=True, check=True).stdout
         self.assertEqual(json.loads(out), [c[1] for c in cases])
+
+    def test_skill_every_needs_human_reason_has_fix(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        reasons = re.findall(r'stage=needs-human reason="([^"]*)"', text)
+        self.assertGreaterEqual(len(reasons), 17)
+        self.assertEqual(len(reasons), text.count('stage=needs-human reason="'))
+        for reason in reasons:
+            self.assertIn(" Fix: ", reason, reason)
+            self.assertNotIn("`", reason, reason)
+        for phrase in ("Fix: click Approve & merge; it runs /trevskills-migrate first.",
+                       "Fix: review the diff, then click Approve & merge.",
+                       "approver output unreadable. Fix: click Discuss first.",
+                       "Every needs-human reason is"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_dashboard_split_reason(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index("const splitReason = ")
+        src = text[start:text.index("\n};\n", start) + 3]
+        cases = [
+            ("Uncommitted change in x: a.json. Fix: commit + push it (or undo it), then click Approve & merge.",
+             {"problem": "Uncommitted change in x: a.json.", "fix": "Commit + push it (or undo it), then click Approve & merge."}),
+            ("a. Fix: one. Fix: two.", {"problem": "a.", "fix": "One. Fix: two."}),
+            ("worktree dirty", {"problem": "worktree dirty", "fix": "Click Discuss first."}),
+            ("", {"problem": "No reason recorded.", "fix": "Click Discuss first."}),
+            (None, {"problem": "No reason recorded.", "fix": "Click Discuss first."}),
+        ]
+        out = subprocess.run([node, "-e", f"{src}\nconsole.log(JSON.stringify([...{json.dumps([c[0] for c in cases])}.map(splitReason), splitReason(undefined)]))"],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(json.loads(out), [c[1] for c in cases] + [{"problem": "No reason recorded.", "fix": "Click Discuss first."}])
+
+    def test_dashboard_banner_and_card_use_split_reason(self):
+        text = DASHBOARD.read_text()
+        self.assertNotIn("nextStep", text)
+        banner = text[text.index("const waitingBanner"):text.index("function renderActions")]
+        for phrase in ("splitReason(", "${esc(problem)}", "${esc(fix)}"):
+            self.assertIn(phrase, banner, phrase)
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        line = next(l for l in card.splitlines() if l.strip().startswith("${human &&") and 'class="reason"' in l)
+        self.assertIn("esc(splitReason(job.reason).problem)", line)
 
     def test_dashboard_card_has_progress_bar(self):
         text = DASHBOARD.read_text()
