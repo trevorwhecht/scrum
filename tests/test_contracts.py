@@ -1,4 +1,4 @@
-import re, unittest
+import json, re, shutil, subprocess, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -291,6 +291,37 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Rendered: yes", "UI not rendered"):
             self.assertIn(phrase, text, phrase)
+
+    def test_dashboard_progress_estimate(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index("function progress(job)")
+        src = re.search(r"^const REVIEWERS = .*$", text, re.M).group(0) + "\n" + text[start:text.index("\n}\n", start) + 3]
+        r = lambda **v: {"check": "PASS", "security": "pending", "ux": "pending", "ui": "pending", "code": "pending", **v}
+        cases = [
+            ({"stage": "done"}, 100), ({"stage": "aborted"}, None), ({"stage": "mystery"}, None),
+            ({"stage": "toString"}, None), ({"stage": "spec"}, 5), ({"stage": "build", "round": 0}, 15),
+            ({"stage": "check"}, 30), ({"stage": "review", "rounds": [r()]}, 45),
+            ({"stage": "review", "rounds": [r(security="FAIL", ux="PASS"), r(ux="PASS", ui="CHANGES")]}, 60),
+            ({"stage": "review", "rounds": [r(security="PASS", ux="PASS", ui="PASS", code="CHANGES")]}, 75),
+            ({"stage": "approve"}, 80), ({"stage": "merging"}, 90),
+            ({"stage": "needs-human", "rounds": [r()]}, 85), ({"stage": "needs-human", "rounds": []}, 10),
+            ({"stage": "build", "round": 1, "limit": 2}, 40),
+        ]
+        jobs = json.dumps([c[0] for c in cases])
+        out = subprocess.run([node, "-e", f"{src}\nconsole.log(JSON.stringify({jobs}.map(progress)))"],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(json.loads(out), [c[1] for c in cases])
+
+    def test_dashboard_card_has_progress_bar(self):
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        for phrase in ("progress(job)", 'role="progressbar"', 'aria-valuemin="0"', 'aria-valuemax="100"',
+                       'aria-valuenow="${pct}"', 'aria-label="Estimated progress"', 'title="~${pct}% (estimate)"',
+                       "width:${pct}%"):
+            self.assertIn(phrase, card, phrase)
 
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
