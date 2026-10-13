@@ -502,6 +502,15 @@ class ContractTest(unittest.TestCase):
                        "width:${pct}%"):
             self.assertIn(phrase, card, phrase)
 
+    def test_dashboard_viewer_shows_job_title(self):
+        text = DASHBOARD.read_text()
+        dialog = next(l for l in text.splitlines() if '<dialog id="viewer"' in l)
+        self.assertIn('aria-labelledby="viewerTitle"', dialog)
+        self.assertNotIn('aria-label="Job files"', dialog)
+        self.assertLess(dialog.index('id="viewerTitle"'), dialog.index('id="tabs"'))
+        opener = text[text.index("function open(job)"):text.index("function termForm")]
+        self.assertIn('$("viewerTitle").textContent = job.title || job.id;', opener)
+
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         self.assertIn("Dashboard server is out of date. Restart serve.py.", text)

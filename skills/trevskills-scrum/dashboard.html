@@ -45,6 +45,8 @@ dialog::backdrop{background:#0007}
 .tabs button,#aiCats button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
 .tabs button[aria-pressed="true"],#aiCats button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .tabs .close{margin-left:auto}
+.vhead{position:sticky;top:0;z-index:1;background:var(--card)}.vhead .tabs{position:static}
+#viewerTitle{margin:0;padding:10px 10px 0;font-size:16px;overflow-wrap:anywhere;color:var(--ink)}
 article{padding:4px 20px 20px;overflow-wrap:anywhere}
 article pre{overflow-x:auto;background:var(--bg);padding:8px;border-radius:6px;white-space:pre-wrap}
 article a{color:var(--accent)}
@@ -154,7 +156,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="agentsBtn" type="button">Agents</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
-<dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
+<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
@@ -327,6 +329,7 @@ async function show(job, file) {
 
 function open(job) {
   $("viewer").dataset.key = job.key;
+  $("viewerTitle").textContent = job.title || job.id;
   const files = job.files || [];
   const pr = job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "";
   $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
