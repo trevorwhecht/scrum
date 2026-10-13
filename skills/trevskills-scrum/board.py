@@ -280,7 +280,13 @@ def cmd_backlog_add(root, items):
             backlog_op(root, "add", text=item)
 
 
+def job_files(d):
+    """Every *.md in a job folder, relative and sorted; [] if the folder doesn't exist."""
+    return sorted(str(p.relative_to(d)) for p in d.rglob("*.md")) if d.is_dir() else []
+
+
 def cmd_set(root, job_id, pairs):
+    files = job_files(Path(root) / "jobs" / check_id(job_id))
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         for pair in pairs:
@@ -290,6 +296,7 @@ def cmd_set(root, job_id, pairs):
             if key == "stage" and value not in STAGES:
                 raise SystemExit(f"bad stage {value!r}; allowed: {', '.join(STAGES)}")
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        job["files"] = files
         job["updatedAt"] = now()
 
 
@@ -302,7 +309,7 @@ def cmd_sync(root, job_id):
     rounds = [{"check": first_word(p / "check.md", ("PASS", "FAIL")) or "pending",
                **{r: first_word(p / f"review-{r}.md", ("PASS", "CHANGES")) or "pending" for r in REVIEWERS}}
               for p in round_dirs]
-    files = sorted(str(p.relative_to(d)) for p in d.rglob("*.md"))
+    files = job_files(d)
     decision = first_word(d / "decision.md", ("APPROVE", "REWORK", "ESCALATE"))
     reworks = sum(first_word(p / "decision.md", ("APPROVE", "REWORK", "ESCALATE")) == "REWORK" for p in round_dirs)
     last = rounds[-1] if rounds else None

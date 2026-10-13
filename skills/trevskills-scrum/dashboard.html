@@ -62,6 +62,8 @@ header{flex-wrap:wrap}
 .error{font-size:12px;color:var(--human);margin:0}
 .error:empty{display:none}
 #actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
+.waiting{border:1px solid var(--human);border-radius:8px;padding:8px 12px;background:color-mix(in srgb,var(--human) 8%,var(--card))}
+.waiting b{color:var(--human)}.waiting p{margin:4px 0 0;overflow-wrap:anywhere}
 #actions:empty{display:none}
 #actions form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
@@ -256,19 +258,30 @@ const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form d
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
 
+// Next step for a needs-human job, picked from the reason prefix the orchestrator writes.
+const nextStep = (reason, worktree) =>
+  /^obsolete/.test(reason) ? "Abort this job."
+  : /^(blocked|spec writer)/.test(reason) ? "Send back to builder with feedback, or abort."
+  : /Hard stop: schema/.test(reason) ? "Run /trevskills-migrate in the worktree, tick the box, then Approve & merge."
+  : worktree ? "Approve & merge, or send back to builder."
+  : "Send back to builder, or abort.";
+const waitingBanner = job => job.stage !== "needs-human" ? "" : `<div class="waiting"
+    data-agent-hint="This job stopped and needs Trevor. The first line is the reason the orchestrator recorded; the second is the suggested next action.">
+    <b>Waiting on you</b><p>${esc(job.reason || "No reason recorded.")}</p><p>${esc(nextStep(job.reason || "", job.worktree))}</p></div>`;
+
 function renderActions(job) {
-  const el = $("actions"), run = runs[job.key], reason = job.reason || "";
+  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
   const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
   const err = '<p class="error" role="alert"></p>';
-  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>` + abortForm(job) + err;
+  if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   if (job.stage !== "needs-human") return el.innerHTML = last + abortForm(job) + err;
-  const canApprove = job.worktree && !/^(blocked|spec writer)/.test(reason);
-  el.innerHTML = last + (canApprove ? `<form data-act="approve">
+  const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
+  el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
-    + `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
-      <button class="btn" type="submit">Send back to builder</button></form>` + abortForm(job) + err;
+    + (obsolete ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
+      <button class="btn" type="submit">Send back to builder</button></form>`) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
