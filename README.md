@@ -35,6 +35,7 @@ brew install gh && gh auth login   # needed to open and merge PRs
 | `/trevskills-scrum next` | runs the first `- [ ]` item in `scrum/backlog.md` |
 | `/trevskills-scrum approve <id>` | merges a needs-human job |
 | `/trevskills-scrum rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |
+| `/trevskills-scrum discuss <id> ["<note>"]` | talks a stopped job through with you first, then runs the approve or rework you agree on (dashboard: Discuss first) |
 | `/trevskills-scrum` | shows the board |
 
 ## Dashboard
