@@ -182,6 +182,36 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=needs-human"])  # missing folder: still succeeds
         self.assertEqual(self.jobs()[0]["files"], [])
 
+    def test_diverged_flag_set_and_cleared(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.write(f"{job_id}/spec.md", "# spec\n## Diverged\n- feature said X → did Y — because Z\n## Next\n")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.assertIs(self.jobs()[0]["diverged"], True)
+        self.write(f"{job_id}/spec.md", "# spec\n")
+        self.write(f"{job_id}/build.md", "STATUS: READY\n## Summary\n## Diverged\n- spec said A → did B — why\n")
+        board.cmd_sync(self.root, job_id)
+        self.assertIs(self.jobs()[0]["diverged"], True)
+        self.write(f"{job_id}/build.md", "STATUS: READY\n## Summary\n")
+        board.cmd_set(self.root, job_id, ["stage=check"])
+        self.assertIs(self.jobs()[0]["diverged"], False)
+
+    def test_diverged_edge_cases_false(self):
+        job_id = board.cmd_new(self.root, "x")
+        for text in ("## Diverged\n", "## Diverged\n\n## Next\n- not this\n", "## Diverged\n- none\n",
+                     "## Diverged\n- None\n## Summary\n", "### Diverged\n- a\n", "## Diverged notes\n- a\n"):
+            self.write(f"{job_id}/build.md", text)
+            board.cmd_set(self.root, job_id, ["stage=build"])
+            self.assertIs(self.jobs()[0]["diverged"], False, text)
+        (self.root / "jobs" / job_id / "build.md").unlink()
+        self.write(f"{job_id}/round-1/review-code.md", "VERDICT: PASS\n## Diverged\n- a\n")
+        self.write(f"{job_id}/decision.md", "APPROVE\n## Diverged\n- a\n")
+        board.cmd_sync(self.root, job_id)
+        self.assertIs(self.jobs()[0]["diverged"], False)
+        missing = board.cmd_new(self.root, "y")
+        (self.root / "jobs" / missing).rmdir()
+        board.cmd_set(self.root, missing, ["stage=build"])
+        self.assertIs(self.jobs()[1]["diverged"], False)
+
     def test_sync_complete_rounds_and_verdicts(self):
         job_id = board.cmd_new(self.root, "x")
         for r in board.REVIEWERS:
@@ -413,8 +443,10 @@ class BoardTest(unittest.TestCase):
         a, b = self.done_jobs(2)
         for j in (a, b):
             self.fill(j)
+        self.write(f"{a}/build.md", "## Diverged\n- spec said A → did B — why\n")
         board.cmd_sync(self.root, a)
         self.assertIn("round-1/check.md", self.jobs()[0]["files"])
+        self.assertIs(self.jobs()[0]["diverged"], True)
         (self.root / "jobs" / b / "spec.md").unlink()  # a job with only some of the three keeps what it has
         out = self.cli("digest-start")
         self.assertEqual(board.cmd_digest_trim(self.root, out["id"]), [a, b])
@@ -424,6 +456,7 @@ class BoardTest(unittest.TestCase):
         files = {j["id"]: j["files"] for j in self.jobs()}
         self.assertEqual(files[a], ["decision.md", "feature.md", "spec.md"])
         self.assertEqual(files[b], ["decision.md", "feature.md"])
+        self.assertIs(self.jobs()[0]["diverged"], False)  # build.md was trimmed away
         self.assertTrue((self.root / "digests" / "001" / "trimmed").exists())
         self.assertEqual(self.cli("digest-trim", "001"), [a, b])  # idempotent
         self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["decision.md", "feature.md", "spec.md"])

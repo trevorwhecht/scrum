@@ -60,7 +60,12 @@ body:has(dialog[open]){overflow:hidden}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
-#filter,#blProject,#blAskme,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+#filter,#laneFilter,#blProject,#blAskme,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+.lanechip,.badge{display:inline-block;font:600 10px system-ui,sans-serif;padding:0 5px;border-radius:4px;margin-right:6px;white-space:nowrap}
+.lanechip{color:var(--muted);border:1px solid var(--line)}
+.badge{color:var(--changes);border:1px solid var(--changes)}
+#diverged{padding:12px 20px;border-bottom:1px solid var(--line)}#diverged:empty{display:none}
+#diverged h3{font-size:13px;margin:0 0 4px}#diverged ul{margin:0;padding-left:18px;overflow-wrap:anywhere}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
@@ -145,18 +150,19 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select{font-size:16px}}
+@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select,#filter,#laneFilter{font-size:16px}}
 </style>
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
+  <select id="laneFilter" aria-label="Show lane"><option value="">All lanes</option><option>fast</option><option>standard</option><option>debug</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Agents</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
-<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="actions"></div><article id="doc"></article></dialog>
+<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
@@ -209,10 +215,28 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, lastText = "", filter = store.get("scrum.filter");
-const shown = () => jobs.filter(j => !filter || j.project === filter);
+let projects = [], jobs = [], runs = {}, backlogs = {}, lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+// No lane key = standard; a promoted fast job is standard too.
+const laneOf = job => job.lane || "standard";
+const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || laneOf(j) === laneFilter));
 const hue = p => [...p].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 17);
 const tag = p => `<span class="tag" style="--h:${hue(p)}">${esc(p)}</span>`;
+
+// Pinned by test_dashboard_lane_label.
+function laneLabel(job) {
+  const lane = laneOf(job);
+  return lane === "standard" && (job.files || []).includes("promoted.md") ? "fast→standard" : lane;
+}
+// Bullet texts under a `## Diverged` heading, minus a lone "none". Pinned by test_dashboard_extracts_diverged_bullets.
+function divergedBullets(md) {
+  let inside = false;
+  const out = [];
+  for (const line of md.split(/\r?\n/)) {
+    if (line.startsWith("## ")) inside = line === "## Diverged";
+    else if (inside && line.startsWith("- ") && line.slice(2).trim().toLowerCase() !== "none") out.push(line.slice(2).trim());
+  }
+  return out;
+}
 
 const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
 const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
@@ -241,7 +265,7 @@ function card(job) {
   const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>`;
   return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
@@ -314,6 +338,9 @@ async function poll() {
 }
 
 $("filter").addEventListener("change", e => { filter = e.target.value; store.set("scrum.filter", filter); lastText = ""; poll(); });
+$("laneFilter").value = laneFilter;
+if ($("laneFilter").value !== laneFilter) laneFilter = "";  // a stored value that is no longer an option
+$("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; store.set("scrum.lane", laneFilter); render(); });
 
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
@@ -338,9 +365,24 @@ function open(job) {
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   if (!termState[job.key]?.pending) delete termState[job.key];
   renderActions(job);
+  renderDiverged(job);
   if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
+}
+
+// Diverged bullets are read from the served files, not board.json; a file that fails to load is skipped.
+async function renderDiverged(job) {
+  const el = $("diverged");
+  el.innerHTML = "";
+  if (!job.diverged) return;
+  const files = ["spec.md", "build.md", "assessment.md"].filter(f => (job.files || []).includes(f));
+  const found = await Promise.all(files.map(f => fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/${f}`, {cache: "no-store"})
+    .then(r => r.ok ? r.text() : "").catch(() => "").then(md => divergedBullets(md).map(b => [f, b]))));
+  const items = found.flat();
+  if ($("viewer").dataset.key !== job.key || !items.length) return;
+  el.innerHTML = `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md and assessment.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
+    <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
 }
 
 // Abort works on any unfinished job: it stops a dashboard-started run and marks the job aborted (code is kept).

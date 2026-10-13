@@ -36,6 +36,10 @@ If you cannot make a test fail for the reported reason, write `ASSESSMENT: NO_RE
     - <path relative to WORKTREE>
     ## Compliance
     - <convention file>: <rule> — ok | conflict: <why>
+    ## Diverged              ← only when the assessment departs from spec.md
+    - <what the source said> → <what was done instead> — <why>
+
+**Diverged.** Compare your work against spec.md. For every place you depart from what it says (a different reproduction, a root cause elsewhere than the report names, a fix plan that changes its scope), add one bullet under `## Diverged` in that shape. Leave the section out entirely when nothing diverged.
 
 `Repro:` runs only the repro test, not the full suite. Under `## Allowed files`, list every file the fix needs and nothing else; the builder may not touch any other file, and never edits the `Repro test:` file. The orchestrator rejects a READY assessment that has no allowed file or any `conflict` line.
 
