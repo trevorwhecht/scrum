@@ -675,6 +675,7 @@ const PIPELINE = [
   {step: "PR / merge", note: "squash-merge", hint: "On APPROVE the orchestrator pushes scrum/<id>, opens a PR, waits for CI and squash-merges."}];
 const CODEX = {step: "Codex", note: "read-only", hint: "codex exec review runs alongside scrum-review-code; the reviewer confirms each finding and tags it (codex)."};
 let agents = [], skills = null;
+let adding = null;  // skill whose add POST is in flight; renderSkills() locks the picker while set
 const modelLabel = a => a.name === "scrum-approver" ? `${a.model} · sonnet if all green` : a.model || "—";
 const stepNode = s => `<div class="node step" data-agent-hint="${esc(s.hint)}"><b>${esc(s.step)}</b><span>${esc(s.note)}</span></div>`;
 const agentNode = name => {
@@ -732,19 +733,20 @@ function renderSkills() {
   const left = (skills || []).filter(s => !a.skills.includes(s.name));
   const hits = left.filter(s => s.name.toLowerCase().includes(q));
   $("agSkills").innerHTML = !skills ? '<p class="empty">loading…</p>'
-    : hits.map(s => `<button class="btn" type="button" data-skill="${esc(s.name)}">${esc(s.name)}</button>`).join("")
+    : hits.map(s => `<button class="btn" type="button" data-skill="${esc(s.name)}"${adding ? " disabled" : ""}>${s.name === adding ? "Adding…" : esc(s.name)}</button>`).join("")
       || `<p class="empty">${left.length ? "No match." : "No other skills installed."}</p>`;
 }
 
-async function addSkill(skill, btn) {
-  if (btn.disabled) return;  // already pending: one POST per button
+async function addSkill(skill) {
+  if (adding) return;  // one add in flight at a time, even across filter re-renders
   const name = $("agDetail").dataset.agent;
-  $("agError").textContent = ""; btn.disabled = true; btn.textContent = "Adding…";
+  $("agError").textContent = ""; adding = skill; renderSkills();
   try {
     const updated = await post(`api/agents/${enc(name)}/skills`, {skill});
+    adding = null;
     agents = agents.map(x => x.name === name ? updated : x);
     renderFlow(); showAgents(name);
-  } catch (err) { btn.disabled = false; btn.textContent = skill; $("agError").textContent = err.message; }
+  } catch (err) { adding = null; $("agError").textContent = err.message; renderSkills(); }
 }
 
 $("agentsBtn").addEventListener("click", async () => {
@@ -779,13 +781,13 @@ $("agDetail").addEventListener("click", async e => {
     }
   }
   const b = e.target.closest("button[data-skill]");
-  if (b) addSkill(b.dataset.skill, b);
+  if (b) addSkill(b.dataset.skill);
 });
 $("agDetail").addEventListener("input", e => { if (e.target.id === "agFilter") renderSkills(); });
 $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks the first match
   e.preventDefault();
   const b = $("agSkills").querySelector("button[data-skill]");
-  if (b) addSkill(b.dataset.skill, b);
+  if (b) addSkill(b.dataset.skill);
 });
 
 // AI-Settings: items come from api/ai-settings; precedence is managed > local > project > user. Every `editable` item
