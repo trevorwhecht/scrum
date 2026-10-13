@@ -723,6 +723,37 @@ class AiSettingsTest(unittest.TestCase):
         code, data, _ = self.get("/api/ai-settings")
         self.assertEqual((code, [s["label"] for s in data["mac"]]), (200, ["code/x"]))
 
+    def test_plugins_filtered_by_install_scope(self):
+        link = Path(self.tmp.name) / "reg-link"
+        link.symlink_to(self.reg)
+        (self.user / "plugins").mkdir()
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {
+            "p@m": [{"scope": "user"}, {"scope": "project", "projectPath": str(link)}, {"scope": "local", "projectPath": str(self.reg)}],
+            "q@m": [{"scope": "project", "projectPath": str(self.walked)}]}}))
+        cats, _ = self.scope("global")
+        self.assertEqual([(i["name"], i["scope"]) for i in cats["plugins"]["items"]], [("p@m", "user")])
+        cats, _ = self.scope("r:reg")
+        items = cats["plugins"]["items"]
+        self.assertEqual([(i["name"], i["scope"], i["status"]) for i in items],
+                         [("p@m", "local", ""), ("p@m", "project", ""), ("p@m", "user", "")])
+        self.assertEqual((cats["plugins"]["count"], len({i["id"] for i in items})), (3, 3))
+        cats, _ = self.scope("m:listed")
+        self.assertEqual([(i["name"], i["scope"]) for i in cats["plugins"]["items"]], [("p@m", "user")])
+
+    def test_plugins_malformed_records_skipped(self):
+        (self.user / "plugins").mkdir()
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {
+            "p@m": [1, "x", {}, {"scope": "managed"}, {"scope": None}, {"scope": "project"},
+                    {"scope": "project", "projectPath": None}, {"scope": "local", "projectPath": 5}, {"scope": "user"}],
+            "q@m": "nope", "r@m": [{"scope": "project", "projectPath": str(self.reg)}]}}))
+        cats, _ = self.scope("r:reg")
+        self.assertEqual([(i["name"], i["scope"]) for i in cats["plugins"]["items"]], [("p@m", "user"), ("r@m", "project")])
+        for bad in ("[1]", "{not json"):
+            (self.user / "plugins" / "installed_plugins.json").write_text(bad)
+            self.assertEqual(self.scope("r:reg")[0]["plugins"]["count"], 0, bad)
+        (self.user / "plugins" / "installed_plugins.json").unlink()
+        self.assertEqual(self.scope("r:reg")[0]["plugins"]["count"], 0)
+
     def test_precedence(self):
         cats, _ = self.scope("r:reg")
         self.assertEqual({(i["scope"], i["status"]) for i in cats["mcp"]["items"]},
@@ -838,7 +869,7 @@ class AiSettingsTest(unittest.TestCase):
         (self.user / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
         (self.reg / ".claude" / "settings.local.json").write_text("{}")
         (self.user / "plugins").mkdir()
-        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"p@x": []}}))
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"p@x": [{"scope": "user"}]}}))
         (self.managed / "managed-settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
         (self.managed / "managed-mcp.json").write_text(json.dumps({"mcpServers": {"m": {"command": "m"}}}))
         planted = self.plant_markdown()
@@ -934,7 +965,8 @@ class AiSettingsTest(unittest.TestCase):
         (self.reg / ".mcp.json").write_text(json.dumps({"mcpServers": {"dup": {"command": "p"}, "other": {"command": "o"}}, "keep": True}))
         (self.user / "plugins").mkdir()
         plugins = self.user / "plugins" / "installed_plugins.json"
-        plugins.write_text(json.dumps({"version": 2, "plugins": {"a@x": [{"scope": "user"}], "b@x": [{"scope": "user"}]}}))
+        plugins.write_text(json.dumps({"version": 2, "plugins": {"p@m": [{"scope": "user"}, {"scope": "project", "projectPath": str(self.reg)}],
+                                                                 "b@x": [{"scope": "user"}]}}))
         cj = self.home / ".claude.json"
 
         hook = self.json_item("global", "hooks", settings, "Stop · m")
@@ -959,17 +991,20 @@ class AiSettingsTest(unittest.TestCase):
             "projects": {str(self.reg): {"mcpServers": {"dup": {"command": "l2", "args": ["-v"]}}}, str(self.listed): {},
                          str(self.home / "gone"): {}, str(self.home): {}}})
 
-        plugin = self.json_item("global", "plugins", plugins, "a@x")
-        self.assertEqual(self.save(plugin, '[{"scope": "user", "version": "2"}]')[0], 200)
-        self.assertEqual(plugins.read_text(), '{\n  "version": 2,\n  "plugins": {\n    "a@x": [\n      {\n        "scope": "user",\n'
+        plugin = self.json_item("r:reg", "plugins", plugins, "p@m", "project")
+        self.assertEqual(json.loads(self.item(plugin["id"])[1]["content"]), {"scope": "project", "projectPath": str(self.reg)})
+        self.assertEqual(self.save(plugin, json.dumps({"scope": "project", "projectPath": str(self.reg), "version": "2"}))[0], 200)
+        self.assertEqual(plugins.read_text(), '{\n  "version": 2,\n  "plugins": {\n    "p@m": [\n      {\n        "scope": "user"\n'
+                         '      },\n      {\n        "scope": "project",\n        "projectPath": ' + json.dumps(str(self.reg)) + ',\n'
                          '        "version": "2"\n      }\n    ],\n    "b@x": [\n      {\n        "scope": "user"\n      }\n    ]\n  }\n}\n')
         self.assertEqual(len(self.backups()), 4)
 
         version = self.item(plugin["id"])[1]["version"]
-        plugins.write_text('{"plugins": {"a@x": []}}')
+        changed = json.dumps({"plugins": {"p@m": [{"scope": "user"}, {"scope": "project", "projectPath": str(self.reg), "version": "3"}]}})
+        plugins.write_text(changed)
         os.utime(plugins, ns=(int(version) + 5_000_000, int(version) + 5_000_000))
-        self.assertEqual(self.save(plugin, "[]", version)[0], 409)
-        self.assertEqual(plugins.read_text(), '{"plugins": {"a@x": []}}')
+        self.assertEqual(self.save(plugin, "{}", version)[0], 409)
+        self.assertEqual(plugins.read_text(), changed)
         self.assertEqual(len(self.backups()), 4)
 
     def test_save_json_rejects_invalid_and_wrong_type(self):
@@ -977,15 +1012,15 @@ class AiSettingsTest(unittest.TestCase):
         settings.write_text('{"model": "x"}')
         (self.user / "plugins").mkdir()
         plugins = self.user / "plugins" / "installed_plugins.json"
-        plugins.write_text('{"plugins": {"a@x": []}}')
+        plugins.write_text('{"plugins": {"a@x": [{"scope": "user"}]}}')
         s_it = self.json_item("global", "settings", settings)
         p_it = self.json_item("global", "plugins", plugins)
         save = lambda it, content: self.serve.ai_settings_save(it["id"], content, self.item(it["id"])[1]["version"])
         self.assertEqual(save(s_it, "{"), (400, {"error": "invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}))
         self.assertEqual(save(s_it, "[1]"), (400, {"error": "must be a JSON object"}))
-        self.assertEqual(save(p_it, "{}"), (400, {"error": "must be a JSON array"}))
+        self.assertEqual(save(p_it, "[]"), (400, {"error": "must be a JSON object"}))
         self.assertEqual(self.save(s_it, "nope")[0], 400)
-        self.assertEqual((settings.read_text(), plugins.read_text()), ('{"model": "x"}', '{"plugins": {"a@x": []}}'))
+        self.assertEqual((settings.read_text(), plugins.read_text()), ('{"model": "x"}', '{"plugins": {"a@x": [{"scope": "user"}]}}'))
         self.assertEqual(self.backups(), [])
 
     def test_save_json_keeps_redacted_values(self):
