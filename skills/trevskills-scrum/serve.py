@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
-files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort).
+files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
@@ -77,6 +77,20 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         pass
     return f"runs/{log.name}"
 
+
+def setup_done(project, root, job_id):
+    """Trevor finished a bigboy child's Human setup: mark it, then start every sibling that is now ready."""
+    with board.locked_board(root) as b:
+        job = board.find(b, job_id)
+        ok = job.get("parent") and job["stage"] == "waiting" and job.get("setup") == "pending"
+        if ok:
+            job.update(setup="done", updatedAt=board.now())
+    if not ok:
+        return 409, {"error": "job isn't a BigBoy child waiting on Human setup"}
+    out = board.cmd_ready(root, job["parent"])
+    for child in out["ready"]:
+        spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
+    return 200, {"id": job_id, **out}
 
 def estimate(root, text):
     """Ask Sonnet for Fibonacci points in the background; on any failure the item just stays unestimated."""
@@ -1355,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen|setup-done))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1417,6 +1431,8 @@ class Handler(BaseHTTPRequestHandler):
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))
             return 200, {"id": job_id, "stage": "aborted"}
+        if action == "setup-done":
+            return setup_done(project, root, job_id)
         if action == "reopen":
             new_id = board.cmd_reopen(root, job_id, body.get("note") or "")
             spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
