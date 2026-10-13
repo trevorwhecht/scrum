@@ -106,7 +106,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    ```
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing"` and stop.
    3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
-   3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard>`. Set `fast` only when it says exactly `Lane: fast`, the `Hard stops:` line is `none`, and the `UI surface:` line is `no`. Set `standard` in every other case: the line is missing or malformed, it says `debug` or `epic` (those lanes don't exist yet, so they run as standard), `Hard stops:` is anything but `none`, or `UI surface:` is `yes`.
+   3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard|debug>`. Set `lane=debug` when it says exactly `Lane: debug`, whatever the `Hard stops:` and `UI surface:` lines say. Set `fast` only when it says exactly `Lane: fast`, the `Hard stops:` line is `none`, and the `UI surface:` line is `no`. Set `standard` in every other case: the line is missing or malformed, it says `epic` (that lane doesn't exist yet, so it runs as standard), or it says `fast` but `Hard stops:` is anything but `none` or `UI surface:` is `yes`.
 4. **Worktree:**
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"
@@ -114,7 +114,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
    Then `B set $ID worktree=$WT stage=build`.
-5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason="blocked: <first reason line>"` and stop.
+5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason="blocked: <first reason line>"` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.
 
 ## Fast lane
@@ -139,14 +139,28 @@ Applies only while the job's `lane` on the board is `fast`. A job with no `lane`
    - `verdict` is `CHANGES` and `round < limit`: resume the builder as in **Review** step 5, run `B set $ID stage=build`, and go to **Check gate**. The job stays fast.
    - `verdict` is `CHANGES` and `round >= limit`: go to **Approve**, as standard does.
 
+## Debug lane
+
+Applies only while the job's `lane` on the board is `debug`. A job with any other `lane` never reads this section. It replaces New job step 5; Check gate, Review and Approve then run as standard, with the debug additions in **Check gate**.
+
+1. **Diagnose.** Spawn `scrum-debugger` and wait for it. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Reproduce and diagnose. Write assessment.md.`
+2. **Validate `$F/jobs/$ID/assessment.md`.** It is invalid when it is missing, its first line is not one of `ASSESSMENT: READY`, `ASSESSMENT: NO_REPRO` or `ASSESSMENT: BLOCKED`, or a READY one lacks a `Repro:` line, a `Repro test:` line or at least one `- ` line under `## Allowed files`, or has a `## Compliance` line containing `conflict`. If invalid, delete it and re-spawn the debugger once. If it is still missing or invalid, run `B set $ID stage=needs-human reason="debugger output unreadable"` and stop.
+3. **No repro or blocked.** For `ASSESSMENT: NO_REPRO` or `ASSESSMENT: BLOCKED`, run `B set $ID stage=needs-human reason="debug: <no repro|blocked> — <line 2>"` and stop.
+4. **Repro must fail.** Run the `Repro:` command in `$WT`. Write `$F/jobs/$ID/repro-before.md`: first line `REPRO: FAIL` (non-zero exit) or `REPRO: PASS` (exit 0), then `Commit: <git -C "$WT" rev-parse HEAD>`, the exit code, and the last 40 lines of output in a fenced block. If the exit code is 0, run `B set $ID stage=needs-human reason="debug: repro does not fail"` and stop.
+5. **Build.** Spawn the builder as New job step 5 does (same name, same `B set $ID builder=`, same BLOCKED handling), but the last prompt line is `Implement the fix in JOB_DIR/assessment.md. Change only the files under ## Allowed files. Write build.md.` Then continue at **Check gate**.
+
 ## Check gate
 
-If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review).
+If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review). If the job's `lane` is `debug`, step 2 adds the debug checks and step 4 ends differently.
 
 1. `N = round + 1` (round as stored on the board). Run `mkdir -p $F/jobs/$ID/round-$N`, then `B set $ID round=$N stage=check`.
 2. In `$WT`, run each of Test / Typecheck / Lint / Build from `project.md` that isn't `none`. Also run `git -C "$WT" diff --name-only "$BASE"...HEAD | grep -E '(^|/)\.env'`; any output is a failure ("committed .env file").
+   For `lane=debug`, also run these; each failure makes `CHECK: FAIL` and gets its own entry in check.md:
+   - **Repro:** the `Repro:` command from `assessment.md`, in `$WT`. It must exit 0.
+   - **Allowed files:** every path in `git -C "$WT" diff --name-only "$BASE"...HEAD` must be listed under `## Allowed files` or be the `Repro test:` path. Otherwise it fails with `outside allowed files: <path>`.
+   - **Repro test untouched:** `git -C "$WT" diff --name-only <Commit from repro-before.md> HEAD -- <Repro test path>` must print nothing. Otherwise it fails with `repro test changed`.
 3. Write `round-$N/check.md`: first line `CHECK: PASS` or `CHECK: FAIL`, then for each command its exit code and the last 40 lines of output in a fenced block.
-4. If it says FAIL, resume the builder with `Checks failed: read JOB_DIR/round-N/check.md, fix, commit, update build.md.` Then re-run steps 2–3, overwriting `check.md`. Allow up to **3** fix attempts. If it still fails, skip the review and go to **Approve**; the approver rules on the failing check.
+4. If it says FAIL, resume the builder with `Checks failed: read JOB_DIR/round-N/check.md, fix, commit, update build.md.` Then re-run steps 2–3, overwriting `check.md`. Allow up to **3** fix attempts. If it still fails, skip the review and go to **Approve**; the approver rules on the failing check. Exception: a `lane=debug` job that still fails after the 3rd fix attempt never goes to **Approve**: run `B set $ID stage=needs-human reason="debug: 3 failed fixes — question the design"` and stop.
 5. If it says PASS, go to **Review**.
 
 ## Review (WAIT FOR ALL)

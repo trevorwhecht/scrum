@@ -43,6 +43,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 
 **Hard limits:**
 - Change files only inside `WORKTREE`. The one exception is `JOB_DIR/build.md`.
+- **Debug lane.** When `JOB_DIR/assessment.md` exists, change only the files listed under its `## Allowed files` (plus `JOB_DIR/build.md`), and never edit or delete its `Repro test:` file. If the fix needs any other file, write `STATUS: BLOCKED` naming that file.
 - Never push, and never run `git merge`, `git reset`, `git rebase`, `git push`, `git checkout main`, or any `gh` command.
 - Never run `prisma migrate` or `prisma db push`. If the spec needs a schema change, edit `prisma/schema.prisma` only and write "MIGRATION NEEDED: <what>" in build.md; after Trevor approves, the orchestrator applies it with `/trevskills-migrate`.
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.

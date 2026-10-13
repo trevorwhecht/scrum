@@ -5,12 +5,13 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENTS = {
     "scrum-spec-writer": "opus", "scrum-builder": "opus", "scrum-review-security": "opus",
     "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
-    "scrum-approver": "opus",
+    "scrum-approver": "opus", "scrum-debugger": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
+    "scrum-debugger": "ASSESSMENT: READY",
 }
 
 
@@ -213,6 +214,8 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Lane: fast|standard|debug|epic", "100", "3 files"):
             self.assertIn(phrase, text, phrase)
         self.assertLess(text.index("Hard stops:"), text.index("Lane:"))
+        self.assertNotIn("`debug` and `epic` don't exist yet", text)
+        self.assertRegex(text, r"[^.\n]*`debug`[^.\n]*\bbug\b")
 
     def test_skill_reads_lane_from_spec(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -220,7 +223,38 @@ class ContractTest(unittest.TestCase):
         step = new_job[new_job.index("B abort $ID --reason"):new_job.index("git worktree add")]
         for phrase in ("B set $ID lane=", "Lane:"):
             self.assertIn(phrase, step, phrase)
-        self.assertRegex(step, r"`debug` or `epic`[^\n]*standard")
+        self.assertIn("lane=debug", step)
+        self.assertRegex(step, r"`epic`[^\n]*standard")
+
+    def test_debugger_contract(self):
+        text = (ROOT / "agents" / "scrum-debugger.md").read_text()
+        for phrase in ("ASSESSMENT: NO_REPRO", "ASSESSMENT: BLOCKED", "Repro:", "Repro test:", "## Allowed files",
+                       "## Compliance", "conflict"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_debug_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertLess(text.index("## Fast lane"), text.index("## Debug lane"))
+        self.assertLess(text.index("## Debug lane"), text.index("## Check gate"))
+        debug = self.section(text, "## Debug lane", "## Check gate")
+        for phrase in ("scrum-debugger", "assessment.md", "ASSESSMENT: NO_REPRO", "debugger output unreadable",
+                       "repro-before.md", "REPRO: FAIL", "repro does not fail", "## Allowed files"):
+            self.assertIn(phrase, debug, phrase)
+        check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
+        self.assertTrue("lane=debug" in check or "`lane` is `debug`" in check)
+        for phrase in ("outside allowed files", "repro test changed", "3 failed fixes"):
+            self.assertIn(phrase, check, phrase)
+        self.assertIn("see **Debug lane**", self.section(text, "5. **Build:**", "6. Continue"))
+
+    def test_builder_respects_allowed_files(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        for phrase in ("assessment.md", "## Allowed files", "Repro test:"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_approver_debug_repro_never_preexisting(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("assessment.md", "repro still fails"):
+            self.assertIn(phrase, text, phrase)
 
     def test_skill_fast_lane_promotes(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
