@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then run every open item), and bare "/trevskills-scrum" for status.
 ---
 
 # Trevskills Scrum: orchestrator
@@ -30,7 +30,7 @@ Shell variables and functions don't survive between Bash calls, so re-derive `RE
 
 If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard.
 
-**Prerequisites (every command that runs a job: new job, `next`, `start`, `approve`, `rework`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
+**Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
 - `command -v gh && gh auth status` succeeds. If not, stop and tell the user to run `brew install gh && gh auth login`.
 
@@ -78,7 +78,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 - **`/trevskills-scrum`** (no args): print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
 - **`/trevskills-scrum next`**: run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
-- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`), never by hand-editing it.
+- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2.
@@ -92,6 +92,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
   Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
 - **`/trevskills-scrum digest`**: run **Digest**. The dashboard's Digest now button starts it headless.
+- **`/trevskills-scrum run-all`**: run **Run all**. The dashboard's Run all button opens it in a new Terminal window.
 
 ## New job
 
@@ -131,6 +132,24 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    Then `B set $ID worktree=$WT stage=build`.
 5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason="blocked: <first reason line>"` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.
+
+## Run all
+
+Cleans the backlog, then works through every open item as jobs, one after another, with nobody watching. Setup and Prerequisites apply. Trevor stops it by interrupting or closing its Terminal window.
+
+1. Run `B triage-start`. Under the board lock it claims `$F/triage/<id>/` and prints `{"id", "open"}`. If `id` is null, say the backlog is empty and stop.
+2. Spawn `scrum-triager` and wait for it. Prompt:
+   ```
+   TRIAGE_DIR=$F/triage/<id>
+   BACKLOG=$F/backlog.md
+   PROJECT=$F/project.md
+   Write plan.json for this triage.
+   ```
+   If `$F/triage/<id>/plan.json` is missing afterwards, spawn it once more.
+3. Run `B triage-apply <id>`. It merges, retires and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
+4. **Loop.** Run `B next`. If `id` is null, stop and give the final report. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text. Whatever the job ends in (done, needs-human, aborted from the dashboard, auto-aborted as obsolete), go back to `B next`. A needs-human job does not stop the loop: Trevor clears it later with approve, rework or discuss. Never ask questions here; there is no Askme step.
+
+The final report lists every job id this run started with its final stage (and for needs-human, its reason), then what the triage merged, retired and estimated (counts from `triage-apply`, or the failure line).
 
 ## Fast lane
 
