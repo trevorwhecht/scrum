@@ -43,6 +43,20 @@ class InstallTest(unittest.TestCase):
             self.assertFalse((home / "skills").exists(), "a refusal must link nothing")
             self.assertFalse((home / "agents").exists(), "a refusal must link nothing")
 
+    def test_install_refuses_to_clobber_real_skill_dir(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            real = home / "skills" / "trevskills-scrum"
+            real.mkdir(parents=True)
+            (real / "marker").write_text("mine")
+            result = self.run_install(home)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing", result.stderr)
+            self.assertFalse(real.is_symlink())
+            self.assertEqual((real / "marker").read_text(), "mine")
+            self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
+            self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
+
 
 if __name__ == "__main__":
     unittest.main()
