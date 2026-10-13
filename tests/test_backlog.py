@@ -74,6 +74,13 @@ class BacklogTest(unittest.TestCase):
         board.backlog_op(self.root, "move", index=0, delta=-1)  # already at top: no-op
         self.assertEqual(board.backlog_items(self.root)[0]["text"], "Old thing")
 
+    def test_move_skips_finished_items_the_dashboard_hides(self):
+        (self.root / "backlog.md").write_text("- [x] A → 001-a\n- [ ] B\n- [x] C → 002-c\n- [ ] D\n")
+        board.backlog_op(self.root, "move", index=3, delta=-1)
+        self.assertEqual([i["text"] for i in board.backlog_items(self.root)], ["A", "D", "C", "B"])
+        board.backlog_op(self.root, "move", index=1, delta=-1)  # only finished items above: no-op
+        self.assertEqual(board.backlog_items(self.root)[1]["text"], "D")
+
     def test_estimate_fills_only_the_unestimated_matching_item(self):
         board.backlog_set_estimate(self.root, "Dark mode", 3, "one toggle and a CSS variable set")
         item = board.backlog_items(self.root)[2]

@@ -167,8 +167,10 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             del lines[pick(items, index)["line"]]
         elif op == "move":
             a = pick(items, index)
-            if delta in (-1, 1) and 0 <= index + delta < len(items):
-                b = items[index + delta]
+            # Swap with the nearest open item that way; finished items are hidden in the dashboard.
+            step = range(index - 1, -1, -1) if delta == -1 else range(index + 1, len(items)) if delta == 1 else []
+            b = next((items[j] for j in step if not items[j]["done"]), None)
+            if b:
                 lines[a["line"]], lines[b["line"]] = lines[b["line"]], lines[a["line"]]
         else:
             raise SystemExit(f"unknown backlog op {op!r}")
