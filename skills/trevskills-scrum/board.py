@@ -546,9 +546,20 @@ def cmd_sync(root, job_id):
 
 # --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
 def caller_tty():
-    """The calling terminal's tty, the same lookup as SKILL.md's "Record your terminal"."""
-    return subprocess.run(["ps", "-o", "tty=", "-p", str(os.getppid())], capture_output=True, text=True,
-                          timeout=2).stdout.strip()
+    """The calling terminal's tty: the first ancestor (at most 10 up) with a ttysN, since Claude Code may start hooks
+    under a detached parent whose tty is ??. The same tty "Record your terminal" stores. "??" when none has one."""
+    pid = os.getppid()
+    for _ in range(10):
+        out = subprocess.run(["ps", "-o", "ppid=,tty=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=2).stdout.split()
+        if len(out) != 2:
+            break
+        if SHAPES["tty"].fullmatch(out[1]):
+            return out[1]
+        if not out[0].isdigit() or int(out[0]) <= 1:
+            break
+        pid = int(out[0])
+    return "??"
 
 
 def waiting_text(event):

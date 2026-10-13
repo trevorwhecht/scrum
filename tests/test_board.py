@@ -531,6 +531,21 @@ class HookTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue(), "")
 
+    def test_caller_tty_walks_up_to_first_terminal(self):
+        table = {100: "   50 ??", 50: "   40 ??", 40: "    1 ttys004"}  # pid -> "ppid tty", as ps prints it
+        ps = lambda args, **kw: subprocess.CompletedProcess(args, 0, table.get(int(args[-1]), "") + "\n", "")
+        with mock.patch.object(board.os, "getppid", return_value=100), mock.patch.object(board.subprocess, "run", ps):
+            self.assertEqual(board.caller_tty(), "ttys004")
+            table[40] = "    1 ??"
+            self.assertEqual(board.caller_tty(), "??")
+            table.update({n: f"{n + 1} ??" for n in range(100, 200)})  # a long chain stops after ~10 levels
+            table[50] = "   40 ??"
+            calls = []
+            with mock.patch.object(board.subprocess, "run", lambda a, **kw: calls.append(a) or ps(a, **kw)):
+                table[100] = "  101 ??"
+                self.assertEqual(board.caller_tty(), "??")
+            self.assertLessEqual(len(calls), 10)
+
     def test_hook_permission_sets_waiting(self):
         self.patch(self.job, updatedAt="2001-01-01T00:00:00+00:00")
         self.hook(json.dumps({"hook_event_name": "PermissionRequest", "tool_name": "Bash",
