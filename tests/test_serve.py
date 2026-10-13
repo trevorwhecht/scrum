@@ -951,6 +951,69 @@ class AiSettingsTest(unittest.TestCase):
         self.assertTrue((self.user / "rules" / "s.md").is_symlink())
         self.assertEqual(target.read_text(), "new")
 
+    def test_symlinked_md_to_non_md_is_read_only(self):
+        (self.user / "rules").mkdir()
+        target = self.reg / "shared.txt"
+        target.write_text("secret")
+        (self.user / "rules" / "s.md").symlink_to(target)
+        it = next(i for i in self.scope("global")[0]["rules"]["items"] if i["name"] == "s")
+        self.assertFalse(it["editable"])
+        self.assertEqual(self.save(it, "pwned", "1")[0], 403)
+        self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 403)
+        self.assertEqual(target.read_text(), "secret")
+
+    def test_save_rejects_lone_surrogate_without_backup(self):
+        f, it = self.plant_markdown()["rule"]
+        body = {"id": it["id"], "content": "a\ud800b", "version": self.item(it["id"])[1]["version"]}
+        r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}/api/ai-settings/save", method="POST",
+                                   headers={"Content-Type": "application/json"}, data=json.dumps(body).encode())
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(r)
+        with cm.exception as e:
+            self.assertEqual(e.code, 400)
+            self.assertIn("invalid characters", json.loads(e.read())["error"])
+        self.assertEqual(f.read_bytes(), b"old rule\r\nline")
+        self.assertEqual(self.backups(), [])
+
+    def deep_rules(self, *names):
+        """Rule files under a rules/ tree deep enough that each quoted path is over 230 characters."""
+        d = self.user / "rules"
+        for i in range(6):
+            d = d / (f"d{i}" + "x" * 40)
+        d.mkdir(parents=True)
+        for n in names:
+            (d / n).write_text(f"old {n}")
+        return [d / n for n in names]
+
+    def test_save_backs_up_long_path(self):
+        f = self.deep_rules("deep.md")[0]
+        self.assertGreater(len(urllib.parse.quote(str(f), safe="")), 230)
+        it = next(i for i in self.scope("global")[0]["rules"]["items"] if i["path"] == str(f))
+        self.assertEqual(self.save(it, "new deep")[0], 200)
+        [b] = self.backups()
+        self.assertLessEqual(len(os.fsencode(b.name)), 255)
+        self.assertEqual(b.read_bytes(), b"old deep.md")
+        code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+        self.assertEqual((code, data["content"], f.read_text()), (200, "old deep.md", "old deep.md"))
+
+    def test_backup_tail_long_paths_distinct(self):
+        base = "/" + "p" * 300
+        a, b = base + "/a.md", base + "/b.md"
+        self.assertEqual(urllib.parse.quote(a, safe="")[:230], urllib.parse.quote(b, safe="")[:230])
+        ta, tb = self.serve.ai_backup_tail(a), self.serve.ai_backup_tail(b)
+        self.assertNotEqual(ta, tb)
+        self.assertLessEqual(len(ta), 201)
+        self.assertEqual(self.serve.ai_backup_tail("/short/x.md"), "%2Fshort%2Fx.md")
+        # undo for one long path never restores the other's backup
+        fa, fb = self.deep_rules("a.md", "b.md")
+        qa, qb = (urllib.parse.quote(str(x), safe="") for x in (fa, fb))
+        self.assertEqual(qa[:230], qb[:230])
+        rules = self.scope("global")[0]["rules"]["items"]
+        ia, ib = (next(i for i in rules if i["path"] == str(x)) for x in (fa, fb))
+        self.assertEqual(self.save(ib, "b new")[0], 200)
+        self.assertEqual(self.post("/api/ai-settings/undo", {"id": ia["id"]})[0], 404)
+        self.assertEqual((fa.read_text(), fb.read_text()), ("old a.md", "b new"))
+
     def test_save_rejects_non_editable_unknown_and_crafted_ids(self):
         (self.user / "skills" / "s").mkdir(parents=True)
         (self.user / "skills" / "s" / "SKILL.md").write_text("x")

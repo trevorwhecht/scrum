@@ -343,7 +343,8 @@ def ai_inventory(scope_id):
         item_id += f"#{n}" if n > 1 else ""
         seen.add(item_id)
         out[cat].append({"id": item_id, "name": str(name), "scope": scope, "path": str(path), "status": "", "category": cat,
-                         "editable": scope != "managed" and (is_json or str(path).endswith(".md")),
+                         "editable": scope != "managed" and (is_json or (str(path).endswith(".md")  # a .md link to a non-.md file stays read-only
+                                                                       and os.path.realpath(path).endswith(".md"))),
                          "_json": is_json, "_entry": entry, "_loc": loc})
     for cat, items in out.items():
         if cat in NAMED:
@@ -397,11 +398,17 @@ def ai_backups():
     return claude_home() / "backups" / "ai-settings"
 
 
+def ai_backup_tail(path):
+    """path with "/" encoded; a long one becomes a 136-char prefix + "~" + sha256 so the file name stays under NAME_MAX."""
+    name = quote(str(path), safe="")
+    return name if len(name) <= 200 else name[:136] + "~" + hashlib.sha256(os.fsencode(str(path))).hexdigest()
+
+
 def ai_backup(path):
     """Copy path's current bytes to <UTC timestamp>__<path with "/" encoded>; names sort oldest to newest."""
     folder = ai_backups()
     folder.mkdir(parents=True, exist_ok=True)
-    data, tail = Path(path).read_bytes(), "__" + quote(str(path), safe="")
+    data, tail = Path(path).read_bytes(), "__" + ai_backup_tail(path)
     while True:  # "x" never overwrites an older backup made in the same microsecond
         try:
             with open(folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + tail), "xb") as f:
@@ -475,12 +482,17 @@ def ai_settings_save(item_id, content, version, confirm=False):
             return 400, {"error": str(e)}
         if ai_guarded(it["category"], new, old) and not confirm:
             return 428, {"error": "confirm required"}
+    else:
+        try:
+            data = content.encode()
+        except UnicodeEncodeError:
+            return 400, {"error": "content has invalid characters (lone surrogate)"}
     try:
         if str(Path(it["path"]).stat().st_mtime_ns) != version:
             return 409, {"error": "file changed on disk"}
         if not it["_json"]:
             ai_backup(it["path"])
-            Path(it["path"]).write_bytes(content.encode())  # in place, so a symlinked rule keeps its link
+            Path(it["path"]).write_bytes(data)  # in place, so a symlinked rule keeps its link
             return 200, ai_settings_item(item_id)
         data, loc = json.loads(Path(it["path"]).read_text()), it["_loc"]
         if loc:
@@ -505,7 +517,7 @@ def ai_settings_undo(item_id):
     it, err = ai_editable(item_id)
     if err:
         return err
-    name = quote(it["path"], safe="")  # the timestamp has no "__", so the first "__" splits it from the path
+    name = ai_backup_tail(it["path"])  # the timestamp has no "__", so the first "__" splits it from the path
     found = sorted(p for p in ai_backups().glob("*") if p.name.split("__", 1)[-1] == name) if ai_backups().is_dir() else []
     if not found:
         return 404, {"error": "no backup to undo"}
