@@ -1,4 +1,6 @@
-import json, subprocess, sys, tempfile, unittest
+import io, json, os, subprocess, sys, tempfile, unittest
+from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +82,15 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["tty=", "term=", "runlog="])
         job = self.jobs()[0]
         self.assertEqual((job["tty"], job["term"], job["runlog"]), (None, None, None))
+
+    def test_set_waiting_stored_and_cleared(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ['waiting=permission: Bash'])
+        self.assertEqual(self.jobs()[0]["waiting"], "permission: Bash")
+        board.cmd_set(self.root, job_id, ["waiting=  a \n <!--b-->  " + "c" * 300])
+        self.assertEqual(self.jobs()[0]["waiting"], "a b " + "c" * 196)
+        board.cmd_set(self.root, job_id, ["waiting="])
+        self.assertIsNone(self.jobs()[0]["waiting"])
 
     def test_set_rejects_bad_tty(self):
         job_id = board.cmd_new(self.root, "x")
@@ -476,6 +487,120 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(len(list((self.root / "jobs" / unlisted).rglob("*"))), 10)
         self.assertEqual(len(list((self.root / "jobs" / review).rglob("*"))), 10)
         self.assertEqual(len(list((self.root / "jobs" / listed).rglob("*"))), 3)
+
+
+
+class HookTest(unittest.TestCase):
+    """board.py hook: a Claude Code hook event on stdin sets or clears `waiting` on this tty's active job."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root = base / "repo" / "scrum"
+        (base / "noboard" / "scrum").mkdir(parents=True)
+        (base / "corrupt" / "scrum").mkdir(parents=True)
+        (base / "corrupt" / "scrum" / "board.json").write_text("{")
+        reg = base / "projects.json"
+        reg.write_text(json.dumps([str(base / "noboard"), str(base / "corrupt"), str(base / "repo")]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.old = board.cmd_new(self.root, "older job")  # same tty, older: never the one picked
+        board.cmd_set(self.root, self.old, ["stage=review", "tty=ttys004"])
+        self.patch(self.old, updatedAt="2000-01-01T00:00:00+00:00")
+        self.job = board.cmd_new(self.root, "paused job")
+        board.cmd_set(self.root, self.job, ["stage=build", "tty=ttys004"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def patch(self, job_id, **fields):
+        path = self.root / "board.json"
+        data = json.loads(path.read_text())
+        next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
+        path.write_text(json.dumps(data))
+
+    def get(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def hook(self, stdin, tty="ttys004"):
+        out = io.StringIO()
+        with mock.patch.object(board, "caller_tty", return_value=tty), mock.patch("sys.stdin", io.StringIO(stdin)), \
+                redirect_stdout(out):
+            code = board.main(["hook"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_hook_permission_sets_waiting(self):
+        self.patch(self.job, updatedAt="2001-01-01T00:00:00+00:00")
+        self.hook(json.dumps({"hook_event_name": "PermissionRequest", "tool_name": "Bash",
+                              "tool_input": {"command": "npm test " + "x" * 100}}))
+        job = self.get(self.job)
+        self.assertEqual(job["waiting"], "permission: Bash: npm test " + "x" * 71)
+        self.assertNotEqual(job["updatedAt"], "2001-01-01T00:00:00+00:00")
+        self.assertNotIn("waiting", self.get(self.old))
+        self.hook(json.dumps({"hook_event_name": "PermissionRequest", "tool_name": "Write", "tool_input": {"command": "x"}}))
+        self.assertEqual(self.get(self.job)["waiting"], "permission: Write")
+
+    def test_hook_question_sets_waiting(self):
+        self.hook(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
+                              "tool_input": {"questions": [{"question": "Which lane?"}, {"question": "no"}]}}))
+        self.assertEqual(self.get(self.job)["waiting"], "question: Which lane?")
+        self.hook(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": {}}))
+        self.assertEqual(self.get(self.job)["waiting"], "question")
+
+    def test_hook_stop_sets_waiting(self):
+        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "\n  \nShip it?\nMore text"}))
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed: Ship it?")
+        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "  "}))
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
+        self.hook(json.dumps({"hook_event_name": "Stop"}))
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
+
+    def test_hook_prompt_clears_waiting(self):
+        self.patch(self.job, waiting="question: Which lane?")
+        self.hook(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "fast"}))
+        self.assertIsNone(self.get(self.job)["waiting"])
+        self.patch(self.job, waiting="permission: Bash")
+        self.hook(json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read"}))
+        self.assertIsNone(self.get(self.job)["waiting"])
+
+    def test_hook_posttool_noop_does_not_write(self):
+        self.patch(self.job, waiting=None, updatedAt="2001-01-01T00:00:00+00:00")
+        path = self.root / "board.json"
+        os.utime(path, (1_000_000, 1_000_000))
+        self.hook(json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"}))
+        self.assertEqual(path.stat().st_mtime, 1_000_000)
+        self.assertEqual(self.get(self.job)["updatedAt"], "2001-01-01T00:00:00+00:00")
+
+    def assert_untouched(self, stdin, tty="ttys004"):
+        path = self.root / "board.json"
+        before = path.read_text()
+        os.utime(path, (1_000_000, 1_000_000))
+        self.hook(stdin, tty)
+        self.assertEqual(path.read_text(), before)
+        self.assertEqual(path.stat().st_mtime, 1_000_000)
+
+    def test_hook_ignores_bad_input(self):
+        stop = json.dumps({"hook_event_name": "Stop"})
+        for stdin in ("", "{", "[]", json.dumps({"hook_event_name": "SessionStart"}),
+                      json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash"})):
+            self.assert_untouched(stdin)
+        for tty in ("??", "", "ttys4; rm", "/dev/ttys004"):
+            self.assert_untouched(stop, tty)
+        with mock.patch.object(board, "caller_tty", side_effect=OSError("no ps")), mock.patch("sys.stdin", io.StringIO(stop)):
+            self.assertEqual(board.main(["hook"]), 0)
+        self.assertNotIn("waiting", self.get(self.job))
+
+    def test_hook_ignores_inactive_and_other_tty(self):
+        board.cmd_set(self.root, self.old, ["stage=needs-human"])
+        board.cmd_set(self.root, self.job, ["tty=ttys005"])
+        done = board.cmd_new(self.root, "done job")
+        board.cmd_set(self.root, done, ["stage=done", "tty=ttys004"])
+        self.assert_untouched(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "hi"}))
+        self.hook(json.dumps({"hook_event_name": "Stop"}), "ttys005")
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
+        self.assertNotIn("waiting", self.get(self.old))
 
 
 if __name__ == "__main__":
