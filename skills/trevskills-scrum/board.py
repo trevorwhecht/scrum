@@ -584,8 +584,8 @@ def add_child(root, board, parent, t, depends_on, goal):
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "")
     (Path(root) / "jobs" / job_id / "feature.md").write_text(feature)
-    board["jobs"][-1].update(stage="waiting", files=["feature.md"], parent=parent["id"], ticket=t["ticket"], depends_on=depends_on,
-                             parallel=t["parallel"], setup=setup and "pending", setup_text=setup)
+    board["jobs"][-1].update(stage="waiting", files=["feature.md"], parent=parent["id"], ticket=t["ticket"],
+                             depends_on=depends_on, parallel=t["parallel"], setup=setup and "pending", setup_text=setup)
     return job_id
 
 
@@ -642,7 +642,8 @@ def cmd_ready(root, parent_id):
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
             # parallel=no runs alone; parallel=yes never beside a parallel=no sibling or one sharing a Likely file.
-            if busy and (not k.get("parallel") or any(not o.get("parallel") or files[k["id"]] & files[o["id"]] for o in busy)):
+            if busy and (not k.get("parallel")
+                         or any(not o.get("parallel") or files[k["id"]] & files[o["id"]] for o in busy)):
                 continue
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
