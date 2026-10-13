@@ -177,7 +177,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
      1. **Guard:** `git -C "$REPO" symbolic-ref --short HEAD` must equal `$DEFAULT`, and `git -C "$REPO" status --porcelain` must be empty.
      2. **Fast-forward:** if both pass, run `git -C "$REPO" pull --ff-only`.
      3. **Skip on failure:** if a guard check or the fast-forward fails, do not restart. Report `Restart pending: <process> — <reason>`, where reason is `not on <default>`, `uncommitted changes` or `fast-forward failed`. Never merge, reset, rebase or stash to make it work.
-     4. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
+     4. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 -sTCP:LISTEN | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
      5. **Verify:** the process answers, e.g. `curl -sf` against the new or changed endpoint returns 200 (retry in the background for a few seconds while it starts).
      A failed restart or verify doesn't change `done`; it is only reported.
 

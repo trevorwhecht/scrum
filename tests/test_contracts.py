@@ -207,7 +207,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         for phrase in ("Restart:", 'symbolic-ref --short HEAD', "status --porcelain", "pull --ff-only", "Restart pending",
-                       "lsof -ti tcp:8765", "curl -sf"):
+                       "lsof -ti tcp:8765 -sTCP:LISTEN", "curl -sf"):
             self.assertIn(phrase, cleanup, phrase)
         self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
 
