@@ -138,6 +138,46 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{done}/reopen", {"note": "twice"})[0], 400)
         self.assertEqual(spawn.call_count, 1)
 
+    def bigboy(self):
+        """A running bigboy parent: T1 waits on Human setup, T2 (exposure) depends on T1. Returns (parent, c1, c2)."""
+        b = self.serve.board
+        parent = b.cmd_new(self.root, "Big setup")
+        (self.root / "jobs" / parent / "plan.md").write_text(
+            "PLAN: READY\n# Big\n## Goal\nG.\n## Done when\n1. x\n## Tickets\n"
+            "### T1: Store\nDepends on: none\nParallel: yes — alone\nExposure: no\nHard stops: none\nHuman setup: Create the bucket\nDo it.\n"
+            "### T2: Show\nDepends on: T1\nParallel: no — last\nExposure: yes\nHard stops: none\nHuman setup: none\nShow it.\n")
+        return (parent, *b.cmd_plan_apply(self.root, parent)["children"])
+
+    def stage_of(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def test_setup_done_marks_and_starts_ready_child(self):
+        parent, c1, c2 = self.bigboy()
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.req("POST", f"/api/p/repo/jobs/{c1}/setup-done", {})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["ready"], [c1])
+        self.assertEqual((self.stage_of(c1)["setup"], self.stage_of(c1)["stage"]), ("done", "spec"))
+        self.assertEqual(self.stage_of(c2)["stage"], "waiting")
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[2:], (c1, "start", f"/trevskills-scrum start {c1}"))
+
+    def test_setup_done_refuses_non_waiting_job(self):
+        parent, c1, c2 = self.bigboy()
+        plain = self.serve.board.cmd_new(self.root, "Plain job")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            for job_id in (plain, parent, c2):  # not a child / the parent / a child with no setup pending
+                self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/setup-done", {})[0], 409, job_id)
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{c1}/setup-done", {})[0], 200)
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{c1}/setup-done", {})[0], 409)  # already done
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(self.stage_of(c2)["setup"], None)
+
+    def test_dashboard_has_bigboy_lane_option(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
+        self.assertIn("<option>bigboy</option>", text)
+        self.assertNotIn("epic", text)
+
     def backlog_index(self, text):
         self.serve.board.backlog_op(self.root, "add", text=text)
         return len(self.serve.board.backlog_items(self.root)) - 1
