@@ -300,6 +300,90 @@ class BoardTest(unittest.TestCase):
         board.main(["--dir", str(self.root), "abort", job_id])
         self.assertTrue(self.jobs()[0]["reason"].startswith("Aborted by Trevor "))
 
+    # --- digest ---
+    def done_jobs(self, n, stage="done"):
+        ids = []
+        for i in range(n):
+            job_id = board.cmd_new(self.root, f"{stage} {i}")
+            if stage == "aborted":
+                board.cmd_abort(self.root, job_id, requeue=False)
+            else:
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+            ids.append(job_id)
+        return ids
+
+    def cli(self, *args):
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *args], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_digest_due_counts_only_undigested_done_jobs(self):
+        done = self.done_jobs(9)
+        self.done_jobs(2, "aborted")
+        self.done_jobs(1, "review")
+        self.done_jobs(1, "needs-human")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 9})
+        done += self.done_jobs(1)
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 10})
+        (self.root / "digests" / "001").mkdir(parents=True)
+        (self.root / "digests" / "001" / "jobs.txt").write_text("\n".join(done[:4]) + "\n")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6})
+        self.assertEqual(board.digested_ids(self.root), set(done[:4]))
+
+    def test_digest_start_claims_jobs_once(self):
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertFalse((self.root / "digests").exists())
+        done = self.done_jobs(3)
+        aborted = self.done_jobs(1, "aborted")
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": done})
+        self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "\n".join(done) + "\n")
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
+        more = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more})
+        self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+
+    def fill(self, job_id):
+        for rel in ("feature.md", "spec.md", "decision.md", "build.md", "round-1/check.md", "round-1/review-ui.md",
+                    "round-1/decision.md", "rework.md", "pr-body.txt"):
+            self.write(f"{job_id}/{rel}", rel)
+
+    def test_digest_trim_keeps_three_files_and_updates_board(self):
+        a, b = self.done_jobs(2)
+        for j in (a, b):
+            self.fill(j)
+        board.cmd_sync(self.root, a)
+        self.assertIn("round-1/check.md", self.jobs()[0]["files"])
+        (self.root / "jobs" / b / "spec.md").unlink()  # a job with only some of the three keeps what it has
+        out = self.cli("digest-start")
+        self.assertEqual(board.cmd_digest_trim(self.root, out["id"]), [a, b])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["decision.md", "feature.md", "spec.md"])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / b).iterdir()), ["decision.md", "feature.md"])
+        self.assertEqual((self.root / "jobs" / a / "spec.md").read_text(), "spec.md")
+        files = {j["id"]: j["files"] for j in self.jobs()}
+        self.assertEqual(files[a], ["decision.md", "feature.md", "spec.md"])
+        self.assertEqual(files[b], ["decision.md", "feature.md"])
+        self.assertTrue((self.root / "digests" / "001" / "trimmed").exists())
+        self.assertEqual(self.cli("digest-trim", "001"), [a, b])  # idempotent
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["decision.md", "feature.md", "spec.md"])
+        for bad in ("1", "../x", "abc", "999"):
+            with self.assertRaises(SystemExit, msg=bad):
+                board.cmd_digest_trim(self.root, bad)
+
+    def test_digest_trim_skips_non_done_and_unlisted(self):
+        listed, unlisted = self.done_jobs(2)
+        review = self.done_jobs(1, "review")[0]
+        for j in (listed, unlisted, review):
+            self.fill(j)
+        d = self.root / "digests" / "001"
+        d.mkdir(parents=True)
+        (d / "jobs.txt").write_text(f"{listed}\n{review}\n../../etc\n999-not-on-board\n")
+        self.assertEqual(board.cmd_digest_trim(self.root, "001"), [listed])
+        self.assertEqual(len(list((self.root / "jobs" / unlisted).rglob("*"))), 10)
+        self.assertEqual(len(list((self.root / "jobs" / review).rglob("*"))), 10)
+        self.assertEqual(len(list((self.root / "jobs" / listed).rglob("*"))), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
