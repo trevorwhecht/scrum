@@ -436,7 +436,7 @@ class ContractTest(unittest.TestCase):
 
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F"):
+        for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F", "on port <N>", "on port 8765"):
             self.assertIn(phrase, text, phrase)
 
     def test_skill_pulls_and_restarts_after_merge(self):
@@ -446,10 +446,41 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         for phrase in ("Restart:", 'symbolic-ref --short HEAD', "status --porcelain", "pull --ff-only", "Restart pending",
-                       "lsof -ti tcp:8765 -sTCP:LISTEN", "curl -sf"):
+                       "lsof -ti tcp:<port> -sTCP:LISTEN", "curl -sf"):
             self.assertIn(phrase, cleanup, phrase)
+        self.assertNotIn("tcp:8765", cleanup)
         self.assertIn("grep -F", cleanup[cleanup.index("**Restart.**"):])
         self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
+
+    def test_project_template_has_dev_command(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("- Build: <command|none>\n- Dev command: <command|none>\n", text)
+        detect = self.section(text, "4. Detect the project", "```markdown")
+        self.assertIn("`Dev command:`", detect)
+        self.assertIn("`dev` package script", detect)
+
+    def test_restart_commands_are_allow_listed(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        restart = cleanup[cleanup.index("**Restart.**"):]
+        for phrase in ("Dev command:", "restart command not allowed", "curl -sf localhost:<port>/",
+                       "no port in Restart line"):
+            self.assertIn(phrase, restart, phrase)
+        self.assertNotIn("used as given", cleanup)
+        self.assertIn("`restart command not allowed`", cleanup[cleanup.index("merged, not live: <why>"):])
+
+    def test_restart_has_behavioural_fallback(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        self.assertIn("PID", cleanup[cleanup.index("**Restart.**"):])
+        self.assertIn("restarted + verified (behavioural)", self.section(text, "## Final report", "and, for needs-human"))
+
+    def test_verify_string_is_shell_safe(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        for phrase in ('grep -F -- "$VERIFY"', "<<'EOF'"):
+            self.assertIn(phrase, cleanup, phrase)
+        self.assertNotIn("grep -F '<verify string>'", cleanup)
 
     def test_merge_always_fast_forwards(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
