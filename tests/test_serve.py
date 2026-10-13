@@ -1198,5 +1198,198 @@ class AiResearchTest(unittest.TestCase):
         self.assertEqual({p: after[p] for p in before}, before)
 
 
+class DigestTest(unittest.TestCase):
+    """The Digest dialog's API, on the AiSettingsTest fake home. "reg" is the registered project holding the digests."""
+    get, post, backups = AiSettingsTest.get, AiSettingsTest.post, AiSettingsTest.backups
+
+    def setUp(self):
+        AiSettingsTest.setUp(self)
+        self.scrum = self.reg / "scrum"
+        self.board = self.serve.board
+        self.addCleanup(self.serve.RUNS.pop, "reg/digest", None)
+
+    def done_job(self, title="shipped"):
+        job_id = self.board.cmd_new(self.scrum, title)
+        self.board.cmd_set(self.scrum, job_id, ["stage=done"])
+        return job_id
+
+    def digest(self, proposals, digest_id="001", jobs=()):
+        d = self.scrum / "digests" / digest_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        (d / "proposals.json").write_text(proposals if isinstance(proposals, str) else json.dumps({"proposals": proposals}))
+        return d
+
+    def prop(self, pid, target, old="old line", new="new line", **extra):
+        return {"id": pid, "target": str(target), "why": f"Seen in 001-a and 002-b ({pid}).", "old": old, "new": new, **extra}
+
+    def decide(self, pid, decision, digest_id="001", headers=None):
+        return self.post(f"/api/p/reg/digests/{digest_id}/{pid}", {"decision": decision}, headers)
+
+    def statuses(self, digest_id="001"):
+        data = json.loads((self.scrum / "digests" / digest_id / "proposals.json").read_text())
+        return [p.get("status", "pending") for p in data["proposals"]]
+
+    def rule(self, text="keep A\nold line\nkeep B\n"):
+        f = self.user / "rules" / "x.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
+    def test_digests_list_skips_malformed_proposals(self):
+        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "digests": []}))
+        a = self.done_job()
+        self.done_job("two")
+        rule = self.rule()
+        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep A", new="kept A", status="applied"),
+                     {"id": "p3", "target": str(rule), "why": "missing old", "new": "x"},
+                     {"id": "p4", "target": str(rule), "why": "not a string", "old": 5, "new": "x"},
+                     self.prop("p5", rule, old="same", new="same"), "not an object"], jobs=[a])
+        d2 = self.digest("{not json", "002")
+        (d2 / "error.md").write_text("digester produced no valid proposals\nmore detail\n")
+        (d2 / "trimmed").write_text("x")
+        code, data, _ = self.get("/api/p/reg/digests")
+        self.assertEqual(code, 200)
+        self.assertEqual((data["running"], data["undigested"]), (False, 1))
+        self.assertEqual([d["id"] for d in data["digests"]], ["002", "001"])
+        self.assertEqual(data["digests"][0], {"id": "002", "jobs": [], "error": "digester produced no valid proposals",
+                                              "trimmed": True, "proposals": []})
+        self.assertEqual(data["digests"][1], {"id": "001", "jobs": [a], "error": None, "trimmed": False, "proposals": [
+            {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line", "status": "pending"},
+            {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "old": "keep A", "new": "kept A", "status": "applied"}]})
+        (self.scrum / "digests" / "003").mkdir()  # the reader hasn't written proposals.json yet
+        self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
+        self.assertEqual(self.get("/api/p/nope/digests")[0], 404)
+
+    def test_digest_now_spawns_and_refuses_when_empty_or_running(self):
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
+            popen.assert_not_called()
+            self.done_job()
+            popen.return_value.poll.return_value = None  # still running
+            code, out = self.post("/api/p/reg/digest", {})
+            self.assertEqual(code, 202, out)
+            popen.assert_called_once()
+            argv = popen.call_args.args[0]
+            self.assertEqual(argv[1:], ["-p", "/trevskills-scrum digest", "--permission-mode", "acceptEdits"])
+            self.assertEqual(self.serve.RUNS["reg/digest"]["action"], "digest")
+            self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
+            self.assertEqual(popen.call_count, 1)
+            self.assertTrue(self.get("/api/p/reg/digests")[1]["running"])
+        self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "a digest is already running"}))
+        popen.return_value.poll.return_value = 0  # finished
+        self.board.cmd_digest_start(self.scrum)
+        self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
+
+    def test_digest_endpoints_need_json_and_localhost(self):
+        rule = self.rule()
+        self.digest([self.prop("p1", rule)])
+        self.done_job()
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            for headers in ({"Content-Type": "text/plain"}, {"Origin": "https://evil.example"}, {"Host": "evil.example"}):
+                self.assertEqual(self.post("/api/p/reg/digest", {}, headers)[0], 403, headers)
+                self.assertEqual(self.decide("p1", "approve", headers=headers)[0], 403, headers)
+            popen.assert_not_called()
+        r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}/api/p/reg/digests", headers={"Host": "evil.example"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(r)
+        e.exception.close()
+        self.assertEqual(e.exception.code, 403)
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["pending"])
+
+    def test_approve_applies_edit_with_backup(self):
+        rule = self.rule()
+        memory = self.user / "projects" / "p" / "memory" / "m.md"
+        memory.parent.mkdir(parents=True)
+        memory.write_text("remember: old line\r\n")
+        self.digest([self.prop("p1", rule), self.prop("p2", memory)])
+        code, out = self.decide("p1", "approve")
+        self.assertEqual((code, out), (200, {**self.prop("p1", rule), "status": "applied"}))
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual([b.read_bytes() for b in self.backups()], [b"keep A\nold line\nkeep B\n"])
+        self.assertTrue(self.backups()[0].name.endswith(urllib.parse.quote(str(rule), safe="")))
+        self.assertEqual(self.statuses(), ["applied", "pending"])
+        self.assertEqual(self.decide("p2", "approve")[0], 200)
+        self.assertEqual(memory.read_bytes(), b"remember: new line\r\n")
+        self.assertEqual(self.statuses(), ["applied", "applied"])
+
+    def test_approve_refuses_non_editable_and_stale(self):
+        (self.user / "agents").mkdir()
+        agent = self.user / "agents" / "a.md"
+        agent.write_text("old line\n")
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("old line\n")
+        settings = self.user / "settings.json"
+        settings.write_text('{"x": "old line"}')
+        twice, absent = self.rule("old line\nold line\n"), self.user / "CLAUDE.md"
+        absent.write_text("nothing here\n")
+        self.digest([self.prop("p1", agent), self.prop("p2", outside), self.prop("p3", settings),
+                     self.prop("p4", self.user / "rules" / ".." / "rules" / "x.md", old="nope"),
+                     self.prop("p5", twice), self.prop("p6", absent), self.prop("p7", self.user / "rules" / "gone.md")])
+        snap = lambda: {p: p.read_bytes() for p in [*self.home.rglob("*"), outside] if p.is_file() and "digests" not in p.parts}
+        before = snap()
+        for pid in ("p1", "p2", "p3", "p7"):
+            self.assertEqual(self.decide(pid, "approve"), (403, None), pid)
+        for pid in ("p4", "p5", "p6"):
+            self.assertEqual(self.decide(pid, "approve"), (409, None), pid)
+        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p1", "approve"), (403, {"error": "target is not editable"}))
+        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p5", "approve"), (409, {"error": "proposal no longer applies"}))
+        self.assertEqual(snap(), before)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.statuses(), ["pending"] * 7)
+
+    def test_reject_and_double_decide(self):
+        rule = self.rule()
+        self.digest([self.prop("p1", rule), self.prop("p2", rule)])
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and p.name != "proposals.json"}
+        before = snap()
+        self.assertEqual(self.decide("p1", "reject"), (200, {**self.prop("p1", rule), "status": "rejected"}))
+        self.assertEqual(snap(), before)
+        self.assertEqual(self.statuses(), ["rejected", "pending"])
+        self.assertEqual(self.decide("p1", "reject")[0], 409)
+        self.assertEqual(self.decide("p1", "approve")[0], 409)
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.decide("p9", "reject")[0], 404)
+        self.assertEqual(self.decide("p2", "reject", digest_id="009")[0], 404)
+        self.assertEqual(self.decide("p2", "maybe")[0], 400)
+        self.assertEqual(self.post("/api/p/reg/digests/../p2", {"decision": "reject"})[0], 404)
+        self.assertEqual(self.statuses(), ["rejected", "pending"])
+
+    def test_approve_repo_target_adds_backlog_item_and_leaves_file(self):
+        claude_md = self.reg / "CLAUDE.md"
+        claude_md.write_text("old line\n")
+        (self.reg / "agents").mkdir()
+        agent = self.reg / "agents" / "scrum-x.md"
+        agent.write_text("old line\n")
+        (self.user / "agents").mkdir()
+        (self.user / "agents" / "scrum-x.md").symlink_to(agent)  # how install.sh links agents into ~/.claude
+        d = self.digest([self.prop("p1", claude_md), self.prop("p2", self.user / "agents" / "scrum-x.md")])
+        self.assertEqual(self.decide("p1", "approve"), (200, {**self.prop("p1", claude_md), "status": "queued"}))
+        self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
+        self.assertEqual((claude_md.read_text(), agent.read_text()), ("old line\n", "old line\n"))
+        self.assertEqual(self.backups(), [])
+        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertEqual(items, [f"Apply digest 001 p1 to CLAUDE.md: see {d / 'proposals.json'}",
+                                 f"Apply digest 001 p2 to agents/scrum-x.md: see {d / 'proposals.json'}"])
+
+    def test_last_decision_trims(self):
+        job_id = self.done_job()
+        for rel in ("feature.md", "spec.md", "decision.md", "build.md", "round-1/check.md"):
+            (self.scrum / "jobs" / job_id / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.scrum / "jobs" / job_id / rel).write_text(rel)
+        self.board.cmd_sync(self.scrum, job_id)
+        rule = self.rule()
+        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep B", new="kept B"), {"id": "bad"}], jobs=[job_id])
+        self.assertEqual(self.decide("p1", "reject")[0], 200)
+        self.assertEqual(len(list((self.scrum / "jobs" / job_id).rglob("*"))), 6)
+        self.assertFalse(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
+        self.assertEqual(self.decide("p2", "approve")[0], 200)
+        self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["decision.md", "feature.md", "spec.md"])
+        job = next(j for j in json.loads((self.scrum / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertEqual(job["files"], ["decision.md", "feature.md", "spec.md"])
+        self.assertTrue(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
+
+
 if __name__ == "__main__":
     unittest.main()

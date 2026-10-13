@@ -323,7 +323,7 @@ def cmd_digest_start(root):
             return {"id": None, "jobs": []}
         d = Path(root) / "digests"
         d.mkdir(exist_ok=True)
-        digest_id = f"{max((int(p.name) for p in d.iterdir() if DIGEST_RE.match(p.name)), default=0) + 1:03d}"
+        digest_id = f"{max((int(p.name) for p in d.iterdir() if DIGEST_RE.fullmatch(p.name)), default=0) + 1:03d}"
         (d / digest_id).mkdir()
         (d / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
         return {"id": digest_id, "jobs": jobs}
@@ -332,7 +332,7 @@ def cmd_digest_start(root):
 def cmd_digest_trim(root, digest_id):
     """Slim each listed done job's folder to feature.md, spec.md and decision.md; returns the trimmed ids. Idempotent."""
     d = Path(root) / "digests" / str(digest_id)
-    if not DIGEST_RE.match(str(digest_id)) or not (d / "jobs.txt").is_file():
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
         raise SystemExit(f"no digest {digest_id!r}")
     listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
     trimmed = []
