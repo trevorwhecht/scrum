@@ -5,17 +5,19 @@
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
-  board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
+  board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
+  board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
+  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/estimate) to backlog.md, write report.md
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, json, os, re, shutil, sys
+import argparse, fcntl, json, os, re, shutil, subprocess, sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,10 +120,11 @@ def cmd_new(root, title):
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 KEEP = object()
+ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
 
 
-def clean(text):
-    return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:300]
+def clean(text, limit=300):
+    return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:limit]
 
 
 def read_backlog(root):
@@ -171,13 +174,13 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             if points is not KEEP:
                 check_points(points)
             lines.append(format_item({"done": False, "points": None if points is KEEP else points,
-                                      "text": clean(text), "job": None, "why": None}))
+                                      "text": clean(text, ITEM_MAX), "job": None, "why": None}))
         elif op == "edit":
             item = pick(items, index)
             if text is not None:
                 if not clean(text):
                     raise SystemExit("backlog item text is empty")
-                item["text"] = clean(text)
+                item["text"] = clean(text, ITEM_MAX)
             if points is not KEEP:
                 check_points(points)
                 item["points"] = points
@@ -283,9 +286,13 @@ def projects():
 
 
 def cmd_backlog_add(root, items):
+    """Append each non-empty item; returns the texts as stored."""
+    added = []
     for item in items:
         if clean(item):
             backlog_op(root, "add", text=item)
+            added.append(clean(item, ITEM_MAX))
+    return added
 
 
 def job_files(d):
@@ -321,12 +328,17 @@ def cmd_digest_start(root):
         jobs = undigested(root, board)
         if not jobs:
             return {"id": None, "jobs": []}
-        d = Path(root) / "digests"
-        d.mkdir(exist_ok=True)
-        digest_id = f"{max((int(p.name) for p in d.iterdir() if DIGEST_RE.fullmatch(p.name)), default=0) + 1:03d}"
-        (d / digest_id).mkdir()
-        (d / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        digest_id = claim_folder(Path(root) / "digests")
+        (Path(root) / "digests" / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
         return {"id": digest_id, "jobs": jobs}
+
+
+def claim_folder(parent):
+    """Create the next 3-digit folder (001, 002, ...) under parent and return its name. Caller holds the board lock."""
+    parent.mkdir(exist_ok=True)
+    name = f"{max((int(p.name) for p in parent.iterdir() if DIGEST_RE.fullmatch(p.name)), default=0) + 1:03d}"
+    (parent / name).mkdir()
+    return name
 
 
 def cmd_digest_trim(root, digest_id):
@@ -352,6 +364,90 @@ def cmd_digest_trim(root, digest_id):
             trimmed.append(job["id"])
         (d / "trimmed").write_text(now() + "\n")
     return trimmed
+
+
+# --- triage: scrum-triager writes triage/<NNN>/plan.json; triage-apply turns it into backlog edits under the lock ---
+TRIAGE_RE = DIGEST_RE
+
+
+def cmd_triage_start(root):
+    with locked_board(root):
+        n = sum(not i["done"] for i in read_backlog(root)[1])
+        return {"id": claim_folder(Path(root) / "triage"), "open": n} if n else {"id": None, "open": 0}
+
+
+def cmd_triage_apply(root, triage_id):
+    """Merge, retire and estimate open items by exact text. Stale, reused or bad entries are skipped and reported."""
+    d = Path(root) / "triage" / str(triage_id)
+    if not TRIAGE_RE.fullmatch(str(triage_id)) or not d.is_dir():
+        raise SystemExit(f"no triage {triage_id!r}")
+    try:
+        plan = json.loads((d / "plan.json").read_text())
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"triage {triage_id}: plan.json is missing or not JSON ({e}); backlog.md was not touched")
+    if not isinstance(plan, dict) or any(not isinstance(plan.get(k) or [], list) for k in ("merge", "retire", "estimate")):
+        raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/estimate lists; backlog.md was not touched")
+    report = {"Merged": [], "Retired": [], "Estimated": [], "Skipped": []}
+    gone = lambda text: format_item({"done": True, "points": None, "text": text, "job": None, "why": None})
+    with locked_board(root):
+        lines, items = read_backlog(root)
+        used, before = set(), {}  # item indexes already consumed; line number -> combined lines inserted above it
+
+        def claim(texts):
+            """The open item for each text (first free one wins), or (None, cause)."""
+            got = []
+            for t in texts:
+                match = [i for i in items if not i["done"] and i["text"] == t]
+                free = [i for i in match if i["index"] not in used and i not in got]
+                if not free:
+                    return None, "already used by an earlier entry" if match else f'no open item has the text "{clean(t, ITEM_MAX)}"'
+                got.append(free[0])
+            return got, None
+
+        for kind in ("merge", "retire", "estimate"):
+            for e in plan.get(kind) or []:
+                e = e if isinstance(e, dict) else {}
+                texts = e.get("items") if kind == "merge" else [e.get("item")]
+                texts = texts if isinstance(texts, list) else []
+                label = f"{kind} " + " + ".join(f'"{clean(t, ITEM_MAX)}"' for t in texts)
+                got, cause = (None, "a merge needs at least 2 items") if len(texts) < 2 and kind == "merge" else claim(texts)
+                pts = e.get("points")
+                pts = pts if type(pts) is int and pts in FIB else None  # bool and 5.0 are not points
+                if got and kind == "merge" and not clean(e.get("text") or ""):
+                    cause = "merged text is empty"
+                elif got and kind == "retire" and not clean(e.get("reason") or ""):
+                    cause = "no reason given"
+                elif got and kind == "estimate" and got[0]["points"] is not None:
+                    cause = "already pointed"
+                elif got and kind == "estimate" and pts is None:
+                    cause = f"points {e.get('points')!r} not in {', '.join(map(str, FIB))}"
+                if cause:
+                    report["Skipped"].append(f"- {label} — {cause}\n")
+                    continue
+                used.update(i["index"] for i in got)
+                why = clean(e.get("why") or "") or None
+                if kind == "merge":
+                    text = clean(e["text"], ITEM_MAX)
+                    for i in got:
+                        lines[i["line"]] = gone(i["text"]) + f" <!-- merged into triage {triage_id} -->"
+                    before.setdefault(min(i["line"] for i in got), []).append(
+                        format_item({"done": False, "points": pts, "text": text, "job": None, "why": why}))
+                    report["Merged"].append(f"- {text}\n" + "".join(f"  - replaced: {i['text']}\n" for i in got))
+                elif kind == "retire":
+                    reason = clean(e["reason"])
+                    lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- retired: {reason} -->"
+                    report["Retired"].append(f"- {got[0]['text']} — {reason}\n")
+                else:
+                    item = got[0] | {"points": pts, "why": why}
+                    lines[item["line"]] = format_item(item)
+                    report["Estimated"].append(f"- [{pts}] {item['text']}" + (f" — {why}" if why else "") + "\n")
+        write_backlog(root, [x for n, line in enumerate(lines) for x in (*before.get(n, []), line)])
+        text = f"# Triage {triage_id} — {now()}\n" + "".join(
+            f"\n## {title}\n" + ("".join(rows) or "None.\n") for title, rows in report.items())
+        (d / "report.md").write_text(text)
+        (Path(root) / "triage" / "latest.md").write_text(text)
+    return {"merged": len(report["Merged"]), "retired": len(report["Retired"]),
+            "estimated": len(report["Estimated"]), "skipped": len(report["Skipped"])}
 
 
 def cmd_set(root, job_id, pairs):
@@ -416,6 +512,8 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
+    sub.add_parser("triage-start")
+    sub.add_parser("triage-apply").add_argument("triage")
     a = p.parse_args(argv)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
@@ -435,8 +533,16 @@ def main(argv=None):
         print(json.dumps(cmd_digest_start(a.dir)))
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
+    elif a.cmd == "triage-start":
+        print(json.dumps(cmd_triage_start(a.dir)))
+    elif a.cmd == "triage-apply":
+        print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
     else:
-        cmd_backlog_add(a.dir, a.items)
+        # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
+        for text in cmd_backlog_add(a.dir, a.items):
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), "--estimate", text,
+                              "--dir", str(a.dir.resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 if __name__ == "__main__":
