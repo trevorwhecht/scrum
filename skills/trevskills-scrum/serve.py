@@ -12,7 +12,7 @@ import argparse, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -131,21 +131,210 @@ def add_skill(path, skill):
         path.write_text(text[:m.start(1)] + "\n".join(lines) + text[m.end(1):])
 
 
-def installed_skills():
-    """User skills (~/.claude/skills/*/SKILL.md) and user-scope plugin skills, named <plugin>:<skill>."""
-    home = Path(os.environ.get("CLAUDE_HOME") or Path.home() / ".claude")
-    found = {p.parent.name: "user" for p in home.glob("skills/*/SKILL.md")}
+def claude_home():
+    return Path(os.environ.get("CLAUDE_HOME") or Path.home() / ".claude")
+
+
+def skill_files():
+    """{name: (source, SKILL.md path)} for user skills and user-scope plugin skills, named <plugin>:<skill>."""
+    home = claude_home()
+    found = {p.parent.name: ("user", p) for p in home.glob("skills/*/SKILL.md")}
     try:
         plugins, extra = json.loads((home / "plugins" / "installed_plugins.json").read_text())["plugins"], {}
         for key, installs in plugins.items():
             plugin = key.split("@")[0]
             for inst in installs:
                 if inst.get("scope") == "user":
-                    extra.update({f"{plugin}:{p.parent.name}": plugin for p in Path(inst["installPath"]).glob("skills/*/SKILL.md")})
+                    extra.update({f"{plugin}:{p.parent.name}": (plugin, p) for p in Path(inst["installPath"]).glob("skills/*/SKILL.md")})
         found.update(extra)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass  # a missing or malformed plugins file just adds nothing
-    return [{"name": n, "source": found[n]} for n in sorted(found)]
+    return found
+
+
+def installed_skills():
+    """User skills (~/.claude/skills/*/SKILL.md) and user-scope plugin skills, named <plugin>:<skill>."""
+    found = skill_files()
+    return [{"name": n, "source": found[n][0]} for n in sorted(found)]
+
+
+# --- AI-Settings: a read-only view of every Claude Code config source -----------------------------------------------
+# Paths and precedence adapted from mcpware/cross-code-organizer (MIT)
+#   managed  /Library/Application Support/ClaudeCode/{managed-settings.json, managed-mcp.json}   (CLAUDE_MANAGED_DIR)
+#   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), commands/ agents/ rules/ *.md, CLAUDE.md,
+#            projects/*/memory/*.md, settings.json (+ hooks), plugins/installed_plugins.json; ~/.claude.json mcpServers
+#   project  <root>: CLAUDE.md, .claude/{skills/*/SKILL.md, commands, agents, rules}, .claude/settings.json (+ hooks), .mcp.json
+#   local    <root>: CLAUDE.local.md, .claude/settings.local.json (+ hooks), ~/.claude.json projects[<root>].mcpServers
+CATEGORIES = [("skills", "Skills"), ("mcp", "MCP Servers"), ("commands", "Commands"), ("agents", "Agents"), ("rules", "Rules"),
+              ("config", "Config"), ("hooks", "Hooks"), ("plugins", "Plugins"), ("settings", "Settings")]
+RANK = {"managed": 0, "local": 1, "project": 2, "user": 3}  # lower wins
+NAMED = {"skills", "mcp", "commands", "agents"}  # the rest are additive: everything loads, nothing is overridden
+WALK_DEPTH, WALK_SKIP = 6, {"node_modules", "Library"}  # fixed on purpose; dot-dirs are skipped too
+SECRET_KEY = re.compile(r"token|secret|password|api[_-]?key|authorization", re.I)
+
+
+def user_home():
+    """Tests point CLAUDE_HOME at <fake home>/.claude, so ~ is its parent; otherwise the real home."""
+    return Path(os.environ["CLAUDE_HOME"]).parent if os.environ.get("CLAUDE_HOME") else Path.home()
+
+
+def load_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def as_dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+def redact(v, key=""):
+    """Every value under env/headers, and every string under a secret-looking key, becomes "[redacted]"."""
+    if key.lower() in ("env", "headers"):
+        return {k: "[redacted]" for k in v} if isinstance(v, dict) else "[redacted]"
+    if isinstance(v, dict):
+        return {k: redact(x, str(k)) for k, x in v.items()}
+    if isinstance(v, list):
+        return [redact(x, key) for x in v]
+    return "[redacted]" if isinstance(v, str) and SECRET_KEY.search(key) else v
+
+
+def walk_claude_dirs(d, depth, found):
+    """Add every folder under d that holds a .claude dir; never descends into dot-dirs, node_modules or Library."""
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if not e.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if e.name == ".claude":
+            found.add(os.path.realpath(d))
+        elif depth + 1 < WALK_DEPTH and not e.name.startswith(".") and e.name not in WALK_SKIP:
+            walk_claude_dirs(e.path, depth + 1, found)
+
+
+def ai_scopes(with_mac=True):
+    """{scope id: (group, label, root or None)}. The home walk runs on each call (~0.2 s on Trevor's Mac), no cache."""
+    home = os.path.realpath(user_home())
+    scopes = {"global": ("global", "Global", None)}
+    registered = board.projects()
+    scopes.update({f"r:{n}": ("registered", n, Path(p)) for n, p in registered.items()})
+    if with_mac:
+        found = {os.path.realpath(k) for k in as_dict(as_dict(load_json(Path(home) / ".claude.json")).get("projects"))
+                 if os.path.isdir(k)}
+        walk_claude_dirs(home, 0, found)
+        found -= {home} | {os.path.realpath(p) for p in registered.values()}
+        for root in sorted(found):
+            label = os.path.relpath(root, home) if root.startswith(home + os.sep) else root
+            scopes[f"m:{label}"] = ("mac", label, Path(root))
+    return scopes
+
+
+def ai_inventory(scope_id):
+    """{category: [item]} for one scope, or None for an unknown scope. Items keep their entry/path for the detail view."""
+    scopes = ai_scopes(with_mac=scope_id.startswith("m:"))
+    if scope_id not in scopes:
+        return None
+    root, home, user = scopes[scope_id][2], user_home(), claude_home()
+    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    claude_json = home / ".claude.json"
+    cj = as_dict(load_json(claude_json))
+    raw = []  # (category, scope, name, path, is_json, entry)
+
+    def md(cat, scope, paths, name=lambda p: p.stem):
+        raw.extend((cat, scope, name(p), p, False, None) for p in sorted(paths) if p.is_file())
+
+    def settings(scope, path):
+        data = load_json(path)
+        if not isinstance(data, dict):
+            return
+        raw.append(("settings", scope, path.name, path, True, data))
+        for event, entries in as_dict(data.get("hooks")).items():
+            for e in entries if isinstance(entries, list) else []:
+                if isinstance(e, dict):
+                    raw.append(("hooks", scope, f"{event} · {e.get('matcher') or '*'}", path, True, e))
+
+    def mcp(scope, path, servers):
+        raw.extend(("mcp", scope, n, path, True, e) for n, e in as_dict(servers).items())
+
+    def claude_dir(scope, d):
+        md("skills", scope, d.glob("skills/*/SKILL.md"), lambda p: p.parent.name)
+        for cat in ("commands", "agents", "rules"):
+            md(cat, scope, d.glob(f"{cat}/*.md"))
+
+    settings("managed", managed / "managed-settings.json")
+    mcp("managed", managed / "managed-mcp.json", as_dict(load_json(managed / "managed-mcp.json")).get("mcpServers"))
+    claude_dir("user", user)
+    raw.extend(("skills", "user", n, p, False, None) for n, (src, p) in sorted(skill_files().items()) if src != "user")
+    md("config", "user", [user / "CLAUDE.md"], lambda p: p.name)
+    md("config", "user", user.glob("projects/*/memory/*.md"), lambda p: str(p.relative_to(user)))
+    settings("user", user / "settings.json")
+    plugins = user / "plugins" / "installed_plugins.json"
+    raw.extend(("plugins", "user", k, plugins, True, v) for k, v in as_dict(as_dict(load_json(plugins)).get("plugins")).items())
+    mcp("user", claude_json, cj.get("mcpServers"))
+    if root:
+        md("config", "project", [root / "CLAUDE.md"], lambda p: p.name)
+        claude_dir("project", root / ".claude")
+        settings("project", root / ".claude" / "settings.json")
+        mcp("project", root / ".mcp.json", as_dict(load_json(root / ".mcp.json")).get("mcpServers"))
+        md("config", "local", [root / "CLAUDE.local.md"], lambda p: p.name)
+        settings("local", root / ".claude" / "settings.local.json")
+        real = os.path.realpath(root)
+        mcp("local", claude_json, next((as_dict(v).get("mcpServers") for k, v in as_dict(cj.get("projects")).items()
+                                        if os.path.realpath(k) == real), None))
+
+    out, seen = {cat: [] for cat, _ in CATEGORIES}, set()
+    for cat, scope, name, path, is_json, entry in raw:
+        item_id = f"{scope_id}|{cat}|{scope}|{path}|{name}"
+        n = 1
+        while item_id + (f"#{n}" if n > 1 else "") in seen:
+            n += 1
+        item_id += f"#{n}" if n > 1 else ""
+        seen.add(item_id)
+        out[cat].append({"id": item_id, "name": str(name), "scope": scope, "path": str(path), "status": "",
+                         "_json": is_json, "_entry": entry})
+    for cat, items in out.items():
+        if cat in NAMED:
+            by_name = {}
+            for it in items:
+                by_name.setdefault(it["name"], []).append(it)
+            for same in by_name.values():
+                if len({it["scope"] for it in same}) > 1:
+                    top = min(RANK[it["scope"]] for it in same)
+                    for it in same:
+                        it["status"] = "wins" if RANK[it["scope"]] == top else "overridden"
+        items.sort(key=(lambda it: RANK[it["scope"]]) if cat == "settings" else (lambda it: (it["name"].lower(), RANK[it["scope"]])))
+    return out
+
+
+def ai_settings_scope(scope_id):
+    inv = ai_inventory(scope_id)
+    if inv is None:
+        return None
+    return {"scope": scope_id, "categories": [
+        {"key": cat, "label": label, "count": len(inv[cat]),
+         "items": [{k: v for k, v in it.items() if not k.startswith("_")} for it in inv[cat]]} for cat, label in CATEGORIES]}
+
+
+def ai_settings_item(item_id):
+    """One item's path and content. Only ids from a freshly built inventory resolve, so no client path is ever read."""
+    inv = ai_inventory(item_id.split("|", 1)[0]) if "|" in item_id else None
+    it = next((x for items in (inv or {}).values() for x in items if x["id"] == item_id), None)
+    if not it:
+        return None
+    if it["_json"]:
+        content = json.dumps(redact(it["_entry"]), indent=2)
+    else:
+        try:
+            content = Path(it["path"]).read_text(errors="replace")
+        except OSError:
+            return None
+    return {k: v for k, v in it.items() if not k.startswith("_")} | {"content": content}
 
 
 def scrum_dir(project):
@@ -185,6 +374,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, [read_agent(p) for p in sorted(agents_dir().glob("*.md"))])
         if path == "/api/skills":
             return self.send_json(200, installed_skills())
+        if path == "/api/ai-settings":
+            scope = parse_qs(urlparse(self.path).query).get("scope", [None])[0]
+            if scope is None:
+                groups = {"global": [], "registered": [], "mac": []}
+                for sid, (group, label, _) in ai_scopes().items():
+                    groups[group].append({"id": sid, "label": label})
+                return self.send_json(200, groups)
+            data = ai_settings_scope(scope)
+            return self.send_json(200, data) if data else self.send_json(404, {"error": "no such scope"})
+        if path == "/api/ai-settings/item":
+            data = ai_settings_item(parse_qs(urlparse(self.path).query).get("id", [""])[0])
+            return self.send_json(200, data) if data else self.send_json(404, {"error": "no such item"})
         if path == "/api/projects":
             return self.send_json(200, [{"name": name} for name in board.projects()])
         if path == "/api/runs":

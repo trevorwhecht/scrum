@@ -38,8 +38,8 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 dialog{width:min(900px,94vw);max-height:88dvh;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);padding:0}
 dialog::backdrop{background:#0007}
 .tabs{display:flex;flex-wrap:wrap;gap:4px;padding:10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
-.tabs button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
-.tabs button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.tabs button,#aiCats button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
+.tabs button[aria-pressed="true"],#aiCats button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .tabs .close{margin-left:auto}
 article{padding:4px 20px 20px;overflow-wrap:anywhere}
 article pre{overflow-x:auto;background:var(--bg);padding:8px;border-radius:6px;white-space:pre-wrap}
@@ -54,7 +54,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
-#filter,#blProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+#filter,#blProject,#aiScope{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
@@ -77,10 +77,10 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 .pts{font:600 12px ui-monospace,monospace;width:46px;min-height:32px;border:0;border-radius:6px;color:#fff;background:var(--pending);text-align:center;cursor:pointer}
 .pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
 .pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
-#agents{width:min(1400px,96vw);max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
-#agents .tabs{align-items:center}
-#agents [hidden]{display:none}
-#agents .tabs button,#agents .btn{min-height:44px;min-width:44px}
+#agents,#aiSettings{width:min(1400px,96vw);max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
+#agents .tabs,#aiSettings .tabs{align-items:center}
+#agents [hidden],#aiSettings [hidden]{display:none}
+#agents .tabs button,#agents .btn,#aiSettings .tabs button,#aiCats button{min-height:44px;min-width:44px}
 #agents article{display:grid;gap:10px;padding-top:14px}
 #flow{display:grid;grid-template-columns:minmax(0,1fr) 44px;position:relative}
 #flow>*{grid-column:1;min-width:0}
@@ -105,7 +105,18 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 #agPicker{display:grid;gap:8px}
 #agSkills{display:flex;flex-wrap:wrap;gap:6px}
 .md{border-top:1px solid var(--line)}
-@media (max-width:640px){#agents{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article{padding-inline:12px}
+#aiScope{flex:1 1 160px;min-width:0;max-width:420px;min-height:44px;text-overflow:ellipsis}
+#aiSettings>.error{padding:10px 20px 0}
+#aiBody{display:grid;grid-template-columns:220px minmax(0,1fr);align-items:start}
+#aiCats{display:grid;gap:4px;padding:14px 10px}
+#aiCats button{display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left}
+#aiList{display:grid;gap:6px;padding-top:14px}
+.node .chip{color:#fff}.node .chip.pending{color:var(--muted)}
+.node .path{flex-basis:100%;overflow-wrap:anywhere}
+.node.over{opacity:.55}
+@media (max-width:640px){#agents,#aiSettings{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article{padding-inline:12px}
+  #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
+  #aiCats button{flex:none}#aiScope{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}}
 </style>
@@ -114,7 +125,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
-  <button class="btn" id="agentsBtn" type="button">Agents</button></header>
+  <button class="btn" id="agentsBtn" type="button">Agents</button>
+  <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -132,6 +144,13 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
     <div id="flow"></div>
     <div id="agDetail" hidden></div>
   </article>
+</dialog>
+<dialog id="aiSettings" aria-label="AI-Settings">
+  <div class="tabs"><button id="aiBack" type="button" hidden>← Back</button><b>AI-Settings</b>
+    <select id="aiScope" aria-label="Scope" data-agent-hint="Global shows managed and user config. A project shows everything that applies inside it: managed, local, project and user."></select>
+    <button class="close" type="button" aria-label="Close">✕</button></div>
+  <p class="error" id="aiError" role="alert"></p>
+  <div id="aiBody"><nav id="aiCats" aria-label="Categories"></nav><article id="aiList"></article></div>
 </dialog>
 <script>
 const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
@@ -488,6 +507,62 @@ $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks th
   e.preventDefault();
   const b = $("agSkills").querySelector("button[data-skill]");
   if (b) addSkill(b.dataset.skill, b);
+});
+
+// AI-Settings: read-only. Items come from api/ai-settings; precedence is managed > local > project > user.
+const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "This Mac"]];
+const AI_LOADING = '<p class="empty">loading…</p>';
+let aiData = null, aiCat = "";
+const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
+const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
+    <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
+    <span class="path">${esc(it.path)}</span></button>`;
+
+function renderAi() {
+  $("aiBack").hidden = true;
+  $("aiCats").innerHTML = aiData.categories.map(c => `<button type="button" data-cat="${esc(c.key)}" aria-pressed="${c.key === aiCat}"><span>${esc(c.label)}</span><span>${c.count}</span></button>`).join("");
+  const cat = aiData.categories.find(c => c.key === aiCat);
+  $("aiList").innerHTML = cat.items.map(aiRow).join("") || '<p class="empty">None</p>';
+}
+
+async function aiLoadScope() {
+  const sid = $("aiScope").value;
+  $("aiError").textContent = ""; $("aiBack").hidden = true; $("aiList").innerHTML = AI_LOADING;
+  const data = await getJson(`api/ai-settings?scope=${enc(sid)}`, null);
+  if ($("aiScope").value !== sid) return;  // a newer scope pick is already loading
+  if (!data) return aiFail();
+  aiData = data;
+  if (!aiData.categories.some(c => c.key === aiCat)) aiCat = aiData.categories[0].key;
+  renderAi();
+}
+
+$("aiBtn").addEventListener("click", async () => {
+  $("aiError").textContent = ""; $("aiScope").innerHTML = ""; $("aiCats").innerHTML = ""; $("aiBack").hidden = true;
+  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = "";
+  $("aiSettings").showModal();
+  const scopes = await getJson("api/ai-settings", null);
+  if (!scopes) return aiFail();
+  $("aiScope").innerHTML = AI_GROUPS.filter(([g]) => scopes[g]?.length).map(([g, label]) => `<optgroup label="${label}">${
+    scopes[g].map(s => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join("")}</optgroup>`).join("");
+  $("aiScope").value = "global";
+  aiLoadScope();
+});
+$("aiScope").addEventListener("change", aiLoadScope);
+$("aiBack").addEventListener("click", renderAi);
+$("aiCats").addEventListener("click", e => {
+  const b = e.target.closest("button[data-cat]");
+  if (b && aiData) { aiCat = b.dataset.cat; renderAi(); }
+});
+$("aiList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-id]");
+  if (!b) return;
+  const sid = $("aiScope").value;
+  $("aiError").textContent = ""; $("aiBack").hidden = false; $("aiList").innerHTML = AI_LOADING;
+  const it = await getJson(`api/ai-settings/item?id=${enc(b.dataset.id)}`, null);
+  if ($("aiScope").value !== sid || $("aiBack").hidden) return;  // moved on while loading
+  if (!it) return aiFail();
+  $("aiList").innerHTML = `<dl class="facts"><dt>Name</dt><dd><b>${esc(it.name)}</b></dd><dt>Scope</dt><dd><span class="skill">${esc(it.scope)}</span></dd>
+    <dt>Path</dt><dd>${esc(it.path)}</dd></dl><pre>${esc(it.content)}</pre>`;
 });
 
 $("board").addEventListener("click", e => {
