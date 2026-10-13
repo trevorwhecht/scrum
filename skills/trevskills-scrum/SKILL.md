@@ -9,7 +9,7 @@ The session running this skill **is the orchestrator**. It spawns every agent, m
 
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**
-- never `git pull` except the one guarded `git -C "$REPO" pull --ff-only` in **Merge** step 7 (Clean up); never stash, merge, reset or switch branches in the main checkout
+- never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
 - never push `main`/`master`
 - never `--auto` or `--admin`
 - never `prisma migrate` or `prisma db push`
@@ -35,6 +35,14 @@ If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every
 - `command -v gh && gh auth status` succeeds. If not, stop and tell the user to run `brew install gh && gh auth login`.
 
 If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
+
+**Record your terminal** (New job, `start`, `approve`, `rework`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
+
+```bash
+T=$(ps -o tty= -p $PPID | tr -d ' '); case "$T" in ttys[0-9]*) B set $ID tty=$T ;; esac
+case "$TERM_PROGRAM" in Apple_Terminal|iTerm.app|ghostty) B set $ID term=$TERM_PROGRAM ;; esac
+```
+A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing.
 
 ### First-run setup (once per repo)
 
@@ -69,18 +77,18 @@ If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to
 For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `worktree`, `BASE` is its `base`, and `DEFAULT` is `BASE` with the `origin/` prefix removed. `N` is its `round`.
 
 - **`/trevskills-scrum`** (no args): print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
-- **`/trevskills-scrum next`**: run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text.
+- **`/trevskills-scrum next`**: run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
 - Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2.
-- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. If the reason contains `Hard stop: schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop until they confirm. A prompt that says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard after he ticked that box) counts as that confirmation. Then write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
-- **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `B set <id> stage=build reason= limit=<round+2>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
+- **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. If the reason contains `Hard stop: schema`, remind the user to run `/trevskills-migrate` in the worktree first, and stop until they confirm. A prompt that says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard after he ticked that box) counts as that confirmation. Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
+- **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `B set <id> stage=build reason= limit=<round+2>`, then **record your terminal** with `ID=<id>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
 
 ## New job
 
 1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
    1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
-2. **Base:** run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
+2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
 3. **Spec:** spawn `scrum-spec-writer` and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID
@@ -173,13 +181,15 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
 7. **Clean up:**
    - Run `git worktree remove "$WT"`. If git refuses because of local changes, leave the worktree in place and mention it.
    - Run `git fetch origin`.
+   - **Fast-forward main (always, whatever the `Restart:` line says).** The dashboard and this skill are served from the main checkout, so it must not stay behind origin:
+     1. **Guard:** `git -C "$REPO" symbolic-ref --short HEAD` must equal `$DEFAULT`, and `git -C "$REPO" status --porcelain` must be empty.
+     2. If both pass, run `git -C "$REPO" pull --ff-only`.
+     3. If a guard check or the fast-forward fails, report `main not updated: <reason>`, where reason is `not on <default>`, `uncommitted changes` or `fast-forward failed`. Never merge, reset, rebase or stash to make it work.
    - Run `B set $ID stage=done reason=`.
    - **Restart.** Read the `Restart:` line from `$F/jobs/$ID/decision.md` (no line, e.g. a human-approved ESCALATE without one, counts as `none`). If it is not `Restart: none`, in order:
-     1. **Guard:** `git -C "$REPO" symbolic-ref --short HEAD` must equal `$DEFAULT`, and `git -C "$REPO" status --porcelain` must be empty.
-     2. **Fast-forward:** if both pass, run `git -C "$REPO" pull --ff-only`.
-     3. **Skip on failure:** if a guard check or the fast-forward fails, do not restart. Report `Restart pending: <process> — <reason>`, where reason is `not on <default>`, `uncommitted changes` or `fast-forward failed`. Never merge, reset, rebase or stash to make it work.
-     4. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 -sTCP:LISTEN | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
-     5. **Verify:** the process answers, e.g. `curl -sf` against the new or changed endpoint returns 200 (retry in the background for a few seconds while it starts).
+     1. **Skip if main wasn't updated:** if the fast-forward above did not succeed, do not restart. Report `Restart pending: <process> — <reason>`, with the same reason as `main not updated`.
+     2. **Restart:** stop the old process, found by its port (`lsof -ti tcp:8765 -sTCP:LISTEN | xargs kill`). Start it again the way it was started. For serve.py that is `mkdir -p ~/.claude/trevskills-scrum && nohup python3 ~/.claude/skills/trevskills-scrum/serve.py >> ~/.claude/trevskills-scrum/serve.log 2>&1 &` (as in `app/make-app.sh`); for anything else, the start command named in the `Restart:` line, used as given.
+     3. **Verify:** the process answers, e.g. `curl -sf` against the new or changed endpoint returns 200 (retry in the background for a few seconds while it starts).
      A failed restart or verify doesn't change `done`; it is only reported.
 
 ## Resuming the builder
@@ -192,4 +202,4 @@ The orchestrator never edits code or review files itself, except for two sanctio
 
 ## Final report
 
-End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, the restart outcome for merged jobs (`restarted + verified`, `restart failed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).
+End with the job id, the final stage, the PR URL, rounds used, any follow-ups added to the backlog, for merged jobs whether main was fast-forwarded (`main updated`, or `main not updated: <reason>`) and the restart outcome (`restarted + verified`, `restart failed`, `verify failed`, `Restart pending: <process> — <reason>`, or `none`), and, for needs-human, the exact reason and the next command (`/trevskills-scrum approve <id>` or `/trevskills-scrum rework <id> "<feedback>"`).

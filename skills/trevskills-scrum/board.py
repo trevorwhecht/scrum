@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base (empty value = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
@@ -19,7 +19,11 @@ from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("spec", "build", "check", "review", "approve", "merging", "done", "needs-human", "aborted")
-FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base")
+FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog")
+TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
+# Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
+SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
+          "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$")}
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 
@@ -295,6 +299,8 @@ def cmd_set(root, job_id, pairs):
                 raise SystemExit(f"bad field {pair!r}; allowed: {', '.join(FIELDS)}")
             if key == "stage" and value not in STAGES:
                 raise SystemExit(f"bad stage {value!r}; allowed: {', '.join(STAGES)}")
+            if value and key in SHAPES and not SHAPES[key].fullmatch(value):
+                raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         job["files"] = files
         job["updatedAt"] = now()
