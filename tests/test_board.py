@@ -177,6 +177,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((c1["stage"], c1["parent"], c1["ticket"], c1["depends_on"], c1["parallel"], c1["setup"]),
                          ("waiting", "001-big", "T1", [], True, None))
         self.assertEqual((c2["setup"], c2["setup_text"]), ("pending", "Add STRIPE_KEY to .env"))
+        self.assertEqual(c2["files"], ["feature.md"])
         self.assertEqual((c3["ticket"], c3["depends_on"], c3["parallel"]), ("T3", ["002-part-1", "003-part-2"], False))
         feature = (self.root / "jobs" / "004-show-the-button" / "feature.md").read_text()
         self.assertTrue(feature.startswith("Show the button\n\nBuild part 3.\n"), feature)

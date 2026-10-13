@@ -584,7 +584,7 @@ def add_child(root, board, parent, t, depends_on, goal):
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "")
     (Path(root) / "jobs" / job_id / "feature.md").write_text(feature)
-    board["jobs"][-1].update(stage="waiting", parent=parent["id"], ticket=t["ticket"], depends_on=depends_on,
+    board["jobs"][-1].update(stage="waiting", files=["feature.md"], parent=parent["id"], ticket=t["ticket"], depends_on=depends_on,
                              parallel=t["parallel"], setup=setup and "pending", setup_text=setup)
     return job_id
 
