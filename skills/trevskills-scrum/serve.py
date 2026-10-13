@@ -192,7 +192,9 @@ def installed_skills():
 # Paths and precedence adapted from mcpware/cross-code-organizer (MIT)
 #   managed  /Library/Application Support/ClaudeCode/{managed-settings.json, managed-mcp.json}   (CLAUDE_MANAGED_DIR)
 #   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), commands/ agents/ rules/ *.md, CLAUDE.md,
-#            projects/*/memory/*.md, settings.json (+ hooks), plugins/installed_plugins.json; ~/.claude.json mcpServers
+#            projects/*/memory/*.md, settings.json (+ hooks), ~/.claude.json mcpServers
+#   plugins  plugins/installed_plugins.json: one item per install record, badged with the record's own scope;
+#            project/local records only in the scope whose root is their projectPath
 #   project  <root>: CLAUDE.md, .claude/{skills/*/SKILL.md, commands, agents, rules}, .claude/settings.json (+ hooks), .mcp.json
 #   local    <root>: CLAUDE.local.md, .claude/settings.local.json (+ hooks), ~/.claude.json projects[<root>].mcpServers
 CATEGORIES = [("skills", "Skills"), ("mcp", "MCP Servers"), ("commands", "Commands"), ("agents", "Agents"), ("rules", "Rules"),
@@ -305,7 +307,13 @@ def ai_inventory(scope_id):
     md("config", "user", user.glob("projects/*/memory/*.md"), lambda p: str(p.relative_to(user)))
     settings("user", user / "settings.json")
     plugins = user / "plugins" / "installed_plugins.json"
-    raw.extend(("plugins", "user", k, plugins, True, v, ["plugins", k]) for k, v in as_dict(as_dict(load_json(plugins)).get("plugins")).items())
+    real = root and os.path.realpath(root)
+    for k, records in as_dict(as_dict(load_json(plugins)).get("plugins")).items():
+        for i, r in enumerate(records if isinstance(records, list) else []):
+            sc = as_dict(r).get("scope")
+            if sc == "user" or (sc in ("project", "local") and real and isinstance(r.get("projectPath"), str)
+                                and os.path.realpath(r["projectPath"]) == real):
+                raw.append(("plugins", sc, k, plugins, True, r, ["plugins", k, i]))
     mcp("user", claude_json, cj.get("mcpServers"))
     if root:
         md("config", "project", [root / "CLAUDE.md"], lambda p: p.name)
@@ -314,7 +322,6 @@ def ai_inventory(scope_id):
         mcp("project", root / ".mcp.json", as_dict(load_json(root / ".mcp.json")).get("mcpServers"))
         md("config", "local", [root / "CLAUDE.local.md"], lambda p: p.name)
         settings("local", root / ".claude" / "settings.local.json")
-        real = os.path.realpath(root)
         key = next((k for k in as_dict(cj.get("projects")) if os.path.realpath(k) == real), None)
         if key is not None:
             mcp("local", claude_json, as_dict(cj["projects"][key]).get("mcpServers"), ("projects", key))
