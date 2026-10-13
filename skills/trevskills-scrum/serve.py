@@ -1283,7 +1283,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1345,6 +1345,10 @@ class Handler(BaseHTTPRequestHandler):
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))
             return 200, {"id": job_id, "stage": "aborted"}
+        if action == "reopen":
+            new_id = board.cmd_reopen(root, job_id, body.get("note") or "")
+            spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
+            return 202, {"id": new_id, "reopened_from": job_id}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
         if not job or job["stage"] != "needs-human" or running(project, job_id):

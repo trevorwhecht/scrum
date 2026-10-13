@@ -319,6 +319,23 @@ class ContractTest(unittest.TestCase):
         actions = text[text.index("function renderActions(job)"):]
         self.assertRegex(actions, r'job\.stage === "aborted" && reason \? `<p class="note">\$\{esc\(reason\)\}')
 
+    def test_dashboard_has_reopen_form(self):
+        text = DASHBOARD.read_text()
+        m = re.search(r'const reopenForm = job => (.*?)</form>`;', text, re.S)
+        self.assertIsNotNone(m)
+        form = m.group(1)
+        self.assertIn('["done", "aborted"].includes(job.stage)', form)
+        self.assertIn('job.reopened_to', form)
+        self.assertIn('Reopened as ${esc(job.reopened_to)}', form)
+        self.assertRegex(form, r'<form data-act="reopen"><textarea name="note" required maxlength="2000"[^>]*aria-label="Note for the reopened job"')
+        self.assertIn('<button class="btn" type="submit">Reopen</button>', form)
+        actions = text[text.index("function renderActions(job)"):text.index("const blProject")]
+        self.assertIn("reopenForm(job)", actions)
+        self.assertIn("{note: form.note.value}", actions)
+        self.assertIn("/${act}`", actions)
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        self.assertIn("Reopened as ${esc(job.reopened_to)}", card)
+
     def test_dashboard_hides_approve_for_obsolete(self):
         m = re.search(r"canApprove = [^;]*/\^\(([^)]*)\)/", DASHBOARD.read_text())
         self.assertIsNotNone(m)
@@ -527,6 +544,15 @@ class ContractTest(unittest.TestCase):
                        'aria-valuenow="${pct}"', 'aria-label="Estimated progress"', 'title="~${pct}% (estimate)"',
                        "width:${pct}%"):
             self.assertIn(phrase, card, phrase)
+
+    def test_dashboard_viewer_shows_job_title(self):
+        text = DASHBOARD.read_text()
+        dialog = next(l for l in text.splitlines() if '<dialog id="viewer"' in l)
+        self.assertIn('aria-labelledby="viewerTitle"', dialog)
+        self.assertNotIn('aria-label="Job files"', dialog)
+        self.assertLess(dialog.index('id="viewerTitle"'), dialog.index('id="tabs"'))
+        opener = text[text.index("function open(job)"):text.index("function termForm")]
+        self.assertIn('$("viewerTitle").textContent = job.title || job.id;', opener)
 
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()

@@ -116,6 +116,28 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {job_id}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 400)  # already claimed
 
+    def test_reopen_endpoint_starts_new_job(self):
+        old = self.serve.board.cmd_new(self.root, "Reopen source")
+        self.serve.board.cmd_set(self.root, old, ["stage=done"])
+        code, out = self.req("POST", f"/api/p/repo/jobs/{old}/reopen", {"note": "Still broken"})
+        self.assertEqual(code, 202, out)
+        new = out["id"]
+        self.assertEqual(out, {"id": new, "reopened_from": old})
+        self.assertTrue(new.endswith("-reopen-" + old.split("-")[0] + "-still-broken"))
+        self.assertTrue((self.root / "jobs" / new / "feature.md").read_text().startswith("Still broken\nReopened from "))
+        self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {new}" == a for c in self.calls() for a in c)))
+
+    def test_reopen_endpoint_rejects_bad_requests(self):
+        live = self.serve.board.cmd_new(self.root, "Not finished")
+        done = self.serve.board.cmd_new(self.root, "Finished")
+        self.serve.board.cmd_set(self.root, done, ["stage=done"])
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            for job_id, body in ((live, {"note": "x"}), (done, {}), (done, {"note": "  "})):
+                self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/reopen", body)[0], 400, (job_id, body))
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{done}/reopen", {"note": "once"})[0], 202)
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{done}/reopen", {"note": "twice"})[0], 400)
+        self.assertEqual(spawn.call_count, 1)
+
     def backlog_index(self, text):
         self.serve.board.backlog_op(self.root, "add", text=text)
         return len(self.serve.board.backlog_items(self.root)) - 1
