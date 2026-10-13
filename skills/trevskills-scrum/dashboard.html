@@ -426,13 +426,14 @@ function renderSkills() {
 }
 
 async function addSkill(skill, btn) {
+  if (btn.disabled) return;  // already pending: one POST per button
   const name = $("agDetail").dataset.agent;
-  $("agError").textContent = ""; btn.disabled = true;
+  $("agError").textContent = ""; btn.disabled = true; btn.textContent = "Adding…";
   try {
     const updated = await post(`api/agents/${enc(name)}/skills`, {skill});
     agents = agents.map(x => x.name === name ? updated : x);
     renderFlow(); showAgents(name);
-  } catch (err) { btn.disabled = false; $("agError").textContent = err.message; }
+  } catch (err) { btn.disabled = false; btn.textContent = skill; $("agError").textContent = err.message; }
 }
 
 $("agentsBtn").addEventListener("click", async () => {
