@@ -121,7 +121,9 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 #aiEdit{display:grid;gap:8px}
 #aiText{width:100%;min-height:50dvh;font:13px/1.5 ui-monospace,monospace}
 #aiEdit div{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-#aiEdit .btn{min-height:44px;min-width:44px}
+#aiEdit .btn,.audit .btn{min-height:44px;min-width:44px}
+#aiList h3{font-size:13px;margin:10px 0 0}
+.node.audit{justify-content:flex-start}.audit .acts{margin-left:auto;display:flex;align-items:center;gap:8px}
 @media (max-width:640px){#agents,#aiSettings{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article{padding-inline:12px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
@@ -559,6 +561,7 @@ const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "
 const AI_LOADING = '<p class="empty">loading…</p>';
 let aiData = null, aiCat = "", aiItem = null;  // aiItem: the editable item on screen, with its last saved version
 let aiFindings = null;  // the last Security scan; it covers every scope, so a scope change keeps it
+let aiAudit = null, aiOff = new Set();  // the current scope's audit, and rows Disabled on this visit (they offer Undo)
 const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
 const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
     <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
@@ -567,8 +570,10 @@ const aiRow = it => `<button class="node${it.status === "overridden" ? " over" :
 function renderAi() {
   $("aiBack").hidden = true;
   $("aiCats").innerHTML = aiData.categories.map(c => `<button type="button" data-cat="${esc(c.key)}" aria-pressed="${c.key === aiCat}"><span>${esc(c.label)}</span><span>${c.count}</span></button>`).join("")
-    + `<button type="button" data-cat="security" aria-pressed="${aiCat === "security"}" data-agent-hint="Scans every scope's config files for risky hooks, allow rules, skills and MCP secrets. Reads files only."><span>Security</span><span>${aiFindings ? aiFindings.length : ""}</span></button>`;
+    + `<button type="button" data-cat="security" aria-pressed="${aiCat === "security"}" data-agent-hint="Scans every scope's config files for risky hooks, allow rules, skills and MCP secrets. Reads files only."><span>Security</span><span>${aiFindings ? aiFindings.length : ""}</span></button>`
+    + `<button type="button" data-cat="audit" aria-pressed="${aiCat === "audit"}" data-agent-hint="Usage, always-loaded tokens and problems per item, with a Keep / Improve / Retire / Merge verdict. Disable flips one settings key and can be undone."><span>Audit</span><span>${aiAudit ? aiAudit.rows.length : ""}</span></button>`;
   if (aiCat === "security") return renderFindings();
+  if (aiCat === "audit") return renderAudit();
   const cat = aiData.categories.find(c => c.key === aiCat);
   $("aiList").innerHTML = cat.items.map(aiRow).join("") || '<p class="empty">None</p>';
 }
@@ -576,17 +581,18 @@ function renderAi() {
 async function aiLoadScope() {
   const sid = $("aiScope").value;
   $("aiError").textContent = ""; $("aiBack").hidden = true; $("aiList").innerHTML = AI_LOADING;
+  aiAudit = null; aiOff.clear();
   const data = await getJson(`api/ai-settings?scope=${enc(sid)}`, null);
   if ($("aiScope").value !== sid) return;  // a newer scope pick is already loading
   if (!data) return aiFail();
   aiData = data;
-  if (aiCat !== "security" && !aiData.categories.some(c => c.key === aiCat)) aiCat = aiData.categories[0].key;
+  if (!["security", "audit"].includes(aiCat) && !aiData.categories.some(c => c.key === aiCat)) aiCat = aiData.categories[0].key;
   renderAi();
 }
 
 $("aiBtn").addEventListener("click", async () => {
   $("aiError").textContent = ""; $("aiScope").innerHTML = ""; $("aiCats").innerHTML = ""; $("aiBack").hidden = true;
-  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = ""; aiFindings = null;
+  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = ""; aiFindings = null; aiAudit = null; aiOff.clear();
   $("aiSettings").showModal();
   const scopes = await getJson("api/ai-settings", null);
   if (!scopes) return aiFail();
@@ -602,6 +608,7 @@ $("aiCats").addEventListener("click", e => {
   if (!b || !aiData) return;
   aiCat = b.dataset.cat; $("aiError").textContent = "";
   if (aiCat === "security") aiFindings = null;  // every click runs a fresh scan
+  aiAudit = null; aiOff.clear();  // leaving or re-entering Audit reloads it and drops Undo
   renderAi();
 });
 const findingRow = f => `<div class="node finding"><span class="chip ${f.severity === "low" ? "pending" : esc(f.severity)}">${esc(f.severity)}</span>
@@ -618,6 +625,43 @@ async function renderFindings() {
   aiFindings = data.findings;
   renderAi();
 }
+const AUDIT_GROUPS = ["Retire", "Merge", "Improve", "Keep"];
+const auditFlag = f => f.startsWith("overlap:") ? `overlap: ${aiAudit.rows.find(r => r.id === f.slice(8))?.name ?? "?"}` : f;
+const auditRow = r => `<div class="node audit"><b>${esc(r.name)}</b><span><span class="skill">${esc(r.scope)}</span> ${esc(r.category)}</span>
+    <span>uses ${r.lifetime ?? "—"} · recent ${r.recent ?? "—"} · ${r.tokens == null ? "—" : `~${r.tokens}`} tok</span>${r.flags.length ? `<span>${esc(r.flags.map(auditFlag).join(", "))}</span>` : ""}
+    <span class="acts">${aiOff.has(r.id) ? `<span class="note" role="status">Disabled</span><button class="btn" type="button" data-toggle="enable" data-row="${esc(r.id)}">Undo</button>`
+      : r.disable ? `<button class="btn" type="button" data-toggle="disable" data-row="${esc(r.id)}">Disable</button>` : ""}</span>
+    <span class="path">${esc(r.verdict.startsWith("Merge") ? `${r.verdict}. ${r.reason}` : r.reason)}</span></div>`;
+async function renderAudit() {
+  if (aiAudit) {
+    $("aiList").innerHTML = AUDIT_GROUPS.map(g => [g, aiAudit.rows.filter(r => r.verdict.split(" ")[0] === g)]).filter(([, rows]) => rows.length)
+      .map(([g, rows]) => `<h3>${g} (${rows.length})</h3>${rows.map(auditRow).join("")}`).join("") || '<p class="empty">Nothing to audit</p>';
+    return;
+  }
+  const sid = $("aiScope").value;
+  $("aiError").textContent = ""; $("aiList").innerHTML = AI_LOADING;
+  const data = await getJson(`api/ai-settings/audit?scope=${enc(sid)}`, null, {});
+  if (aiCat !== "audit" || $("aiScope").value !== sid || !$("aiBack").hidden || aiAudit) return;  // moved on while loading
+  if (!data?.rows) { $("aiList").innerHTML = ""; $("aiError").textContent = data ? STALE : "Couldn't run the audit. Is serve.py running?"; return; }
+  aiAudit = data;
+  renderAi();
+}
+$("aiList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-toggle]");
+  if (!b) return;
+  const audit = aiAudit, id = b.dataset.row, on = b.dataset.toggle === "enable";
+  $("aiError").textContent = ""; b.disabled = true;
+  try {
+    const row = await post(`api/ai-settings/${b.dataset.toggle}`, {id});
+    if (aiAudit !== audit) return;  // left the tab or changed scope meanwhile
+    audit.rows = audit.rows.map(r => r.id === id ? row : r);
+    on ? aiOff.delete(id) : aiOff.add(id);
+    renderAudit();
+  } catch {
+    if (aiAudit !== audit) return;
+    b.disabled = false; $("aiError").textContent = "Couldn't change this setting. Is serve.py running?";
+  }
+});
 $("aiList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-id]");
   if (!b) return;

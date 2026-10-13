@@ -7,9 +7,11 @@ files, and a small JSON API so the buttons can edit backlogs and start Claude ru
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
-AI-Settings is read-only except for Markdown instruction files (CLAUDE.md, CLAUDE.local.md, rules, memory): each save
-is backed up to <CLAUDE_HOME>/backups/ai-settings/ first and can be undone. Its Security scan only reads files: it never
-runs a hook, fetches anything or connects to an MCP server, and its findings never echo a config value.
+AI-Settings is read-only except for Markdown instruction files (CLAUDE.md, CLAUDE.local.md, rules, memory) and two
+settings keys the Audit tab's Disable/Enable flips: skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
+settings.json or a project's settings.local.json. Every write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
+Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
+never echo a config value, and the Audit treats session transcripts as data it only counts.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timezone
@@ -736,6 +738,243 @@ def scan_security():
     return sorted(findings, key=lambda f: (SEVERITY[f["severity"]], f["file"], f["line"] or 0))
 
 
+# --- AI-Settings audit: usage, always-loaded tokens, flags and a verdict per item. Transcripts are untrusted data: each
+# line is only json.loads'ed and its names are looked up against inventory names; no transcript text is ever returned.
+# Fixed on purpose (no knobs): 50 newest transcripts, 2000 ms slow hook, 50% shared 5-grams, 1536-char listing cut-off.
+AUDITED = ("skills", "commands", "agents", "rules", "config", "hooks", "plugins", "mcp")
+RECENT_FILES, SLOW_MS, OVERLAP, LISTING_CUT, SHINGLE = 50, 2000, 0.5, 1536, 5
+COMMAND_TAG = re.compile(r"<command-name>/([^<\s]+)</command-name>")
+SAFE_NAME = re.compile(r"[^\"\\{}\[\]\x00-\x1f\x7f]+")  # a name we'd write as a settings key
+FLAG_TEXT = {
+    "weak-description": "Its description has no early \"Use when\" trigger.",
+    "same-name": "The same name exists at user and project scope.",
+    "overlap": "Most of its text also appears in another item.",
+    "slow-hook": "A run took 2 seconds or more.",
+    "unused": "No uses in the last 50 sessions or ever.",
+    "disabled": "Already turned off.",
+}
+
+
+def frontmatter(text):
+    """{key: value} from a leading --- block; indented lines continue the previous key, quotes and >/| are dropped."""
+    m, meta, key = FRONTMATTER.match(text), {}, None
+    for line in (m.group(1) if m else "").splitlines():
+        if line[:1].isspace() and key:
+            meta[key] = (meta[key] + " " + line.strip()).strip()
+        elif ":" in line:
+            key, _, val = (x.strip() for x in line.partition(":"))
+            meta[key] = "" if val in (">", "|", ">-", "|-") else val.strip("\"'")
+    return meta
+
+
+def lines_of(files):
+    """Every line of every file, streamed; an unreadable file is skipped."""
+    for f in files:
+        try:
+            with open(f, errors="replace") as fh:
+                yield from fh
+        except OSError:
+            continue
+
+
+def transcript_counts():
+    """Counters over the newest RECENT_FILES transcripts. Keys are raw transcript strings and are only ever looked up."""
+    c = {k: {} for k in ("skill", "command", "agent", "tool", "hook")}
+    slow = {}
+    bump = lambda kind, key: isinstance(key, str) and c[kind].__setitem__(key, c[kind].get(key, 0) + 1)
+    try:
+        files = sorted(claude_home().glob("projects/*/*.jsonl"), key=lambda p: p.stat().st_mtime)[-RECENT_FILES:]
+    except OSError:
+        files = []
+    for line in lines_of(files):
+        try:
+            r = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(r, dict):
+            continue
+        msg, att = as_dict(r.get("message")), as_dict(r.get("attachment"))
+        content = msg.get("content")
+        if r.get("type") == "assistant" and isinstance(content, list):
+            for b in map(as_dict, content):
+                if b.get("type") != "tool_use" or not isinstance(b.get("name"), str):
+                    continue
+                inp = as_dict(b.get("input"))
+                if b["name"] == "Skill":
+                    bump("skill", inp.get("skill"))
+                elif b["name"] in ("Task", "Agent"):
+                    bump("agent", inp.get("subagent_type"))
+                elif b["name"].startswith("mcp__"):
+                    bump("tool", b["name"])
+        elif r.get("type") == "user":
+            texts = [content] if isinstance(content, str) else \
+                [as_dict(b).get("text") for b in content] if isinstance(content, list) else []
+            for t in texts:
+                for name in COMMAND_TAG.findall(t) if isinstance(t, str) else []:
+                    bump("command", name)
+        if str(att.get("type", "")).startswith("hook_") and isinstance(att.get("command"), str):
+            bump("hook", att["command"])
+            ms = att.get("durationMs")
+            if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+                slow[att["command"]] = max(slow.get(att["command"], 0), ms)
+    return c, slow
+
+
+def shingles(text):
+    words = re.findall(r"\w+", text.lower())
+    return {tuple(words[i:i + SHINGLE]) for i in range(len(words) - SHINGLE + 1)}
+
+
+def merged_settings(root, key):
+    """`key` merged over user < project < local < managed settings files (later wins)."""
+    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    files = [claude_home() / "settings.json"]
+    files += [root / ".claude" / "settings.json", root / ".claude" / "settings.local.json"] if root else []
+    out = {}
+    for f in files + [managed / "managed-settings.json"]:
+        out.update(as_dict(as_dict(load_json(f)).get(key)))
+    return out
+
+
+def audit(scope_id):
+    """{scope, rows} for one scope, or None for an unknown scope. See the spec table for every rule."""
+    inv = ai_inventory(scope_id) if isinstance(scope_id, str) else None
+    if inv is None:
+        return None
+    root = ai_scopes(with_mac=scope_id.startswith("m:"))[scope_id][2]
+    cj = as_dict(load_json(user_home() / ".claude.json"))
+    skill_use, plugin_use = as_dict(cj.get("skillUsage")), as_dict(cj.get("pluginUsage"))
+    overrides, plugins_on = merged_settings(root, "skillOverrides"), merged_settings(root, "enabledPlugins")
+    counts, slow = transcript_counts()
+    items = [(cat, it) for cat in AUDITED for it in inv[cat]
+             if cat != "config" or it["name"] in ("CLAUDE.md", "CLAUDE.local.md")]
+    texts = {}
+
+    def text(it):
+        if it["path"] not in texts:
+            try:
+                texts[it["path"]] = Path(it["path"]).read_text(errors="replace")
+            except OSError:
+                texts[it["path"]] = ""
+        return texts[it["path"]]
+
+    def usage(n):
+        return as_dict(n).get("usageCount") if isinstance(as_dict(n).get("usageCount"), int) else 0
+
+    scopes_by_name = {}
+    for cat, it in items:
+        scopes_by_name.setdefault((cat, it["name"]), set()).add(it["scope"])
+    rows = []
+    for cat, it in items:
+        name, flags = it["name"], []
+        lifetime = recent = tokens = None
+        if cat in ("skills", "commands", "agents"):
+            meta = frontmatter(text(it))
+            desc = " ".join(meta[k] for k in ("description", "when_to_use") if meta.get(k))
+            tokens = -(-(len(meta.get("name") or name) + len(desc)) // 4)
+            at = desc.lower().find("use when")
+            if at < 0 or at >= LISTING_CUT:
+                flags.append("weak-description")
+            recent = counts["command"].get(name, 0)
+            if cat == "skills":
+                lifetime, recent = usage(skill_use.get(name)), recent + counts["skill"].get(name, 0)
+            elif cat == "agents":
+                recent = counts["agent"].get(name, 0)
+        elif cat in ("rules", "config"):
+            tokens = -(-len(text(it)) // 4)
+        elif cat == "mcp":
+            recent = sum(n for tool, n in counts["tool"].items() if tool.startswith(f"mcp__{name}__"))
+        elif cat == "hooks":
+            hooks = as_dict(it["_entry"]).get("hooks")
+            cmds = {h["command"] for h in hooks if isinstance(as_dict(h).get("command"), str)} if isinstance(hooks, list) else set()
+            recent = sum(counts["hook"].get(cmd, 0) for cmd in cmds)
+            if any(slow.get(cmd, 0) >= SLOW_MS for cmd in cmds):
+                flags.append("slow-hook")
+        if cat in NAMED and {"user", "project"} <= scopes_by_name[(cat, name)]:
+            flags.append("same-name")
+        rows.append({"id": it["id"], "name": name, "category": cat, "scope": it["scope"], "lifetime": lifetime,
+                     "recent": recent, "tokens": tokens, "flags": flags, "_it": it})
+    by_id = {r["id"]: r for r in rows}
+    for r in rows:  # a plugin is the sum of its skills
+        if r["category"] == "plugins":
+            prefix = r["name"].split("@")[0] + ":"
+            mine = [s for s in rows if s["category"] == "skills" and s["name"].startswith(prefix)]
+            r["lifetime"] = usage(plugin_use.get(r["name"]))
+            r["recent"] = sum(s["recent"] for s in mine)
+            r["tokens"] = sum(s["tokens"] for s in mine)
+    # ponytail: O(n²) set intersections; fine for a few hundred items, index shingles if inventories get huge
+    grams = {r["id"]: shingles(text(r["_it"])) for r in rows if r["category"] in ("skills", "rules", "config")}
+    real = {i: os.path.realpath(by_id[i]["_it"]["path"]) for i in grams}
+    for i, g in grams.items():
+        for j, h in grams.items():
+            if i != j and g and real[i] != real[j] and len(g & h) >= OVERLAP * len(g):
+                by_id[i]["flags"].append(f"overlap:{j}")
+    for r in rows:
+        if (r["category"] == "skills" and overrides.get(r["name"]) == "off") or \
+                (r["category"] == "plugins" and plugins_on.get(r["name"]) is False):
+            r["flags"].append("disabled")
+        if r["category"] not in ("rules", "config") and r["recent"] == 0 and not r["lifetime"]:
+            r["flags"].append("unused")
+    merge_key = lambda r: (r["recent"] or 0, -(r["tokens"] or 0), r["name"], r["id"])  # smaller is merged
+    for r in rows:
+        into = next((by_id[f[8:]] for f in r["flags"] if f.startswith("overlap:") and merge_key(r) < merge_key(by_id[f[8:]])), None)
+        improve = [f for f in ("weak-description", "same-name", "slow-hook") if f in r["flags"]]
+        if "unused" in r["flags"]:
+            r["verdict"], r["reason"] = "Retire", FLAG_TEXT["unused"]
+        elif into:
+            r["verdict"], r["reason"] = f"Merge into {into['name']}", f"Most of its text also appears in {into['name']}."
+        elif improve:
+            r["verdict"], r["reason"] = "Improve", " ".join(FLAG_TEXT[f] for f in improve)
+        else:
+            r["verdict"], r["reason"] = "Keep", "No problems found."
+        r["disable"] = (r["verdict"] == "Retire" and r["category"] in ("skills", "plugins") and r["scope"] in ("user", "project")
+                        and "disabled" not in r["flags"] and bool(SAFE_NAME.fullmatch(r["name"])))
+        del r["_it"]
+    return {"scope": scope_id, "rows": rows}
+
+
+def ai_toggle(item_id, enable):
+    """Disable or Enable one user/project skill or plugin by writing one key of one settings file. Returns (code, body)."""
+    scope_id = item_id.split("|", 1)[0] if isinstance(item_id, str) and "|" in item_id else None
+    data = audit(scope_id) if scope_id else None
+    row = next((r for r in (data or {}).get("rows", []) if r["id"] == item_id), None)
+    if not row:
+        return 404, {"error": "no such item"}
+    cat, name = row["category"], row["name"]
+    if cat not in ("skills", "plugins") or row["scope"] not in ("user", "project") or not SAFE_NAME.fullmatch(name):
+        return 403, {"error": "only a user or project skill, or a plugin, can be turned off"}
+    root = ai_scopes(with_mac=scope_id.startswith("m:"))[scope_id][2]
+    target = claude_home() / "settings.json"
+    if cat == "skills" and row["scope"] == "project":
+        target = root / ".claude" / "settings.local.json"
+    elif cat == "plugins" and root and as_dict(as_dict(load_json(root / ".claude" / "settings.json")).get("enabledPlugins")).get(name) is True:
+        target = root / ".claude" / "settings.local.json"  # a checked-in project enable beats a user-level false
+    try:
+        settings = json.loads(target.read_text()) if target.exists() else {}
+    except (OSError, ValueError):
+        settings = None
+    key = "skillOverrides" if cat == "skills" else "enabledPlugins"
+    if not isinstance(settings, dict) or not isinstance(settings.get(key, {}), dict):
+        return 409, {"error": "settings file isn't a JSON object"}
+    try:
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}\n")
+        ai_backup(target)
+        if cat == "plugins":
+            settings.setdefault(key, {})[name] = enable
+        elif not enable:
+            settings.setdefault(key, {})[name] = "off"
+        elif name in settings.get(key, {}):
+            del settings[key][name]
+            if not settings[key]:
+                del settings[key]
+        target.write_text(json.dumps(settings, indent=2) + "\n")  # in place, so a symlinked settings file keeps its link
+    except OSError as e:
+        return 500, {"error": str(e)}
+    return 200, next(r for r in audit(scope_id)["rows"] if r["id"] == item_id)
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -784,6 +1023,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such scope"})
         if path == "/api/ai-settings/security":
             return self.send_json(200, {"findings": scan_security()})
+        if path == "/api/ai-settings/audit":
+            data = audit(parse_qs(urlparse(self.path).query).get("scope", [""])[0])
+            return self.send_json(200, data) if data else self.send_json(404, {"error": "no such scope"})
         if path == "/api/ai-settings/item":
             data = ai_settings_item(parse_qs(urlparse(self.path).query).get("id", [""])[0])
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such item"})
@@ -830,6 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_settings_save(body.get("id"), body.get("content"), body.get("version"))
             elif path == "/api/ai-settings/undo":
                 code, obj = ai_settings_undo(body.get("id"))
+            elif path in ("/api/ai-settings/disable", "/api/ai-settings/enable"):
+                code, obj = ai_toggle(body.get("id"), path.endswith("/enable"))
             else:
                 m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort|terminal))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
