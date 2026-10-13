@@ -114,9 +114,13 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .node .chip{color:#fff}.node .chip.pending{color:var(--muted)}
 .node .path{flex-basis:100%;overflow-wrap:anywhere}
 .node.over{opacity:.55}
+#aiEdit{display:grid;gap:8px}
+#aiText{width:100%;min-height:50dvh;font:13px/1.5 ui-monospace,monospace}
+#aiEdit div{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#aiEdit .btn{min-height:44px;min-width:44px}
 @media (max-width:640px){#agents,#aiSettings{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article{padding-inline:12px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
-  #aiCats button{flex:none}#aiScope{font-size:16px}
+  #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}}
 </style>
@@ -167,7 +171,7 @@ const enc = encodeURIComponent;
 const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }};
 const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
-  .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`); return data; });
+  .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), {status: r.status}); return data; });
 // A 404 from one of our own routes means serve.py predates this dashboard.html; callers pass STALE as `missing` to say so.
 const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
@@ -509,10 +513,12 @@ $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks th
   if (b) addSkill(b.dataset.skill, b);
 });
 
-// AI-Settings: read-only. Items come from api/ai-settings; precedence is managed > local > project > user.
+// AI-Settings: items come from api/ai-settings; precedence is managed > local > project > user. Only `editable` items
+// (Markdown CLAUDE.md, CLAUDE.local.md, rules, memory) get a textarea; serve.py backs up every save, and Undo restores
+// the newest backup. Everything else is a read-only <pre>.
 const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "This Mac"]];
 const AI_LOADING = '<p class="empty">loading…</p>';
-let aiData = null, aiCat = "";
+let aiData = null, aiCat = "", aiItem = null;  // aiItem: the editable item on screen, with its last saved version
 const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
 const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
     <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
@@ -561,8 +567,45 @@ $("aiList").addEventListener("click", async e => {
   const it = await getJson(`api/ai-settings/item?id=${enc(b.dataset.id)}`, null);
   if ($("aiScope").value !== sid || $("aiBack").hidden) return;  // moved on while loading
   if (!it) return aiFail();
+  aiItem = it.editable ? it : null;
   $("aiList").innerHTML = `<dl class="facts"><dt>Name</dt><dd><b>${esc(it.name)}</b></dd><dt>Scope</dt><dd><span class="skill">${esc(it.scope)}</span></dd>
-    <dt>Path</dt><dd>${esc(it.path)}</dd></dl><pre>${esc(it.content)}</pre>`;
+    <dt>Path</dt><dd>${esc(it.path)}</dd></dl>${it.editable ? `<form id="aiEdit">
+    <textarea id="aiText" spellcheck="false" aria-label="${esc(it.name)} content">${esc(it.content)}</textarea>
+    <div><button class="btn primary" id="aiSave" type="submit" disabled>Save</button>
+    <button class="btn" id="aiUndo" type="button" hidden>Undo</button><span class="note" id="aiStatus" role="status"></span></div></form>`
+    : `<pre>${esc(it.content)}</pre>`}`;
+  if (aiItem) aiItem.baseline = $("aiText").value;  // the textarea's own copy: browsers turn \r\n into \n
+});
+// Save and Undo both answer with the fresh item; a reply for an item the user already left is dropped.
+async function aiWrite(route, body, busy, fail) {
+  const form = $("aiEdit"), item = aiItem;
+  $("aiError").textContent = ""; $("aiStatus").textContent = busy; $("aiSave").disabled = $("aiUndo").disabled = true;
+  try {
+    const it = await post(`api/ai-settings/${route}`, {id: item.id, ...body});
+    if (!form.isConnected) return;
+    aiItem = Object.assign(it, {baseline: it.content.replace(/\r\n?/g, "\n")});
+    return true;
+  } catch (err) {
+    if (!form.isConnected) return;
+    $("aiStatus").textContent = "";
+    $("aiError").textContent = err.status === 409 ? "This file changed on disk. Go back and reopen it." : fail;
+  } finally {
+    if (form.isConnected) { $("aiSave").disabled = $("aiText").value === aiItem.baseline; $("aiUndo").disabled = false; }
+  }
+}
+$("aiList").addEventListener("input", e => { if (e.target.id === "aiText") $("aiSave").disabled = e.target.value === aiItem.baseline; });
+$("aiList").addEventListener("submit", async e => {
+  e.preventDefault();
+  if (await aiWrite("save", {content: $("aiText").value, version: aiItem.version}, "Saving…", "Couldn't save. Is serve.py running?")) {
+    $("aiStatus").textContent = "Saved"; $("aiUndo").hidden = false;
+  }
+});
+$("aiList").addEventListener("click", async e => {
+  if (e.target.id !== "aiUndo") return;
+  if (await aiWrite("undo", {}, "Undoing…", "Couldn't undo. Is serve.py running?")) {
+    $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true;
+    $("aiStatus").textContent = "Undone"; $("aiUndo").hidden = true;
+  }
 });
 
 $("board").addEventListener("click", e => {
