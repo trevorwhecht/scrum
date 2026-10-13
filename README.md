@@ -4,12 +4,15 @@
 
 ```
 feature → spec-writer → builder → check gate → security · ux · ui · code → approver
-                           ▲          (tests/lint/build)   (wait for all 4)    │
-                           └──────── CHANGES, round < 2 ◄──────────────────────┤
+                           ▲          (tests/lint/build)   (wait for all 4;     │
+                           │                               code runs codex too) │
+                           └──────── CHANGES, round < 2 ◄───────────────────────┤
                                                     APPROVE → PR → CI → squash-merge
                                                     REWORK  → one more round (once)
                                                     ESCALATE → needs-human (hard stops only)
 ```
+
+**Codex as a second model family, read-only only.** `scrum-review-code` runs `codex exec review` in the background once per round while it does its own review, confirms each finding, and tags the ones it keeps `(codex)`. Codex never edits, never spawns agents, and adds no step: if it fails, or hasn't finished 10 minutes after it started, the review notes `codex: skipped`, which never passes or fails the round. Both engines share one rubric, `codex/AGENTS.md`.
 
 **Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The Opus approver decides everything else.
 
@@ -19,6 +22,8 @@ feature → spec-writer → builder → check gate → security · ux · ui · c
 brew install gh && gh auth login   # needed to open and merge PRs
 ./install.sh                       # links skills/trevskills-scrum and agents/* into ~/.claude
 ```
+
+`install.sh` also links `codex/AGENTS.md` to `~/.codex/AGENTS.md` (or `$CODEX_HOME/AGENTS.md`), the review rules Codex reads. It refuses to replace a real file there.
 
 ## Use (in any repo, from its main checkout)
 
@@ -49,4 +54,5 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 
 - Agents: `agents/scrum-*.md`. A repo can override one with its own `.claude/agents/<same name>.md`.
 - The loop: `skills/trevskills-scrum/SKILL.md`
+- Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
