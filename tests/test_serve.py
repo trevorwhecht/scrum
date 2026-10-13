@@ -417,6 +417,120 @@ class AiSettingsTest(unittest.TestCase):
                     self.item(it["id"])
         self.assertEqual(snap(), before)
 
+    # --- page 2: saving Markdown instruction files, with backup and undo ---
+
+    def post(self, path, body, headers=None):
+        h = {"Content-Type": "application/json"} | (headers or {})
+        r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}{path}", method="POST", headers=h,
+                                   data=json.dumps(body).encode())
+        try:
+            with urllib.request.urlopen(r) as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code, None
+
+    def backups(self):
+        d = self.user / "backups" / "ai-settings"
+        return sorted(d.iterdir()) if d.is_dir() else []
+
+    def plant_markdown(self):
+        """{label: (path, item)} for a user CLAUDE.md, a project CLAUDE.local.md, a user rule and a memory file."""
+        (self.user / "rules").mkdir()
+        (self.user / "projects" / "p" / "memory").mkdir(parents=True)
+        files = {"claude": self.user / "CLAUDE.md", "local": self.reg / "CLAUDE.local.md",
+                 "rule": self.user / "rules" / "x.md", "memory": self.user / "projects" / "p" / "memory" / "m.md"}
+        for label, f in files.items():
+            f.write_text(f"old {label}\r\nline")
+        items = [i for c in self.scope("r:reg")[0].values() for i in c["items"]]
+        return {label: (f, next(i for i in items if i["path"] == str(f))) for label, f in files.items()}
+
+    def save(self, it, content, version=None):
+        return self.post("/api/ai-settings/save", {"id": it["id"], "content": content,
+                                                    "version": version or self.item(it["id"])[1]["version"]})
+
+    def test_save_writes_file_and_backup(self):
+        for label, (f, it) in self.plant_markdown().items():
+            self.assertTrue(it["editable"], label)
+            before, old = len(self.backups()), self.item(it["id"])[1]
+            self.assertTrue(old["editable"])
+            code, data = self.save(it, f"new {label}")
+            self.assertEqual((code, data["content"], f.read_text()), (200, f"new {label}", f"new {label}"), label)
+            self.assertNotEqual(data["version"], old["version"])
+            self.assertEqual(len(self.backups()), before + 1, label)
+            newest = [b for b in self.backups() if b.name.endswith(urllib.parse.quote(str(f), safe=""))]
+            self.assertEqual(newest[-1].read_bytes(), f"old {label}\r\nline".encode(), label)
+
+    def test_save_follows_symlinked_rule(self):
+        (self.user / "rules").mkdir()
+        target = self.reg / "shared.md"
+        target.write_text("old")
+        (self.user / "rules" / "s.md").symlink_to(target)
+        it = next(i for i in self.scope("global")[0]["rules"]["items"] if i["name"] == "s")
+        self.assertEqual(self.save(it, "new")[0], 200)
+        self.assertTrue((self.user / "rules" / "s.md").is_symlink())
+        self.assertEqual(target.read_text(), "new")
+
+    def test_save_rejects_non_editable_unknown_and_crafted_ids(self):
+        (self.user / "skills" / "s").mkdir(parents=True)
+        (self.user / "skills" / "s" / "SKILL.md").write_text("x")
+        (self.user / "agents").mkdir()
+        (self.user / "agents" / "a.md").write_text("x")
+        (self.user / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
+        (self.reg / ".claude" / "settings.local.json").write_text("{}")
+        (self.user / "plugins").mkdir()
+        (self.user / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"p@x": []}}))
+        (self.managed / "managed-settings.json").write_text("{}")
+        planted = self.plant_markdown()
+        snap = lambda: {p: p.stat().st_mtime_ns for p in [*self.home.rglob("*"), *self.managed.rglob("*")]}
+        before = snap()
+        cats, _ = self.scope("r:reg")
+        for cat in ("settings", "hooks", "mcp", "plugins", "skills", "commands", "agents"):
+            self.assertTrue(cats[cat]["items"], cat)
+            for it in cats[cat]["items"]:
+                self.assertFalse(it["editable"], it["id"])
+                self.assertEqual(self.save(it, "pwned")[0], 403, it["id"])
+                self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 403, it["id"])
+        for bad in ("nope", "", None, 5, "global|config|user|/etc/passwd|x", f"r:reg|config|local|{self.home / '.claude.json'}|x",
+                    f"global|rules|user|{self.user}/rules/../../.claude.json|x"):
+            self.assertEqual(self.post("/api/ai-settings/save", {"id": bad, "content": "pwned", "version": "1"})[0], 404, bad)
+            self.assertEqual(self.post("/api/ai-settings/undo", {"id": bad})[0], 404, bad)
+        _, it = planted["rule"]
+        for content in (None, 5, ["x"], {"a": 1}):
+            self.assertEqual(self.save(it, content)[0], 400, content)
+        self.assertEqual(snap(), before)
+        self.assertEqual(self.backups(), [])
+
+    def test_save_conflict_when_file_changed(self):
+        f, it = self.plant_markdown()["claude"]
+        version = self.item(it["id"])[1]["version"]
+        f.write_text("changed by an agent")
+        os.utime(f, ns=(int(version) + 5_000_000, int(version) + 5_000_000))
+        self.assertEqual(self.save(it, "mine", version)[0], 409)
+        self.assertEqual(f.read_text(), "changed by an agent")
+        self.assertEqual(self.backups(), [])
+
+    def test_undo_restores_last_backup(self):
+        planted = self.plant_markdown()
+        f, it = planted["rule"]
+        self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 404)
+        self.assertEqual(self.save(planted["claude"][1], "other file")[0], 200)  # another path's backup is ignored
+        self.assertEqual(self.save(it, "new")[0], 200)
+        code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+        self.assertEqual((code, data["content"], f.read_bytes()), (200, "old rule\r\nline", b"old rule\r\nline"))
+        mine = [b for b in self.backups() if b.name.endswith(urllib.parse.quote(str(f), safe=""))]
+        self.assertEqual([b.read_bytes() for b in mine], [b"old rule\r\nline", b"new"])
+
+    def test_save_and_undo_need_json_and_localhost(self):
+        f, it = self.plant_markdown()["rule"]
+        version = self.item(it["id"])[1]["version"]
+        body = {"id": it["id"], "content": "pwned", "version": version}
+        for path in ("/api/ai-settings/save", "/api/ai-settings/undo"):
+            for headers in ({"Content-Type": "text/plain"}, {"Origin": "https://evil.example"}, {"Host": "evil.example"}):
+                self.assertEqual(self.post(path, body, headers)[0], 403, (path, headers))
+        self.assertEqual(f.read_bytes(), b"old rule\r\nline")
+        self.assertEqual(self.backups(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
