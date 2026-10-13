@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog (empty = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
@@ -19,11 +19,12 @@ from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("spec", "build", "check", "review", "approve", "merging", "done", "needs-human", "aborted")
-FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog")
+FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane")
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
-          "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$")}
+          "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$"),
+          "lane": re.compile(r"^(?:fast|standard|debug|epic)$")}  # no lane key = standard
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 

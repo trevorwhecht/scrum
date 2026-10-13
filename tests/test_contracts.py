@@ -182,6 +182,7 @@ class ContractTest(unittest.TestCase):
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertTrue("except" in line or "exception" in line, line)
         self.assertIn("Reviewer produced no output.", line)
+        self.assertIn("fast lane", line)
 
     def test_skill_uses_sonnet_approver_only_when_green(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -206,6 +207,42 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+
+    def test_spec_writer_documents_lane_line(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("Lane: fast|standard|debug|epic", "100", "3 files"):
+            self.assertIn(phrase, text, phrase)
+        self.assertLess(text.index("Hard stops:"), text.index("Lane:"))
+
+    def test_skill_reads_lane_from_spec(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        new_job = self.section(text, "## New job", "## Fast lane")
+        step = new_job[new_job.index("B abort $ID --reason"):new_job.index("git worktree add")]
+        for phrase in ("B set $ID lane=", "Lane:"):
+            self.assertIn(phrase, step, phrase)
+        self.assertRegex(step, r"`debug` or `epic`[^\n]*standard")
+
+    def test_skill_fast_lane_promotes(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Check gate")
+        for phrase in ("--numstat", "100", "3 files", "UI globs", "promoted.md", "lane=standard",
+                       "Skipped by orchestrator: fast lane.", "LANE=fast"):
+            self.assertIn(phrase, fast, phrase)
+        self.assertRegex(fast, r"never[^\n]*fast")
+
+    def test_skill_fast_lane_skips_approver(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Check gate")
+        for phrase in ("**Merge**", "no decision.md", "Fast lane: check gate + code review", "**Approve**"):
+            self.assertIn(phrase, fast, phrase)
+        for heading in ("## Check gate", "## Review (WAIT FOR ALL)"):
+            nxt = text.index("\n## ", text.index(heading) + 1)
+            self.assertIn("see **Fast lane**", text[text.index(heading):nxt], heading)
+
+    def test_code_reviewer_fast_lane_is_diff_only(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("LANE=fast", "codex: skipped — fast lane"):
+            self.assertIn(phrase, text, phrase)
 
     def test_dashboard_has_waiting_banner(self):
         self.assertIn("Waiting on you", DASHBOARD.read_text())

@@ -22,6 +22,8 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes.
 - If Codex errors, refuses, runs out of quota, times out, or writes no `codex-review.md`, write `codex: skipped — <reason>` under Notes. A skip is never a pass, and it never fails the round on its own: judge the round on your own review.
 
+**Fast lane.** When your prompt contains `LANE=fast`, read only spec.md, check.md, the diff, and the changed files the diff touches. Skip the Codex step entirely and write `codex: skipped — fast lane` under Notes. The output format and the blocking rules below are unchanged.
+
 **Look for:**
 - every acceptance criterion actually implemented and actually verified; run the tests yourself if in doubt
 - bugs and missing edge cases

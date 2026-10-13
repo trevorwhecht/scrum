@@ -106,6 +106,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    ```
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing"` and stop.
    3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
+   3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard>`. Set `fast` only when it says exactly `Lane: fast`, the `Hard stops:` line is `none`, and the `UI surface:` line is `no`. Set `standard` in every other case: the line is missing or malformed, it says `debug` or `epic` (those lanes don't exist yet, so they run as standard), `Hard stops:` is anything but `none`, or `UI surface:` is `yes`.
 4. **Worktree:**
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"
@@ -116,7 +117,31 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason="blocked: <first reason line>"` and stop.
 6. Continue at **Check gate**.
 
+## Fast lane
+
+Applies only while the job's `lane` on the board is `fast`. A job with no `lane`, or `lane=standard`, never reads this section. Same builder, same Check gate; then one diff-only code review and straight to Merge, with no approver.
+
+1. **Promotion (deterministic).** Promoting means running `B set $ID lane=standard` and appending `Promoted to standard: <trigger>` to `$F/jobs/$ID/promoted.md`; the job then continues on the standard path from where it is. A standard job is never set back to fast.
+   - **2nd check failure:** a fast job whose `check.md` says `CHECK: FAIL` for the 2nd time in a round is promoted (trigger `check failed twice`). The fix attempts in **Check gate** step 4 then carry on as standard.
+   - **After `CHECK: PASS`, before Review**, promote if any of these hold (trigger names the first one hit). This runs again on every round, including after the Merge **Conflicts** step sends the job back to the Check gate:
+     - `git -C "$WT" diff --numstat "$BASE"...HEAD` sums to more than 100 added+deleted lines, or any line shows `-` (a binary file);
+     - more than 3 files changed (exactly 100 lines or exactly 3 files stays fast);
+     - any changed file (`git -C "$WT" diff --name-only "$BASE"...HEAD`) matches the Merge schema guard regex `(^|/)prisma/(schema\.prisma|migrations/)|\.sql$` or `(^|/)\.env`;
+     - any changed file matches `UI globs` from `project.md` (matching rules are in First-run setup).
+2. **Review.** Run `B set $ID stage=review`. Write `round-$N/review-security.md`, `round-$N/review-ux.md` and `round-$N/review-ui.md` yourself, each containing exactly:
+   ```
+   VERDICT: PASS
+   Skipped by orchestrator: fast lane.
+   ```
+   Spawn only `scrum-review-code`, with the 5 lines (`ROUND=$N`), the line `LANE=fast`, and `Review this round. Write only your own review file.` Wait for it, then handle `B sync $ID` exactly as **Review** step 4.
+3. **Route:**
+   - `verdict` is `PASS`: go straight to **Merge**. Spawn no approver; there is no decision.md. The PR uses the no-Merge-summary fallback in Merge step 3 (job title, spec acceptance criteria as bullets), and the body line `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` is replaced by `Fast lane: check gate + code review. Spec and review: scrum/jobs/$ID/`. The schema guard still runs unchanged. With no decision.md, the `Restart:` line counts as `none`.
+   - `verdict` is `CHANGES` and `round < limit`: resume the builder as in **Review** step 5, run `B set $ID stage=build`, and go to **Check gate**. The job stays fast.
+   - `verdict` is `CHANGES` and `round >= limit`: go to **Approve**, as standard does.
+
 ## Check gate
+
+If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review).
 
 1. `N = round + 1` (round as stored on the board). Run `mkdir -p $F/jobs/$ID/round-$N`, then `B set $ID round=$N stage=check`.
 2. In `$WT`, run each of Test / Typecheck / Lint / Build from `project.md` that isn't `none`. Also run `git -C "$WT" diff --name-only "$BASE"...HEAD | grep -E '(^|/)\.env'`; any output is a failure ("committed .env file").
@@ -125,6 +150,8 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 5. If it says PASS, go to **Review**.
 
 ## Review (WAIT FOR ALL)
+
+If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 
 1. Run `B set $ID stage=review`.
 2. **UI/UX skip (decided from the diff, never from the spec's `UI surface:` line).** If `project.md` has `UI globs` set to something other than `none`, and no file from `git -C "$WT" diff --name-only "$BASE"...HEAD` matches any of them (matching rules are in First-run setup), write `round-$N/review-ui.md` and `round-$N/review-ux.md` yourself, each containing exactly:
@@ -169,7 +196,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    - `OPEN`: reuse it.
    - `MERGED`: skip steps 4–6 and go to step 7 (Clean up), so the fast-forward and the live check still run.
    - `CLOSED`: run `stage=needs-human reason="PR was closed by someone"` and stop.
-   - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. Write the body to that file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/`, then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
+   - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. Write the body to that file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` (for a fast-lane job, the line in **Fast lane** step 3 instead), then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
 
    Then `B set $ID pr=<url>`.
 4. **Checks.** Run this in the **background**, because foreground `sleep` is blocked:
@@ -205,7 +232,7 @@ Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored
 1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `B set $ID builder=<new id>`.
 
-The orchestrator never edits code or review files itself, except for two sanctioned review files: the UI/UX skip files in **Review** step 2, and the `Reviewer produced no output.` fallback.
+The orchestrator never edits code or review files itself, except for three sanctioned review files: the UI/UX skip files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
 
 ## Final report
 
