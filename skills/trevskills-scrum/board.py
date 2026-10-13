@@ -6,6 +6,7 @@
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
+  board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue]  mark a job aborted (terminal); --requeue puts it back on the backlog
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -236,6 +237,43 @@ def cmd_abort(root, job_id, requeue):
             write_backlog(root, lines)
 
 
+# --- the project list behind the one all-projects dashboard ---
+def registry_path():
+    return Path(os.environ.get("SCRUM_REGISTRY") or Path.home() / ".claude" / "trevskills-scrum" / "projects.json")
+
+
+def read_registry():
+    try:
+        paths = json.loads(registry_path().read_text())
+        return [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def cmd_register(repo):
+    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name("projects.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        paths = read_registry()
+        repo = str(Path(repo).resolve())
+        if repo not in paths:
+            tmp = path.with_name("projects.json.tmp")
+            tmp.write_text(json.dumps(paths + [repo], indent=2) + "\n")
+            os.replace(tmp, path)
+
+
+def projects():
+    """{display name: repo path} for registered repos that still have a scrum/ folder. Names are the folder
+    name, or parent/folder when two repos share one."""
+    repos = [Path(p) for p in read_registry() if (Path(p) / "scrum").is_dir()]
+    counts = {}
+    for r in repos:
+        counts[r.name] = counts.get(r.name, 0) + 1
+    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
+
+
 def cmd_backlog_add(root, items):
     for item in items:
         if clean(item):
@@ -292,6 +330,7 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("register").add_argument("repo", type=Path)
     ab = sub.add_parser("abort")
     ab.add_argument("id")
     ab.add_argument("--requeue", action="store_true")
@@ -304,6 +343,8 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "register":
+        cmd_register(a.repo)
     elif a.cmd == "abort":
         cmd_abort(a.dir, a.id, a.requeue)
     else:
