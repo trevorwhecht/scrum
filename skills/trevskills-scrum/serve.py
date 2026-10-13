@@ -498,6 +498,11 @@ def activity(root, job):
     """{"text", "at"} for what happened last on an active job: the stage, the job folder's files, the branch's last
     commit, the PR. The newest event wins; on a tie the more specific (earlier in the list) one does."""
     d, events = root / "jobs" / job["id"], []
+    if job.get("waiting") and job.get("stage") not in ("done", "aborted"):  # paused on Trevor: wins over every event
+        try:
+            return {"text": f"waiting on you: {job['waiting']}", "at": datetime.fromisoformat(job["updatedAt"]).timestamp()}
+        except (KeyError, TypeError, ValueError):
+            pass
 
     def mtime(path):
         try:

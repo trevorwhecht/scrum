@@ -1,6 +1,33 @@
 ---
 name: trevskills-scrum
 description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then run every open item), and bare "/trevskills-scrum" for status.
+hooks:
+  PermissionRequest:
+    - hooks:
+        - type: command
+          command: 'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook'
+          timeout: 5
+  PreToolUse:
+    - matcher: AskUserQuestion
+      hooks:
+        - type: command
+          command: 'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook'
+          timeout: 5
+  Stop:
+    - hooks:
+        - type: command
+          command: 'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook'
+          timeout: 5
+  UserPromptSubmit:
+    - hooks:
+        - type: command
+          command: 'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook'
+          timeout: 5
+  PostToolUse:
+    - hooks:
+        - type: command
+          command: 'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook'
+          timeout: 5
 ---
 
 # Trevskills Scrum: orchestrator
@@ -42,7 +69,7 @@ If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to
 T=$(ps -o tty= -p $PPID | tr -d ' '); case "$T" in ttys[0-9]*) B set $ID tty=$T ;; esac
 case "$TERM_PROGRAM" in Apple_Terminal|iTerm.app|ghostty) B set $ID term=$TERM_PROGRAM ;; esac
 ```
-A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing.
+A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing. The recorded tty is also what the frontmatter hooks (`board.py hook`) match on to mark the job `waiting` while this session waits on Trevor.
 
 ### First-run setup (once per repo)
 

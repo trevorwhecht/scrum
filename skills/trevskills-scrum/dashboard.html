@@ -264,15 +264,18 @@ const ago = at => {
 };
 const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
 
+// A running job whose interactive session is stopped on a permission prompt, a question or a reply (board.py hook).
+const paused = job => !!job.waiting && !["done", "needs-human", "aborted"].includes(job.stage);
+
 function card(job) {
-  const human = job.stage === "needs-human", run = runs[job.key], act = job.activity, pct = progress(job);
-  const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  const human = job.stage === "needs-human" || paused(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  const stale = !human && !["done", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>`;
   return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
+    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
@@ -429,9 +432,14 @@ const nextStep = (reason, worktree) =>
   : /Hard stop: schema/.test(reason) ? "Approve & merge runs /trevskills-migrate first. Tick the box only if you already ran it."
   : worktree ? "Approve & merge, or send back to builder."
   : "Send back to builder, or abort.";
-const waitingBanner = job => job.stage !== "needs-human" ? "" : `<div class="waiting"
-    data-agent-hint="This job stopped and needs Trevor. The first line is the reason the orchestrator recorded; the second is the suggested next action.">
-    <b>Waiting on you</b><p>${esc(job.reason || "No reason recorded.")}</p><p>${esc(nextStep(job.reason || "", job.worktree))}</p></div>`;
+const bannerHtml = (hint, why, next) => `<div class="waiting" data-agent-hint="${esc(hint)}">
+    <b>Waiting on you</b><p>${esc(why)}</p><p>${esc(next)}</p></div>`;
+const waitingBanner = job => paused(job)
+  ? bannerHtml("This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for; Open terminal brings that session to the front.",
+      job.waiting, "Answer it in the job's terminal.")
+  : job.stage !== "needs-human" ? ""
+  : bannerHtml("This job stopped and needs Trevor. The first line is the reason the orchestrator recorded; the second is the suggested next action.",
+      job.reason || "No reason recorded.", nextStep(job.reason || "", job.worktree));
 
 function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
@@ -440,7 +448,7 @@ function renderActions(job) {
   if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = why + last + reopenForm(job) + termForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + why + last + reopenForm(job) + termForm(job) + abortForm(job) + err;
   const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
