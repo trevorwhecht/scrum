@@ -75,13 +75,43 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 .pts{font:600 12px ui-monospace,monospace;width:46px;min-height:32px;border:0;border-radius:6px;color:#fff;background:var(--pending);text-align:center;cursor:pointer}
 .pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
 .pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
+#agents{width:min(1400px,96vw);max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
+#agents .tabs{align-items:center}
+#agents [hidden]{display:none}
+#agents .tabs button,#agents .btn{min-height:44px;min-width:44px}
+#agents article{display:grid;gap:10px;padding-top:14px}
+#flow{display:grid;grid-template-columns:minmax(0,1fr) 44px}
+#flow>*{grid-column:1;min-width:0}
+.node{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px 12px;width:100%;min-height:44px;text-align:left;
+  font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+button.node{cursor:pointer;touch-action:manipulation}
+button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:none}
+.node b{font:600 13px ui-monospace,monospace;overflow-wrap:anywhere}
+.node span{font-size:12px;color:var(--muted)}
+.node.step{background:var(--bg);border-style:dashed}
+.arrow{text-align:center;color:var(--muted);font-size:16px;line-height:24px}
+.lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;align-items:start}
+.lane{display:grid;gap:4px}
+#flow>.loop{grid-column:2;position:relative;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0;margin:21px 8px 21px 0}
+.loop::before{content:"";position:absolute;left:-2px;top:-7px;border:6px solid transparent;border-right:8px solid var(--changes);border-left:0}
+.loop span{position:absolute;top:50%;right:4px;transform:translateY(-50%);writing-mode:vertical-rl;font-size:11px;color:var(--changes)}
+.facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:0}
+.facts dt{color:var(--muted);font-size:12px;line-height:44px}
+.facts dd{margin:0;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:44px}
+.skill{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+#agPicker{display:grid;gap:8px}
+#agSkills{display:flex;flex-wrap:wrap;gap:6px}
+.md{border-top:1px solid var(--line)}
+@media (max-width:640px){#agents{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article{padding-inline:12px}
+  .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}}
 </style>
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
-  <button class="btn" id="backlogBtn" type="button">Backlog</button></header>
+  <button class="btn" id="backlogBtn" type="button">Backlog</button>
+  <button class="btn" id="agentsBtn" type="button">Agents</button></header>
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -90,6 +120,14 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
     <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
+  </article>
+</dialog>
+<dialog id="agents" aria-label="Agents">
+  <div class="tabs"><button id="agBack" type="button" hidden>← Back</button><b>Agents</b><button class="close" type="button" aria-label="Close">✕</button></div>
+  <article>
+    <p class="error" id="agError" role="alert"></p>
+    <div id="flow"></div>
+    <div id="agDetail" hidden></div>
   </article>
 </dialog>
 <script>
@@ -310,6 +348,119 @@ $("blList").addEventListener("change", e => {
     ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
 });
 $("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
+
+// The pipeline order is fixed by SKILL.md, so it lives here; everything about each agent comes from api/agents.
+const PIPELINE = [
+  {step: "Orchestrator", note: "main session", hint: "The /trevskills-scrum skill runs in the main Claude session, spawns every agent and moves the job between stages."},
+  "scrum-spec-writer", "scrum-builder",
+  {step: "Check gate", note: "test · lint · build", hint: "Runs the project's test, typecheck, lint and build commands; a failure goes back to the builder."},
+  ["scrum-review-security", "scrum-review-ux", "scrum-review-ui", "scrum-review-code"],
+  "scrum-approver",
+  {step: "PR / merge", note: "squash-merge", hint: "On APPROVE the orchestrator pushes scrum/<id>, opens a PR, waits for CI and squash-merges."}];
+const CODEX = {step: "Codex", note: "read-only", hint: "codex exec review runs alongside scrum-review-code; the reviewer confirms each finding and tags it (codex)."};
+let agents = [], skills = null;
+const modelLabel = a => a.name === "scrum-approver" ? `${a.model} · sonnet if all green` : a.model || "—";
+const stepNode = s => `<div class="node step" data-agent-hint="${esc(s.hint)}"><b>${esc(s.step)}</b><span>${esc(s.note)}</span></div>`;
+const agentNode = name => {
+  const a = agents.find(x => x.name === name);
+  return a ? `<button class="node" type="button" data-agent="${esc(a.name)}"><b>${esc(a.name)}</b><span>${esc(modelLabel(a))}</span></button>` : "";
+};
+const ARROW = '<div class="arrow" aria-hidden="true">↓</div>';
+
+function renderFlow() {
+  const known = PIPELINE.flat().filter(x => typeof x === "string");
+  const extra = agents.map(a => a.name).filter(n => !known.includes(n));
+  const rows = [...PIPELINE, ...extra].map(x => typeof x === "string" ? agentNode(x) : Array.isArray(x)
+    ? `<div class="lanes">${x.map(n => `<div class="lane">${agentNode(n)}${n === "scrum-review-code" ? stepNode(CODEX) : ""}</div>`).join("")}</div>`
+    : stepNode(x));
+  const row = name => 2 * PIPELINE.indexOf(name) + 1;  // every node row is followed by an arrow row
+  $("flow").innerHTML = rows.join(ARROW) + `<div class="loop" style="grid-row:${row("scrum-builder")}/${row("scrum-approver") + 1}"
+    data-agent-hint="When the approver decides CHANGES or REWORK, the job goes back to the builder for another round."><span>changes · rework</span></div>`;
+  alignLoop();
+}
+
+// The loop's ends meet the middle of the builder and approver nodes, whose height changes when a label wraps.
+function alignLoop() {
+  const loop = $("flow").querySelector(".loop"), half = n => ($("flow").querySelector(`[data-agent="${n}"]`)?.offsetHeight || 44) / 2 - 1;
+  if (loop) loop.style.margin = `${half("scrum-builder")}px 8px ${half("scrum-approver")}px 0`;
+}
+window.addEventListener("resize", () => { if ($("agents").open) alignLoop(); });
+
+function showAgents(name) {
+  const a = name && agents.find(x => x.name === name);
+  $("flow").hidden = !!a; $("agDetail").hidden = !a; $("agBack").hidden = !a;
+  if (!a) return alignLoop();
+  $("agDetail").innerHTML = `<dl class="facts">
+      <dt>Agent</dt><dd><b>${esc(a.name)}</b></dd>
+      <dt>Model</dt><dd>${esc(modelLabel(a))}</dd>
+      <dt>Tools</dt><dd>${esc(a.tools || "—")}</dd>
+      <dt>Description</dt><dd>${esc(a.description || "—")}</dd>
+      <dt>Skills</dt><dd>${a.skills.map(s => `<span class="skill">${esc(s)}</span>`).join("") || '<span class="empty">None</span>'}
+        <button class="btn icon" id="agAdd" type="button" aria-label="Add skill" aria-expanded="false">+</button></dd></dl>
+    <form id="agPicker" hidden><input type="text" id="agFilter" placeholder="Filter skills" aria-label="Filter skills" autocomplete="off">
+      <div id="agSkills"></div></form>
+    <div class="md">${window.marked ? marked.parse(a.body) : `<pre>${esc(a.body)}</pre>`}</div>`;
+  $("agDetail").dataset.agent = a.name;
+}
+
+function renderSkills() {
+  const a = agents.find(x => x.name === $("agDetail").dataset.agent), q = $("agFilter").value.trim().toLowerCase();
+  const left = (skills || []).filter(s => !a.skills.includes(s.name));
+  const hits = left.filter(s => s.name.toLowerCase().includes(q));
+  $("agSkills").innerHTML = !skills ? '<p class="empty">loading…</p>'
+    : hits.map(s => `<button class="btn" type="button" data-skill="${esc(s.name)}">${esc(s.name)}</button>`).join("")
+      || `<p class="empty">${left.length ? "No match." : "No other skills installed."}</p>`;
+}
+
+async function addSkill(skill, btn) {
+  const name = $("agDetail").dataset.agent;
+  $("agError").textContent = ""; btn.disabled = true;
+  try {
+    const updated = await post(`api/agents/${enc(name)}/skills`, {skill});
+    agents = agents.map(x => x.name === name ? updated : x);
+    renderFlow(); showAgents(name);
+  } catch (err) { btn.disabled = false; $("agError").textContent = err.message; }
+}
+
+$("agentsBtn").addEventListener("click", async () => {
+  $("agError").textContent = ""; skills = null;
+  $("flow").innerHTML = '<p class="empty">loading…</p>';
+  showAgents(null);
+  $("agents").showModal();
+  const list = await getJson("api/agents", null);
+  if (!list) {
+    $("flow").innerHTML = "";
+    return $("agError").textContent = "Couldn't load agents. Is serve.py running?";
+  }
+  agents = list;
+  renderFlow();
+});
+$("agBack").addEventListener("click", () => showAgents(null));
+$("flow").addEventListener("click", e => {
+  const b = e.target.closest("[data-agent]");
+  if (b) { $("agError").textContent = ""; showAgents(b.dataset.agent); }
+});
+$("agDetail").addEventListener("click", async e => {
+  if (e.target.id === "agAdd") {
+    const open = $("agPicker").hidden;
+    $("agPicker").hidden = !open; e.target.setAttribute("aria-expanded", open);
+    if (!open) return;
+    renderSkills(); $("agFilter").focus();
+    if (!skills) {
+      skills = await getJson("api/skills", null);
+      if (!skills) { $("agError").textContent = "Couldn't load installed skills."; return $("agPicker").hidden = true; }
+      renderSkills();
+    }
+  }
+  const b = e.target.closest("button[data-skill]");
+  if (b) addSkill(b.dataset.skill, b);
+});
+$("agDetail").addEventListener("input", e => { if (e.target.id === "agFilter") renderSkills(); });
+$("agDetail").addEventListener("submit", e => {  // Enter in the filter picks the first match
+  e.preventDefault();
+  const b = $("agSkills").querySelector("button[data-skill]");
+  if (b) addSkill(b.dataset.skill, b);
+});
 
 $("board").addEventListener("click", e => {
   const el = e.target.closest(".card");
