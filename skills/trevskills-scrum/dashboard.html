@@ -38,6 +38,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .bar>span{display:block;height:100%;background:var(--accent)}.bar.done>span{background:var(--pass)}.bar.human>span{background:var(--human)}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
 .stale{color:var(--changes)}
+.meta.kid{margin-top:0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
 .empty{color:var(--muted);font-size:12px}
 dialog{width:min(900px,94vw);max-height:88dvh;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);padding:0}
 dialog::backdrop{background:#0007}
@@ -58,6 +59,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
 .card.aborted{opacity:.55}
 .btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.tall{min-height:44px}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
 #filter,#laneFilter,#blProject,#blAskme,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
@@ -159,7 +161,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
-  <select id="laneFilter" aria-label="Show lane"><option value="">All lanes</option><option>fast</option><option>standard</option><option>debug</option></select>
+  <select id="laneFilter" aria-label="Show lane"><option value="">All lanes</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Agents</button>
@@ -264,15 +266,31 @@ const ago = at => {
 };
 const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
 
+// A BigBoy child that can't start until Trevor clicks Setup done.
+const setupWait = job => job.stage === "waiting" && job.setup === "pending";
+// BigBoy parent: merged count, then one line per child with the tickets it waits on. Child: which parent it belongs to.
+function bigboyLines(job) {
+  if (job.children?.length) {
+    const kids = job.children.map(id => jobs.find(j => j.key === `${job.project}/${id}`) || {id, stage: "—"});
+    const ticketOf = id => kids.find(k => k.id === id)?.ticket || id;
+    return `<span class="meta">T${kids.filter(k => k.stage === "done").length}/${kids.length} merged</span>`
+      + kids.map(k => `<span class="meta kid">${esc(k.ticket || k.id)} ${esc(k.stage)}${k.depends_on?.length ? ` ← ${esc(k.depends_on.map(ticketOf).join(", "))}` : ""}</span>`).join("");
+  }
+  return job.parent ? `<span class="meta">${esc(job.ticket)} of ${esc(job.parent)}</span>` : "";
+}
+
 function card(job) {
-  const human = job.stage === "needs-human", run = runs[job.key], act = job.activity, pct = progress(job);
-  const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  const human = job.stage === "needs-human", setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), so they never go stale.
+  const stale = !["done", "needs-human", "aborted", "waiting", "plan", "running"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>`;
-  return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
+  return `<button class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
+    ${bigboyLines(job)}
     ${(job.rounds || []).map(roundRow).join("")}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${human && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
+    ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
@@ -380,12 +398,12 @@ async function renderDiverged(job) {
   const el = $("diverged");
   el.innerHTML = "";
   if (!job.diverged) return;
-  const files = ["spec.md", "build.md", "assessment.md"].filter(f => (job.files || []).includes(f));
+  const files = ["spec.md", "build.md", "assessment.md", "plan.md"].filter(f => (job.files || []).includes(f));
   const found = await Promise.all(files.map(f => fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/${f}`, {cache: "no-store"})
     .then(r => r.ok ? r.text() : "").catch(() => "").then(md => divergedBullets(md).map(b => [f, b]))));
   const items = found.flat();
   if ($("viewer").dataset.key !== job.key || !items.length) return;
-  el.innerHTML = `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md and assessment.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
+  el.innerHTML = `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
     <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
 }
 
@@ -393,6 +411,9 @@ async function renderDiverged(job) {
 const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+// Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
+const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
+    <button class="btn primary tall" type="submit">Setup done</button></form>`;
 // Reopen starts a new linked job from a finished one; once reopened, the button jumps to that job instead.
 const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
   : job.reopened_to ? `<form data-act="goto" data-key="${esc(`${job.project}/${job.reopened_to}`)}"><button class="btn" type="submit">Reopened as ${esc(job.reopened_to)}</button></form>`
@@ -444,12 +465,13 @@ function renderActions(job) {
   if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = why + last + reopenForm(job) + termForm(job) + abortForm(job) + err;
-  const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
+  if (job.stage !== "needs-human") return el.innerHTML = why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
+  // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work).
+  const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
-    + (obsolete ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
+    + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
       <button class="btn" type="submit">Send back to builder</button></form>`) + termForm(job) + abortForm(job) + err;
 }
@@ -468,7 +490,7 @@ $("actions").addEventListener("submit", async e => {
   btn.disabled = true;
   try {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
-      : act === "reopen" ? {note: form.note.value} : {feedback: form.feedback.value};
+      : act === "reopen" ? {note: form.note.value} : act === "setup-done" ? {} : {feedback: form.feedback.value};
     const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();

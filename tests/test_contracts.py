@@ -7,12 +7,14 @@ AGENTS = {
     "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
     "scrum-approver": "opus", "scrum-debugger": "opus",
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
+    "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
     "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
+    "scrum-planner": "PLAN: READY", "scrum-tracker": "TRACK: ON TRACK", "scrum-bigboy-reviewer": "BIGBOY: PASS",
 }
 
 
@@ -212,10 +214,10 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_lane_line(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
-        for phrase in ("Lane: fast|standard|debug|epic", "100", "3 files"):
+        for phrase in ("Lane: fast|standard|debug|bigboy", "100", "3 files", "8 files", "500"):
             self.assertIn(phrase, text, phrase)
         self.assertLess(text.index("Hard stops:"), text.index("Lane:"))
-        self.assertNotIn("`debug` and `epic` don't exist yet", text)
+        self.assertNotIn("epic", text)
         self.assertRegex(text, r"[^.\n]*`debug`[^.\n]*\bbug\b")
 
     def test_skill_reads_lane_from_spec(self):
@@ -225,7 +227,24 @@ class ContractTest(unittest.TestCase):
         for phrase in ("B set $ID lane=", "Lane:"):
             self.assertIn(phrase, step, phrase)
         self.assertIn("lane=debug", step)
-        self.assertRegex(step, r"`epic`[^\n]*standard")
+        self.assertIn("lane=bigboy", step)
+        self.assertIn("**BigBoy lane**", step)
+        self.assertNotIn("epic", text)
+
+    def test_skill_documents_bigboy_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for phrase in ("Lane: bigboy", "/trevskills-scrum bigboy", "scrum-planner", "scrum-tracker", "scrum-bigboy-reviewer",
+                       "plan-apply", " ready ", "/trevskills-scrum start <child>"):
+            self.assertIn(phrase, text, phrase)
+        bigboy = self.section(text, "## BigBoy lane", "## Check gate")
+        for phrase in ("stage=plan", "B plan-apply", "planner output unreadable", "OBSOLETE:", "B abort", "B ready",
+                       "runlog=runs/", "--permission-mode acceptEdits", "track-", "TRACK: ADJUST", "TRACK: OFF TRACK",
+                       "bigboy off track", "gh pr diff", "Refresh spec.md: dependencies", "all_merged", "BIGBOY: GAPS",
+                       "--fix", "bigboy review: gaps remain", "Phase 2 of", "no worktree"):
+            self.assertIn(phrase, bigboy, phrase)
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        self.assertIn("**BigBoy lane**", cleanup)
+        self.assertIn("parent", cleanup)
 
     def test_debugger_contract(self):
         text = (ROOT / "agents" / "scrum-debugger.md").read_text()
@@ -629,7 +648,7 @@ class ContractTest(unittest.TestCase):
     def test_dashboard_lane_label(self):
         cases = [({}, "standard"), ({"lane": None}, "standard"), ({"lane": "fast"}, "fast"), ({"lane": "debug"}, "debug"),
                  ({"lane": "standard", "files": ["promoted.md"]}, "fast→standard"),
-                 ({"lane": "fast", "files": ["promoted.md"]}, "fast"), ({"lane": "epic"}, "epic")]
+                 ({"lane": "fast", "files": ["promoted.md"]}, "fast"), ({"lane": "bigboy"}, "bigboy")]
         self.assertEqual(self.node_eval("laneLabel", f"{json.dumps([c[0] for c in cases])}.map(laneLabel)"),
                          [c[1] for c in cases])
 
@@ -638,10 +657,42 @@ class ContractTest(unittest.TestCase):
         for phrase in ('id="laneFilter"', 'aria-label="Show lane"', "scrum.lane", '<option value="">All lanes</option>',
                        "<option>fast</option>", "<option>standard</option>", "<option>debug</option>"):
             self.assertIn(phrase, text, phrase)
+        self.assertIn("<option>bigboy</option>", text)
         self.assertNotIn("<option>epic</option>", text)
         shown = re.search(r"^const shown = .*$", text, re.M).group(0)
         self.assertIn("lane", shown)
         self.assertRegex(text, r"@media \(max-width:640px\)\{[^\n]*#laneFilter[^\n]*font-size:16px")
+
+    def test_dashboard_bigboy_cards(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index("const setupWait = ")
+        src = re.search(r"^const esc = .*$", text, re.M).group(0) + "\n" + text[start:text.index("\n}\n", start) + 3]
+        jobs = [{"key": "p/001-big", "project": "p", "id": "001-big", "children": ["002-a", "003-b", "004-c"]},
+                {"key": "p/002-a", "project": "p", "id": "002-a", "ticket": "T1", "stage": "done", "parent": "001-big", "depends_on": []},
+                {"key": "p/003-b", "project": "p", "id": "003-b", "ticket": "T2", "stage": "waiting", "parent": "001-big",
+                 "depends_on": [], "setup": "pending"},
+                {"key": "p/004-c", "project": "p", "id": "004-c", "ticket": "T3", "stage": "waiting", "parent": "001-big",
+                 "depends_on": ["002-a", "003-b"]}]
+        out = subprocess.run([node, "-e", f"let jobs = {json.dumps(jobs)};\n{src}\n"
+                              "console.log(JSON.stringify([bigboyLines(jobs[0]), bigboyLines(jobs[3]), jobs.map(setupWait)]))"],
+                             capture_output=True, text=True, check=True).stdout
+        parent, child, waits = json.loads(out)
+        self.assertEqual(parent, '<span class="meta">T1/3 merged</span><span class="meta kid">T1 done</span>'
+                         '<span class="meta kid">T2 waiting</span><span class="meta kid">T3 waiting ← T1, T2</span>')
+        self.assertEqual(child, '<span class="meta">T3 of 001-big</span>')
+        self.assertEqual(waits, [False, False, True, False])
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        for phrase in ('human || setup ? " human"', "Human setup: ${esc(job.setup_text", '"waiting", "plan", "running"'):
+            self.assertIn(phrase, card, phrase)
+        for phrase in ('data-act="setup-done"', "btn primary tall", ">Setup done</button>", 'act === "setup-done" ? {}'):
+            self.assertIn(phrase, text, phrase)
+        self.assertRegex(text, r"\.btn\.tall\{min-height:44px\}")
+        actions = text[text.index("function renderActions"):text.index('$("actions").addEventListener')]
+        self.assertIn("noRework = /^obsolete/.test(reason) || !!job.children?.length", actions)
+        self.assertIn('(noRework ? "" : `<form data-act="rework">', actions)
 
     def test_dashboard_viewer_shows_job_title(self):
         text = DASHBOARD.read_text()
