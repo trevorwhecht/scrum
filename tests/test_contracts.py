@@ -76,6 +76,9 @@ class ContractTest(unittest.TestCase):
             "board.py --dir",                    # next/backlog go through the locked board
             " next",
             "backlog-add",
+            "/trevskills-scrum start <id>",          # dashboard Run now hands off here
+            "serve.py",                              # dashboard buttons need the server
+            "Trevor confirms /trevskills-migrate",   # dashboard approve on schema jobs
         ):
             self.assertIn(phrase, text, phrase)
 
