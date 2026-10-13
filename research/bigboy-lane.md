@@ -6,7 +6,7 @@ Replaces the "epic" lane. For work too big for one job. Evidence is in `triage-l
 
 ```
 request
-  └─ Grill: questions with Trevor at level 1-3, or auto (see Grill mode)
+  └─ Askme (optional): questions with Trevor at level 1-3 (see Askme)
   └─ Spec writer says Lane: bigboy  (or Trevor forces it: /trevskills-scrum bigboy <feature>)
        └─ PLANNER writes plan.md; no plan approval, it proceeds on its own
             └─ orchestrator creates child jobs T1..Tn; all go to SPEC now
@@ -16,10 +16,10 @@ request
             └─ after the last merge: BIGBOY REVIEW of the whole goal against plan.md
 ```
 
-## Grill mode (questions instead of plan approval)
+## Askme (questions instead of plan approval)
 
 - **Level:** Trevor sets 1-3; the agent decides how many questions to ask within it. 1 asks only what blocks the build, 2 asks moderately, 3 is thorough. Off by default.
-- **Auto:** even with no level set, the spec writer or planner asks instead of assuming whenever its reading would contradict or drop explicit wording in the request. That situation is never handled as an Assumption.
+- **Without askme:** agents keep the unattended rule: make the reasonable call and record it with its reasoning under Assumptions. That is acceptable.
 - **Unclear answers:** if Trevor's answers are unclear, it asks follow-up or different questions before planning.
 - **Where it runs:** interactively, like Discuss. Answers are saved to feature.md under `## Q&A`.
 
