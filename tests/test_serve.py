@@ -886,7 +886,8 @@ class AiAuditTest(unittest.TestCase):
                                ("mcp", "srv"): (None, 2), ("mcp", "quiet"): (None, 0), ("hooks", "Stop · *"): (None, 2),
                                ("plugins", "pl@mkt"): (5, 1), ("skills", "pl:ps"): (0, 1)})
         for r in rows.values():
-            self.assertEqual(set(r), {"id", "name", "category", "scope", "lifetime", "recent", "tokens", "flags", "verdict", "reason", "disable"})
+            self.assertEqual(set(r), {"id", "name", "category", "scope", "lifetime", "recent", "tokens", "flags", "verdict", "reason", "disable",
+                                      "research"})
         self.assertNotIn("settings", {r["category"] for r in rows.values()})
         self.assertEqual(self.get("/api/ai-settings/audit?scope=nope")[0], 404)
 
@@ -1039,6 +1040,131 @@ class AiAuditTest(unittest.TestCase):
             self.assertEqual(self.toggle(action, self.row(rows, "plugins", "pl@mkt")["id"])[0], 409)
         self.assertEqual((self.user / "settings.json").read_text(), "[1, 2]")
         self.assertEqual(self.backups(), [])
+
+
+class AiResearchTest(unittest.TestCase):
+    """Page 5: Research this on Audit rows, on the AiAuditTest fake home. The registered "reg" project is the research home."""
+    get, post, USER_SETTINGS = AiSettingsTest.get, AiSettingsTest.post, AiAuditTest.USER_SETTINGS
+    write, skill, plant, audit, row = AiSecurityTest.write, AiAuditTest.skill, AiAuditTest.plant, AiAuditTest.audit, AiAuditTest.row
+    FLAGS = ["--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash"]
+
+    def setUp(self):
+        AiSettingsTest.setUp(self)
+        self.serve.CLAUDE = "claude-stub"
+        self.runs, self.real_home = self.reg / "scrum" / "runs", self.serve.research_home
+        patcher = mock.patch.object(self.serve, "research_home", lambda: ("reg", self.reg / "scrum"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: [self.serve.RUNS.pop(k) for k in list(self.serve.RUNS) if k.startswith("reg/research-")])
+
+    def research(self, item_id, alive=False, headers=None):
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None if alive else 0
+            code, out = self.post("/api/ai-settings/research", {"id": item_id}, headers)
+        return code, out, popen
+
+    def mcp_id(self):
+        return next(i["id"] for c in self.get("/api/ai-settings?scope=global")[1]["categories"] if c["key"] == "mcp"
+                    for i in c["items"] if i["scope"] == "user")
+
+    def test_research_spawns_read_only_run_with_redacted_item(self):
+        rule = self.write(self.user / "rules" / "r.md", "Always do X.")
+        rows, _ = self.audit()
+        rule_id = self.row(rows, "rules", "r")["id"]
+        code, out, popen = self.research(rule_id)
+        self.assertEqual(code, 202, out)
+        key = "research-" + __import__("hashlib").sha1(rule_id.encode()).hexdigest()[:12]
+        self.assertEqual(set(out), {"key", "log", "project"})
+        self.assertEqual((out["key"], out["project"]), (key, "reg"))
+        self.assertRegex(out["log"], rf"^runs/\d{{8}}-\d{{6}}-research-{key}\.log$")
+        self.assertTrue((self.reg / "scrum" / out["log"]).is_file())
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[:2], ["claude-stub", "-p"])
+        self.assertEqual(argv[3:], self.FLAGS)
+        self.assertNotIn("acceptEdits", argv)
+        prompt = argv[2]
+        for s in ("/trevskills-research", str(rule), "## Suggested edits", "Always do X.", "rules", "user"):
+            self.assertIn(s, prompt)
+        code, out, popen = self.research(self.mcp_id())
+        self.assertEqual(code, 202)
+        prompt = popen.call_args.args[0][2]
+        self.assertIn("[redacted]", prompt)
+        self.assertNotIn(SECRET, prompt)
+        self.write(self.user / "rules" / "big.md", "a" * 70_000 + "TAIL")
+        code, out, popen = self.research(self.row(self.audit()[0], "rules", "big")["id"])
+        prompt = popen.call_args.args[0][2]
+        self.assertIn("a" * 60_000 + "\n[truncated", prompt)
+        self.assertNotIn("TAIL", prompt)
+
+    def test_spawn_default_flags_unchanged(self):
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            log = self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "start", "/trevskills-scrum start x")
+        self.addCleanup(self.serve.RUNS.pop, "reg/999-not-a-job", None)
+        self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum start x", "--permission-mode", "acceptEdits"])
+        self.assertRegex(log, r"^runs/\d{8}-\d{6}-start-999-not-a-job\.log$")
+
+    def test_research_home_is_this_checkout(self):
+        repo = self.serve.HERE.parent.parent
+        with mock.patch.object(self.serve.board, "projects", lambda: {"other": self.reg, "me": repo}):
+            self.assertEqual(self.real_home(), ("me", repo / "scrum"))
+        with mock.patch.object(self.serve.board, "projects", lambda: {"other": self.reg}):
+            self.assertIsNone(self.real_home())
+
+    def test_research_rejects_and_needs_json_localhost(self):
+        self.write(self.user / "rules" / "r.md", "rule")
+        rule_id = self.row(self.audit()[0], "rules", "r")["id"]
+        for bad in ("nope", "", None, 5, "global|rules|user|/etc/passwd|passwd", f"global|rules|user|{self.user}/rules/../../../etc/passwd|r"):
+            code, _, popen = self.research(bad)
+            self.assertEqual(code, 404, bad)
+            popen.assert_not_called()
+        for headers in ({"Content-Type": "text/plain"}, {"Origin": "https://evil.example"}, {"Host": "evil.example"}):
+            code, _, popen = self.research(rule_id, headers=headers)
+            self.assertEqual(code, 403, headers)
+            popen.assert_not_called()
+        self.assertEqual(self.research(rule_id, alive=True)[0], 202)
+        code, out, popen = self.research(rule_id)
+        self.assertEqual(code, 409)
+        popen.assert_not_called()
+        with mock.patch.object(self.serve, "research_home", lambda: None):
+            code, _, popen = self.research(self.mcp_id())
+        self.assertEqual(code, 409)
+        popen.assert_not_called()
+
+    def test_audit_row_links_newest_research_log(self):
+        self.plant()
+        self.write(self.user / "rules" / "r.md", "rule")
+        rows, _ = self.audit()
+        rule_id = self.row(rows, "rules", "r")["id"]
+        self.assertTrue(all(r["research"] is None for r in rows.values()))
+        key = "research-" + __import__("hashlib").sha1(rule_id.encode()).hexdigest()[:12]
+        self.write(self.runs / f"20000101-000000-research-{key}.log", "old suggestions")
+        self.write(self.runs / "20990101-000000-research-research-000000000000.log", "someone else's")
+        code, out, _ = self.research(rule_id, alive=True)
+        self.assertEqual(code, 202)
+        rows, _ = self.audit()
+        self.assertEqual(self.row(rows, "rules", "r")["research"], {"key": key, "project": "reg", "log": out["log"], "alive": True})
+        self.assertEqual([r for r in rows.values() if r["research"] and r["id"] != rule_id], [])
+        self.serve.RUNS[f"reg/{key}"]["proc"].poll.return_value = 0
+        (self.reg / "scrum" / out["log"]).write_text("## Suggested edits\nBefore/After")
+        self.assertFalse(self.row(self.audit()[0], "rules", "r")["research"]["alive"])
+        self.serve.RUNS.pop(f"reg/{key}")  # a serve.py restart: the link comes from the file alone
+        self.assertEqual(self.row(self.audit()[0], "rules", "r")["research"]["log"], out["log"])
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.server.server_address[1]}/p/reg/{out['log']}") as res:
+            self.assertEqual(res.read().decode(), "## Suggested edits\nBefore/After")
+
+    def test_research_writes_nothing(self):
+        self.plant()
+        self.write(self.user / "rules" / "r.md", "rule")
+        rule_id = self.row(self.audit()[0], "rules", "r")["id"]
+        snap = lambda: {p: p.stat().st_mtime_ns for p in [*self.home.rglob("*"), *self.managed.rglob("*")] if p.is_file()}
+        before = snap()
+        code, out, popen = self.research(rule_id)
+        self.assertEqual(code, 202)
+        self.assertEqual(popen.call_args.args[0][3:], self.FLAGS)
+        after = snap()
+        self.assertEqual(set(after) - set(before), {self.reg / "scrum" / out["log"]})  # only the run's own log
+        self.assertEqual({p: after[p] for p in before}, before)
 
 
 if __name__ == "__main__":

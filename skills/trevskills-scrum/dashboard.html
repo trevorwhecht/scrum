@@ -123,7 +123,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 #aiEdit div{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #aiEdit .btn,.audit .btn{min-height:44px;min-width:44px}
 #aiList h3{font-size:13px;margin:10px 0 0}
-.node.audit{justify-content:flex-start}.audit .acts{margin-left:auto;display:flex;align-items:center;gap:8px}
+.node.audit{justify-content:flex-start}.audit .acts{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.audit .acts a{display:inline-flex;align-items:center;min-height:44px}
 @media (max-width:640px){#agents,#aiSettings{width:100%;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article{padding-inline:12px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
@@ -252,6 +253,7 @@ async function poll() {
       getJson("api/runs", [])]);
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
+    auditRunsChanged();
     const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
     const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
     backlogs = nextBacklogs;
@@ -629,9 +631,26 @@ const AUDIT_GROUPS = ["Retire", "Merge", "Improve", "Keep"];
 const auditFlag = f => f.startsWith("overlap:") ? `overlap: ${aiAudit.rows.find(r => r.id === f.slice(8))?.name ?? "?"}` : f;
 const auditRow = r => `<div class="node audit"><b>${esc(r.name)}</b><span><span class="skill">${esc(r.scope)}</span> ${esc(r.category)}</span>
     <span>uses ${r.lifetime ?? "—"} · recent ${r.recent ?? "—"} · ${r.tokens == null ? "—" : `~${r.tokens}`} tok</span>${r.flags.length ? `<span>${esc(r.flags.map(auditFlag).join(", "))}</span>` : ""}
-    <span class="acts">${aiOff.has(r.id) ? `<span class="note" role="status">Disabled</span><button class="btn" type="button" data-toggle="enable" data-row="${esc(r.id)}">Undo</button>`
+    <span class="acts">${researchActs(r)}${aiOff.has(r.id) ? `<span class="note" role="status">Disabled</span><button class="btn" type="button" data-toggle="enable" data-row="${esc(r.id)}">Undo</button>`
       : r.disable ? `<button class="btn" type="button" data-toggle="disable" data-row="${esc(r.id)}">Disable</button>` : ""}</span>
     <span class="path">${esc(r.verdict.startsWith("Merge") ? `${r.verdict}. ${r.reason}` : r.reason)}</span></div>`;
+// Research this: a read-only claude run per row whose log holds the suggested edits; Edit opens the 2/5 editor to apply them.
+const researchActs = r => {
+  const rs = r.research, log = rs && `p/${enc(rs.project)}/${esc(rs.log)}`;
+  return (rs?.alive ? `<span class="note" role="status">Researching…</span><a href="${log}" target="_blank" rel="noopener">log</a>`
+      : rs ? `<a href="${log}" target="_blank" rel="noopener">Suggestions</a>` : "")
+    + `<button class="btn" type="button" data-research="${esc(r.id)}"${rs?.alive ? " disabled" : ""} data-agent-hint="Starts a read-only claude run that compares this item with current Anthropic docs and top repos and replies with suggested edits. It changes no files.">Research this</button>`
+    + (["rules", "config"].includes(r.category) ? `<button class="btn" type="button" data-id="${esc(r.id)}">Edit</button>` : "");
+};
+// Called by poll(): flips a row from Researching… to Suggestions once its run has ended; no extra polling.
+function auditRunsChanged() {
+  let changed = false;
+  for (const r of aiAudit?.rows || []) {
+    const run = r.research && runs[`${r.research.project}/${r.research.key}`];
+    if (run && run.alive !== r.research.alive) { r.research.alive = run.alive; changed = true; }
+  }
+  if (changed && aiCat === "audit" && $("aiBack").hidden && $("aiSettings").open) renderAudit();
+}
 async function renderAudit() {
   if (aiAudit) {
     $("aiList").innerHTML = AUDIT_GROUPS.map(g => [g, aiAudit.rows.filter(r => r.verdict.split(" ")[0] === g)]).filter(([, rows]) => rows.length)
@@ -646,6 +665,23 @@ async function renderAudit() {
   aiAudit = data;
   renderAi();
 }
+$("aiList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-research]");
+  if (!b) return;
+  const audit = aiAudit, id = b.dataset.research;
+  $("aiError").textContent = ""; b.disabled = true;
+  try {
+    const out = await post("api/ai-settings/research", {id});
+    if (aiAudit !== audit) return;  // left the tab or changed scope meanwhile
+    audit.rows.find(r => r.id === id).research = {...out, alive: true};
+    renderAudit();
+  } catch (err) {
+    if (aiAudit !== audit) return;
+    b.disabled = false;
+    $("aiError").textContent = err.status === 409 && /already running/.test(err.message) ? "Research is already running for this item."
+      : err.status === 409 ? err.message : "Couldn't start research. Is serve.py running?";
+  }
+});
 $("aiList").addEventListener("click", async e => {
   const b = e.target.closest("button[data-toggle]");
   if (!b) return;
