@@ -82,6 +82,9 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #backlog article{display:grid;gap:10px;padding-top:14px}
 #backlog .tabs{align-items:center}#blAskmeLabel{display:flex;align-items:center;gap:4px;font-size:13px}#backlog .tabs select{min-height:44px}
 #blAdd{display:flex;gap:6px}
+#blRunAll{font:inherit;font-size:13px;min-height:44px;min-width:44px}  /* .btn look; .tabs button would make it mono */
+#blTriage summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--muted);font-size:13px}
+#blTriageBody{font-size:13px;overflow-wrap:anywhere}
 #blAdd input{flex:1;min-width:0}
 #blList{list-style:none;margin:0;padding:0}
 #blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
@@ -164,11 +167,12 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
-  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="close" type="button" aria-label="Close">✕</button></div>
+  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then every open item runs as a job, one after another. Disabled when this project has no open items. Stop it by closing that window.">Run all</button><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
-    <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
+    <form id="blAdd"><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
+    <details id="blTriage" hidden><summary>Last triage</summary><div id="blTriageBody"></div></details>
   </article>
 </dialog>
 <dialog id="digest" aria-label="Digest">
@@ -478,12 +482,14 @@ const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("
 
 function renderBacklog() {
   $("blAdd").hidden = !projects.length;
+  $("blRunAll").disabled = !projects.length;
   if (!projects.length) return $("blList").innerHTML = '<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>';
   const open = (backlogs[blProject()] || []).filter(i => !i.done);
+  $("blRunAll").disabled = !open.length;
   $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}">
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
         ${PTS.map(p => `<option value="${p ?? ""}"${p === it.points ? " selected" : ""}>${p ?? "?"}</option>`).join("")}</select>
-      <input type="text" value="${esc(it.text)}" maxlength="300" aria-label="Item text">
+      <input type="text" value="${esc(it.text)}" maxlength="2000" aria-label="Item text">
       <button class="btn icon" type="button" data-do="up" aria-label="Move up"${n === 0 ? " disabled" : ""}>↑</button>
       <button class="btn icon" type="button" data-do="down" aria-label="Move down"${n === open.length - 1 ? " disabled" : ""}>↓</button>
       <button class="btn icon" type="button" data-do="run" aria-label="Run now">▶</button>
@@ -504,12 +510,34 @@ function pickProject(sel, key) {
   if (!sel.value && projects.length) sel.value = projects[0];
 }
 
+// The latest triage report (scrum/triage/latest.md) for the picked project, collapsed; hidden when there is none.
+// Run all disarms on every open, project change and finished call, so a stale "Run all?" never fires for another project.
+function disarmRunAll() {
+  const b = $("blRunAll");
+  delete b.dataset.armed; b.textContent = "Run all"; b.classList.remove("primary");
+}
+async function showProjectBacklog() {
+  disarmRunAll();
+  renderBacklog();
+  const p = blProject();
+  const res = p ? await fetch(`p/${enc(p)}/triage/latest.md`, {cache: "no-store"}).catch(() => null) : null;
+  const md = res?.ok ? await res.text() : "";
+  if (p !== blProject()) return;
+  $("blTriage").hidden = !md;
+  $("blTriageBody").innerHTML = !md ? "" : window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
+}
 $("backlogBtn").addEventListener("click", () => {
   pickProject($("blProject"), "scrum.backlogProject");
-  renderBacklog();
+  showProjectBacklog();
   $("backlog").showModal();
 });
-$("blProject").addEventListener("change", e => { store.set("scrum.backlogProject", e.target.value); renderBacklog(); });
+$("blProject").addEventListener("change", e => { store.set("scrum.backlogProject", e.target.value); showProjectBacklog(); });
+$("blRunAll").addEventListener("click", e => {
+  const b = e.currentTarget;
+  if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "Run all?"; b.classList.add("primary"); return; }
+  b.disabled = true;
+  backlogCall(url => post(`${url}/run-all`, {}).then(() => $("backlog").close())).then(disarmRunAll);
+});
 $("blAskme").value = store.get("scrum.askme");
 $("blAskme").addEventListener("change", e => store.set("scrum.askme", e.target.value));
 $("blAdd").addEventListener("submit", e => {

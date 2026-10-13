@@ -3,6 +3,7 @@
 files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
+  python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
@@ -1282,7 +1283,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1326,6 +1327,12 @@ class Handler(BaseHTTPRequestHandler):
                 return code, {"id": out["id"], **obj} if code == 200 else obj
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
+        if rest == "/backlog/run-all":  # interactive, like askme: triage, then every open item as a job
+            if all(i["done"] for i in board.backlog_items(root)):
+                return 409, {"error": "backlog is empty"}
+            # ponytail: Terminal.app only, like discuss and askme
+            return run_terminal([(osa_new_window(root.parent, CLAUDE, "/trevskills-scrum run-all"),
+                                  "Run all opened in a new Terminal window.")])
         if rest == "/digest":
             return digest_now(project, root)
         if rest.startswith("/digests/"):
@@ -1370,7 +1377,11 @@ def make_server(port):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
+    p.add_argument("--dir", type=Path, default=Path("scrum"), help="the project's scrum/ folder, for --estimate")
     a = p.parse_args()
+    if a.estimate is not None:
+        return estimate(a.dir.resolve(), a.estimate)
     server = make_server(a.port)
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}", flush=True)

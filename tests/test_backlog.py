@@ -1,4 +1,4 @@
-import sys, tempfile, unittest
+import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +100,121 @@ class BacklogTest(unittest.TestCase):
             board.cmd_next(self.root, index=2)  # already claimed
         with self.assertRaises(SystemExit):
             board.cmd_next(self.root, index=0)  # done item
+
+    def test_backlog_item_text_cap_2000(self):
+        board.backlog_op(self.root, "add", text="a" * 1999)
+        self.assertEqual(board.backlog_items(self.root)[-1]["text"], "a" * 1999)
+        board.backlog_op(self.root, "add", text="b" * 2500)
+        self.assertEqual(board.backlog_items(self.root)[-1]["text"], "b" * 2000)
+        board.backlog_op(self.root, "edit", index=2, text="c" * 2500)
+        self.assertEqual(board.backlog_items(self.root)[2]["text"], "c" * 2000)
+        self.assertEqual(board.clean("x" * 500), "x" * 300)
+
+    def triage(self, backlog, plan):
+        (self.root / "backlog.md").write_text(backlog)
+        out = board.cmd_triage_start(self.root)
+        (self.root / "triage" / out["id"] / "plan.json").write_text(plan if isinstance(plan, str) else json.dumps(plan))
+        return out
+
+    def test_triage_start_numbers_folders_and_skips_empty_backlog(self):
+        self.assertEqual(board.cmd_triage_start(self.root), {"id": "001", "open": 2})
+        self.assertEqual(board.cmd_triage_start(self.root), {"id": "002", "open": 2})
+        (self.root / "backlog.md").write_text("# Backlog\n- [x] Old thing → 001-old-thing\n")
+        self.assertEqual(board.cmd_triage_start(self.root), {"id": None, "open": 0})
+        self.assertEqual(sorted(p.name for p in (self.root / "triage").iterdir()), ["001", "002"])
+
+    def test_triage_merge_retire_estimate(self):
+        out = self.triage(
+            "# Backlog\n"
+            "- [x] Old thing → 001-old-thing\n"
+            "- [ ] Export orders as CSV\n"
+            "## Later\n"
+            "- [ ] [5] CSV export button <!-- UI only -->\n"
+            "some note the user wrote\n"
+            "- [ ] Remove legacy flag\n"
+            "- [ ] Dark mode\n"
+            "- [ ] [8] Rate limiting <!-- pointed by Trevor -->\n",
+            {"merge": [{"items": ["Export orders as CSV", "CSV export button"],
+                        "text": "Export orders as CSV from a button (merged: CSV export, CSV button)", "points": 5,
+                        "why": "API plus one button"}],
+             "retire": [{"item": "Remove legacy flag", "reason": "board.py has no legacy flag since 012-cleanup"}],
+             "estimate": [{"item": "Dark mode", "points": 3, "why": "one toggle and a CSS variable set"}]})
+        self.assertEqual(out, {"id": "001", "open": 5})
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(res, {"merged": 1, "retired": 1, "estimated": 1, "skipped": 0})
+        self.assertEqual(self.text(),
+            "# Backlog\n"
+            "- [x] Old thing → 001-old-thing\n"
+            "- [ ] [5] Export orders as CSV from a button (merged: CSV export, CSV button) <!-- API plus one button -->\n"
+            "- [x] Export orders as CSV <!-- merged into triage 001 -->\n"
+            "## Later\n"
+            "- [x] CSV export button <!-- merged into triage 001 -->\n"
+            "some note the user wrote\n"
+            "- [x] Remove legacy flag <!-- retired: board.py has no legacy flag since 012-cleanup -->\n"
+            "- [ ] [3] Dark mode <!-- one toggle and a CSS variable set -->\n"
+            "- [ ] [8] Rate limiting <!-- pointed by Trevor -->\n")
+        report = (self.root / "triage" / "001" / "report.md").read_text()
+        self.assertEqual((self.root / "triage" / "latest.md").read_text(), report)
+        self.assertRegex(report.splitlines()[0], r"^# Triage 001 — \d{4}-\d\d-\d\dT")
+        self.assertEqual(report.split("\n", 1)[1],
+            "\n## Merged\n"
+            "- Export orders as CSV from a button (merged: CSV export, CSV button)\n"
+            "  - replaced: Export orders as CSV\n"
+            "  - replaced: CSV export button\n"
+            "\n## Retired\n"
+            "- Remove legacy flag — board.py has no legacy flag since 012-cleanup\n"
+            "\n## Estimated\n"
+            "- [3] Dark mode — one toggle and a CSS variable set\n"
+            "\n## Skipped\n"
+            "None.\n")
+
+    def test_triage_skips_stale_duplicate_and_bad_points(self):
+        backlog = ("# Backlog\n- [ ] Alpha\n- [ ] Beta\n- [ ] Gamma\n- [ ] [2] Delta <!-- set by Trevor -->\n- [x] Done one → 001-x\n")
+        self.triage(backlog, {
+            "merge": [{"items": ["Alpha", "Gone item"], "text": "Alpha plus gone"},
+                      {"items": ["Alpha"], "text": "Only one"},
+                      {"items": ["Alpha", "Beta"], "text": "Alpha and Beta (merged: A, B)", "points": 4, "why": "w"}],
+            "retire": [{"item": "Beta", "reason": "already merged above"},
+                       {"item": "Done one", "reason": "it's done"}],
+            "estimate": [{"item": "Gamma", "points": 4, "why": "not fib"},
+                         {"item": "Delta", "points": 5, "why": "overwrite attempt"},
+                         {"item": "Alpha", "points": 1, "why": "consumed"}]})
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(res, {"merged": 1, "retired": 0, "estimated": 0, "skipped": 7})
+        self.assertEqual(self.text(),
+            "# Backlog\n- [ ] Alpha and Beta (merged: A, B) <!-- w -->\n- [x] Alpha <!-- merged into triage 001 -->\n"
+            "- [x] Beta <!-- merged into triage 001 -->\n- [ ] Gamma\n- [ ] [2] Delta <!-- set by Trevor -->\n"
+            "- [x] Done one → 001-x\n")
+        skipped = (self.root / "triage" / "latest.md").read_text().split("## Skipped\n", 1)[1]
+        self.assertEqual(skipped,
+            '- merge "Alpha" + "Gone item" — no open item has the text "Gone item"\n'
+            '- merge "Alpha" — a merge needs at least 2 items\n'
+            '- retire "Beta" — already used by an earlier entry\n'
+            '- retire "Done one" — no open item has the text "Done one"\n'
+            '- estimate "Gamma" — points 4 not in 1, 2, 3, 5, 8, 13\n'
+            '- estimate "Delta" — already pointed\n'
+            '- estimate "Alpha" — already used by an earlier entry\n')
+
+    def test_triage_bad_plan_leaves_backlog_untouched(self):
+        before = self.text()
+        for plan in ("not json {", "[1, 2]", None):
+            out = board.cmd_triage_start(self.root)
+            if plan is not None:
+                (self.root / "triage" / out["id"] / "plan.json").write_text(plan)
+            with self.assertRaises(SystemExit):
+                board.cmd_triage_apply(self.root, out["id"])
+            self.assertEqual(self.text(), before, plan)
+        r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "board.py"), "--dir", str(self.root),
+                            "triage-apply", "001"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("plan.json", r.stderr)
+        self.assertEqual(self.text(), before)
+
+    def test_abort_requeue_keeps_long_feature_text(self):
+        job_id = board.cmd_new(self.root, "Long merged item")
+        (self.root / "jobs" / job_id / "feature.md").write_text("r" * 1000 + "\n")
+        board.cmd_abort(self.root, job_id, requeue=True)
+        self.assertTrue(self.text().endswith("- [ ] " + "r" * 1000 + "\n"))
 
 
 if __name__ == "__main__":

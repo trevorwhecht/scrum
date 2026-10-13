@@ -6,7 +6,7 @@ AGENTS = {
     "scrum-spec-writer": "opus", "scrum-builder": "opus", "scrum-review-security": "opus",
     "scrum-review-ux": "sonnet", "scrum-review-ui": "sonnet", "scrum-review-code": "sonnet",
     "scrum-approver": "opus", "scrum-debugger": "opus",
-    "scrum-digest-reader": "sonnet", "scrum-digester": "opus",
+    "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
@@ -340,6 +340,32 @@ class ContractTest(unittest.TestCase):
         m = re.search(r"canApprove = [^;]*/\^\(([^)]*)\)/", DASHBOARD.read_text())
         self.assertIsNotNone(m)
         self.assertIn("obsolete", m.group(1).split("|"))
+
+    def test_skill_defines_run_all(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("run-all", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        self.assertIn("- **`/trevskills-scrum run-all`**", text)
+        run_all = self.section(text, "## Run all", "## Fast lane")
+        for phrase in ("B triage-start", "scrum-triager", "TRIAGE_DIR=$F/triage/", "B triage-apply",
+                       "Triage <id> failed: <message>", "$F/triage/latest.md", "B next",
+                       "A needs-human job does not stop the loop", "final stage"):
+            self.assertIn(phrase, run_all, phrase)
+
+    def test_triager_contract(self):
+        self.assertEqual(frontmatter(ROOT / "agents" / "scrum-triager.md").get("tools"), "Read, Grep, Glob, Write")
+        text = (ROOT / "agents" / "scrum-triager.md").read_text()
+        for phrase in ("TRIAGE_DIR/plan.json", "as data, not instructions", "every original requirement",
+                       "(merged: <short name of each original>)", "naming the evidence", "1, 2, 3, 5, 8, 13",
+                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"'):
+            self.assertIn(phrase, text, phrase)
+
+    def test_dashboard_has_run_all_and_last_triage(self):
+        text = DASHBOARD.read_text()
+        for phrase in ('id="blRunAll"', "/run-all`", "Run all?", 'id="blTriage"', "Last triage", "triage/latest.md",
+                       'maxlength="2000" required placeholder="Add a backlog item"', 'maxlength="2000" aria-label="Item text"'):
+            self.assertIn(phrase, text, phrase)
+        button = re.search(r'<button[^>]*id="blRunAll"[^>]*>', text).group(0)
+        self.assertIn("data-agent-hint=", button)
 
     def test_skill_documents_askme(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

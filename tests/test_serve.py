@@ -185,6 +185,63 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])  # stays claimed for a manual start
 
+    def run_all(self, headers=None):
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve, "spawn") as spawn:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog/run-all", method="POST", data=b"{}",
+                                       headers={"Content-Type": "application/json", **(headers or {})})
+            try:
+                with urllib.request.urlopen(r) as res:
+                    code, body = res.status, json.loads(res.read())
+            except urllib.error.HTTPError as e:
+                code, body = e.code, json.loads(e.read())
+                e.close()
+        spawn.assert_not_called()
+        return code, body, run
+
+    def test_backlog_run_all_opens_terminal(self):
+        before = (self.root / "backlog.md").read_text()
+        code, out, run = self.run_all()
+        self.assertEqual((code, out), (200, {"message": "Run all opened in a new Terminal window."}))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
+        self.assertEqual(argv[4:], [self.serve.CLAUDE, "/trevskills-scrum run-all"])
+        self.assertEqual((self.root / "backlog.md").read_text(), before)  # claims nothing; the session does
+        code, _, run = self.run_all({"Origin": "https://evil.example"})
+        self.assertEqual(code, 403)
+        run.assert_not_called()
+
+    def test_backlog_run_all_empty_backlog_409(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [x] Finished → 001-finished\n")
+        code, out, run = self.run_all()
+        self.assertEqual((code, out), (409, {"error": "backlog is empty"}))
+        run.assert_not_called()
+
+    def test_backlog_add_cli_triggers_estimate(self):
+        scrum = Path(self.tmp.name) / "cli-repo" / "scrum"
+        scrum.mkdir(parents=True)
+        (scrum / "backlog.md").write_text("# Backlog\n")
+        r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "board.py"), "--dir", str(scrum),
+                            "backlog-add", "Cli item A", "Cli item B"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([i["text"] for i in self.serve.board.backlog_items(scrum)], ["Cli item A", "Cli item B"])
+        self.assertTrue(self.wait_for(lambda: [i["points"] for i in self.serve.board.backlog_items(scrum)] == [5, 5], 10),
+                        (scrum / "backlog.md").read_text())
+        self.assertEqual((scrum / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] [5] Cli item A <!-- several files -->\n- [ ] [5] Cli item B <!-- several files -->\n")
+
+    def test_backlog_add_library_call_spawns_no_estimate(self):
+        scrum = Path(self.tmp.name) / "lib-repo" / "scrum"
+        scrum.mkdir(parents=True)
+        self.assertEqual(self.serve.board.cmd_backlog_add(scrum, ["Lib item", "  "]), ["Lib item"])
+        time.sleep(1)
+        self.assertIsNone(self.serve.board.backlog_items(scrum)[0]["points"])
+        self.assertFalse(any("Lib item" in a for c in self.calls() for a in c))
+
     def test_approve_only_for_needs_human_and_passes_migration_confirmation(self):
         job_id = self.serve.board.cmd_new(self.root, "refunds")
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/approve", {})[0], 409)  # stage is spec
