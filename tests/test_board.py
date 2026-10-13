@@ -40,6 +40,11 @@ class BoardTest(unittest.TestCase):
         (self.root / "jobs" / "007-old").mkdir(parents=True)
         self.assertTrue(board.cmd_new(self.root, "next").startswith("008-"))
 
+    def test_new_numbers_continue_past_board_jobs_without_folders(self):
+        self.root.mkdir(parents=True)
+        (self.root / "board.json").write_text('{"jobs": [{"id": "004-csv-export"}]}')
+        self.assertTrue(board.cmd_new(self.root, "next").startswith("005-"))
+
     def test_new_with_symbol_only_title_gets_fallback_slug(self):
         self.assertEqual(board.cmd_new(self.root, "!!!"), "001-job")
 

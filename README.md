@@ -30,7 +30,18 @@ brew install gh && gh auth login   # needed to open and merge PRs
 | `/trevskills-scrum rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |
 | `/trevskills-scrum` | shows the board |
 
-Dashboard: `cd scrum && python3 -m http.server 8765`, then open http://localhost:8765/dashboard.html
+## Dashboard
+
+From the repo root: `python3 ~/.claude/skills/trevskills-scrum/serve.py`, then open http://localhost:8765
+
+- Cards move across the stages, and each review round is one row of reviewer chips.
+- A stuck (needs-human) card opens with **Approve & merge** and **Send back to builder**. Each click starts a background `claude -p` run, logged to `scrum/runs/`, and the card shows "● running" until it finishes.
+- **Backlog** opens the queue:
+  - **+** adds an item, and Sonnet estimates it in Fibonacci points (1 2 3 5 8 13, colour-coded). Change the points or text inline.
+  - ↑/↓ reorders the queue; `/trevskills-scrum next` takes the top item.
+  - ▶ starts a job now, and ✕ deletes an item. Both ask once on the button.
+
+The server listens on localhost only and refuses requests from other websites.
 
 The first run writes `scrum/project.md` (stack, test/lint/build commands, convention files). Edit it if detection got something wrong. To run several jobs at once, open several Claude sessions; each job gets its own worktree.
 

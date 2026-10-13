@@ -79,7 +79,8 @@ def add_job(root, board, title):
     """Caller must hold the board lock."""
     jobs_dir = Path(root) / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
-    nums = [int(m.group(1)) for p in jobs_dir.iterdir() if (m := re.match(r"(\d+)-", p.name))]
+    names = [p.name for p in jobs_dir.iterdir()] + [j.get("id", "") for j in board["jobs"]]
+    nums = [int(m.group(1)) for name in names if (m := re.match(r"(\d+)-", name))]
     job_id = f"{max(nums, default=0) + 1:03d}-{slug(title)}"
     (jobs_dir / job_id).mkdir()
     board["jobs"].append({

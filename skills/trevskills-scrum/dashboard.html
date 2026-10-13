@@ -7,7 +7,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
-  --pass:#1e8449;--changes:#c4520f;--invalid:#7a3fd6;--human:#d32f2f;--pending:#c8c4ba}
+  --pass:#1e8449;--changes:#c4520f;--invalid:#7a3fd6;--human:#d32f2f;--pending:#c8c4ba;
+  --p1:#1e8449;--p2:#2f9e6a;--p3:#1f8fa6;--p5:#d4a514;--p8:#d9661a;--p13:#c0392b}
 @media (prefers-color-scheme:dark){:root{--bg:#131312;--card:#1d1c1a;--ink:#ecebe6;--muted:#9b978e;--line:#2f2d2a;--pending:#55524c}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -41,13 +42,47 @@ dialog::backdrop{background:#0007}
 article{padding:4px 20px 20px;overflow-wrap:anywhere}
 article pre{overflow-x:auto;background:var(--bg);padding:8px;border-radius:6px;white-space:pre-wrap}
 article a{color:var(--accent)}
-@media (max-width:640px){main{grid-template-columns:1fr!important}}
+body:has(dialog[open]){overflow:hidden}
+.btn{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:6px 10px;min-height:32px;cursor:pointer;touch-action:manipulation}
+.btn:hover:not(:disabled){border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{background:var(--human);border-color:var(--human);color:#fff}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.icon{min-width:32px;padding:6px 8px}
+header .btn{margin-left:auto}
+.running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
+.note{font-size:12px;color:var(--muted);margin:0}
+.error{font-size:12px;color:var(--human);margin:0}
+.error:empty{display:none}
+#actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
+#actions:empty{display:none}
+#actions form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+textarea{flex:1 1 320px;min-height:64px;resize:vertical}
+#backlog article{display:grid;gap:10px;padding-top:14px}
+#blAdd{display:flex;gap:6px}
+#blAdd input{flex:1;min-width:0}
+#blList{list-style:none;margin:0;padding:0}
+#blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+#blList li input{flex:1;min-width:0}
+.pts{font:600 12px ui-monospace,monospace;width:46px;min-height:32px;border:0;border-radius:6px;color:#fff;background:var(--pending);text-align:center;cursor:pointer}
+.pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
+.pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
+@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}}
 </style>
 </head>
 <body>
-<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span></header>
+<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span><button class="btn" id="backlogBtn" type="button">Backlog</button></header>
 <main id="board"></main>
-<dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><article id="doc"></article></dialog>
+<dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
+<dialog id="backlog" aria-label="Backlog">
+  <div class="tabs"><b>Backlog</b><button class="close" type="button" aria-label="Close">✕</button></div>
+  <article>
+    <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
+    <p class="error" id="blError" role="alert"></p>
+    <ol id="blList"></ol>
+  </article>
+</dialog>
 <script>
 const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
@@ -56,7 +91,11 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "
 // Agents write the markdown, so any raw HTML in it is shown as text, never run.
 if (window.marked) marked.use({renderer: {html: h => esc(typeof h === "object" ? h.text : h)}});
 const $ = id => document.getElementById(id);
-let jobs = [], lastText = "";
+let jobs = [], lastText = "", api = false, runs = {}, runsKey = "", backlog = [];
+const PTS = [null, 1, 2, 3, 5, 8, 13];
+const SERVE = "<code>python3 ~/.claude/skills/trevskills-scrum/serve.py</code>";
+const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+  .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`); return data; });
 
 const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
 const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
@@ -68,6 +107,7 @@ function card(job) {
     <span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
+    ${runs[job.id]?.alive ? `<span class="running">● ${esc(runs[job.id].action)} running…</span>` : ""}
     <span class="meta">${job.pr ? "PR ready · " : ""}${stale ? `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>` : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>
   </button>`;
 }
@@ -84,12 +124,31 @@ function render() {
   }).join("");
 }
 
+// serve.py adds /api/*; under a plain file server the board is read-only and the buttons explain why.
+async function pollApi() {
+  try {
+    const [b, r] = await Promise.all([fetch("api/backlog", {cache: "no-store"}), fetch("api/runs", {cache: "no-store"})]);
+    if (!b.ok || !r.ok) throw new Error();
+    api = true;
+    const items = await b.json();
+    runs = Object.fromEntries((await r.json()).map(x => [x.id, x]));
+    if (JSON.stringify(items) !== JSON.stringify(backlog)) { backlog = items; if ($("backlog").open && !editingBacklog()) renderBacklog(); }
+    $("backlogBtn").textContent = `Backlog · ${backlog.filter(i => !i.done).length}`;
+  } catch { api = false; runs = {}; }
+}
+
 async function poll() {
+  await pollApi();
   try {
     const res = await fetch("board.json", {cache: "no-store"});
     if (!res.ok) { $("status").textContent = "No board.json yet. Run /trevskills-scrum in this repo."; jobs = []; render(); return; }
-    const text = await res.text();
-    if (text !== lastText) { jobs = JSON.parse(text).jobs || []; lastText = text; render(); }
+    const text = await res.text(), key = JSON.stringify(runs);
+    if (text !== lastText || key !== runsKey) {
+      jobs = JSON.parse(text).jobs || []; lastText = text; render();
+      const open = $("viewer").open && jobs.find(j => j.id === $("viewer").dataset.job);
+      if (open && key !== runsKey && !$("actions").contains(document.activeElement)) renderActions(open);
+      runsKey = key;
+    }
     $("status").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     $("status").textContent = `Can't read board.json (${e.message}). Showing the last good state.`;
@@ -116,10 +175,91 @@ function open(job) {
   $("tabs").innerHTML = files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
+  renderActions(job);
   $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
 }
+
+function renderActions(job) {
+  const el = $("actions"), run = runs[job.id], reason = job.reason || "";
+  const log = run ? ` · <a href="${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
+  if (run?.alive) return el.innerHTML = `<p class="running">● ${esc(run.action)} running…${log}</p>`;
+  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
+  if (job.stage !== "needs-human") return el.innerHTML = last;
+  if (!api) return el.innerHTML = `<p class="note">Approve and Send back need the dashboard server: ${SERVE}</p>`;
+  const canApprove = job.worktree && !/^(blocked|spec writer)/.test(reason);
+  el.innerHTML = last + (canApprove ? `<form data-act="approve">
+      ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
+      <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
+    + `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
+      <button class="btn" type="submit">Send back to builder</button></form><p class="error" role="alert"></p>`;
+}
+
+$("actions").addEventListener("submit", async e => {
+  e.preventDefault();
+  const form = e.target, act = form.dataset.act, id = $("viewer").dataset.job, btn = form.querySelector("button");
+  if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
+  btn.disabled = true;
+  try {
+    await post(`api/jobs/${encodeURIComponent(id)}/${act}`, act === "approve" ? {migrated: !!form.migrated?.checked} : {feedback: form.feedback.value});
+    await poll();
+    renderActions(jobs.find(j => j.id === id));
+  } catch (err) {
+    btn.disabled = false;
+    $("actions").querySelector(".error").textContent = err.message;
+  }
+});
+
+const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("blList").contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName));
+
+function renderBacklog() {
+  $("blAdd").hidden = !api;
+  if (!api) return $("blList").innerHTML = `<li class="note">Editing the backlog needs the dashboard server: ${SERVE}</li>`;
+  const open = backlog.filter(i => !i.done);
+  $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}">
+      <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
+        ${PTS.map(p => `<option value="${p ?? ""}"${p === it.points ? " selected" : ""}>${p ?? "?"}</option>`).join("")}</select>
+      <input type="text" value="${esc(it.text)}" maxlength="300" aria-label="Item text">
+      <button class="btn icon" type="button" data-do="up" aria-label="Move up"${n === 0 ? " disabled" : ""}>↑</button>
+      <button class="btn icon" type="button" data-do="down" aria-label="Move down"${n === open.length - 1 ? " disabled" : ""}>↓</button>
+      <button class="btn icon" type="button" data-do="run" aria-label="Run now">▶</button>
+      <button class="btn icon" type="button" data-do="delete" aria-label="Delete">✕</button>
+    </li>`).join("") || '<li class="note">Backlog is empty.</li>';
+}
+
+async function backlogCall(fn) {
+  $("blError").textContent = "";
+  try { await fn(); } catch (err) { $("blError").textContent = err.message; }
+  await poll();
+  renderBacklog();
+}
+
+$("backlogBtn").addEventListener("click", () => { renderBacklog(); $("backlog").showModal(); });
+$("blAdd").addEventListener("submit", e => {
+  e.preventDefault();
+  const input = e.target.text;
+  backlogCall(async () => { await post("api/backlog", {op: "add", text: input.value}); input.value = ""; });
+});
+$("blList").addEventListener("click", e => {
+  const b = e.target.closest("button[data-do]");
+  if (!b) return;
+  const index = +b.closest("li").dataset.i, act = b.dataset.do;
+  // Run and Delete ask once on the button itself; no native confirm().
+  if ((act === "run" || act === "delete") && !b.dataset.armed) {
+    b.dataset.armed = "1"; b.textContent = act === "run" ? "Run?" : "Delete?"; b.classList.add(act === "run" ? "primary" : "danger");
+    return;
+  }
+  b.disabled = true;
+  backlogCall(() => act === "run" ? post("api/backlog/run", {index}).then(() => $("backlog").close())
+    : post("api/backlog", act === "delete" ? {op: "delete", index} : {op: "move", index, delta: act === "up" ? -1 : 1}));
+});
+$("blList").addEventListener("change", e => {
+  const index = +e.target.closest("li").dataset.i;
+  backlogCall(() => post("api/backlog", e.target.tagName === "SELECT"
+    ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
+});
+$("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
 
 $("board").addEventListener("click", e => {
   const el = e.target.closest(".card");
@@ -128,12 +268,13 @@ $("board").addEventListener("click", e => {
 });
 $("tabs").addEventListener("click", e => {
   const b = e.target.closest("button");
-  if (!b) return;
-  if (b.classList.contains("close")) return $("viewer").close();
+  if (!b || b.classList.contains("close")) return;
   const job = jobs.find(j => j.id === $("viewer").dataset.job);
   if (job) show(job, b.dataset.file);
 });
-$("viewer").addEventListener("click", e => { if (e.target === $("viewer")) $("viewer").close(); });
+document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e => {
+  if (e.target === d || e.target.closest(".close")) d.close();
+}));
 
 poll();
 setInterval(poll, 2000);
