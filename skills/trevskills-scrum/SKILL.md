@@ -79,7 +79,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
    1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
-2. **Base:** run `git fetch origin` (skip it if there is no remote). `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. With no remote, use the current branch, but only if it's `main` or `master`; otherwise stop. Run `B set $ID base=$BASE`.
+2. **Base:** run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
 3. **Spec:** spawn `scrum-spec-writer` and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID

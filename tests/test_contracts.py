@@ -156,6 +156,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn('find "$REPO" -maxdepth 1', text)
         self.assertIn("git remote set-head origin -a", text)
 
+    def test_skill_base_step_has_no_no_remote_fallback(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertNotIn("skip it if there is no remote", text)
+        self.assertNotIn("With no remote", text)
+        self.assertIn("BASE=origin/$DEFAULT", text)
+        self.assertIn("B set $ID base=$BASE", text)
+
     def test_skill_project_template_has_ui_globs(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         template = self.section(text, "# Project profile", "```")
