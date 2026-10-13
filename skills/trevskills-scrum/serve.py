@@ -77,6 +77,75 @@ def estimate(root, text):
         pass
 
 
+FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+ITEM = re.compile(r"(\s*)-\s+(.+)")
+AGENT_LOCK = threading.Lock()
+
+
+def agents_dir():
+    """The checkout serve.py runs from (the main one, when installed); tests point SCRUM_AGENTS_DIR elsewhere."""
+    return Path(os.environ.get("SCRUM_AGENTS_DIR") or HERE.parent.parent / "agents")
+
+
+def read_agent(path):
+    """Frontmatter fields, the `skills:` list (block or `a, b` form) and the markdown body of one agent file."""
+    text = path.read_text()
+    m = FRONTMATTER.match(text)
+    meta, skills, key = {}, [], None
+    for line in (m.group(1) if m else "").splitlines():
+        if (item := ITEM.fullmatch(line)) and key == "skills":
+            skills.append(item.group(2).strip())
+        elif ":" in line and not line[:1].isspace():
+            key, _, val = (x.strip() for x in line.partition(":"))
+            meta[key] = val
+            if key == "skills":
+                skills += [s.strip() for s in val.strip("[]").split(",") if s.strip()]
+    return {"name": path.stem, "model": meta.get("model", ""), "tools": meta.get("tools", ""),
+            "description": meta.get("description", ""), "skills": skills, "body": text[m.end():] if m else text}
+
+
+def add_skill(path, skill):
+    """Append `  - skill` under `skills:` (creating the key after the last frontmatter line); other bytes stay put."""
+    with AGENT_LOCK:
+        text = path.read_text()
+        m = FRONTMATTER.match(text)
+        if not m:
+            raise SystemExit("agent file has no frontmatter")
+        have = read_agent(path)["skills"]
+        if skill in have:
+            return
+        lines = m.group(1).split("\n")
+        at = next((i for i, l in enumerate(lines) if re.match(r"skills\s*:", l)), None)
+        if at is None:
+            lines += ["skills:", f"  - {skill}"]
+        elif lines[at].split(":", 1)[1].strip():  # one-line `skills: a, b` becomes a block list
+            lines[at:at + 1] = ["skills:"] + [f"  - {s}" for s in have + [skill]]
+        else:
+            end = at + 1
+            while end < len(lines) and ITEM.fullmatch(lines[end]):
+                end += 1
+            indent = ITEM.fullmatch(lines[end - 1]).group(1) if end > at + 1 else "  "
+            lines.insert(end, f"{indent}- {skill}")
+        path.write_text(text[:m.start(1)] + "\n".join(lines) + text[m.end(1):])
+
+
+def installed_skills():
+    """User skills (~/.claude/skills/*/SKILL.md) and user-scope plugin skills, named <plugin>:<skill>."""
+    home = Path(os.environ.get("CLAUDE_HOME") or Path.home() / ".claude")
+    found = {p.parent.name: "user" for p in home.glob("skills/*/SKILL.md")}
+    try:
+        plugins, extra = json.loads((home / "plugins" / "installed_plugins.json").read_text())["plugins"], {}
+        for key, installs in plugins.items():
+            plugin = key.split("@")[0]
+            for inst in installs:
+                if inst.get("scope") == "user":
+                    extra.update({f"{plugin}:{p.parent.name}": plugin for p in Path(inst["installPath"]).glob("skills/*/SKILL.md")})
+        found.update(extra)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # a missing or malformed plugins file just adds nothing
+    return [{"name": n, "source": found[n]} for n in sorted(found)]
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -110,6 +179,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.end_headers()
         if path == "/dashboard.html":
             return self.send(200, (HERE / "dashboard.html").read_bytes(), TYPES[".html"])
+        if path == "/api/agents":
+            return self.send_json(200, [read_agent(p) for p in sorted(agents_dir().glob("*.md"))])
+        if path == "/api/skills":
+            return self.send_json(200, installed_skills())
         if path == "/api/projects":
             return self.send_json(200, [{"name": name} for name in board.projects()])
         if path == "/api/runs":
@@ -141,15 +214,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(403, {"error": "forbidden"})
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-            m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort))", urlparse(self.path).path)
-            root = m and scrum_dir(unquote(m.group(1)))
-            code, obj = self.route(unquote(m.group(1)), root, m.group(2), body if isinstance(body, dict) else {}) \
-                if root else (404, {"error": "no such project or endpoint"})
+            body, path = body if isinstance(body, dict) else {}, urlparse(self.path).path
+            if a := re.fullmatch(r"/api/agents/([^/]+)/skills", path):
+                code, obj = self.route_skill(unquote(a.group(1)), body.get("skill"))
+            else:
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort))", path)
+                root = m and scrum_dir(unquote(m.group(1)))
+                code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
+                    if root else (404, {"error": "no such project or endpoint"})
         except ValueError:
             code, obj = 400, {"error": "body must be JSON"}
         except SystemExit as e:
             code, obj = 400, {"error": str(e)}
         self.send_json(code, obj)
+
+    def route_skill(self, name, skill):
+        target = agents_dir() / f"{name}.md"
+        if not re.fullmatch(r"[\w-]+", name) or not target.is_file():
+            return 404, {"error": "no such agent"}
+        if not isinstance(skill, str) or skill not in {s["name"] for s in installed_skills()}:
+            return 400, {"error": "not an installed skill"}
+        add_skill(target, skill)
+        return 200, read_agent(target)
 
     def route(self, project, root, rest, body):
         if rest == "/backlog":

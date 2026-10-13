@@ -52,6 +52,7 @@ Each card carries a project tag, and the **All projects** menu filters to one pr
   - **+** adds an item, and Sonnet estimates it in Fibonacci points (1 2 3 5 8 13, colour-coded). Change the points or text inline.
   - ↑/↓ reorders the queue; `/trevskills-scrum next` takes the top item.
   - ▶ starts a job now, and ✕ deletes an item. Both ask once on the button.
+- **Agents** shows the pipeline with each agent's model. Click an agent for its prompt, tools and skills; **+** adds an installed skill to its frontmatter (live on the next spawn, and an uncommitted change in this checkout).
 
 The server listens on localhost only and refuses requests from other websites.
 
