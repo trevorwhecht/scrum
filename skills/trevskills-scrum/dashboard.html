@@ -93,7 +93,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .arrow{text-align:center;color:var(--muted);font-size:16px;line-height:24px}
 .lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;align-items:start}
 .lane{display:grid;gap:4px}
-#flow>.loop{grid-column:1/3;position:relative;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0;margin:21px 8px 21px 0}
+#flow>.loop{grid-column:2;position:relative;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0;margin:21px 8px 21px 0}
 .loop::before{content:"";position:absolute;left:var(--tip,-2px);top:-7px;border:6px solid transparent;border-right:8px solid var(--changes);border-left:0}
 .loop span{position:absolute;top:50%;right:4px;transform:translateY(-50%);writing-mode:vertical-rl;font-size:11px;color:var(--changes)}
 .facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:0}
@@ -385,14 +385,16 @@ function renderFlow() {
 }
 
 // The loop's ends meet the middle of the builder and approver nodes, whose height changes when a label wraps.
-// Nodes are centred and content-sized, so the loop starts at the narrower one's right edge and runs behind the
-// wider one (nodes sit above it); --tip moves the arrowhead out to the builder's own edge.
+// Nodes are centred and content-sized, so a negative left margin stretches the loop from its own column back to the
+// narrower node's right edge; it runs behind the wider one (nodes sit above it), and --tip moves the arrowhead out to
+// the builder's own edge. Spanning both columns instead would push the auto-placed nodes out of the loop's rows.
 function alignLoop() {
   const flow = $("flow"), loop = flow.querySelector(".loop"), node = n => flow.querySelector(`[data-agent="${n}"]`);
   const b = node("scrum-builder"), a = node("scrum-approver");
   if (!loop || !b || !a || flow.hidden) return;
   const left = Math.min(b.offsetLeft + b.offsetWidth, a.offsetLeft + a.offsetWidth) - 2;
-  loop.style.margin = `${b.offsetHeight / 2 - 1}px 8px ${a.offsetHeight / 2 - 1}px ${left}px`;
+  const col = parseFloat(getComputedStyle(flow).gridTemplateColumns);  // width of the node column = where the loop's column starts
+  loop.style.margin = `${b.offsetHeight / 2 - 1}px 8px ${a.offsetHeight / 2 - 1}px ${left - col}px`;
   loop.style.setProperty("--tip", `${b.offsetLeft + b.offsetWidth - left}px`);
 }
 window.addEventListener("resize", () => { if ($("agents").open) alignLoop(); });
