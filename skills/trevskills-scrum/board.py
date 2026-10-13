@@ -95,28 +95,124 @@ def cmd_new(root, title):
         return add_job(root, board, title)
 
 
-def cmd_next(root):
-    """Claim the first unchecked backlog item under the board lock, so two sessions never take the same one."""
+# --- backlog.md: "- [ ] [5] Text → 003-id <!-- why -->"; points and the estimate's reason are optional ---
+FIB = (1, 2, 3, 5, 8, 13)
+ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+KEEP = object()
+
+
+def clean(text):
+    return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:300]
+
+
+def read_backlog(root):
+    """(lines, items). Items remember their line so writes leave headings and notes alone."""
     path = Path(root) / "backlog.md"
+    lines = path.read_text().splitlines() if path.exists() else ["# Backlog"]
+    items = []
+    for n, line in enumerate(lines):
+        if m := ITEM_RE.match(line):
+            done, pts, text, job, why = m.groups()
+            items.append({"index": len(items), "line": n, "done": done == "x",
+                          "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job})
+    return lines, items
+
+
+def format_item(item):
+    return (f"- [{'x' if item['done'] else ' '}] " + (f"[{item['points']}] " if item["points"] else "") + item["text"]
+            + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
+
+
+def write_backlog(root, lines):
+    (Path(root) / "backlog.md").write_text("\n".join(lines) + "\n")
+
+
+def backlog_items(root):
+    return [{k: v for k, v in item.items() if k != "line"} for item in read_backlog(root)[1]]
+
+
+def pick(items, index):
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(items):
+        raise SystemExit(f"no backlog item {index!r}")
+    return items[index]
+
+
+def check_points(points):
+    if points is not None and (isinstance(points, bool) or points not in FIB):
+        raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
+
+
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
+    """add / edit / delete / move one backlog item under the board lock. Returns the new item list."""
+    with locked_board(root):
+        lines, items = read_backlog(root)
+        if op == "add":
+            if not clean(text or ""):
+                raise SystemExit("backlog item text is empty")
+            if points is not KEEP:
+                check_points(points)
+            lines.append(format_item({"done": False, "points": None if points is KEEP else points,
+                                      "text": clean(text), "job": None, "why": None}))
+        elif op == "edit":
+            item = pick(items, index)
+            if text is not None:
+                if not clean(text):
+                    raise SystemExit("backlog item text is empty")
+                item["text"] = clean(text)
+            if points is not KEEP:
+                check_points(points)
+                item["points"] = points
+            lines[item["line"]] = format_item(item)
+        elif op == "delete":
+            del lines[pick(items, index)["line"]]
+        elif op == "move":
+            a = pick(items, index)
+            if delta in (-1, 1) and 0 <= index + delta < len(items):
+                b = items[index + delta]
+                lines[a["line"]], lines[b["line"]] = lines[b["line"]], lines[a["line"]]
+        else:
+            raise SystemExit(f"unknown backlog op {op!r}")
+        write_backlog(root, lines)
+    return backlog_items(root)
+
+
+def backlog_set_estimate(root, text, points, why):
+    """Fill in the AI estimate for the first open, unestimated item with this text. False if it's gone or set."""
+    check_points(points)
+    with locked_board(root):
+        lines, items = read_backlog(root)
+        for item in items:
+            if not item["done"] and item["points"] is None and item["text"] == text:
+                item["points"], item["why"] = points, clean(why or "") or None
+                lines[item["line"]] = format_item(item)
+                write_backlog(root, lines)
+                return True
+    return False
+
+
+def cmd_next(root, index=None):
+    """Claim the first open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
     with locked_board(root) as board:
-        lines = path.read_text().splitlines() if path.exists() else []
-        for i, line in enumerate(lines):
-            if m := re.match(r"^- \[ \] (.+)$", line):
-                feature = m.group(1).strip()
-                job_id = add_job(root, board, feature[:60])
-                lines[i] = f"- [x] {feature} → {job_id}"
-                path.write_text("\n".join(lines) + "\n")
-                return {"id": job_id, "feature": feature}
-    return {"id": None, "feature": None}
+        lines, items = read_backlog(root)
+        if index is None:
+            item = next((i for i in items if not i["done"]), None)
+            if item is None:
+                return {"id": None, "feature": None}
+        else:
+            item = pick(items, index)
+            if item["done"]:
+                raise SystemExit(f"backlog item {index} is already claimed")
+        job_id = add_job(root, board, item["text"][:60])
+        item["done"], item["job"] = True, job_id
+        lines[item["line"]] = format_item(item)
+        write_backlog(root, lines)
+        return {"id": job_id, "feature": item["text"]}
 
 
 def cmd_backlog_add(root, items):
-    path = Path(root) / "backlog.md"
-    with locked_board(root):
-        text = path.read_text() if path.exists() else "# Backlog\n"
-        if not text.endswith("\n"):
-            text += "\n"
-        path.write_text(text + "".join(f"- [ ] {item.strip()}\n" for item in items if item.strip()))
+    for item in items:
+        if clean(item):
+            backlog_op(root, "add", text=item)
 
 
 def cmd_set(root, job_id, pairs):
@@ -167,7 +263,7 @@ def main(argv=None):
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
-    sub.add_parser("next")
+    sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
     a = p.parse_args(argv)
     if a.cmd == "new":
@@ -177,7 +273,7 @@ def main(argv=None):
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
-        print(json.dumps(cmd_next(a.dir)))
+        print(json.dumps(cmd_next(a.dir, a.index)))
     else:
         cmd_backlog_add(a.dir, a.items)
 
