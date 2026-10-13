@@ -216,6 +216,41 @@ class ContractTest(unittest.TestCase):
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
 
+    def test_approver_documents_restart_line(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("Restart:", "Restart: none", "Below line 1"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_pulls_and_restarts_after_merge(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for phrase in ("Restart:", "pull --ff-only", "status --porcelain", "Restart pending",
+                       "never `git reset`, `git rebase`"):
+            self.assertIn(phrase, text, phrase)
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        for phrase in ("Restart:", 'symbolic-ref --short HEAD', "status --porcelain", "pull --ff-only", "Restart pending",
+                       "lsof -ti tcp:8765 -sTCP:LISTEN", "curl -sf"):
+            self.assertIn(phrase, cleanup, phrase)
+        self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
+
+    def test_ux_reviewer_renders_page(self):
+        text = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        for phrase in ("headless", "390", "1440", "Rendered: yes", "Rendered: no", "VERDICT: CHANGES"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_approver_requires_rendered_ui(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("Rendered: yes", "UI not rendered"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_dashboard_names_stale_server(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
+        self.assertIn("Dashboard server is out of date. Restart serve.py.", text)
+        self.assertIn("Is serve.py running?", text)          # network failures keep the not-running copy
+        self.assertIn("Can't reach the dashboard server", text)
+        for route in ("api/agents", "api/skills"):
+            self.assertIn(f'getJson("{route}", null, STALE)', text, route)
+        self.assertIn('getJson(`api/p/${enc(p)}/backlog`, [])', text)  # per-project 404 stays "no such project"
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -82,20 +82,21 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #agents [hidden]{display:none}
 #agents .tabs button,#agents .btn{min-height:44px;min-width:44px}
 #agents article{display:grid;gap:10px;padding-top:14px}
-#flow{display:grid;grid-template-columns:minmax(0,1fr) 44px}
+#flow{display:grid;grid-template-columns:minmax(0,1fr) 44px;position:relative}
 #flow>*{grid-column:1;min-width:0}
-.node{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px 12px;width:100%;min-height:44px;text-align:left;
+.node{position:relative;z-index:1;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px 12px;width:100%;min-height:44px;text-align:left;
   font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
 button.node{cursor:pointer;touch-action:manipulation}
 button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:none}
 .node b{font:600 13px ui-monospace,monospace;overflow-wrap:anywhere}
 .node span{font-size:12px;color:var(--muted)}
 .node.step{background:var(--bg);border-style:dashed}
+#flow>.node{width:auto;max-width:100%;justify-self:center}
 .arrow{text-align:center;color:var(--muted);font-size:16px;line-height:24px}
 .lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;align-items:start}
 .lane{display:grid;gap:4px}
 #flow>.loop{grid-column:2;position:relative;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0;margin:21px 8px 21px 0}
-.loop::before{content:"";position:absolute;left:-2px;top:-7px;border:6px solid transparent;border-right:8px solid var(--changes);border-left:0}
+.loop::before{content:"";position:absolute;left:var(--tip,-2px);top:-7px;border:6px solid transparent;border-right:8px solid var(--changes);border-left:0}
 .loop span{position:absolute;top:50%;right:4px;transform:translateY(-50%);writing-mode:vertical-rl;font-size:11px;color:var(--changes)}
 .facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:0}
 .facts dt{color:var(--muted);font-size:12px;line-height:44px}
@@ -148,7 +149,10 @@ const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch {
                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }};
 const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
   .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`); return data; });
-const getJson = (url, fallback) => fetch(url, {cache: "no-store"}).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
+// A 404 from one of our own routes means serve.py predates this dashboard.html; callers pass STALE as `missing` to say so.
+const STALE = "Dashboard server is out of date. Restart serve.py.";
+const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
+  .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
 let projects = [], jobs = [], runs = {}, backlogs = {}, lastText = "", filter = store.get("scrum.filter");
 const shown = () => jobs.filter(j => !filter || j.project === filter);
@@ -200,6 +204,7 @@ function renderSelect(sel, value, withAll) {
 async function poll() {
   try {
     const res = await fetch("api/projects", {cache: "no-store"});
+    if (res.status === 404) return $("status").textContent = STALE;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     projects = (await res.json()).map(p => p.name);
     if (filter && !projects.includes(filter)) filter = "";
@@ -393,9 +398,17 @@ function renderFlow() {
 }
 
 // The loop's ends meet the middle of the builder and approver nodes, whose height changes when a label wraps.
+// Nodes are centred and content-sized, so a negative left margin stretches the loop from its own column back to the
+// narrower node's right edge; it runs behind the wider one (nodes sit above it), and --tip moves the arrowhead out to
+// the builder's own edge. Spanning both columns instead would push the auto-placed nodes out of the loop's rows.
 function alignLoop() {
-  const loop = $("flow").querySelector(".loop"), half = n => ($("flow").querySelector(`[data-agent="${n}"]`)?.offsetHeight || 44) / 2 - 1;
-  if (loop) loop.style.margin = `${half("scrum-builder")}px 8px ${half("scrum-approver")}px 0`;
+  const flow = $("flow"), loop = flow.querySelector(".loop"), node = n => flow.querySelector(`[data-agent="${n}"]`);
+  const b = node("scrum-builder"), a = node("scrum-approver");
+  if (!loop || !b || !a || flow.hidden) return;
+  const left = Math.min(b.offsetLeft + b.offsetWidth, a.offsetLeft + a.offsetWidth) - 2;
+  const col = parseFloat(getComputedStyle(flow).gridTemplateColumns);  // width of the node column = where the loop's column starts
+  loop.style.margin = `${b.offsetHeight / 2 - 1}px 8px ${a.offsetHeight / 2 - 1}px ${left - col}px`;
+  loop.style.setProperty("--tip", `${b.offsetLeft + b.offsetWidth - left}px`);
 }
 window.addEventListener("resize", () => { if ($("agents").open) alignLoop(); });
 
@@ -441,10 +454,10 @@ $("agentsBtn").addEventListener("click", async () => {
   $("flow").innerHTML = '<p class="empty">loading…</p>';
   showAgents(null);
   $("agents").showModal();
-  const list = await getJson("api/agents", null);
-  if (!list) {
+  const list = await getJson("api/agents", null, STALE);
+  if (!Array.isArray(list)) {
     $("flow").innerHTML = "";
-    return $("agError").textContent = "Couldn't load agents. Is serve.py running?";
+    return $("agError").textContent = list || "Couldn't load agents. Is serve.py running?";
   }
   agents = list;
   renderFlow();
@@ -461,8 +474,9 @@ $("agDetail").addEventListener("click", async e => {
     if (!open) return;
     renderSkills(); $("agFilter").focus();
     if (!skills) {
-      skills = await getJson("api/skills", null);
-      if (!skills) { $("agError").textContent = "Couldn't load installed skills."; return $("agPicker").hidden = true; }
+      const list = await getJson("api/skills", null, STALE);
+      if (!Array.isArray(list)) { $("agError").textContent = list || "Couldn't load installed skills."; return $("agPicker").hidden = true; }
+      skills = list;
       renderSkills();
     }
   }
