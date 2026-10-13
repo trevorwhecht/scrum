@@ -457,7 +457,7 @@ const waitingBanner = job => {
   const p = paused(job);
   if (!p && job.stage !== "needs-human") return "";
   const {problem, fix} = p ? {problem: job.waiting, fix: "Answer it in the job's terminal."} : splitReason(job.reason);
-  return `<div class="waiting"
+  return `<div class="waiting" role="status"
     data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for; Open terminal brings that session to the front."
       : "This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix."}">
     <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
