@@ -203,6 +203,10 @@ RANK = {"managed": 0, "local": 1, "project": 2, "user": 3}  # lower wins
 NAMED = {"skills", "mcp", "commands", "agents"}  # the rest are additive: everything loads, nothing is overridden
 WALK_DEPTH, WALK_SKIP = 6, {"node_modules", "Library"}  # fixed on purpose; dot-dirs are skipped too
 SECRET_KEY = re.compile(r"token|secret|password|api[_-]?key|authorization", re.I)
+# Token prefixes, a 32+ hex run, or a 40+ base64-style run with a digit, a lower and an upper; "/" and "." split paths and URLs.
+SECRET_VALUE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}|\bghp_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}|\bxox[a-z]-[A-Za-z0-9-]{10,}"
+                          r"|(?<![A-Za-z0-9])[0-9a-fA-F]{32,}(?![A-Za-z0-9])"
+                          r"|(?<![A-Za-z0-9+_=-])(?=[A-Za-z0-9+_=-]*[0-9])(?=[A-Za-z0-9+_=-]*[a-z])(?=[A-Za-z0-9+_=-]*[A-Z])[A-Za-z0-9+_=-]{40,}")
 
 
 def user_home():
@@ -222,14 +226,17 @@ def as_dict(v):
 
 
 def redact(v, key=""):
-    """Every value under env/headers, and every string under a secret-looking key, becomes "[redacted]"."""
+    """Every value under env/headers, the whole value under a secret-looking key (any type), and every string matching
+    SECRET_VALUE becomes "[redacted]"."""
     if key.lower() in ("env", "headers"):
         return {k: "[redacted]" for k in v} if isinstance(v, dict) else "[redacted]"
+    if SECRET_KEY.search(key):
+        return "[redacted]"
     if isinstance(v, dict):
         return {k: redact(x, str(k)) for k, x in v.items()}
     if isinstance(v, list):
         return [redact(x, key) for x in v]
-    return "[redacted]" if isinstance(v, str) and SECRET_KEY.search(key) else v
+    return "[redacted]" if isinstance(v, str) and SECRET_VALUE.search(v) else v
 
 
 def walk_claude_dirs(d, depth, found):

@@ -831,6 +831,61 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(content, {"env": {"PLAIN": "[redacted]"}, "nested": [{"my_api-key": "[redacted]", "apiKey": "[redacted]"}],
                                    "x": {"Password": "[redacted]", "ok": "visible"}})
 
+    SUBTREES = {"apiKey": {"value": "S", "n": [1, "S"]}, "token": 123456, "password": True, "secret": None, "ok": "visible"}
+    SK, GHP, XOX = "sk-abcdefgh12345678", "ghp_ABCDEFGHIJKLMNOPQRSTuvwx", "xoxb-1234567890-abcdef"
+    URL, HOOK_CMD = f"https://h.example/mcp?k={GHP}", f"curl -H 'X: {XOX}' https://h.example"
+
+    def plant_value_secrets(self):
+        mcp, settings = self.reg / ".mcp.json", self.user / "settings.json"
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "args": ["-y", "pkg", "--key", self.SK], "url": self.URL}}}))
+        settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": self.HOOK_CMD}]}]}}))
+        return mcp, settings, self.json_item("r:reg", "mcp", mcp, "s"), self.json_item("global", "hooks", settings)
+
+    def test_secret_key_subtree_redacted(self):
+        (self.user / "settings.json").write_text(json.dumps(self.SUBTREES))
+        it = self.json_item("global", "settings", self.user / "settings.json")
+        self.assertEqual(json.loads(self.item(it["id"])[1]["content"]),
+                         {"apiKey": "[redacted]", "token": "[redacted]", "password": "[redacted]", "secret": "[redacted]", "ok": "visible"})
+
+    def test_secret_values_redacted(self):
+        _, _, server, hook = self.plant_value_secrets()
+        (self.user / "rules").mkdir()
+        (self.user / "rules" / "r.md").write_text(f"key {self.SK}\n")
+        self.assertEqual(json.loads(self.item(server["id"])[1]["content"]),
+                         {"command": "npx", "args": ["-y", "pkg", "--key", "[redacted]"], "url": "[redacted]"})
+        self.assertEqual(json.loads(self.item(hook["id"])[1]["content"]), {"hooks": [{"type": "command", "command": "[redacted]"}]})
+        bodies = [self.get("/api/ai-settings?scope=r%3Areg")[2], self.get("/api/ai-settings?scope=global")[2]]
+        for sid in ("r:reg", "global"):
+            for c in self.scope(sid)[0].values():
+                bodies += [self.item(it["id"])[2] for it in c["items"] if it["category"] in ("mcp", "hooks", "settings", "plugins")]
+        for body in bodies:
+            for s in (self.SK, self.GHP, self.XOX, "abcdefgh12345678", "ABCDEFGHIJKLMNOPQRSTuvwx"):
+                self.assertNotIn(s, body)
+        rule = next(i for i in self.scope("global")[0]["rules"]["items"] if i["name"] == "r")
+        self.assertEqual(self.item(rule["id"])[1]["content"], f"key {self.SK}\n")
+
+    def test_secret_value_pattern_boundaries(self):
+        hexrun, b64 = "0123456789abcdef0123456789abcdef", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7dE9"
+        for v in (hexrun, b64, f"--sha={hexrun}", f"Bearer {b64} trailing", self.SK, self.URL, self.HOOK_CMD, "github_pat_" + "a1" * 11):
+            self.assertEqual(self.serve.redact([v]), ["[redacted]"], v)
+        ok = ["/Users/trevor/Developer/repos/some-very-long-project-name/server.js", "risk-free", "--disk-cache",
+              "claude-sonnet-4-5", "ai-settings-redact-in-serve-py-redact-th-x", "npx", "-y", "--key"]
+        self.assertEqual(self.serve.redact({"args": ok}), {"args": ok})
+
+    def test_save_round_trips_value_and_subtree_redaction(self):
+        mcp, settings, server, hook = self.plant_value_secrets()
+        mcp_before, settings_before = json.loads(mcp.read_text()), json.loads(settings.read_text())
+        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"])[0], 200)
+        self.assertEqual(self.save(hook, self.item(hook["id"])[1]["content"])[0], 200)
+        self.assertEqual((json.loads(mcp.read_text()), json.loads(settings.read_text())), (mcp_before, settings_before))
+        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace('"npx"', '"node"'))[0], 200)
+        self.assertEqual(json.loads(mcp.read_text()),
+                         {"mcpServers": {"s": {"command": "node", "args": ["-y", "pkg", "--key", self.SK], "url": self.URL}}})
+        settings.write_text(json.dumps(self.SUBTREES))
+        s_it = self.json_item("global", "settings", settings)
+        self.assertEqual(self.save(s_it, self.item(s_it["id"])[1]["content"])[0], 200)
+        self.assertEqual(json.loads(settings.read_text()), self.SUBTREES)
+
     def test_read_only(self):
         snap = lambda: {p: p.stat().st_mtime_ns for p in self.home.rglob("*")}
         before = snap()
