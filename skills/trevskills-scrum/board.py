@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane (empty = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
@@ -13,6 +13,10 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/estimate) to backlog.md, write report.md
+  board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
+                                   --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
+  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec), print
+                                   {"ready","merged","total","in_progress","all_merged"}
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
@@ -23,13 +27,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
-STAGES = ("spec", "build", "check", "review", "approve", "merging", "done", "needs-human", "aborted")
-FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane")
+STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
+          "aborted")
+FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup")
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$"),
-          "lane": re.compile(r"^(?:fast|standard|debug|epic)$")}  # no lane key = standard
+          "lane": re.compile(r"^(?:fast|standard|debug|bigboy)$"),  # no lane key = standard
+          "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 
@@ -248,10 +254,16 @@ def cmd_abort(root, job_id, requeue, reason=None):
             write_backlog(root, lines)
 
 
+def md_section(text, heading):
+    """The body of a `## <heading>` section, up to the next `## ` heading, or None if it has none."""
+    m = re.search(rf"^## {re.escape(heading)}[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m and m.group(1)
+
+
 def merge_summary(text):
     """The body of decision.md's '## Merge summary' section, or None if it has none."""
-    m = re.search(r"^## Merge summary[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
-    return m and m.group(1).strip()
+    body = md_section(text, "Merge summary")
+    return body and body.strip()
 
 
 def cmd_reopen(root, job_id, note):
@@ -332,8 +344,8 @@ def job_files(d):
 
 
 def diverged(d):
-    """True if spec.md, build.md or assessment.md has a `## Diverged` section with a bullet that isn't `- none`."""
-    for name in ("spec.md", "build.md", "assessment.md"):
+    """True if spec.md, build.md, assessment.md or plan.md has a `## Diverged` section with a bullet that isn't `- none`."""
+    for name in ("spec.md", "build.md", "assessment.md", "plan.md"):
         p = d / name
         if not p.is_file():
             continue
@@ -496,6 +508,158 @@ def cmd_triage_apply(root, triage_id):
             "estimated": len(report["Estimated"]), "skipped": len(report["Skipped"])}
 
 
+# --- bigboy: plan.md becomes 2-5 child jobs; `ready` claims the ones that may start ---
+PLAN_FIELDS = {"Depends on": "depends", "Parallel": "parallel", "Exposure": "exposure", "Hard stops": "hard",
+               "Human setup": "setup"}
+TICKET_RE = re.compile(r"^### (T\d+):[ \t]*(.*?)\s*$")
+PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with a / or . and nothing code-like
+IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
+BLOCKED = "bigboy blocked"
+
+
+def likely_files(spec_text):
+    """The backtick-quoted paths in a spec's `## Likely files` section."""
+    return {p for p in re.findall(r"`([^`\s]+)`", md_section(spec_text, "Likely files") or "") if PATH_RE.match(p)}
+
+
+def parse_plan(text):
+    """(goal, tickets) from plan.md, or SystemExit naming the first problem. Each ticket's depends are ticket names."""
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if first != "PLAN: READY":
+        raise SystemExit(f"plan.md: first line must be PLAN: READY, not {first[:60]!r}")
+    tickets, cur = [], None
+    for line in (md_section(text, "Tickets") or "").splitlines():
+        if m := TICKET_RE.match(line):
+            cur = {"ticket": m.group(1), "title": m.group(2), "text": []}
+            tickets.append(cur)
+        elif cur is not None:
+            key, sep, value = line.partition(":")
+            if sep and PLAN_FIELDS.get(key.strip()) and PLAN_FIELDS[key.strip()] not in cur:
+                cur[PLAN_FIELDS[key.strip()]] = value.strip()
+            else:
+                cur["text"].append(line)
+    if not 2 <= len(tickets) <= 5:
+        raise SystemExit(f"plan.md has {len(tickets)} tickets under ## Tickets; 2-5 allowed")
+    names = [t["ticket"] for t in tickets]
+    if len(set(names)) != len(names):
+        raise SystemExit("plan.md: two tickets share a name")
+    for t in tickets:
+        name = t["ticket"]
+        missing = next((k for k, v in PLAN_FIELDS.items() if v not in t), None)
+        if missing or not t["title"]:
+            raise SystemExit(f"plan.md {name}: missing {missing + ': line' if missing else 'title'}")
+        deps = [] if t["depends"].lower() == "none" else [d.strip() for d in t["depends"].split(",") if d.strip()]
+        if name in deps:
+            raise SystemExit(f"plan.md {name}: depends on itself")
+        if bad := [d for d in deps if d not in names]:
+            raise SystemExit(f"plan.md {name}: depends on unknown ticket {bad[0]}")
+        t["depends"] = deps
+        for key in ("parallel", "exposure"):
+            if not (m := re.match(r"(yes|no)\b", t[key], re.I)):
+                raise SystemExit(f"plan.md {name}: {key.capitalize()}: must start with yes or no")
+            t[key] = m.group(1).lower() == "yes"
+        t["text"] = "\n".join(t["text"]).strip()
+    merged, todo = set(), {t["ticket"]: set(t["depends"]) for t in tickets}
+    while todo:
+        free = [k for k, deps in todo.items() if deps <= merged]
+        if not free:
+            raise SystemExit(f"plan.md: dependency cycle among {', '.join(sorted(todo))}")
+        merged.update(free)
+        for k in free:
+            del todo[k]
+    exposure = [t for t in tickets if t["exposure"]]
+    if len(exposure) != 1:
+        raise SystemExit(f"plan.md has {len(exposure)} Exposure: yes tickets; exactly 1 allowed")
+    if set(names) - {exposure[0]["ticket"]} - set(exposure[0]["depends"]):
+        raise SystemExit(f"plan.md: the Exposure: yes ticket {exposure[0]['ticket']} must depend on every other ticket")
+    return (md_section(text, "Goal") or "").strip(), tickets
+
+
+def add_child(root, board, parent, t, depends_on, goal):
+    """Create one waiting child job for ticket t and write its feature.md. Caller holds the board lock."""
+    job_id = add_job(root, board, t["title"][:60])
+    setup = t.get("setup", "none")
+    setup = None if setup.lower() == "none" else setup
+    feature = f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
+        + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
+        + (f"Human setup: {setup}\n" if setup else "")
+    (Path(root) / "jobs" / job_id / "feature.md").write_text(feature)
+    board["jobs"][-1].update(stage="waiting", parent=parent["id"], ticket=t["ticket"], depends_on=depends_on,
+                             parallel=t["parallel"], setup=setup and "pending", setup_text=setup)
+    return job_id
+
+
+def cmd_plan_apply(root, parent_id, fix=False):
+    """Create the children from plan.md (or, with fix, the one FIX child from bigboy-review.md) under the lock.
+    Every check runs before the first job is created, so a refused plan creates nothing."""
+    d = Path(root) / "jobs" / check_id(parent_id)
+    read = lambda name: (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).is_file() else ""
+    with locked_board(root) as board:
+        parent = live(board, parent_id)
+        kids = parent.get("children") or []
+        if fix:
+            if not kids:
+                raise SystemExit(f"job {parent_id} has no children yet; run plan-apply without --fix first")
+            if any(find(board, k).get("ticket") == "FIX" for k in kids):
+                raise SystemExit(f"job {parent_id} already has its one FIX child")
+            text = (md_section(read("bigboy-review.md"), "Fix ticket") or "").strip()
+            if not text:
+                raise SystemExit(f"job {parent_id}: bigboy-review.md has no ## Fix ticket text")
+            ticket = {"ticket": "FIX", "title": f"Fix {parent['title']}", "text": text, "parallel": False}
+            new = [add_child(root, board, parent, ticket, [], "")]
+        else:
+            if kids:
+                raise SystemExit(f"job {parent_id} already has children: {', '.join(kids)}")
+            goal, tickets = parse_plan(read("plan.md"))
+            ids = {}
+            for t in tickets:  # create all first: a ticket may depend on one listed after it
+                ids[t["ticket"]] = add_child(root, board, parent, t, [], goal)
+            for t in tickets:
+                find(board, ids[t["ticket"]])["depends_on"] = [ids[x] for x in t["depends"]]
+            new = list(ids.values())
+        parent.update(children=kids + new, stage="running", reason=None, updatedAt=now())
+        parent["files"], parent["diverged"] = job_files(d), diverged(d)
+        return {"children": new}
+
+
+def cmd_ready(root, parent_id):
+    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
+    jobs_dir = Path(root) / "jobs"
+    with locked_board(root) as board:
+        parent = find(board, check_id(parent_id))
+        kids = [find(board, k) for k in parent.get("children") or []]
+        if not kids:
+            raise SystemExit(f"job {parent_id} has no children")
+        stage = {k["id"]: k["stage"] for k in kids}
+        blocked = parent["stage"] == "needs-human" and (parent.get("reason") or "").startswith(BLOCKED)
+        spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
+            if (jobs_dir / k["id"] / "spec.md").is_file() else ""
+        files = {k["id"]: likely_files(spec(k)) for k in kids}
+        busy = [k for k in kids if k["stage"] not in IDLE]
+        ready = []
+        for k in kids if parent["stage"] == "running" or blocked else []:
+            if k["stage"] != "waiting" or k.get("setup") == "pending" \
+                    or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
+                continue
+            # parallel=no runs alone; parallel=yes never beside a parallel=no sibling or one sharing a Likely file.
+            if busy and (not k.get("parallel") or any(not o.get("parallel") or files[k["id"]] & files[o["id"]] for o in busy)):
+                continue
+            k.update(stage="spec", updatedAt=now())
+            busy.append(k)
+            ready.append(k["id"])
+        merged = sum(k["stage"] == "done" for k in kids)
+        if ready and blocked:
+            parent.update(stage="running", reason=None, updatedAt=now())
+        elif not ready and not busy and merged < len(kids) and (parent["stage"] == "running" or blocked):
+            stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")] \
+                or [k["id"] for k in kids if k.get("setup") == "pending"]
+            parent.update(stage="needs-human", updatedAt=now(), reason=f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each "
+                          "listed child (Approve & merge, Send back to builder or Setup done); if one was aborted, "
+                          "click Abort job on this BigBoy.")
+        return {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
+                "all_merged": merged == len(kids)}
+
+
 def cmd_set(root, job_id, pairs):
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
@@ -561,6 +725,10 @@ def main(argv=None):
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
+    pa = sub.add_parser("plan-apply")
+    pa.add_argument("id")
+    pa.add_argument("--fix", action="store_true")
+    sub.add_parser("ready").add_argument("id")
     a = p.parse_args(argv)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
@@ -584,6 +752,10 @@ def main(argv=None):
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
         print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
+    elif a.cmd == "plan-apply":
+        print(json.dumps(cmd_plan_apply(a.dir, a.id, a.fix)))
+    elif a.cmd == "ready":
+        print(json.dumps(cmd_ready(a.dir, a.id)))
     else:
         # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
         for text in cmd_backlog_add(a.dir, a.items):

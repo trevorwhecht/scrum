@@ -100,7 +100,7 @@ class BoardTest(unittest.TestCase):
     def test_set_lane_stored(self):
         job_id = board.cmd_new(self.root, "x")
         self.assertNotIn("lane", self.jobs()[0])  # no lane key = standard
-        for lane in ("fast", "standard", "debug", "epic"):
+        for lane in ("fast", "standard", "debug", "bigboy"):
             board.cmd_set(self.root, job_id, [f"lane={lane}"])
             self.assertEqual(self.jobs()[0]["lane"], lane)
         board.cmd_set(self.root, job_id, ["lane="])
@@ -116,8 +116,241 @@ class BoardTest(unittest.TestCase):
             out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "stage=review", bad],
                                  capture_output=True, text=True)
             self.assertNotEqual(out.returncode, 0, bad)
-            self.assertIn("fast|standard|debug|epic", out.stderr, bad)
+            self.assertIn("fast|standard|debug|bigboy", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_lane_accepts_bigboy_rejects_epic(self):
+        job_id = board.cmd_new(self.root, "x")
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=bigboy"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.jobs()[0]["lane"], "bigboy")
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=epic"],
+                             capture_output=True, text=True)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(self.jobs()[0]["lane"], "bigboy")
+
+    # --- bigboy: plan-apply / ready ---
+    @staticmethod
+    def ticket(n, deps="none", parallel="yes — disjoint files", exposure="no", setup="none", title=None):
+        return (f"### T{n}: {title or f'Part {n}'}\nDepends on: {deps}\nParallel: {parallel}\nExposure: {exposure}\n"
+                f"Hard stops: none\nHuman setup: {setup}\nBuild part {n}.\n")
+
+    def plan(self, *tickets, first="PLAN: READY"):
+        """A bigboy parent titled Big, with plan.md holding these tickets."""
+        parent = board.cmd_new(self.root, "Big")
+        board.cmd_set(self.root, parent, ["lane=bigboy", "stage=plan"])
+        self.write(f"{parent}/plan.md", f"{first}\n# Big\n## Goal\nShip the big thing.\n## Done when\n1. It works on main.\n"
+                   "## Tickets\n" + "".join(tickets) + "## Assumptions\n- none\n")
+        return parent
+
+    def child(self, job_id):
+        return next(j for j in self.jobs() if j["id"] == job_id)
+
+    def spec(self, job_id, *paths):
+        self.write(f"{job_id}/spec.md", "# x\n## Likely files\n" + "".join(f"- `{p}`: why\n" for p in paths) + "## Assumptions\n- `other/file.py`\n")
+
+    def assert_refused(self, parent, *, fix=False):
+        before = (self.root / "board.json").read_text()
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "plan-apply", parent]
+                             + (["--fix"] if fix else []), capture_output=True, text=True)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        return out.stderr
+
+    def three(self, setup="none"):
+        """T1, T2 (optional setup) independent; T3 is the exposure ticket. Children are 002, 003, 004."""
+        parent = self.plan(self.ticket(1), self.ticket(2, setup=setup),
+                           self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
+        return parent, board.cmd_plan_apply(self.root, parent)["children"]
+
+    def test_plan_apply_creates_waiting_children(self):
+        parent = self.plan(self.ticket(1), self.ticket(2, setup="Add STRIPE_KEY to .env"),
+                           self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes", title="Show the button"))
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "plan-apply", parent],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"children": ["002-part-1", "003-part-2", "004-show-the-button"]})
+        p = self.child("001-big")
+        self.assertEqual((p["stage"], p["children"]), ("running", ["002-part-1", "003-part-2", "004-show-the-button"]))
+        c1, c2, c3 = (self.child(i) for i in ("002-part-1", "003-part-2", "004-show-the-button"))
+        self.assertEqual((c1["stage"], c1["parent"], c1["ticket"], c1["depends_on"], c1["parallel"], c1["setup"]),
+                         ("waiting", "001-big", "T1", [], True, None))
+        self.assertEqual((c2["setup"], c2["setup_text"]), ("pending", "Add STRIPE_KEY to .env"))
+        self.assertEqual((c3["ticket"], c3["depends_on"], c3["parallel"]), ("T3", ["002-part-1", "003-part-2"], False))
+        feature = (self.root / "jobs" / "004-show-the-button" / "feature.md").read_text()
+        self.assertTrue(feature.startswith("Show the button\n\nBuild part 3.\n"), feature)
+        self.assertIn("Ship the big thing.", feature)
+        self.assertNotIn("Depends on:", feature)
+
+    def test_plan_apply_rejects_ticket_count(self):
+        exposure = lambda deps: self.ticket(9, deps=deps, exposure="yes")
+        for tickets in ([exposure("none")], [self.ticket(n) for n in range(1, 6)] + [exposure("T1, T2, T3, T4, T5")]):
+            self.tmp.cleanup()
+            parent = self.plan(*tickets)
+            self.assertIn("tickets", self.assert_refused(parent))
+            self.assertEqual(len(self.jobs()), 1)
+            self.assertEqual([p.name for p in (self.root / "jobs").iterdir()], ["001-big"])
+
+    def test_plan_apply_rejects_not_ready(self):
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"), first="PLAN: DRAFT")
+        self.assertIn("PLAN: READY", self.assert_refused(parent))
+
+    def test_plan_apply_rejects_bad_dependencies(self):
+        cases = {"unknown": [self.ticket(1, deps="T7"), self.ticket(2, deps="T1", exposure="yes")],
+                 "self": [self.ticket(1, deps="T1"), self.ticket(2, deps="T1", exposure="yes")],
+                 "cycle": [self.ticket(1, deps="T2"), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes")]}
+        for name, tickets in cases.items():
+            self.tmp.cleanup()
+            self.assertIn(name, self.assert_refused(self.plan(*tickets)), name)
+            self.assertEqual(len(self.jobs()), 1, name)
+
+    def test_plan_apply_requires_exposure_last(self):
+        cases = [[self.ticket(1), self.ticket(2, deps="T1")],                                          # none
+                 [self.ticket(1, exposure="yes"), self.ticket(2, deps="T1", exposure="yes")],           # two
+                 [self.ticket(1), self.ticket(2), self.ticket(3, deps="T1", exposure="yes")]]           # not last
+        for tickets in cases:
+            self.tmp.cleanup()
+            self.assertIn("Exposure", self.assert_refused(self.plan(*tickets)))
+            self.assertEqual(len(self.jobs()), 1)
+
+    def test_plan_apply_twice_refused(self):
+        parent, kids = self.three()
+        self.assertIn("already", self.assert_refused(parent))
+        self.assertEqual(len(self.jobs()), 4)
+
+    def gaps(self, parent, fix="## Fix ticket\nWire the missing button.\n"):
+        board.cmd_set(self.root, parent, ["stage=review"])
+        self.write(f"{parent}/bigboy-review.md", "BIGBOY: GAPS\nThe button is missing.\n" + fix)
+
+    def test_plan_apply_fix_adds_one_child(self):
+        parent, kids = self.three()
+        for k in kids:
+            board.cmd_set(self.root, k, ["stage=done"])
+        self.gaps(parent)
+        self.assertEqual(board.cmd_plan_apply(self.root, parent, fix=True), {"children": ["005-fix-big"]})
+        fix = self.child("005-fix-big")
+        self.assertEqual((fix["stage"], fix["ticket"], fix["depends_on"], fix["parent"], fix["setup"]),
+                         ("waiting", "FIX", [], "001-big", None))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["children"]), ("running", kids + ["005-fix-big"]))
+        self.assertIn("Wire the missing button.", (self.root / "jobs" / "005-fix-big" / "feature.md").read_text())
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], ["005-fix-big"])
+
+    def test_plan_apply_fix_refused_twice(self):
+        parent, kids = self.three()
+        self.gaps(parent, fix="")
+        self.assertIn("Fix ticket", self.assert_refused(parent, fix=True))
+        self.gaps(parent)
+        board.cmd_plan_apply(self.root, parent, fix=True)
+        self.gaps(parent)
+        self.assertIn("already", self.assert_refused(parent, fix=True))
+        self.assertEqual(len(self.jobs()), 5)
+
+    def test_ready_waits_for_dependencies(self):
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        self.assertEqual(board.cmd_ready(self.root, parent),
+                         {"ready": [c1], "merged": 0, "total": 3, "in_progress": 1, "all_merged": False})
+        self.assertEqual(self.child(c1)["stage"], "spec")
+        board.cmd_set(self.root, c1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        board.cmd_set(self.root, c2, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
+        board.cmd_set(self.root, c3, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent),
+                         {"ready": [], "merged": 3, "total": 3, "in_progress": 0, "all_merged": True})
+        self.assertEqual(self.child(parent)["stage"], "running")
+
+    def test_ready_claims_once(self):
+        parent, (c1, c2, c3) = self.three()
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        again = board.cmd_ready(self.root, parent)
+        self.assertEqual((again["ready"], again["in_progress"]), ([], 2))
+        self.assertEqual([self.child(c)["stage"] for c in (c1, c2, c3)], ["spec", "spec", "waiting"])
+
+    def test_ready_skips_pending_setup(self):
+        parent, (c1, c2, c3) = self.three(setup="Create the S3 bucket")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        board.cmd_set(self.root, c1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, c2, ["setup=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+
+    def test_ready_serializes_overlapping_likely_files(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4, deps="T1, T2, T3", exposure="yes"))
+        c1, c2, c3, c4 = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py", "src/b.py")
+        self.spec(c2, "src/b.py")
+        self.spec(c3, "src/c.py")  # `other/file.py` sits outside Likely files in every spec, so it never counts
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c3])
+        board.cmd_set(self.root, c1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        # A parallel=no child starts only when no sibling is in progress.
+        parent = self.plan(self.ticket(1), self.ticket(2, parallel="no — touches everything"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
+        board.cmd_set(self.root, d1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
+
+    def test_likely_files_reads_only_that_section(self):
+        text = "## Problem\n`a/x.py`\n## Likely files\n- `skills/board.py`: `SHAPES[\"lane\"]` and `cmd_ready(root)`\n- `tests/t.py`\n## Assumptions\n- `b/y.py`\n"
+        self.assertEqual(board.likely_files(text), {"skills/board.py", "tests/t.py"})
+        self.assertEqual(board.likely_files("# no section\n"), set())
+
+    def five(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),
+                           self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
+        return parent, board.cmd_plan_apply(self.root, parent)["children"]
+
+    def test_ready_failed_child_blocks_only_dependents(self):
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c2, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c4])
+        self.assertEqual((self.child(parent)["stage"], self.child(c3)["stage"]), ("running", "waiting"))
+
+    def test_ready_marks_parent_blocked(self):
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_abort(self.root, c2, requeue=False)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
+        p = self.child(parent)
+        self.assertEqual(p["stage"], "needs-human")
+        self.assertTrue(p["reason"].startswith(f"bigboy blocked: {c1}, {c2}. Fix: "), p["reason"])
+        board.cmd_set(self.root, c1, ["stage=done", "reason="])  # Trevor approved it and it merged
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_ready_leaves_other_parent_stops_alone(self):
+        parent, kids = self.three()
+        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy off track: x. Fix: y"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy off track: x. Fix: y"))
+        self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
+
+    def test_next_skips_bigboy_children(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Dark mode\n")
+        parent, kids = self.three()
+        self.assertEqual(board.cmd_next(self.root), {"id": "005-dark-mode", "feature": "Dark mode"})
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
+        self.assertEqual(self.child(parent)["stage"], "running")
+
+    def test_diverged_reads_plan_md(self):
+        parent, _ = self.three()
+        board.cmd_set(self.root, parent, ["stage=running"])
+        self.assertIs(self.child(parent)["diverged"], False)
+        with open(self.root / "jobs" / parent / "plan.md", "a") as f:
+            f.write("## Diverged\n- T3 said X → tracker narrowed it to Y — T1 already did X\n")
+        board.cmd_set(self.root, parent, ["stage=running"])
+        self.assertIs(self.child(parent)["diverged"], True)
 
     def test_set_unknown_job_fails(self):
         board.cmd_new(self.root, "x")
