@@ -62,6 +62,10 @@ def spawn(project, root, job_id, action, prompt):
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
+    try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}"])
+    except SystemExit:
+        pass
 
 
 def estimate(root, text):
@@ -410,6 +414,148 @@ def ai_settings_undo(item_id):
     return 200, ai_settings_item(item_id)
 
 
+STAGE_TEXT = {"spec": "spec writer working", "build": "builder working", "check": "check running",
+              "review": "reviewers working", "approve": "approver deciding", "merging": "merging",
+              "needs-human": "waiting on you"}
+
+
+def activity(root, job):
+    """{"text", "at"} for what happened last on an active job: the stage, the job folder's files, the branch's last
+    commit, the PR. The newest event wins; on a tie the more specific (earlier in the list) one does."""
+    d, events = root / "jobs" / job["id"], []
+
+    def mtime(path):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
+    rounds = sorted((p for p in d.glob("round-*") if re.fullmatch(r"round-\d+", p.name)), key=lambda p: int(p.name[6:]))
+    if rounds:
+        last, n = rounds[-1], rounds[-1].name[6:]
+        reviews = [t for t in map(mtime, last.glob("review-*.md")) if t]
+        if reviews:
+            events.append((max(reviews), f"reviewers {len(reviews)}/{len(board.REVIEWERS)} done"))
+        if t := mtime(last / "check.md"):
+            events.append((t, f"check {board.first_word(last / 'check.md', ('PASS', 'FAIL'))} (attempt {n})"))
+    if t := mtime(d / "decision.md"):
+        events.append((t, f"approver: {board.first_word(d / 'decision.md', ('APPROVE', 'REWORK', 'ESCALATE'))}"))
+    if t := mtime(d / "ci.md"):
+        events.append((t, "CI failed, builder fixing"))
+    wt = job.get("worktree")
+    if wt and os.path.isdir(wt):
+        try:
+            out = subprocess.run(["git", "-C", wt, "log", "-1", "--format=%s|%ct", f"scrum/{job['id']}"],
+                                 capture_output=True, text=True, timeout=2).stdout.strip()
+            subject, _, ct = out.rpartition("|")
+            if ct.isdigit():
+                events.append((int(ct), f"builder committed: {subject}"))
+        except (subprocess.SubprocessError, OSError):
+            pass
+    text = STAGE_TEXT.get(job["stage"], job["stage"])
+    if job.get("pr"):
+        text = "CI running" if job["stage"] == "merging" else "PR ready"
+    try:
+        events.append((datetime.fromisoformat(job["updatedAt"]).timestamp(), text))
+    except (KeyError, TypeError, ValueError):
+        pass
+    if not events:
+        return None
+    at, text = max(events, key=lambda e: e[0])  # max() keeps the first of equal timestamps
+    return {"text": text, "at": at}
+
+
+def board_with_activity(root):
+    """board.json plus a computed `activity` on every job that isn't done or aborted."""
+    data = json.loads((root / "board.json").read_text())
+    for job in data.get("jobs", []):
+        if job.get("stage") not in ("done", "aborted"):
+            job["activity"] = activity(root, job)
+    return data
+
+
+TERM_SCRIPTS = {  # each gets "/dev/<tty>" as argv; returns "ok", or "missing" when no tab has that tty
+    "Apple_Terminal": """on run argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is item 1 of argv then
+          set selected of t to true
+          set index of w to 1
+          activate
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "missing"
+end run""",
+    "iTerm.app": """on run argv
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is item 1 of argv then
+            select w
+            select t
+            select s
+            activate
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return "missing"
+end run"""}
+TAIL_SCRIPT = """on run argv
+  tell application "Terminal"
+    do script "tail -f " & quoted form of item 1 of argv
+    activate
+  end tell
+end run"""
+
+
+def open_terminal(project, root, job_id):
+    """Bring the job's interactive tab to the front, or tail its headless run log in a new window. Every stored value
+    is re-checked here (board.py checked it on the way in) and reaches osascript/open only as an argv item."""
+    jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
+    job = next((j for j in jobs if j.get("id") == job_id), None)
+    if not job:
+        return 404, {"error": "no such job"}
+    tty, term = job.get("tty"), job.get("term")
+    with RUNS_LOCK:
+        runlog = job.get("runlog") or RUNS.get(f"{project}/{job_id}", {}).get("log")
+    if (tty is not None and not (isinstance(tty, str) and board.SHAPES["tty"].fullmatch(tty))
+            or term is not None and term not in board.TERMS):
+        return 400, {"error": "job has a bad tty or term"}
+    log = None
+    if runlog:
+        runs = os.path.realpath(root / "runs") + os.sep
+        log = os.path.realpath(root / runlog) if isinstance(runlog, str) else ""
+        if not log.startswith(runs) or not log.endswith(".log") or not os.path.isfile(log):
+            return 400, {"error": "run log is missing or outside scrum/runs/"}
+    if tty and term == "ghostty":
+        cmd, message = ["open", "-a", "Ghostty"], f"Ghostty is open. Look for the tab on {tty}."
+    elif tty:
+        cmd, message = ["osascript", "-e", TERM_SCRIPTS[term or "Apple_Terminal"], f"/dev/{tty}"], None
+    elif log and term == "ghostty" and os.path.isdir("/Applications/Ghostty.app"):
+        cmd, message = ["open", "-na", "Ghostty", "--args", "-e", "tail", "-f", log], None
+    elif log:
+        cmd, message = ["osascript", "-e", TAIL_SCRIPT, log], None
+    else:
+        return 409, {"error": "no terminal recorded for this job"}
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except (subprocess.SubprocessError, OSError) as e:
+        return 500, {"error": f"couldn't open the terminal ({e})"}
+    if out.returncode:
+        return 500, {"error": (out.stderr.strip().splitlines() or ["couldn't open the terminal"])[-1]}
+    if out.stdout.strip() == "missing":
+        return 404, {"error": f"no open tab on {tty}"}
+    return 200, {"id": job_id, "message": message}
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -480,6 +626,11 @@ class Handler(BaseHTTPRequestHandler):
             target = os.path.realpath(root / rel)
             if target.startswith(os.path.realpath(root) + os.sep) and Path(target).suffix in (".json", ".md", ".log") \
                     and os.path.isfile(target):
+                if target == os.path.realpath(root / "board.json"):
+                    try:
+                        return self.send_json(200, board_with_activity(root))
+                    except ValueError:
+                        pass  # mid-write or hand-broken: serve the raw bytes as before
                 return self.send(200, Path(target).read_bytes(), TYPES[Path(target).suffix])
         self.send_json(404, {"error": "not found"})
 
@@ -498,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/undo":
                 code, obj = ai_settings_undo(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run)?|/jobs/[^/]+/(?:approve|rework|abort|terminal))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -536,6 +687,8 @@ class Handler(BaseHTTPRequestHandler):
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
+        if action == "terminal":
+            return open_terminal(project, root, job_id)
         if action == "abort":
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))

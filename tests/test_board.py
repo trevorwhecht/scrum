@@ -70,6 +70,33 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, job_id, ["stage=shipping"])
         self.assertEqual(self.jobs()[0]["stage"], "spec")
 
+    def test_set_tty_term_runlog_stored(self):
+        job_id = board.cmd_new(self.root, "x")
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id,
+                              "tty=ttys003", "term=Apple_Terminal", "runlog=runs/x.log"], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        job = self.jobs()[0]
+        self.assertEqual((job["tty"], job["term"], job["runlog"]), ("ttys003", "Apple_Terminal", "runs/x.log"))
+        board.cmd_set(self.root, job_id, ["tty=", "term=", "runlog="])
+        job = self.jobs()[0]
+        self.assertEqual((job["tty"], job["term"], job["runlog"]), (None, None, None))
+
+    def test_set_rejects_bad_tty(self):
+        job_id = board.cmd_new(self.root, "x")
+        before = (self.root / "board.json").read_text()
+        for bad in ("tty=ttys1; rm", "tty=/dev/ttys1", "tty=??", "tty=ttys1\n", "runlog=runs/../board.json", "runlog=x.log"):
+            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "stage=review", bad],
+                                 capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0, bad)
+            self.assertIn("bad field", out.stderr, bad)
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_set_rejects_unknown_term(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaisesRegex(SystemExit, "bad field"):
+            board.cmd_set(self.root, job_id, ["tty=ttys2", "term=xterm"])
+        self.assertNotIn("tty", self.jobs()[0])
+
     def test_set_unknown_job_fails(self):
         board.cmd_new(self.root, "x")
         with self.assertRaises(SystemExit):

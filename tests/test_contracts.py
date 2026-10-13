@@ -232,6 +232,44 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, cleanup, phrase)
         self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
 
+    def test_merge_always_fast_forwards(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertEqual(text.count("pull --ff-only"), 1)
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        restart = cleanup.index("**Restart.**")
+        ff = cleanup.index('git -C "$REPO" pull --ff-only')
+        self.assertLess(cleanup.index("git fetch origin"), ff)
+        self.assertLess(cleanup.index("symbolic-ref --short HEAD"), ff)
+        self.assertLess(ff, restart)
+        self.assertIn("whatever the `Restart:` line says", cleanup[:restart])
+        self.assertNotIn("symbolic-ref", cleanup[restart:])  # the Restart sub-steps reuse the result
+        self.assertIn("Restart pending", cleanup[restart:])
+        for reason in ("main not updated: <reason>", "`not on <default>`", "`uncommitted changes`", "`fast-forward failed`"):
+            self.assertIn(reason, cleanup, reason)
+        self.assertIn("main not updated: <reason>", self.section(text, "## Final report", "and, for needs-human"))
+        rules = self.section(text, "This skill is a sanctioned exception", "## Setup")
+        self.assertIn("one guarded fast-forward (`--ff-only`)", rules)
+        self.assertIn("**Merge** step 7", rules)
+
+    def test_skill_records_terminal(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for phrase in ("ps -o tty= -p $PPID", "B set $ID tty=", "$TERM_PROGRAM", "B set $ID term=",
+                       "Apple_Terminal|iTerm.app|ghostty", "ttys[0-9]*"):
+            self.assertIn(phrase, text, phrase)
+        commands = self.section(text, "## Commands", "## Check gate")
+        self.assertIn("**record your terminal**", self.section(commands, "`/trevskills-scrum approve <id>`", "\n"))
+        self.assertIn("**record your terminal**", self.section(commands, "`/trevskills-scrum rework <id> <feedback>`", "\n"))
+        self.assertIn("**record your terminal**", self.section(commands, "2. **Base:**", "\n"))  # New job, next, start
+
+    def test_dashboard_has_activity_line_and_open_terminal(self):
+        text = DASHBOARD.read_text()
+        self.assertIn(".activity .what{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}", text)
+        self.assertIn("${esc(act.text)}", text)
+        self.assertIn(">Open terminal</button>", text)
+        self.assertIn("/terminal`", text)
+        self.assertIn("job.tty", text)
+        self.assertIn("job.runlog", text)
+
     def test_ux_reviewer_renders_page(self):
         text = (ROOT / "agents" / "scrum-review-ux.md").read_text()
         for phrase in ("headless", "390", "1440", "Rendered: yes", "Rendered: no", "VERDICT: CHANGES"):

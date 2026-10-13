@@ -1,4 +1,4 @@
-import json, os, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import json, os, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from unittest import mock
 from pathlib import Path
 
@@ -145,6 +145,157 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id][0]["stage"], "aborted")
         self.assertIn("abort me", [i["text"] for i in self.serve.board.backlog_items(self.root) if not i["done"]])
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/abort", {})[0], 400)  # already aborted
+
+    # --- runlog, Open terminal, activity line ---
+    def job(self, title, *pairs):
+        job_id = self.serve.board.cmd_new(self.root, title)
+        if pairs:
+            self.serve.board.cmd_set(self.root, job_id, list(pairs))
+        return job_id
+
+    def patch_board(self, job_id, **fields):
+        """Write fields straight into board.json, past board.py's checks, as a hand-edited board would."""
+        path = self.root / "board.json"
+        data = json.loads(path.read_text())
+        next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
+        path.write_text(json.dumps(data))
+
+    def terminal(self, job_id, headers=None):
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            run.return_value = mock.Mock(returncode=0, stdout="ok\n", stderr="")
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {}, headers)
+        return code, out, run, popen
+
+    def test_spawn_records_runlog(self):
+        job_id = self.job("runlog me")
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.serve.spawn("repo", self.root, job_id, "start", "x")
+            self.serve.spawn("repo", self.root, "999-not-on-board", "start", "x")  # failure is ignored
+        self.addCleanup(lambda: [self.serve.RUNS.pop(f"repo/{i}", None) for i in (job_id, "999-not-on-board")])
+        self.assertEqual(popen.call_count, 2)
+        job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
+        self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
+
+    def test_terminal_apple_terminal_passes_tty_as_argv(self):
+        code, out, run, popen = self.terminal(self.job("tab", "tty=ttys004", "term=Apple_Terminal"))
+        self.assertEqual(code, 200, out)
+        argv = run.call_args.args[0]
+        self.assertEqual((argv[0], argv[1], argv[-1]), ("osascript", "-e", "/dev/ttys004"))
+        self.assertIn("on run argv", argv[2])
+        self.assertIn("set index of w to 1", argv[2])
+        self.assertNotIn("ttys004", argv[2])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        code, out, run, _ = self.terminal(self.job("iterm", "tty=ttys005", "term=iTerm.app"))
+        self.assertEqual(code, 200)
+        self.assertEqual(run.call_args.args[0][-1], "/dev/ttys005")
+        self.assertIn('application "iTerm"', run.call_args.args[0][2])
+
+    def test_terminal_ghostty_returns_message(self):
+        code, out, run, _ = self.terminal(self.job("ghost", "tty=ttys006", "term=ghostty"))
+        self.assertEqual(code, 200)
+        self.assertEqual(run.call_args.args[0], ["open", "-a", "Ghostty"])
+        self.assertIn("ttys006", out["message"])
+
+    def test_terminal_headless_tails_log(self):
+        (self.root / "runs").mkdir(exist_ok=True)
+        (self.root / "runs" / "h.log").write_text("x")
+        code, out, run, _ = self.terminal(self.job("headless", "runlog=runs/h.log"))
+        self.assertEqual(code, 200, out)
+        argv = run.call_args.args[0]
+        self.assertEqual((argv[0], argv[-1]), ("osascript", os.path.realpath(self.root / "runs" / "h.log")))
+        self.assertIn("quoted form of", argv[2])
+
+    def test_terminal_none_errors(self):
+        code, out, run, popen = self.terminal(self.job("nothing"))
+        self.assertTrue(400 <= code < 500)
+        run.assert_not_called(); popen.assert_not_called()
+
+    def test_terminal_rejects_bad_id(self):
+        for bad in ("999-missing", "..%2F..%2Fx", "BAD"):
+            code, _, run, popen = self.terminal(bad)
+            self.assertTrue(400 <= code < 500, bad)
+            run.assert_not_called(); popen.assert_not_called()
+
+    def test_terminal_rejects_bad_tty(self):
+        for fields in ({"tty": "ttys1; rm -rf ~"}, {"tty": "/dev/ttys1"}, {"tty": 5},
+                       {"tty": "ttys1", "term": "xterm"}):
+            job_id = self.job("bad tty")
+            self.patch_board(job_id, **fields)
+            code, _, run, popen = self.terminal(job_id)
+            self.assertTrue(400 <= code < 500, fields)
+            run.assert_not_called(); popen.assert_not_called()
+
+    def test_terminal_rejects_log_outside_runs(self):
+        runs = self.root / "runs"
+        runs.mkdir(exist_ok=True)
+        link = runs / "escape.log"
+        if not link.is_symlink():
+            link.symlink_to(self.root / "board.json")
+        for log in ("runs/../board.json", "runs/escape.log", "runs/missing.log", "../calls.jsonl"):
+            job_id = self.job("bad log")
+            self.patch_board(job_id, runlog=log)
+            code, _, run, popen = self.terminal(job_id)
+            self.assertTrue(400 <= code < 500, log)
+            run.assert_not_called(); popen.assert_not_called()
+
+    def test_terminal_rejects_foreign_origin(self):
+        job_id = self.job("origin", "tty=ttys007")
+        for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}):
+            code, _, run, popen = self.terminal(job_id, headers)
+            self.assertEqual(code, 403)
+            run.assert_not_called(); popen.assert_not_called()
+
+    def activity_of(self, job_id):
+        code, data = self.req("GET", "/p/repo/board.json")
+        self.assertEqual(code, 200)
+        return next(j for j in data["jobs"] if j["id"] == job_id).get("activity")
+
+    def touch(self, rel, text, ahead):
+        path = self.root / "jobs" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        t = time.time() + ahead
+        os.utime(path, (t, t))
+
+    def test_activity_line_counts_reviews(self):
+        job_id = self.job("reviews", "stage=review")
+        self.assertEqual(self.activity_of(job_id)["text"], "reviewers working")
+        self.touch(f"{job_id}/round-1/review-security.md", "VERDICT: PASS\n", 5)
+        self.touch(f"{job_id}/round-1/review-ui.md", "VERDICT: PASS\n", 6)
+        act = self.activity_of(job_id)
+        self.assertEqual(act["text"], "reviewers 2/4 done")
+        self.assertAlmostEqual(act["at"], time.time() + 6, delta=2)
+
+    def test_activity_line_check_fail(self):
+        job_id = self.job("checks", "stage=check")
+        self.touch(f"{job_id}/round-1/check.md", "CHECK: PASS\n", 3)
+        self.touch(f"{job_id}/round-2/check.md", "CHECK: FAIL\n", 4)
+        self.assertEqual(self.activity_of(job_id)["text"], "check FAIL (attempt 2)")
+
+    def test_activity_line_pr_and_done(self):
+        job_id = self.job("pr", "stage=merging", "pr=https://x/1")
+        self.assertEqual(self.activity_of(job_id)["text"], "CI running")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human"])
+        self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=done"])
+        self.assertIsNone(self.activity_of(job_id))
+
+    def test_activity_line_builder_commit(self):
+        wt = Path(self.tmp.name) / "wt-activity"
+        job_id = self.job("commit")
+        later = "@" + str(int(time.time()) + 30)  # newer than updatedAt, so the commit wins
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t", "GIT_COMMITTER_DATE": later, "GIT_AUTHOR_DATE": later}
+        wt.mkdir()
+        for args in (["init", "-q", "-b", f"scrum/{job_id}"],
+                     ["-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "Add <b>|thing</b>"]):
+            out = subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True, env=env)
+            self.assertEqual(out.returncode, 0, out.stderr)
+        self.serve.board.cmd_set(self.root, job_id, [f"worktree={wt}", "stage=build"])
+        self.assertEqual(self.activity_of(job_id)["text"], "builder committed: Add <b>|thing</b>")
+        self.serve.board.cmd_set(self.root, job_id, ["worktree=/nonexistent/wt"])  # missing worktree is ignored
+        self.assertEqual(self.activity_of(job_id)["text"], "builder working")
 
     def fake_agents_and_claude_home(self):
         """A temp agents dir and a fake CLAUDE_HOME with user skills and user- and project-scope plugins."""

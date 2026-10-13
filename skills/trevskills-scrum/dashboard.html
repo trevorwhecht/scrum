@@ -32,6 +32,8 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .chip.PASS{background:var(--pass)}.chip.CHANGES,.chip.FAIL{background:var(--changes)}.chip.INVALID{background:var(--invalid)}
 .chip.pending{background:transparent;color:var(--muted);border:1px dashed var(--pending)}
 .meta{display:block;font-size:12px;color:var(--muted);margin-top:6px}
+.meta.activity{display:flex;gap:4px;white-space:nowrap}.activity>span{flex:none}
+.activity .what{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
 .stale{color:var(--changes)}
 .empty{color:var(--muted);font-size:12px}
@@ -185,16 +187,25 @@ const tag = p => `<span class="tag" style="--h:${hue(p)}">${esc(p)}</span>`;
 const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
 const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
 
+const ago = at => {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - at));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
+};
+const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
+
 function card(job) {
-  const human = job.stage === "needs-human", run = runs[job.key];
+  const human = job.stage === "needs-human", run = runs[job.key], act = job.activity;
   const stale = !["done", "needs-human", "aborted"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  const staleText = `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>`;
   return `<button class="card${human ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
     ${job.stage === "aborted" ? '<span class="reason">Aborted</span>' : ""}
     ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
-    <span class="meta">${job.pr ? "PR ready · " : ""}${stale ? `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>` : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>
+    ${act && !["done", "aborted"].includes(job.stage)
+      ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
+      : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
   </button>`;
 }
 
@@ -248,6 +259,7 @@ async function poll() {
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
+    tickAgo();
   } catch (e) {
     $("status").textContent = `Can't reach the dashboard server (${e.message}). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py`;
   }
@@ -275,6 +287,7 @@ function open(job) {
   $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
+  if (!termState[job.key]?.pending) delete termState[job.key];
   renderActions(job);
   $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
@@ -285,6 +298,29 @@ function open(job) {
 const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+
+// Open terminal: kept per job outside the DOM, so a polling re-render keeps the pending state and the message.
+const termState = {};
+function termForm(job) {
+  if (!job.tty && !job.runlog && !runs[job.key]?.log) return "";
+  const st = termState[job.key] || {};
+  return `<form data-act="terminal"><button class="btn" type="submit"${st.pending ? " disabled" : ""}>Open terminal</button>${
+    st.err ? `<span class="error" role="alert">${esc(st.err)}</span>` : st.msg ? `<span class="note" role="status">${esc(st.msg)}</span>` : ""}</form>`;
+}
+const redrawTerm = key => {
+  const job = jobs.find(j => j.key === key), form = $("actions").querySelector('form[data-act="terminal"]');
+  if (job && form && $("viewer").dataset.key === key) form.outerHTML = termForm(job);
+};
+async function openTerminal(key) {
+  const job = jobs.find(j => j.key === key);
+  if (!job || termState[key]?.pending) return;
+  termState[key] = {pending: true}; redrawTerm(key);
+  try {
+    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/terminal`, {});
+    termState[key] = {msg: out.message || ""};
+  } catch (err) { termState[key] = {err: err.message}; }
+  redrawTerm(key);
+}
 
 // Next step for a needs-human job, picked from the reason prefix the orchestrator writes.
 const nextStep = (reason, worktree) =>
@@ -301,21 +337,22 @@ function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
   const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
   const err = '<p class="error" role="alert"></p>';
-  if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + abortForm(job) + err;
+  if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = last + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = last + termForm(job) + abortForm(job) + err;
   const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated" required> I ran /trevskills-migrate for this job</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (obsolete ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
-      <button class="btn" type="submit">Send back to builder</button></form>`) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`) + termForm(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
   const form = e.target, act = form.dataset.act, key = $("viewer").dataset.key, btn = form.querySelector("button");
   const job = jobs.find(j => j.key === key);
+  if (act === "terminal") return openTerminal(key);
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
   if (act === "abort" && !form.dataset.armed) {
     form.dataset.armed = "1"; form.querySelector("label").hidden = false;
