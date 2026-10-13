@@ -319,6 +319,23 @@ class ContractTest(unittest.TestCase):
         actions = text[text.index("function renderActions(job)"):]
         self.assertRegex(actions, r'job\.stage === "aborted" && reason \? `<p class="note">\$\{esc\(reason\)\}')
 
+    def test_dashboard_has_reopen_form(self):
+        text = DASHBOARD.read_text()
+        m = re.search(r'const reopenForm = job => (.*?)</form>`;', text, re.S)
+        self.assertIsNotNone(m)
+        form = m.group(1)
+        self.assertIn('["done", "aborted"].includes(job.stage)', form)
+        self.assertIn('job.reopened_to', form)
+        self.assertIn('Reopened as ${esc(job.reopened_to)}', form)
+        self.assertRegex(form, r'<form data-act="reopen"><textarea name="note" required maxlength="2000"[^>]*aria-label="Note for the reopened job"')
+        self.assertIn('<button class="btn" type="submit">Reopen</button>', form)
+        actions = text[text.index("function renderActions(job)"):text.index("const blProject")]
+        self.assertIn("reopenForm(job)", actions)
+        self.assertIn("{note: form.note.value}", actions)
+        self.assertIn("/${act}`", actions)
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        self.assertIn("Reopened as ${esc(job.reopened_to)}", card)
+
     def test_dashboard_hides_approve_for_obsolete(self):
         m = re.search(r"canApprove = [^;]*/\^\(([^)]*)\)/", DASHBOARD.read_text())
         self.assertIsNotNone(m)

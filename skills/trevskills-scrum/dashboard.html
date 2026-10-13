@@ -245,6 +245,7 @@ function card(job) {
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
+    ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
     ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
@@ -334,7 +335,7 @@ function open(job) {
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   if (!termState[job.key]?.pending) delete termState[job.key];
   renderActions(job);
-  $("viewer").showModal();
+  if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
 }
@@ -343,6 +344,11 @@ function open(job) {
 const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+// Reopen starts a new linked job from a finished one; once reopened, the button jumps to that job instead.
+const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
+  : job.reopened_to ? `<form data-act="goto" data-key="${esc(`${job.project}/${job.reopened_to}`)}"><button class="btn" type="submit">Reopened as ${esc(job.reopened_to)}</button></form>`
+  : `<form data-act="reopen"><textarea name="note" required maxlength="2000" placeholder="What should the follow-up job do?" aria-label="Note for the reopened job"></textarea>
+    <button class="btn" type="submit">Reopen</button></form>`;
 
 // Open terminal: kept per job outside the DOM, so a polling re-render keeps the pending state and the message.
 const termState = {};
@@ -385,7 +391,7 @@ function renderActions(job) {
   if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = why + last + termForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = why + last + reopenForm(job) + termForm(job) + abortForm(job) + err;
   const obsolete = /^obsolete/.test(reason), canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
@@ -400,6 +406,7 @@ $("actions").addEventListener("submit", async e => {
   const form = e.target, btn = e.submitter || form.querySelector("button"), act = btn.dataset.act || form.dataset.act, key = $("viewer").dataset.key;
   const job = jobs.find(j => j.key === key);
   if (act === "terminal") return openTerminal(key);
+  if (act === "goto") { const linked = jobs.find(j => j.key === form.dataset.key); if (linked) open(linked); return; }
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
   if (act === "abort" && !form.dataset.armed) {
     form.dataset.armed = "1"; form.querySelector("label").hidden = false;
@@ -407,10 +414,13 @@ $("actions").addEventListener("submit", async e => {
   }
   btn.disabled = true;
   try {
-    const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked} : {feedback: form.feedback.value};
-    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
+    const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
+      : act === "reopen" ? {note: form.note.value} : {feedback: form.feedback.value};
+    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();
+    const linked = act === "reopen" && jobs.find(j => j.key === `${job.project}/${out.id}`);
+    if (linked) return open(linked);
     renderActions(jobs.find(j => j.key === key));
   } catch (err) {
     btn.disabled = false;
