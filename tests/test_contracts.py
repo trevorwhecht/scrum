@@ -330,6 +330,9 @@ class ContractTest(unittest.TestCase):
     def test_dashboard_has_waiting_banner(self):
         self.assertIn("Waiting on you", DASHBOARD.read_text())
 
+    def test_dashboard_waiting_banner_has_status_role(self):
+        self.assertRegex(DASHBOARD.read_text(), r'<div class="waiting"\s+role="status"')
+
     def test_skill_registers_waiting_hooks(self):
         fm = re.match(r"^---\n(.*?)\n---\n", (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), re.S).group(1)
         self.assertIn("\nhooks:\n", fm)
