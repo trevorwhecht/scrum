@@ -116,6 +116,53 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {job_id}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 400)  # already claimed
 
+    def backlog_index(self, text):
+        self.serve.board.backlog_op(self.root, "add", text=text)
+        return len(self.serve.board.backlog_items(self.root)) - 1
+
+    def askme_run(self, body, returncode=0):
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve, "spawn") as spawn:
+            run.return_value = mock.Mock(returncode=returncode, stdout="", stderr="Terminal said no\n" if returncode else "")
+            code, out = self.req("POST", "/api/p/repo/backlog/run", body)
+        return code, out, run, spawn
+
+    def test_backlog_run_askme_opens_terminal(self):
+        i = self.backlog_index("Ask me first")
+        code, out, run, spawn = self.askme_run({"index": i, "askme": 3})
+        self.assertEqual(code, 200, out)
+        job_id = out["id"]
+        self.assertEqual(out["message"], "Askme opened in a new Terminal window.")
+        self.assertEqual((self.root / "jobs" / job_id / "feature.md").read_text(), "Ask me first\n")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
+        self.assertEqual(argv[4:], [self.serve.CLAUDE, f"/trevskills-scrum start {job_id} askme 3"])
+        spawn.assert_not_called()
+        self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])
+
+    def test_backlog_run_rejects_bad_askme(self):
+        i = self.backlog_index("Bad askme level")
+        jobs_before = sorted(p.name for p in (self.root / "jobs").iterdir())
+        for bad in (0, 4, "x", "2", True, 2.0):
+            code, _, run, spawn = self.askme_run({"index": i, "askme": bad})
+            self.assertEqual(code, 400, bad)
+            run.assert_not_called()
+            spawn.assert_not_called()
+        self.assertFalse(self.serve.board.backlog_items(self.root)[i]["done"])
+        self.assertIn("- [ ] Bad askme level", (self.root / "backlog.md").read_text())
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), jobs_before)
+        code, out, run, spawn = self.askme_run({"index": i, "askme": None})  # null is Off: headless
+        self.assertEqual(code, 202, out)
+        run.assert_not_called()
+        self.assertEqual(spawn.call_args.args[4], f"/trevskills-scrum start {out['id']}")
+
+    def test_backlog_run_askme_terminal_failure(self):
+        i = self.backlog_index("Terminal fails")
+        code, _, run, spawn = self.askme_run({"index": i, "askme": 1}, returncode=1)
+        self.assertEqual(code, 500)
+        spawn.assert_not_called()
+        self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])  # stays claimed for a manual start
+
     def test_approve_only_for_needs_human_and_passes_migration_confirmation(self):
         job_id = self.serve.board.cmd_new(self.root, "refunds")
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/approve", {})[0], 409)  # stage is spec

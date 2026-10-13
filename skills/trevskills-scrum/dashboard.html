@@ -58,7 +58,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
-#filter,#blProject,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+#filter,#blProject,#blAskme,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
@@ -73,6 +73,7 @@ header{flex-wrap:wrap}
 input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #backlog article{display:grid;gap:10px;padding-top:14px}
+#backlog .tabs{align-items:center}#blAskmeLabel{display:flex;align-items:center;gap:4px;font-size:13px}#backlog .tabs select{min-height:44px}
 #blAdd{display:flex;gap:6px}
 #blAdd input{flex:1;min-width:0}
 #blList{list-style:none;margin:0;padding:0}
@@ -142,7 +143,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}}
+@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select{font-size:16px}}
 </style>
 </head>
 <body>
@@ -155,7 +156,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <main id="board"></main>
 <dialog id="viewer" aria-label="Job files"><div class="tabs" id="tabs"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
-  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="close" type="button" aria-label="Close">✕</button></div>
+  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
     <form id="blAdd"><input type="text" name="text" maxlength="300" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
@@ -454,6 +455,8 @@ $("backlogBtn").addEventListener("click", () => {
   $("backlog").showModal();
 });
 $("blProject").addEventListener("change", e => { store.set("scrum.backlogProject", e.target.value); renderBacklog(); });
+$("blAskme").value = store.get("scrum.askme");
+$("blAskme").addEventListener("change", e => store.set("scrum.askme", e.target.value));
 $("blAdd").addEventListener("submit", e => {
   e.preventDefault();
   const input = e.target.text;
@@ -469,7 +472,8 @@ $("blList").addEventListener("click", e => {
     return;
   }
   b.disabled = true;
-  backlogCall(url => act === "run" ? post(`${url}/run`, {index}).then(() => $("backlog").close())
+  const askme = $("blAskme").value;
+  backlogCall(url => act === "run" ? post(`${url}/run`, {index, ...(askme ? {askme: +askme} : {})}).then(() => $("backlog").close())
     : post(url, act === "delete" ? {op: "delete", index} : {op: "move", index, delta: act === "up" ? -1 : 1}));
 });
 $("blList").addEventListener("change", e => {

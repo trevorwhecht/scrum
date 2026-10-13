@@ -324,6 +324,33 @@ class ContractTest(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn("obsolete", m.group(1).split("|"))
 
+    def test_skill_documents_askme(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("askme [1-3]", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        for phrase in ("askme [1-3]", "## Q&A", "start <id> askme", "- Q: ", "  A: ", "level 2",
+                       "only what blocks the build", "moderate", "thorough", "follow-up"):
+            self.assertIn(phrase, text, phrase)
+        new_job = self.section(text, "## New job", "## Fast lane")
+        self.assertLess(new_job.index("1b."), new_job.index("Askme"))
+        self.assertLess(new_job.index("Askme"), new_job.index("spawn `scrum-spec-writer`"))
+
+    def test_spec_writer_uses_qa(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        self.assertIn("## Q&A", text)
+        self.assertRegex(text, r"## Q&A[^\n]*Trevor's decisions[^\n]*Assumptions")
+        self.assertIn("Never ask questions", text)
+
+    def test_dashboard_has_askme_select(self):
+        text = DASHBOARD.read_text()
+        m = re.search(r'<select id="blAskme"[^>]*>(.*?)</select>', text)
+        self.assertIsNotNone(m)
+        self.assertIn('aria-label="Askme"', m.group(0))
+        self.assertIn("data-agent-hint=", m.group(0))
+        self.assertEqual(re.findall(r'<option value="(\d?)"[^>]*>([^<]*)</option>', m.group(1)),
+                         [("", "Off"), ("1", "1"), ("2", "2"), ("3", "3")])
+        self.assertIn('"scrum.askme"', text)
+        self.assertIn('{index, ...(askme ? {askme: +askme} : {})}', text)
+
     def test_spec_writer_refines_existing_criteria(self):
         path = ROOT / "agents" / "scrum-spec-writer.md"
         self.assertIn("verbatim", path.read_text())

@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), and bare "/trevskills-scrum" for status.
 ---
 
 # Trevskills Scrum: orchestrator
@@ -80,7 +80,9 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 - **`/trevskills-scrum next`**: run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
 - Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
+- **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2.
+- **`/trevskills-scrum start <id> askme <1-3>`**: the same, but the dashboard's Run now had Askme set, so it opened this session in a new Terminal window. Load the job and run **New job** from step 1c (Askme) at that level; a missing or bad level means level 2.
 - **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. Also run Merge step 1's **main checkout guard**; while it fails, **refuse** with the same `main checkout not clean: <first files or 'not on <default>'>` message and don't write `human-approval.md`. Once it passes, continue. If the reason contains `Hard stop: schema`, Trevor's approve is the go-ahead to migrate: `cd "$WT"` and invoke `/trevskills-migrate` there with args `base=$BASE`, following it exactly. If it stops or any check fails, run `B set <id> stage=needs-human reason="migrate stopped: <one line why>"` and stop; never work around it. On success, commit what it generated (`git -C "$WT" add prisma/migrations && git -C "$WT" commit -m "Add migration"`) and `cd "$REPO"`. Skip the migrate step when the prompt says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard when he ticks that box). Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
 - **`/trevskills-scrum rework <id> <feedback>`**: append `## <ISO date>\n<feedback>` to `$F/jobs/<id>/rework.md`. Run `B set <id> stage=build reason= limit=<round+2>`, then **record your terminal** with `ID=<id>`. If the worktree is gone, recreate it from the branch with `git worktree add "$REPO/.claude/worktrees/scrum-<id>" scrum/<id>`. Resume the builder (see **Resuming the builder**) pointing it at `rework.md`, then continue at **Check gate**.
 - **`/trevskills-scrum discuss <id> [<note>]`**: an interactive talk-through before anything goes back to the builder. The dashboard's Discuss first button opens it in a new terminal, with whatever Trevor typed as the note. The job must be `needs-human`. **Record your terminal** with `ID=<id>`. Read only the board `reason`, the first lines and `## Rulings` of `decision.md`, `rework.md`, and `migrate-stop.md` if it exists. Then tell Trevor in plain words:
@@ -95,6 +97,18 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
    1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
+   1c. **Askme** (only for `askme` or `start <id> askme`; otherwise skip to step 2). An interactive question round with Trevor, run like **discuss**. **Record your terminal** first. Read `feature.md`, `$F/project.md` and just enough of the repo to know what is unclear. The level sets how many questions; you pick the number within it:
+      - level 1 asks only what blocks the build;
+      - level 2 asks a moderate number;
+      - level 3 is thorough.
+
+      Ask in rounds, in plain words. When an answer is unclear, or contradicts another answer, ask follow-up or different questions before going on. Until the questions are done, spawn no agent, create no worktree and edit no file except `feature.md`. Then append to `$F/jobs/$ID/feature.md`, with one pair per question asked, follow-ups included:
+      ```
+      ## Q&A
+      - Q: <question>
+        A: <Trevor's answer>
+      ```
+      If Trevor says to skip or stop, write the pairs answered so far (nothing at all if there are none) and carry on. The same session then runs the rest of the job (step 2 onward).
 2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
 3. **Spec:** spawn `scrum-spec-writer` and wait for it. Prompt:
    ```
