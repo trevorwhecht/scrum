@@ -230,7 +230,7 @@ class ContractTest(unittest.TestCase):
 
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("Restart:", "Restart: none", "Below line 1"):
+        for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F"):
             self.assertIn(phrase, text, phrase)
 
     def test_skill_pulls_and_restarts_after_merge(self):
@@ -242,6 +242,7 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Restart:", 'symbolic-ref --short HEAD', "status --porcelain", "pull --ff-only", "Restart pending",
                        "lsof -ti tcp:8765 -sTCP:LISTEN", "curl -sf"):
             self.assertIn(phrase, cleanup, phrase)
+        self.assertIn("grep -F", cleanup[cleanup.index("**Restart.**"):])
         self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
 
     def test_merge_always_fast_forwards(self):
@@ -282,15 +283,65 @@ class ContractTest(unittest.TestCase):
         self.assertIn("job.tty", text)
         self.assertIn("job.runlog", text)
 
+    def assert_reviewer_renders(self, name):
+        text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+        for phrase in ("**Render the real page.**", "serve.py --port <free port>", "headless", "390", "1440",
+                       "Stop the server and Chrome you started", "Bash is read-only, with one exception",
+                       "Rendered: yes", "Rendered: no", "VERDICT: CHANGES",
+                       "Never PASS a UI diff you did not render", "You must see the new element on the rendered page"):
+            self.assertIn(phrase, text, f"{name}: {phrase}")
+        template = next(l for l in text.splitlines() if l.strip().startswith("Rendered: yes"))
+        self.assertIn("visible", template, name)
+
     def test_ux_reviewer_renders_page(self):
-        text = (ROOT / "agents" / "scrum-review-ux.md").read_text()
-        for phrase in ("headless", "390", "1440", "Rendered: yes", "Rendered: no", "VERDICT: CHANGES"):
-            self.assertIn(phrase, text, phrase)
+        self.assert_reviewer_renders("ux")
+
+    def test_ui_reviewer_renders_page(self):
+        self.assert_reviewer_renders("ui")
 
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Rendered: yes", "UI not rendered"):
             self.assertIn(phrase, text, phrase)
+        rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
+        self.assertIn("visible", rule)
+
+    def test_merge_guards_main_checkout_before_merge(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Resuming the builder")
+        step1 = self.section(merge, "1. **Preconditions:**", "\n2. ")
+        for phrase in ("--untracked-files=no", "symbolic-ref --short HEAD", "main checkout not clean"):
+            self.assertIn(phrase, step1, phrase)
+        self.assertLess(merge.index("main checkout not clean"), merge.index("gh pr merge"))
+        self.assertLess(merge.index("main checkout not clean"), merge.index("push -u origin"))
+        self.assertEqual(text.count("pull --ff-only"), 1)
+        approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
+        self.assertIn("main checkout not clean", approve)
+        self.assertLess(approve.index("main checkout not clean"), approve.index("human-approval.md"))
+        self.assertIn("--untracked-files=no", self.section(text, "7. **Clean up:**", "## Resuming the builder"))
+
+    def test_done_only_when_live(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        restart = cleanup.index("**Restart.**")
+        self.assertIn("merged, not live: <why>", cleanup)
+        self.assertIn("stage=done", cleanup[restart:])
+        self.assertNotIn("stage=done", cleanup[:restart])
+        for why in ("`not on <default>`", "`uncommitted changes`", "`fast-forward failed`", "`restart failed`",
+                    "`verify failed`"):
+            self.assertIn(why, cleanup[cleanup.index("merged, not live: <why>"):], why)
+        merged = next(l for l in text.splitlines() if l.strip().startswith("- `MERGED`:"))
+        self.assertNotIn("stage=done", merged)
+        self.assertIn("step 7", merged)
+        self.assertIn("merged, not live", self.section(text, "## Final report", "and, for needs-human"))
+
+    def test_dashboard_card_warns_not_live(self):
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        line = next(l for l in card.splitlines() if "merged, not live" in l)
+        self.assertIn('job.stage === "done"', line)
+        self.assertIn('class="reason"', line)
+        self.assertIn("esc(job.reason)", line)
 
     def test_dashboard_progress_estimate(self):
         node = shutil.which("node")
