@@ -245,6 +245,37 @@ def cmd_abort(root, job_id, requeue, reason=None):
             write_backlog(root, lines)
 
 
+def merge_summary(text):
+    """The body of decision.md's '## Merge summary' section, or None if it has none."""
+    m = re.search(r"^## Merge summary[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m and m.group(1).strip()
+
+
+def cmd_reopen(root, job_id, note):
+    """Start a new job that follows up a done or aborted one; its feature.md carries the old job's context."""
+    old_dir = Path(root) / "jobs" / check_id(job_id)
+    note = clean(note)
+    with locked_board(root) as board:
+        old = find(board, job_id)
+        if old["stage"] not in ("done", "aborted"):
+            raise SystemExit(f"job {job_id} is {old['stage']}; only done or aborted jobs can be reopened")
+        if old.get("reopened_to"):
+            raise SystemExit(f"job {job_id} was already reopened as {old['reopened_to']}")
+        if not note:
+            raise SystemExit("note is empty")
+        read = lambda name: (old_dir / name).read_text().strip() if (old_dir / name).is_file() else None
+        decision = read("decision.md")
+        parts = [("feature.md", read("feature.md")), ("spec.md", read("spec.md")),
+                 ("Merge summary", decision and merge_summary(decision))]
+        text = f"{note}\nReopened from {job_id}." + (f" PR: {old['pr']}" if old.get("pr") else "") + "\n" \
+            + "".join(f"\n## Original {name}\n\n{body}\n" for name, body in parts if body)
+        new_id = add_job(root, board, f"Reopen {job_id.split('-')[0]}: {note}"[:60])
+        (Path(root) / "jobs" / new_id / "feature.md").write_text(text)
+        board["jobs"][-1]["reopened_from"] = job_id
+        old["reopened_to"] = new_id
+        return new_id
+
+
 # --- the project list behind the one all-projects dashboard ---
 def registry_path():
     return Path(os.environ.get("SCRUM_REGISTRY") or Path.home() / ".claude" / "trevskills-scrum" / "projects.json")
