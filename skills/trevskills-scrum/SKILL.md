@@ -99,7 +99,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
    Write spec.md for this job.
    ```
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing"` and stop.
-   3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change. Run `B set $ID stage=needs-human reason="obsolete: <rest of that line>"` and stop: create no worktree and spawn no builder.
+   3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
 4. **Worktree:**
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"

@@ -194,9 +194,13 @@ class ContractTest(unittest.TestCase):
     def test_skill_defines_obsolete_stop(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("OBSOLETE:", text)
-        self.assertIn('reason="obsolete:', text)
         new_job = text[text.index("## New job"):]
-        self.assertLess(new_job.index('reason="obsolete:'), new_job.index("git worktree add"))
+        self.assertNotIn('stage=needs-human reason="obsolete:', new_job)
+        self.assertIn("B abort $ID --reason 'obsolete:", new_job)
+        self.assertLess(new_job.index("B abort $ID --reason"), new_job.index("git worktree add"))
+        step = next(l for l in new_job.splitlines() if "**Obsolete:**" in l)
+        for phrase in ("no worktree", "no builder", "auto-aborted as obsolete"):
+            self.assertIn(phrase, step)
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
         self.assertIn("obsolete", approve)
 
@@ -205,6 +209,14 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_waiting_banner(self):
         self.assertIn("Waiting on you", DASHBOARD.read_text())
+
+    def test_dashboard_aborted_card_shows_reason(self):
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function render()")]
+        aborted = next(l for l in card.splitlines() if 'job.stage === "aborted" ? `<span class="reason">' in l)
+        self.assertIn('esc(job.reason || "Aborted")', aborted)
+        actions = text[text.index("function renderActions(job)"):]
+        self.assertRegex(actions, r'job\.stage === "aborted" && reason \? `<p class="note">\$\{esc\(reason\)\}')
 
     def test_dashboard_hides_approve_for_obsolete(self):
         m = re.search(r"canApprove = [^;]*/\^\(([^)]*)\)/", DASHBOARD.read_text())

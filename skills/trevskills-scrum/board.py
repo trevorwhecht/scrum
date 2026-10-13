@@ -7,7 +7,7 @@
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
-  board.py abort <id> [--requeue]  mark a job aborted (terminal); --requeue puts it back on the backlog
+  board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
@@ -226,14 +226,14 @@ def cmd_next(root, index=None):
         return {"id": job_id, "feature": item["text"]}
 
 
-def cmd_abort(root, job_id, requeue):
+def cmd_abort(root, job_id, requeue, reason=None):
     """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
     feature = Path(root) / "jobs" / check_id(job_id) / "feature.md"
     with locked_board(root) as board:
         job = find(board, job_id)
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
-        job.update(stage="aborted", reason=f"Aborted by Trevor {now()}", updatedAt=now())
+        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now())
         if requeue:
             text = clean(feature.read_text() if feature.exists() else job["title"]) or job["title"]
             lines, _ = read_backlog(root)
@@ -347,6 +347,7 @@ def main(argv=None):
     ab = sub.add_parser("abort")
     ab.add_argument("id")
     ab.add_argument("--requeue", action="store_true")
+    ab.add_argument("--reason")
     a = p.parse_args(argv)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
@@ -359,7 +360,7 @@ def main(argv=None):
     elif a.cmd == "register":
         cmd_register(a.repo)
     elif a.cmd == "abort":
-        cmd_abort(a.dir, a.id, a.requeue)
+        cmd_abort(a.dir, a.id, a.requeue, a.reason)
     else:
         cmd_backlog_add(a.dir, a.items)
 
