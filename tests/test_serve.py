@@ -772,6 +772,41 @@ class AiSettingsTest(unittest.TestCase):
         code, data, _ = self.item(local["id"])
         self.assertEqual((code, json.loads(data["content"]), data["path"]), (200, {"command": "l"}, str(self.home / ".claude.json")))
 
+    def test_nested_commands_and_rules_discovered(self):
+        for rel, text in (("commands/frontend/component.md", "fc"), ("commands/a/b/c.md", "abc"), ("commands/ns/notes.txt", "x")):
+            (self.user / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.user / rel).write_text(text)
+        (self.user / "commands" / "ns" / "dir.md").mkdir()
+        (self.reg / ".claude" / "rules" / "web").mkdir(parents=True)
+        (self.reg / ".claude" / "rules" / "web" / "style.md").write_text("ws")
+        cats, _ = self.scope("global")
+        self.assertEqual([(i["name"], i["scope"]) for i in cats["commands"]["items"]],
+                         [("a:b:c", "user"), ("c", "user"), ("frontend:component", "user")])
+        self.assertEqual(cats["rules"]["count"], 0)
+        cmd = next(i for i in cats["commands"]["items"] if i["name"] == "frontend:component")
+        code, data, _ = self.item(cmd["id"])
+        self.assertEqual((code, data["path"], data["content"], cmd["editable"]),
+                         (200, str(self.user / "commands" / "frontend" / "component.md"), "fc", True))
+        cats, _ = self.scope("r:reg")
+        self.assertEqual([(i["name"], i["scope"]) for i in cats["rules"]["items"]], [("web:style", "project")])
+        rule = cats["rules"]["items"][0]
+        code, data, _ = self.item(rule["id"])
+        self.assertEqual((code, data["path"], data["content"], rule["editable"]),
+                         (200, str(self.reg / ".claude" / "rules" / "web" / "style.md"), "ws", True))
+
+    def test_nested_command_precedence_uses_namespaced_name(self):
+        for rel in ("ns/x.md", "a/x.md", "x.md"):
+            (self.user / "commands" / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.user / "commands" / rel).write_text("u")
+        for rel in ("ns/x.md", "b/x.md"):
+            (self.reg / ".claude" / "commands" / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.reg / ".claude" / "commands" / rel).write_text("p")
+        cats, _ = self.scope("r:reg")
+        got = {(i["name"], i["scope"], i["status"]) for i in cats["commands"]["items"]}
+        self.assertEqual(got, {("c", "project", "wins"), ("c", "user", "overridden"),
+                               ("ns:x", "project", "wins"), ("ns:x", "user", "overridden"),
+                               ("a:x", "user", ""), ("b:x", "project", ""), ("x", "user", "")})
+
     def test_item_rejects_unknown_and_traversal(self):
         for bad in ("", "nope", "global|commands|user|/etc/passwd|passwd", "../../etc/passwd",
                     f"r:reg|config|project|{self.reg}/../../../../etc/passwd|passwd", "m:../..|config|project|/etc/hosts|hosts"):

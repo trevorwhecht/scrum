@@ -191,7 +191,7 @@ def installed_skills():
 # --- AI-Settings: every Claude Code config source; everything outside managed scope is editable ----------------------
 # Paths and precedence adapted from mcpware/cross-code-organizer (MIT)
 #   managed  /Library/Application Support/ClaudeCode/{managed-settings.json, managed-mcp.json}   (CLAUDE_MANAGED_DIR)
-#   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), commands/ agents/ rules/ *.md, CLAUDE.md,
+#   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), agents/*.md, {commands,rules}/**/*.md, CLAUDE.md,
 #            projects/*/memory/*.md, settings.json (+ hooks), ~/.claude.json mcpServers
 #   plugins  plugins/installed_plugins.json: one item per install record, badged with the record's own scope;
 #            project/local records only in the scope whose root is their projectPath
@@ -296,8 +296,9 @@ def ai_inventory(scope_id):
 
     def claude_dir(scope, d):
         md("skills", scope, d.glob("skills/*/SKILL.md"), lambda p: p.parent.name)
-        for cat in ("commands", "agents", "rules"):
-            md(cat, scope, d.glob(f"{cat}/*.md"))
+        md("agents", scope, d.glob("agents/*.md"))
+        for cat in ("commands", "rules"):  # recursive, named like slash commands: commands/a/b.md -> a:b
+            md(cat, scope, (d / cat).rglob("*.md"), lambda p, base=d / cat: ":".join(p.relative_to(base).with_suffix("").parts))
 
     settings("managed", managed / "managed-settings.json")
     mcp("managed", managed / "managed-mcp.json", as_dict(load_json(managed / "managed-mcp.json")).get("mcpServers"))
