@@ -17,7 +17,8 @@ header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
 #status{color:var(--muted);font-size:12px}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
-.col h2{white-space:nowrap;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.col h2 span{white-space:nowrap}
+.col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
 .col.human h2{color:var(--human)}
 .card{display:block;width:100%;text-align:left;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
@@ -87,7 +88,9 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
   </article>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done", "aborted"];
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
+// Aborted jobs are finished too: they sit, dimmed, in the done column rather than a ninth column.
+const colOf = job => job.stage === "aborted" ? "done" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -110,19 +113,20 @@ function card(job) {
     <span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${(job.rounds || []).map(roundRow).join("")}
     ${human && job.reason ? `<span class="reason">${esc(job.reason)}</span>` : ""}
+    ${job.stage === "aborted" ? '<span class="reason">Aborted</span>' : ""}
     ${runs[job.id]?.alive ? `<span class="running">● ${esc(runs[job.id].action)} running…</span>` : ""}
     <span class="meta">${job.pr ? "PR ready · " : ""}${stale ? `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>` : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>
   </button>`;
 }
 
 function render() {
-  const extra = [...new Set(jobs.map(j => j.stage).filter(s => !STAGES.includes(s)))];
+  const extra = [...new Set(jobs.map(colOf).filter(s => !STAGES.includes(s)))];
   const cols = [...STAGES, ...extra];
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
-  $("board").style.gridTemplateColumns = cols.map(s => jobs.some(j => j.stage === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  $("board").style.gridTemplateColumns = cols.map(s => jobs.some(j => colOf(j) === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   $("board").innerHTML = cols.map(stage => {
-    const inCol = jobs.filter(j => j.stage === stage);
-    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2>${esc(stage)} · ${inCol.length}</h2>
+    const inCol = jobs.filter(j => colOf(j) === stage);
+    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2><span>${esc(stage)}</span> <span>· ${inCol.length}</span></h2>
       ${inCol.map(card).join("") || '<p class="empty">—</p>'}</section>`;
   }).join("");
 }
