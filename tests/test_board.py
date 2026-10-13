@@ -330,6 +330,66 @@ class BoardTest(unittest.TestCase):
         board.main(["--dir", str(self.root), "abort", job_id])
         self.assertTrue(self.jobs()[0]["reason"].startswith("Aborted by Trevor "))
 
+    # --- reopen ---
+    def test_reopen_creates_linked_job(self):
+        old = board.cmd_new(self.root, "Modal title")
+        board.cmd_set(self.root, old, ["stage=done", "reason=merged", "pr=https://github.com/x/y/pull/9"])
+        before = next(j for j in self.jobs() if j["id"] == old)
+        new = board.cmd_reopen(self.root, old, "  Modal title still wraps\non mobile  ")
+        self.assertEqual(new, "002-reopen-001-modal-title-still-wraps-on-mo")
+        jobs = {j["id"]: j for j in self.jobs()}
+        self.assertEqual(jobs[new]["title"], "Reopen 001: Modal title still wraps on mobile")
+        self.assertEqual((jobs[new]["stage"], jobs[new]["reopened_from"]), ("spec", "001-modal-title"))
+        self.assertEqual({k: v for k, v in jobs[old].items() if k != "reopened_to"},
+                         {k: v for k, v in before.items()})
+        self.assertEqual(jobs[old]["reopened_to"], new)
+        long = board.cmd_new(self.root, "z")
+        board.cmd_abort(self.root, long, requeue=False)
+        newer = board.cmd_reopen(self.root, long, "x" * 100)
+        self.assertEqual(next(j for j in self.jobs() if j["id"] == newer)["title"], "Reopen 003: " + "x" * 48)
+
+    def test_reopen_feature_carries_context(self):
+        old = board.cmd_new(self.root, "Done one")
+        board.cmd_set(self.root, old, ["stage=done", "pr=https://github.com/x/y/pull/9"])
+        self.write(f"{old}/feature.md", "Make the title fit\n")
+        self.write(f"{old}/spec.md", "# Spec\nCriteria here\n")
+        self.write(f"{old}/decision.md", "DECISION: APPROVE\n## Why\nfine\n## Merge summary\nTitle now truncates.\nCSS only.\n## Later\nnope\n")
+        new = board.cmd_reopen(self.root, old, "Still wraps on mobile")
+        self.assertEqual((self.root / "jobs" / new / "feature.md").read_text(),
+                         "Still wraps on mobile\n"
+                         "Reopened from 001-done-one. PR: https://github.com/x/y/pull/9\n\n"
+                         "## Original feature.md\n\nMake the title fit\n\n"
+                         "## Original spec.md\n\n# Spec\nCriteria here\n\n"
+                         "## Original Merge summary\n\nTitle now truncates.\nCSS only.\n")
+        aborted = board.cmd_new(self.root, "Aborted one")
+        board.cmd_abort(self.root, aborted, requeue=False)
+        self.write(f"{aborted}/feature.md", "Try a thing\n")
+        self.write(f"{aborted}/decision.md", "DECISION: ESCALATE\n## Why\nno summary here\n")
+        new2 = board.cmd_reopen(self.root, aborted, "Try again")
+        self.assertEqual((self.root / "jobs" / new2 / "feature.md").read_text(),
+                         "Try again\nReopened from 003-aborted-one.\n\n## Original feature.md\n\nTry a thing\n")
+
+    def test_reopen_refuses(self):
+        live_job = board.cmd_new(self.root, "still going")
+        board.cmd_set(self.root, live_job, ["stage=review"])
+        done = board.cmd_new(self.root, "finished")
+        board.cmd_set(self.root, done, ["stage=done"])
+        board.cmd_reopen(self.root, done, "follow up")
+        snapshot = lambda: ((self.root / "board.json").read_text(), sorted(p.name for p in (self.root / "jobs").iterdir()))
+        before = snapshot()
+        for job_id, note, msg in ((live_job, "x", "done or aborted"), (done, "y", "003-reopen-002-follow-up")):
+            with self.assertRaises(SystemExit) as e:
+                board.cmd_reopen(self.root, job_id, note)
+            self.assertIn(msg, str(e.exception))
+            self.assertEqual(snapshot(), before)
+        other = board.cmd_new(self.root, "other")
+        board.cmd_set(self.root, other, ["stage=done"])
+        before = snapshot()
+        for note in ("", "  \n ", "<!-- -->"):
+            with self.assertRaises(SystemExit):
+                board.cmd_reopen(self.root, other, note)
+            self.assertEqual(snapshot(), before)
+
     # --- digest ---
     def done_jobs(self, n, stage="done"):
         ids = []
