@@ -97,6 +97,28 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, job_id, ["tty=ttys2", "term=xterm"])
         self.assertNotIn("tty", self.jobs()[0])
 
+    def test_set_lane_stored(self):
+        job_id = board.cmd_new(self.root, "x")
+        self.assertNotIn("lane", self.jobs()[0])  # no lane key = standard
+        for lane in ("fast", "standard", "debug", "epic"):
+            board.cmd_set(self.root, job_id, [f"lane={lane}"])
+            self.assertEqual(self.jobs()[0]["lane"], lane)
+        board.cmd_set(self.root, job_id, ["lane="])
+        self.assertIsNone(self.jobs()[0]["lane"])
+        (self.root / "backlog.md").write_text("- [ ] y\n")
+        nxt = board.cmd_next(self.root)
+        self.assertNotIn("lane", next(j for j in self.jobs() if j["id"] == nxt["id"]))
+
+    def test_set_rejects_bad_lane_without_writing(self):
+        job_id = board.cmd_new(self.root, "x")
+        before = (self.root / "board.json").read_text()
+        for bad in ("lane=quick", "lane=FAST", "lane=fast ", "lane=fast\n"):
+            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "stage=review", bad],
+                                 capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0, bad)
+            self.assertIn("fast|standard|debug|epic", out.stderr, bad)
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
     def test_set_unknown_job_fails(self):
         board.cmd_new(self.root, "x")
         with self.assertRaises(SystemExit):
