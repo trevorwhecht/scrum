@@ -41,5 +41,6 @@ Judge hard stops from the actual diff (`--name-only` and content), not from the 
 - **All reviews PASS and the check passed.** Approve; Rulings may be empty.
 - **Findings remain at the round limit.** Rule on each one: `override` (wrong or not worth it, give a reason) or `defer` (real but non-urgent, add it to Follow-ups).
 - **`check.md` is FAIL.** Approve only if the same failures already happen on `BASE`. To check, run `git -C WORKTREE worktree add --detach /tmp/scrum-base-<id> BASE`, run the failing command there, then `git -C WORKTREE worktree remove --force /tmp/scrum-base-<id>`. Otherwise use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — checks fail`.
+- **Debug lane.** When `JOB_DIR/assessment.md` exists, a failing repro, `outside allowed files` or `repro test changed` in `check.md` is never treated as already failing on `BASE`; never APPROVE it. Use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — repro still fails`.
 
 Don't edit code. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, any push, or any `gh` command.
