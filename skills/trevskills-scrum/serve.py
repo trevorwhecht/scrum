@@ -8,8 +8,9 @@ files, and a small JSON API so the buttons can edit backlogs and start Claude ru
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
-AI-Settings is read-only except for Markdown instruction files (CLAUDE.md, CLAUDE.local.md, rules, memory) and two
-settings keys the Audit tab's Disable/Enable flips: skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
+AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
+server, plugin) spliced back into its file with "[redacted]" values restored from disk, and a permissions or hooks change
+only with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
 settings.json or a project's settings.local.json. Every write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
 Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
 never echo a config value, and the Audit treats session transcripts as data it only counts.
@@ -173,7 +174,7 @@ def installed_skills():
     return [{"name": n, "source": found[n][0]} for n in sorted(found)]
 
 
-# --- AI-Settings: every Claude Code config source; only Markdown config and rules files are editable ----------------
+# --- AI-Settings: every Claude Code config source; everything outside managed scope is editable ----------------------
 # Paths and precedence adapted from mcpware/cross-code-organizer (MIT)
 #   managed  /Library/Application Support/ClaudeCode/{managed-settings.json, managed-mcp.json}   (CLAUDE_MANAGED_DIR)
 #   user     CLAUDE_HOME: skills/*/SKILL.md (+ plugin skills), commands/ agents/ rules/ *.md, CLAUDE.md,
@@ -259,23 +260,23 @@ def ai_inventory(scope_id):
     managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
     claude_json = home / ".claude.json"
     cj = as_dict(load_json(claude_json))
-    raw = []  # (category, scope, name, path, is_json, entry)
+    raw = []  # (category, scope, name, path, is_json, entry, loc): loc is a JSON entry's key path from its file's root
 
     def md(cat, scope, paths, name=lambda p: p.stem):
-        raw.extend((cat, scope, name(p), p, False, None) for p in sorted(paths) if p.is_file())
+        raw.extend((cat, scope, name(p), p, False, None, None) for p in sorted(paths) if p.is_file())
 
     def settings(scope, path):
         data = load_json(path)
         if not isinstance(data, dict):
             return
-        raw.append(("settings", scope, path.name, path, True, data))
+        raw.append(("settings", scope, path.name, path, True, data, []))
         for event, entries in as_dict(data.get("hooks")).items():
-            for e in entries if isinstance(entries, list) else []:
+            for i, e in enumerate(entries if isinstance(entries, list) else []):
                 if isinstance(e, dict):
-                    raw.append(("hooks", scope, f"{event} · {e.get('matcher') or '*'}", path, True, e))
+                    raw.append(("hooks", scope, f"{event} · {e.get('matcher') or '*'}", path, True, e, ["hooks", event, i]))
 
-    def mcp(scope, path, servers):
-        raw.extend(("mcp", scope, n, path, True, e) for n, e in as_dict(servers).items())
+    def mcp(scope, path, servers, at=()):
+        raw.extend(("mcp", scope, n, path, True, e, [*at, "mcpServers", n]) for n, e in as_dict(servers).items())
 
     def claude_dir(scope, d):
         md("skills", scope, d.glob("skills/*/SKILL.md"), lambda p: p.parent.name)
@@ -285,12 +286,12 @@ def ai_inventory(scope_id):
     settings("managed", managed / "managed-settings.json")
     mcp("managed", managed / "managed-mcp.json", as_dict(load_json(managed / "managed-mcp.json")).get("mcpServers"))
     claude_dir("user", user)
-    raw.extend(("skills", "user", n, p, False, None) for n, (src, p) in sorted(skill_files().items()) if src != "user")
+    raw.extend(("skills", "user", n, p, False, None, None) for n, (src, p) in sorted(skill_files().items()) if src != "user")
     md("config", "user", [user / "CLAUDE.md"], lambda p: p.name)
     md("config", "user", user.glob("projects/*/memory/*.md"), lambda p: str(p.relative_to(user)))
     settings("user", user / "settings.json")
     plugins = user / "plugins" / "installed_plugins.json"
-    raw.extend(("plugins", "user", k, plugins, True, v) for k, v in as_dict(as_dict(load_json(plugins)).get("plugins")).items())
+    raw.extend(("plugins", "user", k, plugins, True, v, ["plugins", k]) for k, v in as_dict(as_dict(load_json(plugins)).get("plugins")).items())
     mcp("user", claude_json, cj.get("mcpServers"))
     if root:
         md("config", "project", [root / "CLAUDE.md"], lambda p: p.name)
@@ -300,20 +301,21 @@ def ai_inventory(scope_id):
         md("config", "local", [root / "CLAUDE.local.md"], lambda p: p.name)
         settings("local", root / ".claude" / "settings.local.json")
         real = os.path.realpath(root)
-        mcp("local", claude_json, next((as_dict(v).get("mcpServers") for k, v in as_dict(cj.get("projects")).items()
-                                        if os.path.realpath(k) == real), None))
+        key = next((k for k in as_dict(cj.get("projects")) if os.path.realpath(k) == real), None)
+        if key is not None:
+            mcp("local", claude_json, as_dict(cj["projects"][key]).get("mcpServers"), ("projects", key))
 
     out, seen = {cat: [] for cat, _ in CATEGORIES}, set()
-    for cat, scope, name, path, is_json, entry in raw:
+    for cat, scope, name, path, is_json, entry, loc in raw:
         item_id = f"{scope_id}|{cat}|{scope}|{path}|{name}"
         n = 1
         while item_id + (f"#{n}" if n > 1 else "") in seen:
             n += 1
         item_id += f"#{n}" if n > 1 else ""
         seen.add(item_id)
-        out[cat].append({"id": item_id, "name": str(name), "scope": scope, "path": str(path), "status": "",
-                         "editable": cat in ("config", "rules") and not is_json and str(path).endswith(".md"),
-                         "_json": is_json, "_entry": entry})
+        out[cat].append({"id": item_id, "name": str(name), "scope": scope, "path": str(path), "status": "", "category": cat,
+                         "editable": scope != "managed" and (is_json or str(path).endswith(".md")),
+                         "_json": is_json, "_entry": entry, "_loc": loc})
     for cat, items in out.items():
         if cat in NAMED:
             by_name = {}
@@ -389,20 +391,84 @@ def ai_editable(item_id):
     return it, None
 
 
-def ai_settings_save(item_id, content, version):
+MISSING = object()
+
+
+def ai_unredact(new, old, path=()):
+    """new with every "[redacted]" string swapped for old's value at the same key path (dict key or list index)."""
+    if new == "[redacted]":
+        if old is MISSING:
+            raise ValueError(f"[redacted] at {'.'.join(map(str, path)) or '(root)'} has no saved value")
+        return old
+    if isinstance(new, dict):
+        o = as_dict(old)
+        return {k: ai_unredact(v, o.get(k, MISSING), (*path, k)) for k, v in new.items()}
+    if isinstance(new, list):
+        o = old if isinstance(old, list) else []
+        return [ai_unredact(v, o[i] if i < len(o) else MISSING, (*path, i)) for i, v in enumerate(new)]
+    return new
+
+
+def ai_guarded(cat, new, old):
+    """True when saving new over old changes what Claude Code may run: a hook entry, or a settings file's permissions/hooks."""
+    if cat == "hooks":
+        return new != old
+    return cat == "settings" and any(new.get(k, MISSING) != old.get(k, MISSING) for k in ("permissions", "hooks"))
+
+
+def ai_refind(it):
+    """The fresh item view of the same file and JSON entry: a hook's id carries its matcher, so a save can change it."""
+    sid = it["id"].split("|", 1)[0]
+    hit = next((x for x in (ai_inventory(sid) or {}).get(it["category"], [])
+                if (x["path"], x["scope"], x["_loc"]) == (it["path"], it["scope"], it["_loc"])), None)
+    out = hit and ai_settings_item(hit["id"])
+    return (200, out) if out else (409, {"error": "item is no longer in the file; reopen it"})
+
+
+def ai_settings_save(item_id, content, version, confirm=False):
     it, err = ai_editable(item_id)
     if err:
         return err
     if not isinstance(content, str):
         return 400, {"error": "content must be a string"}
+    if it["_json"]:
+        try:
+            new = json.loads(content)
+        except ValueError as e:
+            return 400, {"error": f"invalid JSON: {e}"}
+        old = it["_entry"]
+        want = {dict: "object", list: "array"}.get(type(old))
+        if want and not isinstance(new, type(old)):
+            return 400, {"error": f"must be a JSON {want}"}
+        try:
+            new = ai_unredact(new, old)
+        except ValueError as e:
+            return 400, {"error": str(e)}
+        if ai_guarded(it["category"], new, old) and not confirm:
+            return 428, {"error": "confirm required"}
     try:
         if str(Path(it["path"]).stat().st_mtime_ns) != version:
             return 409, {"error": "file changed on disk"}
+        if not it["_json"]:
+            ai_backup(it["path"])
+            Path(it["path"]).write_bytes(content.encode())  # in place, so a symlinked rule keeps its link
+            return 200, ai_settings_item(item_id)
+        data, loc = json.loads(Path(it["path"]).read_text()), it["_loc"]
+        if loc:
+            parent = data
+            for k in loc[:-1]:
+                parent = parent[k]
+            parent[loc[-1]]  # raises if the entry moved since the inventory was read
+            parent[loc[-1]] = new
+        else:
+            data = new
         ai_backup(it["path"])
-        Path(it["path"]).write_bytes(content.encode())  # in place, so a symlinked rule keeps its link
+        Path(it["path"]).write_text(json.dumps(data, indent=2) + "\n")  # in place, so a symlinked file keeps its link
     except OSError as e:
         return 500, {"error": str(e)}
-    return 200, ai_settings_item(item_id)
+    except (ValueError, KeyError, IndexError, TypeError):
+        return 409, {"error": "file changed on disk"}
+    return ai_refind(it)
 
 
 def ai_settings_undo(item_id):
@@ -420,7 +486,7 @@ def ai_settings_undo(item_id):
         Path(it["path"]).write_bytes(data)
     except OSError as e:
         return 500, {"error": str(e)}
-    return 200, ai_settings_item(item_id)
+    return ai_refind(it)
 
 
 STAGE_TEXT = {"spec": "spec writer working", "build": "builder working", "check": "check running",
@@ -918,7 +984,7 @@ def audit(scope_id):
         if cat in NAMED and {"user", "project"} <= scopes_by_name[(cat, name)]:
             flags.append("same-name")
         rows.append({"id": it["id"], "name": name, "category": cat, "scope": it["scope"], "lifetime": lifetime,
-                     "recent": recent, "tokens": tokens, "flags": flags, "_it": it,
+                     "recent": recent, "tokens": tokens, "flags": flags, "_it": it, "editable": it["editable"],
                      "research": research_row(home, links, it["id"])})
     by_id = {r["id"]: r for r in rows}
     for r in rows:  # a plugin is the sum of its skills
@@ -1129,7 +1195,8 @@ def editable_path(target):
         if under and not (real.startswith(under) or given.startswith(under)):
             continue
         for items in (ai_inventory(sid) or {}).values():
-            if hit := next((it["path"] for it in items if it["editable"] and os.path.realpath(it["path"]) == real), None):
+            if hit := next((it["path"] for it in items if it["editable"] and not it["_json"]
+                            and os.path.realpath(it["path"]) == real), None):
                 return hit
     return None
 
@@ -1275,7 +1342,7 @@ class Handler(BaseHTTPRequestHandler):
             if a := re.fullmatch(r"/api/agents/([^/]+)/skills", path):
                 code, obj = self.route_skill(unquote(a.group(1)), body.get("skill"))
             elif path == "/api/ai-settings/save":
-                code, obj = ai_settings_save(body.get("id"), body.get("content"), body.get("version"))
+                code, obj = ai_settings_save(body.get("id"), body.get("content"), body.get("version"), body.get("confirm") is True)
             elif path == "/api/ai-settings/undo":
                 code, obj = ai_settings_undo(body.get("id"))
             elif path in ("/api/ai-settings/disable", "/api/ai-settings/enable"):

@@ -133,7 +133,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .node .chip.high{background:var(--human)}.node .chip.medium{background:var(--changes)}
 #aiEdit{display:grid;gap:8px}
 #aiText{width:100%;min-height:50dvh;font:13px/1.5 ui-monospace,monospace}
-#aiEdit div{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#aiEdit>div:not(#aiDiff){display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #aiEdit .btn,.audit .btn{min-height:44px;min-width:44px}
 #aiList h3{font-size:13px;margin:10px 0 0}
 .node.audit{justify-content:flex-start}.audit .acts{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
@@ -145,11 +145,11 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .dg{display:grid;gap:8px}.dg h3{font-size:13px;margin:6px 0 0}
 .prop{display:grid;gap:6px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--card)}
 .prop .path{font:600 12px ui-monospace,monospace;overflow-wrap:anywhere}
-.prop .diff{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-.prop .diff div{min-width:0}.prop pre{margin:4px 0 0}
+.diff{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.diff div{min-width:0}.diff pre{margin:4px 0 0}
 .prop .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 @media (max-width:640px){#agents,#aiSettings,#digest{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article{padding-inline:12px}
-  .prop .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
+  .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
@@ -570,9 +570,10 @@ $("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target
 // edit on that repo's backlog; serve.py decides which. The last decision in a digest trims its job folders.
 let digestData = null, digestText = "";
 const dgProject = () => $("dgProject").value;
+const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</span><pre>${esc(old)}</pre></div><div><span class="note">New</span><pre>${esc(now)}</pre></div></div>`;
 const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
     <span class="path">${esc(p.target)}</span><span>${esc(p.why)}</span>
-    <div class="diff"><div><span class="note">Old</span><pre>${esc(p.old)}</pre></div><div><span class="note">New</span><pre>${esc(p.new)}</pre></div></div>
+    ${diffHtml(p.old, p.new)}
     <div class="acts">${p.status === "pending"
       ? `<button class="btn primary" type="button" data-decide="approve" data-agent-hint="A file outside every registered repo is edited in place after a backup to ~/.claude/backups/ai-settings/. A file inside a repo is not touched: the edit is added to that repo's backlog instead.">Approve</button>
          <button class="btn" type="button" data-decide="reject">Reject</button>`
@@ -756,9 +757,10 @@ $("agDetail").addEventListener("submit", e => {  // Enter in the filter picks th
   if (b) addSkill(b.dataset.skill, b);
 });
 
-// AI-Settings: items come from api/ai-settings; precedence is managed > local > project > user. Only `editable` items
-// (Markdown CLAUDE.md, CLAUDE.local.md, rules, memory) get a textarea; serve.py backs up every save, and Undo restores
-// the newest backup. Everything else is a read-only <pre>.
+// AI-Settings: items come from api/ai-settings; precedence is managed > local > project > user. Every `editable` item
+// (everything outside managed scope) gets a textarea; a JSON item must parse, and a permissions or hooks change shows an
+// Old/New diff and needs a second click. serve.py backs up every save, and Undo restores the newest backup. Managed
+// items are a read-only <pre>.
 const AI_GROUPS = [["global", "Global"], ["registered", "Registered"], ["mac", "This Mac"]];
 const AI_LOADING = '<p class="empty">loading…</p>';
 let aiData = null, aiCat = "", aiItem = null;  // aiItem: the editable item on screen, with its last saved version
@@ -840,7 +842,7 @@ const researchActs = r => {
   return (rs?.alive ? `<span class="note" role="status">Researching…</span><a href="${log}" target="_blank" rel="noopener">log</a>`
       : rs ? `<a href="${log}" target="_blank" rel="noopener">Suggestions</a>` : "")
     + `<button class="btn" type="button" data-research="${esc(r.id)}"${rs?.alive ? " disabled" : ""} data-agent-hint="Starts a read-only claude run that compares this item with current Anthropic docs and top repos and replies with suggested edits. It changes no files.">Research this</button>`
-    + (["rules", "config"].includes(r.category) ? `<button class="btn" type="button" data-id="${esc(r.id)}">Edit</button>` : "");
+    + (r.editable ? `<button class="btn" type="button" data-id="${esc(r.id)}">Edit</button>` : "");
 };
 // Called by poll(): flips a row from Researching… to Suggestions once its run has ended; no extra polling.
 function auditRunsChanged() {
@@ -909,7 +911,7 @@ $("aiList").addEventListener("click", async e => {
   aiItem = it.editable ? it : null;
   $("aiList").innerHTML = `<dl class="facts"><dt>Name</dt><dd><b>${esc(it.name)}</b></dd><dt>Scope</dt><dd><span class="skill">${esc(it.scope)}</span></dd>
     <dt>Path</dt><dd>${esc(it.path)}</dd></dl>${it.editable ? `<form id="aiEdit">
-    <textarea id="aiText" spellcheck="false" aria-label="${esc(it.name)} content">${esc(it.content)}</textarea>
+    <textarea id="aiText" spellcheck="false" aria-label="${esc(it.name)} content">${esc(it.content)}</textarea><div id="aiDiff"></div>
     <div><button class="btn primary" id="aiSave" type="submit" disabled>Save</button>
     <button class="btn" id="aiUndo" type="button" hidden>Undo</button><span class="note" id="aiStatus" role="status"></span></div></form>`
     : `<pre>${esc(it.content)}</pre>`}`;
@@ -927,22 +929,49 @@ async function aiWrite(route, body, busy, fail) {
   } catch (err) {
     if (!form.isConnected) return;
     $("aiStatus").textContent = "";
-    $("aiError").textContent = err.status === 409 ? "This file changed on disk. Go back and reopen it." : fail;
+    $("aiError").textContent = err.status === 409 ? "This file changed on disk. Go back and reopen it." : err.status === 400 ? err.message : fail;
   } finally {
     if (form.isConnected) { $("aiSave").disabled = $("aiText").value === aiItem.baseline; $("aiUndo").disabled = false; }
   }
 }
-$("aiList").addEventListener("input", e => { if (e.target.id === "aiText") $("aiSave").disabled = e.target.value === aiItem.baseline; });
+// A save that changes what Claude Code may run (a hook entry, or a settings file's permissions/hooks) asks once on the
+// Save button itself, like backlog Run/Delete; serve.py refuses it without confirm too.
+const AI_JSON = ["settings", "hooks", "mcp", "plugins"];
+const aiGuarded = (cat, old, now) => cat === "hooks" ? JSON.stringify(old) !== JSON.stringify(now)
+  : cat === "settings" && ["permissions", "hooks"].some(k => JSON.stringify(old?.[k]) !== JSON.stringify(now?.[k]));
+function aiDisarm() {
+  delete $("aiEdit").dataset.armed; $("aiDiff").innerHTML = "";
+  $("aiSave").textContent = "Save"; $("aiSave").classList.remove("danger");
+}
+$("aiList").addEventListener("input", e => {
+  if (e.target.id !== "aiText") return;
+  $("aiSave").disabled = e.target.value === aiItem.baseline;
+  if ($("aiEdit").dataset.armed) aiDisarm();
+});
 $("aiList").addEventListener("submit", async e => {
   e.preventDefault();
-  if (await aiWrite("save", {content: $("aiText").value, version: aiItem.version}, "Saving…", "Couldn't save. Is serve.py running?")) {
-    $("aiStatus").textContent = "Saved"; $("aiUndo").hidden = false;
+  const form = $("aiEdit"), text = $("aiText").value, body = {content: text, version: aiItem.version};
+  if (AI_JSON.includes(aiItem.category)) {
+    let now;
+    try { now = JSON.parse(text); } catch (err) { $("aiError").textContent = `Invalid JSON: ${err.message}`; return; }
+    if (form.dataset.armed) body.confirm = true;
+    else if (aiGuarded(aiItem.category, JSON.parse(aiItem.baseline), now)) {
+      form.dataset.armed = "1"; $("aiError").textContent = "";
+      $("aiSave").textContent = "Confirm save"; $("aiSave").classList.add("danger");
+      $("aiDiff").innerHTML = diffHtml(aiItem.baseline, text); $("aiSave").scrollIntoView({block: "end"});
+      return;
+    }
   }
+  const ok = await aiWrite("save", body, "Saving…", "Couldn't save. Is serve.py running?");
+  if (form.isConnected) aiDisarm();
+  if (!ok) return;
+  if (AI_JSON.includes(aiItem.category)) { $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true; }
+  $("aiStatus").textContent = "Saved"; $("aiUndo").hidden = false;
 });
 $("aiList").addEventListener("click", async e => {
   if (e.target.id !== "aiUndo") return;
   if (await aiWrite("undo", {}, "Undoing…", "Couldn't undo. Is serve.py running?")) {
-    $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true;
+    $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true; aiDisarm();
     $("aiStatus").textContent = "Undone"; $("aiUndo").hidden = true;
   }
 });
