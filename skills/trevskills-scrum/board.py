@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup (empty = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
@@ -17,6 +17,7 @@
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec), print
                                    {"ready","merged","total","in_progress","all_merged"}
+  board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
@@ -29,7 +30,9 @@ from pathlib import Path
 REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted")
-FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup")
+FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
+          "waiting")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
@@ -674,6 +677,8 @@ def cmd_set(root, job_id, pairs):
                 raise SystemExit(f"bad stage {value!r}; allowed: {', '.join(STAGES)}")
             if value and key in SHAPES and not SHAPES[key].fullmatch(value):
                 raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
+            if key == "waiting":
+                value = clean(value, 200)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
@@ -705,6 +710,77 @@ def cmd_sync(root, job_id):
             "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
 
 
+# --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
+def caller_tty():
+    """The calling terminal's tty: the first ancestor (at most 10 up) with a ttysN, since Claude Code may start hooks
+    under a detached parent whose tty is ??. The same tty "Record your terminal" stores. "??" when none has one."""
+    pid = os.getppid()
+    for _ in range(10):
+        out = subprocess.run(["ps", "-o", "ppid=,tty=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=2).stdout.split()
+        if len(out) != 2:
+            break
+        if SHAPES["tty"].fullmatch(out[1]):
+            return out[1]
+        if not out[0].isdigit() or int(out[0]) <= 1:
+            break
+        pid = int(out[0])
+    return "??"
+
+
+def waiting_text(event):
+    """The `waiting` value a hook event sets, None for an event that clears it, KEEP for one that changes nothing."""
+    name, tool, inp = event.get("hook_event_name"), event.get("tool_name"), event.get("tool_input") or {}
+    if name == "PermissionRequest":
+        cmd = inp.get("command") if tool == "Bash" else None
+        return f"permission: {tool}" + (f": {str(cmd)[:80]}" if cmd else "")
+    if name == "PreToolUse" and tool == "AskUserQuestion":
+        try:
+            return f"question: {inp['questions'][0]['question']}"
+        except (KeyError, IndexError, TypeError):
+            return "question"
+    if name == "Stop":
+        line = next((l.strip() for l in str(event.get("last_assistant_message") or "").splitlines() if l.strip()), "")
+        return f"reply needed: {line}" if line else "reply needed"
+    if name in ("UserPromptSubmit", "PostToolUse"):
+        return None
+    return KEEP
+
+
+class _Gone(Exception):
+    """The matched job changed under the lock; leave the board unwritten."""
+
+
+def cmd_hook(event, tty):
+    """Set or clear `waiting` on the active job recorded on this tty (newest updatedAt across every registered repo).
+    Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
+    text = waiting_text(event)
+    if text is KEEP or not SHAPES["tty"].fullmatch(tty or ""):
+        return
+    text = clean(text, 200) if text else None
+    match = None
+    for repo in read_registry():
+        root = Path(repo) / "scrum"
+        try:
+            jobs = json.loads((root / "board.json").read_text())["jobs"]
+            for job in jobs:
+                if job.get("tty") == tty and job.get("stage") in ACTIVE and (
+                        match is None or str(job.get("updatedAt")) > str(match[1].get("updatedAt"))):
+                    match = (root, job)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    if match is None or (text is None and match[1].get("waiting") is None):
+        return
+    try:
+        with locked_board(match[0]) as board:
+            job = next((j for j in board["jobs"] if j.get("id") == match[1].get("id")), None)
+            if not job or job.get("tty") != tty or job.get("stage") not in ACTIVE or (text is None and job.get("waiting") is None):
+                raise _Gone
+            job.update(waiting=text, updatedAt=now())
+    except _Gone:
+        pass
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", type=Path, default=Path("scrum"))
@@ -726,11 +802,19 @@ def main(argv=None):
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
+    sub.add_parser("hook")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
     sub.add_parser("ready").add_argument("id")
     a = p.parse_args(argv)
+    if a.cmd == "hook":
+        # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
+        try:
+            cmd_hook(json.loads(sys.stdin.read()), caller_tty())
+        except (Exception, SystemExit):
+            pass
+        return 0
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
     elif a.cmd == "set":

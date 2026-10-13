@@ -1,4 +1,5 @@
 import json, os, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+from datetime import datetime
 from unittest import mock
 from pathlib import Path
 
@@ -477,6 +478,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
         self.serve.board.cmd_set(self.root, job_id, ["stage=done"])
         self.assertIsNone(self.activity_of(job_id))
+
+    def test_activity_line_waiting_wins(self):
+        job_id = self.job("paused", "stage=review", "waiting=question: Which lane?")
+        self.touch(f"{job_id}/round-1/review-ui.md", "VERDICT: PASS\n", 60)  # newer than updatedAt
+        act = self.activity_of(job_id)
+        self.assertEqual(act["text"], "waiting on you: question: Which lane?")
+        updated = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)["updatedAt"]
+        self.assertEqual(act["at"], datetime.fromisoformat(updated).timestamp())
+        self.serve.board.cmd_set(self.root, job_id, ["waiting="])
+        self.assertEqual(self.activity_of(job_id)["text"], "reviewers 1/4 done")
 
     def test_activity_line_builder_commit(self):
         wt = Path(self.tmp.name) / "wt-activity"

@@ -266,6 +266,8 @@ const ago = at => {
 };
 const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
 
+// A running job whose interactive session is stopped on a permission prompt, a question or a reply (board.py hook).
+const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
 // A BigBoy child that can't start until Trevor clicks Setup done.
 const setupWait = job => job.stage === "waiting" && job.setup === "pending";
 // BigBoy parent: merged count, then one line per child with the tickets it waits on. Child: which parent it belongs to.
@@ -280,16 +282,17 @@ function bigboyLines(job) {
 }
 
 function card(job) {
-  const human = job.stage === "needs-human", setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  const human = job.stage === "needs-human" || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), so they never go stale.
-  const stale = !["done", "needs-human", "aborted", "waiting", "plan", "running"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
+  const stale = !human && !["done", "needs-human", "aborted", "waiting", "plan", "running"].includes(job.stage) && Date.now() - Date.parse(job.updatedAt) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(job.updatedAt).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${bigboyLines(job)}
     ${(job.rounds || []).map(roundRow).join("")}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${human && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
+    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
+    ${human && !paused(job) && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
     ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
@@ -451,10 +454,12 @@ const splitReason = reason => {
   return {problem: r.slice(0, i), fix: fix.charAt(0).toUpperCase() + fix.slice(1)};
 };
 const waitingBanner = job => {
-  if (job.stage !== "needs-human") return "";
-  const {problem, fix} = splitReason(job.reason);
+  const p = paused(job);
+  if (!p && job.stage !== "needs-human") return "";
+  const {problem, fix} = p ? {problem: job.waiting, fix: "Answer it in the job's terminal."} : splitReason(job.reason);
   return `<div class="waiting"
-    data-agent-hint="This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix.">
+    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for; Open terminal brings that session to the front."
+      : "This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix."}">
     <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
 };
 
@@ -465,7 +470,7 @@ function renderActions(job) {
   if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work).
   const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
   el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">

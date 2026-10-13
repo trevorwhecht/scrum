@@ -330,6 +330,19 @@ class ContractTest(unittest.TestCase):
     def test_dashboard_has_waiting_banner(self):
         self.assertIn("Waiting on you", DASHBOARD.read_text())
 
+    def test_skill_registers_waiting_hooks(self):
+        fm = re.match(r"^---\n(.*?)\n---\n", (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), re.S).group(1)
+        self.assertIn("\nhooks:\n", fm)
+        for event in ("PermissionRequest:", "PreToolUse:", "matcher: AskUserQuestion", "Stop:", "UserPromptSubmit:", "PostToolUse:"):
+            self.assertIn(event, fm, event)
+        self.assertEqual(fm.count('command: \'python3 "$HOME/.claude/skills/trevskills-scrum/board.py" hook\''), 5)
+        self.assertEqual(fm.count("timeout: 5"), 5)
+
+    def test_dashboard_banner_covers_waiting(self):
+        text = DASHBOARD.read_text()
+        for phrase in ("job.waiting", "Answer it in the job's terminal."):
+            self.assertIn(phrase, text, phrase)
+
     def test_dashboard_aborted_card_shows_reason(self):
         text = DASHBOARD.read_text()
         card = text[text.index("function card(job)"):text.index("function render()")]
