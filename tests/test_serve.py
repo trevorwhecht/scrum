@@ -910,22 +910,28 @@ class AiSettingsTest(unittest.TestCase):
         (self.user / "rules").mkdir()
         (self.user / "rules" / "r.md").write_text(f"key {self.SK}\n")
         self.assertEqual(json.loads(self.item(server["id"])[1]["content"]),
-                         {"command": "npx", "args": ["-y", "pkg", "--key", "[redacted]"], "url": "[redacted]"})
-        self.assertEqual(json.loads(self.item(hook["id"])[1]["content"]), {"hooks": [{"type": "command", "command": "[redacted]"}]})
+                         {"command": "npx", "args": ["-y", "pkg", "--key", "[redacted]"], "url": "https://h.example/mcp?k=[redacted]"})
+        self.assertEqual(json.loads(self.item(hook["id"])[1]["content"]),
+                         {"hooks": [{"type": "command", "command": "curl -H 'X: [redacted]' https://h.example"}]})
         bodies = [self.get("/api/ai-settings?scope=r%3Areg")[2], self.get("/api/ai-settings?scope=global")[2]]
         for sid in ("r:reg", "global"):
             for c in self.scope(sid)[0].values():
                 bodies += [self.item(it["id"])[2] for it in c["items"] if it["category"] in ("mcp", "hooks", "settings", "plugins")]
         for body in bodies:
-            for s in (self.SK, self.GHP, self.XOX, "abcdefgh12345678", "ABCDEFGHIJKLMNOPQRSTuvwx"):
+            for s in (self.SK, self.GHP, self.XOX, "abcdefgh12345678", "ABCDEFGHIJKLMNOPQRSTuvwx", "1234567890-abcdef"):
                 self.assertNotIn(s, body)
         rule = next(i for i in self.scope("global")[0]["rules"]["items"] if i["name"] == "r")
         self.assertEqual(self.item(rule["id"])[1]["content"], f"key {self.SK}\n")
 
     def test_secret_value_pattern_boundaries(self):
         hexrun, b64 = "0123456789abcdef0123456789abcdef", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7dE9"
-        for v in (hexrun, b64, f"--sha={hexrun}", f"Bearer {b64} trailing", self.SK, self.URL, self.HOOK_CMD, "github_pat_" + "a1" * 11):
-            self.assertEqual(self.serve.redact([v]), ["[redacted]"], v)
+        for v, want in ((hexrun, "[redacted]"), (b64, "[redacted]"), (f"--sha={hexrun}", "--sha=[redacted]"),
+                        (f"Bearer {b64} trailing", "Bearer [redacted] trailing"), (self.SK, "[redacted]"),
+                        (self.URL, "https://h.example/mcp?k=[redacted]"), (self.HOOK_CMD, "curl -H 'X: [redacted]' https://h.example"),
+                        ("github_pat_" + "a1" * 11, "[redacted]")):
+            self.assertEqual(self.serve.redact_str(v), want, v)
+            self.assertIsNone(self.serve.SECRET_VALUE.search(self.serve.redact_str(v)), v)
+            self.assertEqual(self.serve.redact([v]), [want], v)
         ok = ["/Users/trevor/Developer/repos/some-very-long-project-name/server.js", "risk-free", "--disk-cache",
               "claude-sonnet-4-5", "ai-settings-redact-in-serve-py-redact-th-x", "npx", "-y", "--key"]
         self.assertEqual(self.serve.redact({"args": ok}), {"args": ok})
@@ -939,10 +945,63 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace('"npx"', '"node"'), confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text()),
                          {"mcpServers": {"s": {"command": "node", "args": ["-y", "pkg", "--key", self.SK], "url": self.URL}}})
+        view = self.item(hook["id"])[1]["content"]
+        self.assertEqual(self.save(hook, view.replace("https://h.example", "https://other.example"), confirm=True)[0], 200)
+        self.assertEqual(json.loads(settings.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"],
+                         "curl -H 'X: xoxb-1234567890-abcdef' https://other.example")
+        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace("h.example/mcp", "o.example/mcp"))[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["url"], f"https://o.example/mcp?k={self.GHP}")
         settings.write_text(json.dumps(self.SUBTREES))
         s_it = self.json_item("global", "settings", settings)
         self.assertEqual(self.save(s_it, self.item(s_it["id"])[1]["content"])[0], 200)
         self.assertEqual(json.loads(settings.read_text()), self.SUBTREES)
+
+    def test_save_partial_redaction_mismatch_refused(self):
+        mcp, _, server, _ = self.plant_value_secrets()
+        before, backups = mcp.read_bytes(), len(self.backups())
+        view = json.loads(self.item(server["id"])[1]["content"])
+        version = self.item(server["id"])[1]["version"]
+        mismatch = {"error": "[redacted] at url does not match its saved value"}
+        cases = [(view | {"url": "https://h.example/mcp?k=[redacted]&j=[redacted]"}, mismatch),
+                 (view | {"url": "https://h.example/mcp?k=[redacted]", "command": "x [redacted]"},
+                  {"error": "[redacted] at command does not match its saved value"}),
+                 (view | {"note": "foo [redacted]"}, {"error": "[redacted] at note has no saved value"})]
+        for new, err in cases:
+            self.assertEqual(self.serve.ai_settings_save(server["id"], json.dumps(new), version, confirm=True), (400, err), new)
+        self.assertEqual((mcp.read_bytes(), len(self.backups())), (before, backups))
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "url": f"{self.SK}/{self.GHP}", "n": 5}}}))
+        server = self.json_item("r:reg", "mcp", mcp, "s")
+        view, version = json.loads(self.item(server["id"])[1]["content"]), self.item(server["id"])[1]["version"]
+        self.assertEqual(view["url"], "[redacted]/[redacted]")
+        before = mcp.read_bytes()
+        for new, err in ((view | {"url": "x/[redacted]"}, mismatch),
+                         (view | {"n": "[redacted] x"}, {"error": "[redacted] at n does not match its saved value"})):
+            self.assertEqual(self.serve.ai_settings_save(server["id"], json.dumps(new), version, confirm=True), (400, err), new)
+        self.assertEqual(mcp.read_bytes(), before)
+
+    def test_save_list_insert_keeps_redacted_values(self):
+        mcp, _, server, _ = self.plant_value_secrets()
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["--verbose", "-y", "pkg", "--key", "[redacted]"]}),
+                                   confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["--verbose", "-y", "pkg", "--key", self.SK])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["pkg", "--key", "[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["pkg", "--key", self.SK])
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "args": ["--a", self.SK, "--b", f"k={self.GHP}"]}}}))
+        server = self.json_item("r:reg", "mcp", mcp, "s")
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(view["args"], ["--a", "[redacted]", "--b", "k=[redacted]"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["-y", "--a", "[redacted]", "--b", "k=[redacted]"]}),
+                                   confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["-y", "--a", self.SK, "--b", f"k={self.GHP}"])
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["-y", "--a", "replacement", "--b", "k=[redacted]"]}),
+                                   confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["-y", "--a", "replacement", "--b", f"k={self.GHP}"])
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "args": [self.SK, self.XOX]}}}))
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["replacement", "[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["replacement", self.XOX])
 
     def test_read_only(self):
         snap = lambda: {p: p.stat().st_mtime_ns for p in self.home.rglob("*")}
@@ -1857,6 +1916,7 @@ class AiResearchTest(unittest.TestCase):
 
     def test_research_spawns_read_only_run_with_redacted_item(self):
         rule = self.write(self.user / "rules" / "r.md", "Always do X.")
+        self.write(self.user / "rules" / "s.md", "key sk-abcdefgh12345678\n")
         rows, _ = self.audit()
         rule_id = self.row(rows, "rules", "r")["id"]
         code, out, popen = self.research(rule_id)
@@ -1881,6 +1941,13 @@ class AiResearchTest(unittest.TestCase):
         prompt = popen.call_args.args[0][2]
         self.assertIn("[redacted]", prompt)
         self.assertNotIn(SECRET, prompt)
+        s_id = self.row(self.audit()[0], "rules", "s")["id"]
+        code, out, popen = self.research(s_id)
+        self.assertEqual(code, 202, out)
+        prompt = popen.call_args.args[0][2]
+        self.assertIn("key [redacted]", prompt)
+        self.assertNotIn("sk-abcdefgh12345678", prompt)
+        self.assertEqual(self.serve.ai_settings_item(s_id)["content"], "key sk-abcdefgh12345678\n")
         self.write(self.user / "rules" / "big.md", "a" * 70_000 + "TAIL")
         code, out, popen = self.research(self.row(self.audit()[0], "rules", "big")["id"])
         prompt = popen.call_args.args[0][2]
