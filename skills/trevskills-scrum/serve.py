@@ -11,15 +11,16 @@ origin or a localhost origin; a cross-site page can't send that without a CORS p
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
 and a change to what runs (a hook or plugin entry, an MCP server's command/args, a settings file's
-permissions/hooks/statusLine/apiKeyHelper) only with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
-settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
+permissions/hooks/statusLine/apiKeyHelper) only with confirm. The Audit tab's Disable/Enable also flips
+skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
 key; it refuses keys managed settings pin, and rolls the file back (409) if the effective value didn't change. Every
 write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
 Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
 never echo a config value, and the Audit treats session transcripts as data it only counts.
 Research this (Audit rows) starts a read-only `claude -p` run (web tools only, no Edit/Write/Bash) that compares one item,
 as the redacted content the item view shows (Markdown too: its secret-looking values are redacted), against current
-docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from; nothing is applied except by hand in the editor.
+docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
+nothing is applied except by hand in the editor.
 """
 import argparse, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timezone
@@ -447,8 +448,9 @@ MISSING = object()
 def ai_unredact(new, old, path=()):
     """new with every "[redacted]" swapped for old's value at the same key path: a whole string takes old's value, and
     one inside a string takes old's SECRET_VALUE matches in order (the counts must agree). A list item holding a
-    "[redacted]" pairs with the next old item whose redacted form equals it, so inserts and deletes don't shift it;
-    an item that matches none falls back to the same index."""
+    "[redacted]" in a list that grew or shrank pairs with the next old item whose redacted form equals it, so inserts
+    and deletes don't shift it; a same-length list (an edit, not an insert) and an item that matches none pair by
+    index, so replacing one secret can't pull it into another's slot."""
     p = ".".join(map(str, path)) or "(root)"
     if isinstance(new, str) and "[redacted]" in new:
         if old is MISSING:
@@ -468,7 +470,7 @@ def ai_unredact(new, old, path=()):
         key, start, out = str(path[-1]) if path else "", 0, []
         for i, v in enumerate(new):
             pair = o[i] if i < len(o) else MISSING
-            if "[redacted]" in json.dumps(v):
+            if len(new) != len(o) and "[redacted]" in json.dumps(v):
                 j = next((j for j in range(start, len(o)) if redact(o[j], key) == v), None)
                 if j is not None:
                     pair, start = o[j], j + 1

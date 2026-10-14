@@ -994,6 +994,14 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(server, json.dumps(view | {"args": ["-y", "--a", "[redacted]", "--b", "k=[redacted]"]}),
                                    confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["-y", "--a", self.SK, "--b", f"k={self.GHP}"])
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["-y", "--a", "replacement", "--b", "k=[redacted]"]}),
+                                   confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["-y", "--a", "replacement", "--b", f"k={self.GHP}"])
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "args": [self.SK, self.XOX]}}}))
+        view = json.loads(self.item(server["id"])[1]["content"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["replacement", "[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["replacement", self.XOX])
 
     def test_read_only(self):
         snap = lambda: {p: p.stat().st_mtime_ns for p in self.home.rglob("*")}
