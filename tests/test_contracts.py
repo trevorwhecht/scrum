@@ -102,6 +102,18 @@ class ContractTest(unittest.TestCase):
             if path.name != "scrum-review-code.md":
                 self.assertNotIn("codex exec", text, path.name)
 
+    def test_skill_routes_steps_through_router(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        routing = self.section(text, "## Routing", "## Resuming the builder")
+        for phrase in ("local/route.py", "--job $F/jobs/$ID", "--scrum $F", 'run.py" claude -p',
+                       "SCRUM_LOCAL_CONTEXT=32768", "--allowedTools", "builder=local", "one cloud retry",
+                       "Local run failed:", "never loop", 'route.py" record', "invalid-artifact", "fallback"):
+            self.assertIn(phrase, routing, phrase)
+        self.assertGreaterEqual(text.count("see **Routing**"), 4)
+        for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, all up front.**", "2. Spawn `scrum-digest-reader`"):
+            line = next(l for l in text.splitlines() if l.startswith(step) or l.strip().startswith(step))
+            self.assertIn("see **Routing**", line, step)
+
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",

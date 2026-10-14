@@ -145,7 +145,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
       ```
       If Trevor says to skip or stop, write the pairs answered so far (nothing at all if there are none) and carry on. The same session then runs the rest of the job (step 2 onward).
 2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
-3. **Spec:** spawn `scrum-spec-writer` and wait for it. Prompt:
+3. **Spec:** spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID
    WORKTREE=none
@@ -164,7 +164,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
    Then `B set $ID worktree=$WT stage=build`.
-5. **Build:** spawn `scrum-builder` and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason='blocked: <first reason line>. Fix: type what the builder needs and click Send back to builder.'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
+5. **Build:** spawn `scrum-builder` (see **Routing**) and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason='blocked: <first reason line>. Fix: type what the builder needs and click Send back to builder.'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.
 
 ## Run all
@@ -231,7 +231,7 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
    Write plan.md for this job.
    ```
    Then run `B plan-apply $ID`. Under the board lock it checks plan.md (first line `PLAN: READY`, 2-5 tickets, every `Depends on:` names a known ticket other than itself with no cycle, exactly one `Exposure: yes` ticket and it depends on every other), creates one `waiting` child job per ticket with its `feature.md`, sets the parent's `children`, moves the parent to `running`, and prints `{"children": [...]}`. A refused plan creates nothing. If it exits non-zero, delete `$F/jobs/$ID/plan.md`, spawn the planner once more, and run `B plan-apply $ID` again. If that fails too, take its error line, strip quotes (`'` and `"`) and backticks, run `B set $ID stage=needs-human reason='planner output unreadable: <error line>. Fix: click Abort job with Put back in backlog ticked, then run it again.'` and stop.
-2. **Child specs, all up front.** Spawn one `scrum-spec-writer` per child **in ONE message**, in the background, and wait for all of them. Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Then, for each child:
+2. **Child specs, all up front.** Spawn one `scrum-spec-writer` per child **in ONE message**, in the background, and wait for all of them (see **Routing**: each child is routed on its own, and local ones run as background subprocesses alongside the cloud ones). Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Then, for each child:
    - **Obsolete:** if its `spec.md` starts with `OBSOLETE:`, run `B abort <child> --reason 'obsolete: <rest of that line, single quotes stripped>'`. Its dependents never become ready.
    - **Lane:** otherwise run New job step 3c with `ID=<child>` (`Lane: bigboy` counts as `standard`). A child without a `spec.md` is fine: its own `start` writes it.
 3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run detached from the main checkout, logging to `scrum/runs/`:
@@ -306,7 +306,7 @@ If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, 
    - **Allowed files:** every path in `git -C "$WT" diff --name-only "$BASE"...HEAD` must be listed under `## Allowed files` or be the `Repro test:` path. Otherwise it fails with `outside allowed files: <path>`.
    - **Repro test untouched:** `git -C "$WT" diff --name-only <Commit from repro-before.md> HEAD -- <Repro test path>` must print nothing. Otherwise it fails with `repro test changed`.
 3. Write `round-$N/check.md`: first line `CHECK: PASS` or `CHECK: FAIL`, then for each command its exit code and the last 40 lines of output in a fenced block.
-4. If it says FAIL, resume the builder with `Checks failed: read JOB_DIR/round-N/check.md, fix, commit, update build.md.` Then re-run steps 2–3, overwriting `check.md`. Allow up to **3** fix attempts. If it still fails, skip the review and go to **Approve**; the approver rules on the failing check. Exception: a `lane=debug` job that still fails after the 3rd fix attempt never goes to **Approve**: run `B set $ID stage=needs-human reason="debug: 3 failed fixes — question the design. Fix: click Discuss first."` and stop.
+4. If it says FAIL, resume the builder with `Checks failed: read JOB_DIR/round-N/check.md, fix, commit, update build.md.` Then re-run steps 2–3, overwriting `check.md`. Allow up to **3** fix attempts. While the board says `builder=local`, attempts 1 and 2 re-run the local builder and attempt 3 is its cloud retry (see **Routing**). If it still fails, skip the review and go to **Approve**; the approver rules on the failing check. Exception: a `lane=debug` job that still fails after the 3rd fix attempt never goes to **Approve**: run `B set $ID stage=needs-human reason="debug: 3 failed fixes — question the design. Fix: click Discuss first."` and stop.
 5. If it says PASS, go to **Review**.
 
 ## Review (WAIT FOR ALL)
@@ -402,9 +402,39 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 
+## Routing
+
+Only `scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` are routed, and only in the steps that point here. Every other spawn uses the Agent tool as written.
+
+1. **Ask.** Take `START=$(date +%s)` just before the step. Run `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" <role> --job $F/jobs/$ID` (for a BigBoy child, `$ID` is that child's id), or `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" scrum-digest-reader --scrum $F` for the digest reader. The step runs `local` only when that exits 0 and prints a JSON object whose `runner` is `local`; `<model>` is its `model`. Every other result means `cloud`: `cloud`, `skip`, a non-zero exit, unparseable output, or route.py missing. `cloud` means: spawn with the Agent tool exactly as the step says.
+2. **Local runner.** One subprocess that does the agent's work and writes the same artifact. Run it from `$REPO` (the main checkout) with the Bash tool's `run_in_background` and Bash timeout 3600000, and wait for it to finish as you would for a spawned agent. `<role>` is the agent name. The prompt is the agent definition body (everything after the second `---` line of its file), a blank line, then the same prompt lines the Agent tool would have received, extra lines included (e.g. the spec refresh line); write those lines with their values filled in:
+   ```bash
+   AGENT="$HOME/.claude/agents/<role>.md"; TOOLS=$(sed -n 's/^tools: //p' "$AGENT" | head -1)
+   PROMPT="$(awk 'n>=2; /^---$/{n++}' "$AGENT")
+
+   $(cat <<'EOF'
+   <the prompt lines>
+   EOF
+   )"
+   SCRUM_LOCAL_MODEL=<model> SCRUM_LOCAL_CONTEXT=32768 python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py" claude -p --allowedTools "$TOOLS" "$PROMPT"
+   ```
+   A local build runs `B set $ID builder=local` instead of recording an agent id.
+3. **One cloud retry, never loop.** A local run is invalid when: **spec writer**, `spec.md` is missing; **digest reader**, `notes.md` is missing or its first line is not `DIGEST NOTES`; **builder**, `build.md` is missing. A refused run.py preflight leaves no artifact, so it is invalid too, with run.py's error line as the reason. Retry an invalid run once on cloud with the Agent tool and the same prompt plus one extra line `Local run failed: <reason>.` That retry replaces the step's own "spawn it once more", so the step still makes at most 2 attempts before its existing needs-human or `error.md` stop. A step gets one cloud retry at most and never goes back to local.
+4. **Builder while the board says `builder=local`.** Every fix attempt and every review, approver, rework, CI or merge resume re-runs the local builder subprocess, with the 5 lines (current `ROUND`) and the resume text as the prompt lines. A local build has no Agent id, so there is no SendMessage.
+   - **Check gate:** fix attempts 1 and 2 run local. If the check still fails after them, fix attempt 3 is the cloud retry: a fresh `scrum-builder` with the 5 lines, the resume text and `Local run failed: check still failing after 2 local fix attempts.` The 3-attempt cap is unchanged.
+   - **Fast lane:** promotion on the 2nd check failure moves the next fix attempt to cloud (`Local run failed: check failed twice.`), and that move is the step's one cloud retry.
+   - Whenever a build moves to cloud, run `B set $ID builder=<cloud agent id>` and stop routing the builder for this job. From then on, resumes use SendMessage as in **Resuming the builder**.
+5. **Log every routed attempt.** Run `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> <runner> <model> $(( $(date +%s) - START )) <outcome>`, taking a fresh `START` before each attempt. `<dir>` is `$F/jobs/$ID`, or `$F` for the digest reader. `<runner>` is `local` or `cloud`. `<model>` is the router's `model`, or `-` for cloud. `<outcome>`:
+   - a local spec writer or digest reader: `ok` or `invalid-artifact`;
+   - a local build: `ok` or `invalid-artifact`, plus one more line, `check-pass` or `check-fail`, when that build reaches the Check gate;
+   - a first-try cloud run: `ok`;
+   - the cloud retry: its own line, runner `cloud`, outcome `fallback`.
+
+   Ignore a failed `record` call. Logging never blocks the pipeline.
+
 ## Resuming the builder
 
-Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored agent id) with a message naming the exact file(s) to read. If SendMessage fails because the agent no longer exists (for example after a session restart):
+If the board's `builder` is `local`, re-run the local builder subprocess instead of SendMessage (see **Routing** step 4). Otherwise use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored agent id) with a message naming the exact file(s) to read. If SendMessage fails because the agent no longer exists (for example after a session restart):
 1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `B set $ID builder=<new id>`.
 
@@ -415,7 +445,7 @@ Outside the **Lilguy lane**, the orchestrator never edits code or review files i
 Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never pushes, merges or opens a PR. It never edits an agent, skill, rule or memory file itself. Step 4 auto-approves the proposals the digester marked obvious, which only ever queues a repo backlog item. Trevor approves or rejects every other proposal from its needs-human card on the board or in the dashboard's **Digest** dialog. The last decision trims the digested job folders.
 
 1. Run `B digest-start`. Under the board lock it claims every `done` job that's in no earlier digest and prints `{"id", "jobs"}`. If `id` is null, say there is nothing to digest and stop. Otherwise `D=$F/digests/<id>`.
-2. Spawn `scrum-digest-reader` and wait for it. Prompt:
+2. Spawn `scrum-digest-reader` (see **Routing**) and wait for it. Prompt:
    ```
    DIGEST_DIR=$D
    JOBS_DIR=$F/jobs

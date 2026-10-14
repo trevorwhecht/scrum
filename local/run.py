@@ -5,10 +5,35 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import urllib.error
+import urllib.request
 
 HERE = Path(__file__).resolve().parent
 MODEL = os.environ.get('SCRUM_LOCAL_MODEL', 'scrum-local')
 CONTEXT = int(os.environ.get('SCRUM_LOCAL_CONTEXT', '65536'))
+BASE = os.environ.get('SCRUM_OLLAMA_URL', 'http://127.0.0.1:11434').rstrip('/')
+
+def preflight(base: str, model: str, context: int) -> None:
+    """Load `model` the way the compat endpoint will, then refuse if Ollama gave it less than `context`."""
+    load = urllib.request.Request(base + '/api/generate', method='POST',
+                                  data=json.dumps({'model': model, 'keep_alive': '10m'}).encode(),
+                                  headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(load, timeout=300) as reply:
+            reply.read()
+        with urllib.request.urlopen(base + '/api/ps', timeout=10) as reply:
+            loaded = json.loads(reply.read()).get('models') or []
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise SystemExit(f'Ollama preflight failed at {base}: {e}')
+    entry = next((m for m in loaded if model in (m.get('name'), m.get('model'))), None)
+    if entry is None:
+        raise SystemExit(f'Ollama preflight: {model} is not loaded after /api/generate')
+    if 'context_length' not in entry:
+        print(f'warning: Ollama /api/ps reports no context_length for {model}; cannot check it is >= {context}',
+              file=sys.stderr)
+    elif entry['context_length'] < context:
+        raise SystemExit(f'Ollama loaded {model} with context {entry["context_length"]} < {context}; '
+                         f'start Ollama with OLLAMA_CONTEXT_LENGTH={context}')
 
 def without_model(args):
     result = []
@@ -33,7 +58,7 @@ def main():
     if mode == 'dashboard':
         command = [sys.executable, str(HERE.parent / 'skills/trevskills-scrum/serve.py'), *args]
     elif mode == 'claude':
-        settings = {'ANTHROPIC_BASE_URL': 'http://127.0.0.1:11434',
+        settings = {'ANTHROPIC_BASE_URL': BASE,
                     'ANTHROPIC_AUTH_TOKEN': 'ollama', 'ANTHROPIC_API_KEY': '',
                     'ANTHROPIC_MODEL': MODEL, 'CLAUDE_CODE_SUBAGENT_MODEL': MODEL,
                     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
@@ -54,6 +79,8 @@ def main():
                    '-c', 'web_search="disabled"', *without_model(args)]
     else:
         raise SystemExit('Usage: local/run.py dashboard|claude|codex [arguments]')
+    if mode == 'claude':
+        preflight(BASE, MODEL, CONTEXT)
     os.execvpe(command[0], command, env)
 
 if __name__ == '__main__':
