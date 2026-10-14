@@ -58,6 +58,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
 .btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
 .card.aborted{opacity:.55}
+.card.dcard{cursor:default}.dcard .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.tall{min-height:44px}
 .btn.icon{min-width:32px;padding:6px 8px}
@@ -247,7 +248,7 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || laneOf(j) === laneFilter));
@@ -333,15 +334,28 @@ function card(job) {
   </button>`;
 }
 
+// A pending digest proposal: Trevor decides it here or in the Digest dialog. A div, so its buttons don't nest in a <button>.
+function digestCard(project, digestId, p) {
+  return `<div class="card human dcard" data-project="${esc(project)}" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
+    ${tag(project)}<span class="reason">Digest ${esc(digestId)} ${esc(p.id)}${p.obvious_reason ? `: ${esc(p.obvious_reason)}` : ""}</span>
+    <span class="meta kid">${esc(p.target)}</span>
+    <div class="acts"><button class="btn tall primary" type="button" data-decide="approve">Approve</button><button class="btn tall" type="button" data-decide="reject">Reject</button></div>
+    <p class="error" role="alert"></p></div>`;
+}
+// Digest cards follow the project filter like job cards; they have no lane, so the lane filter leaves them alone.
+const digestCards = () => projects.filter(p => !filter || p === filter).flatMap(p => (digests[p]?.digests || [])
+  .flatMap(g => g.proposals.filter(x => x.status === "pending").map(x => digestCard(p, g.id, x))));
+
 function render() {
-  const list = shown();
+  const list = shown(), dcards = digestCards();
   const cols = [...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
+  const count = s => list.filter(j => colOf(j) === s).length + (s === "needs-human" ? dcards.length : 0);
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
-  $("board").style.gridTemplateColumns = cols.map(s => list.some(j => colOf(j) === s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   $("board").innerHTML = cols.map(stage => {
-    const inCol = list.filter(j => colOf(j) === stage);
-    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2><span>${esc(stage)}</span> <span>· ${inCol.length}</span></h2>
-      ${inCol.map(card).join("") || '<p class="empty">—</p>'}</section>`;
+    const inCol = list.filter(j => colOf(j) === stage), extra = stage === "needs-human" ? dcards.join("") : "";
+    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
+      ${inCol.map(card).join("") + extra || '<p class="empty">—</p>'}</section>`;
   }).join("");
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
@@ -366,10 +380,12 @@ async function poll() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     projects = (await res.json()).map(p => p.name);
     if (filter && !projects.includes(filter)) filter = "";
-    const [boards, items, runList] = await Promise.all([
+    const [boards, items, runList, digestList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
-      getJson("api/runs", [])]);
+      getJson("api/runs", []),
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests`, null)))]);
+    digests = Object.fromEntries(projects.map((p, i) => [p, digestList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
     auditRunsChanged();
@@ -377,7 +393,7 @@ async function poll() {
     const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
     backlogs = nextBacklogs;
     renderSelect($("filter"), filter, true);
-    const text = JSON.stringify([all, runs, backlogs, filter]);
+    const text = JSON.stringify([all, runs, backlogs, digests, filter]);
     if (text !== lastText) {
       jobs = all; lastText = text; render();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
@@ -1128,6 +1144,20 @@ $("aiList").addEventListener("click", async e => {
   }
 });
 
+$("board").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-decide]");
+  if (!b) return;
+  const c = b.closest(".dcard"), btns = c.querySelectorAll("button");
+  btns.forEach(x => { x.disabled = true; });
+  c.querySelector(".error").textContent = "";
+  try {
+    await post(`api/p/${enc(c.dataset.project)}/digests/${enc(c.dataset.digest)}/${enc(c.dataset.pid)}`, {decision: b.dataset.decide});
+    poll();  // the card leaves once the proposal is no longer pending
+  } catch (err) {
+    c.querySelector(".error").textContent = err.message;
+    btns.forEach(x => { x.disabled = false; });
+  }
+});
 $("board").addEventListener("click", e => {
   const el = e.target.closest(".card");
   const job = el && jobs.find(j => j.key === el.dataset.key);
