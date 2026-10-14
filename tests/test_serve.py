@@ -1658,6 +1658,76 @@ class AiAuditTest(unittest.TestCase):
         self.assertEqual((self.user / "settings.json").read_text(), "[1, 2]")
         self.assertEqual(self.backups(), [])
 
+    def test_disable_user_row_targets_local_when_higher_file_sets_key(self):
+        self.plant()
+        local, project = self.reg / ".claude" / "settings.local.json", self.reg / ".claude" / "settings.json"
+        self.write(local, {"enabledPlugins": {"pl@mkt": True}})
+        self.write(project, {"skillOverrides": {"idle": "name-only"}})
+        others = self.snapshot({local})
+        rows, _ = self.audit("r:reg")
+        for cat, name in (("plugins", "pl@mkt"), ("skills", "idle")):
+            code, out = self.toggle("disable", self.row(rows, cat, name)["id"])
+            self.assertEqual(code, 200, name)
+            self.assertIn("disabled", out["flags"], name)
+        self.assertEqual(json.loads(local.read_text()), {"enabledPlugins": {"pl@mkt": False}, "skillOverrides": {"idle": "off"}})
+        self.assertEqual(self.snapshot({local}), others)
+
+    def plugin_installs(self, extra):
+        plugins = {"pl@mkt": [{"scope": "user", "installPath": str(self.home / "plugcache" / "pl")}], **extra}
+        self.write(self.user / "plugins" / "installed_plugins.json", {"plugins": plugins})
+
+    def test_disable_project_and_local_plugin_rows_target_settings_local(self):
+        self.plant()
+        self.plugin_installs({"pp@mkt": [{"scope": "project", "projectPath": str(self.reg), "installPath": "/nope"}],
+                              "lp@mkt": [{"scope": "local", "projectPath": str(self.reg), "installPath": "/nope"}]})
+        local, project = self.reg / ".claude" / "settings.local.json", self.reg / ".claude" / "settings.json"
+        self.write(project, {"enabledPlugins": {"pp@mkt": True, "lp@mkt": True}})
+        others = self.snapshot({local})
+        rows, _ = self.audit("r:reg")
+        for name, scope in (("pp@mkt", "project"), ("lp@mkt", "local")):
+            row = self.row(rows, "plugins", name, scope)
+            self.assertEqual((row["verdict"], row["disable"]), ("Retire", True), name)
+            self.assertEqual(self.toggle("disable", row["id"])[0], 200, name)
+        self.assertEqual(json.loads(local.read_text()), {"enabledPlugins": {"pp@mkt": False, "lp@mkt": False}})
+        for name, scope in (("pp@mkt", "project"), ("lp@mkt", "local")):
+            self.assertEqual(self.toggle("enable", self.row(rows, "plugins", name, scope)["id"])[0], 200, name)
+        self.assertEqual(json.loads(local.read_text()), {"enabledPlugins": {"pp@mkt": True, "lp@mkt": True}})
+        self.assertEqual(self.snapshot({local}), others)
+
+    def test_toggle_refuses_when_managed_pins_key(self):
+        self.plant()
+        self.plugin_installs({"zz@mkt": [{"scope": "user", "installPath": "/nope"}]})
+        self.write(self.managed / "managed-settings.json", {"enabledPlugins": {"zz@mkt": True}, "skillOverrides": {"idle": "on"}})
+        rows, _ = self.audit("r:reg")
+        before = self.snapshot(set())
+        for cat, name in (("plugins", "zz@mkt"), ("skills", "idle")):
+            row = self.row(rows, cat, name)
+            self.assertEqual((row["verdict"], row["disable"]), ("Retire", False), name)
+            for action in ("disable", "enable"):
+                self.assertEqual(self.toggle(action, row["id"])[0], 409, (action, name))
+        self.assertEqual(self.snapshot(set()), before)
+        self.assertFalse((self.reg / ".claude" / "settings.local.json").exists())
+        self.assertEqual(self.backups(), [])
+
+    def test_toggle_rolls_back_when_effective_value_unchanged(self):
+        self.plant()
+        user_settings, local = self.user / "settings.json", self.reg / ".claude" / "settings.local.json"
+        self.write(user_settings, {**self.USER_SETTINGS, "skillOverrides": {"idle": "off"}})
+        local.write_text('{"skillOverrides":{"idle":"off"}}')
+        user_before = user_settings.read_bytes()
+        rows, _ = self.audit("r:reg")
+        self.assertEqual(self.serve.ai_toggle(self.row(rows, "skills", "idle")["id"], True),
+                         (409, {"error": "a higher-precedence settings file still decides this"}))
+        self.assertEqual(local.read_bytes(), b'{"skillOverrides":{"idle":"off"}}')
+        self.assertEqual(user_settings.read_bytes(), user_before)
+        self.assertEqual(len(self.backups()), 1)
+        # a file the write created is removed again (merged_settings forced to ignore it, as if a higher file raced in)
+        user_settings.unlink()
+        idle = self.row(self.audit()[0], "skills", "idle")["id"]
+        with mock.patch.object(self.serve, "merged_settings", lambda root, key: {}):
+            self.assertEqual(self.toggle("disable", idle)[0], 409)
+        self.assertFalse(user_settings.exists())
+
 
 class AiResearchTest(unittest.TestCase):
     """Page 5: Research this on Audit rows, on the AiAuditTest fake home. The registered "reg" project is the research home."""
