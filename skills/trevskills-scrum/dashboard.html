@@ -177,7 +177,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="routing" hidden data-agent-hint="Codex 5h and weekly quota used, from the newest Codex rollout file, and whether local Ollama answers. local/route.py sends work to Ollama when Codex passes its thresholds in local/routing.json. Refreshed every 60 s."></span>
+  <span id="routing" hidden data-agent-hint="Codex 5h and weekly quota used, from the newest Codex rollout file, and whether local Ollama answers. local/route.py moves the Codex review to Ollama when either window passes its threshold in local/routing.json. Refreshed every 60 s."></span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
