@@ -344,6 +344,20 @@ class ServeTest(unittest.TestCase):
         self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
 
+    def test_spawn_clears_stale_tty(self):
+        job_id = self.job("was interactive", "tty=ttys004", "term=Apple_Terminal")
+        with mock.patch.object(self.serve.subprocess, "Popen"):
+            rel = self.serve.spawn("repo", self.root, job_id, "approve", "x")
+        self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
+        job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertEqual((job.get("tty"), job["runlog"], job["term"]), (None, rel, "Apple_Terminal"))
+        code, out, run, _ = self.terminal(job_id)
+        self.assertEqual(code, 200, out)
+        run.assert_called_once()
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-1], os.path.realpath(self.root / rel))
+        self.assertNotIn("/dev/ttys004", argv)
+
     def test_terminal_apple_terminal_passes_tty_as_argv(self):
         code, out, run, popen = self.terminal(self.job("tab", "tty=ttys004", "term=Apple_Terminal"))
         self.assertEqual(code, 200, out)
