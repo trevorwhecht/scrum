@@ -815,6 +815,24 @@ class ContractTest(unittest.TestCase):
             self.assertIn(f'getJson("{route}", null, STALE)', text, route)
         self.assertIn('getJson(`api/p/${enc(p)}/backlog`, [])', text)  # per-project 404 stays "no such project"
 
+    def test_security_finding_row_shows_rule_id(self):
+        text = DASHBOARD.read_text()
+        row = text[text.index("const findingRow"):text.index("async function renderFindings")]
+        self.assertIn('${f.rule ? ` <span class="note">${esc(f.rule)}</span>` : ""}', row)
+
+    def test_progress_bar_margin_matches_meta(self):
+        bar = next(l for l in DASHBOARD.read_text().splitlines() if l.startswith(".bar{"))
+        self.assertIn("margin-top:6px", bar)
+        self.assertNotIn("margin-top:3px", bar)
+
+    def test_digest_empty_line_is_short(self):
+        text = DASHBOARD.read_text()
+        digests = text[text.index("function renderDigests"):]
+        digests = digests[:digests.index("\n}")]
+        self.assertIn('<p class="note">No projects</p>', digests)
+        self.assertIn("No projects yet. Run /trevskills-scrum in a repo and it shows up here.", text)  # board
+        self.assertIn('<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>', text)  # backlog
+
 
 if __name__ == "__main__":
     unittest.main()

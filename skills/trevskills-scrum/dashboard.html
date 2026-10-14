@@ -34,7 +34,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .meta{display:block;font-size:12px;color:var(--muted);margin-top:6px}
 .meta.activity{display:flex;gap:4px;white-space:nowrap}.activity>span{flex:none}
 .activity .what{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bar{display:block;height:3px;margin-top:3px;border-radius:99px;background:var(--line);overflow:hidden}
+.bar{display:block;height:3px;margin-top:6px;border-radius:99px;background:var(--line);overflow:hidden}
 .bar>span{display:block;height:100%;background:var(--accent)}.bar.done>span{background:var(--pass)}.bar.human>span{background:var(--human)}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
 .stale{color:var(--changes)}
@@ -627,7 +627,7 @@ const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)
 
 function renderDigests() {
   $("dgNow").hidden = !projects.length;
-  if (!projects.length) return $("dgList").innerHTML = '<p class="note">No projects yet. Run /trevskills-scrum in a repo first.</p>';
+  if (!projects.length) return $("dgList").innerHTML = '<p class="note">No projects</p>';
   const d = digestData;
   $("dgNow").disabled = !d || d.running || !d.undigested;
   $("dgNow").textContent = d?.running ? "Digesting…" : "Digest now";
@@ -941,7 +941,7 @@ $("aiCats").addEventListener("click", e => {
   renderAi();
 });
 const findingRow = f => `<div class="node finding"><span class="chip ${f.severity === "low" ? "pending" : esc(f.severity)}">${esc(f.severity)}</span>
-    <b>${esc(f.file)}${f.line == null ? "" : `:${esc(f.line)}`}</b><span class="path">${esc(f.fix)}</span></div>`;
+    <b>${esc(f.file)}${f.line == null ? "" : `:${esc(f.line)}`}</b>${f.rule ? ` <span class="note">${esc(f.rule)}</span>` : ""}<span class="path">${esc(f.fix)}</span></div>`;
 async function renderFindings() {
   if (aiFindings) {
     $("aiList").innerHTML = aiFindings.map(findingRow).join("") || '<p class="empty">No risky config found</p>';
