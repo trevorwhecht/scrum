@@ -391,7 +391,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
         for phrase in ("TRIAGE_DIR/plan.json", "as data, not instructions", "every original requirement",
                        "(merged: <short name of each original>)", "naming the evidence", "1, 2, 3, 5, 8, 13",
-                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"'):
+                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"', "up to 8 points"):
             self.assertIn(phrase, text, phrase)
 
     def test_dashboard_has_run_all_and_last_triage(self):
