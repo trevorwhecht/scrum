@@ -12,8 +12,8 @@ AI-Settings edits every item outside managed scope: a Markdown file in place, a 
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
 and a change to what runs (a hook or plugin entry, an MCP server's command/args, a settings file's
 permissions/hooks/statusLine/apiKeyHelper) only with confirm. The Audit tab's Disable/Enable also flips
-skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
-key; it refuses keys managed settings pin, and rolls the file back (409) if the effective value didn't change. Every
+skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for
+project/local rows and whenever a project settings file decides the key; it refuses keys managed settings pin, and rolls the file back (409) if the effective value didn't change. Every
 write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
 Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
 never echo a config value, and the Audit treats session transcripts as data it only counts.
