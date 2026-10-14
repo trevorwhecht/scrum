@@ -380,13 +380,15 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
-                       "assessment.md", "notes.md"):
+                       "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
+                       "(fallback: <n>)", "DIGEST NOTES", "150 lines"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
                        '"obvious"', '"obvious_reason"', "2 or more different jobs", "never removes or loosens",
-                       "never a global file"):
+                       "never a global file", "ROUTING", "local/routing.json", "## Local routing",
+                       "at least 5 local runs", "at least 3 local runs", "more than one third", "codex-review"):
             self.assertIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
@@ -395,7 +397,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("- **`/trevskills-scrum digest`**", text)
         digest = self.section(text, "## Digest", "## Final report")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
-                       "error.md", "B digest-trim", "no remote", "--digest-auto"):
+                       "error.md", "B digest-trim", "no remote", "--digest-auto", "ROUTING=", "local/routing.json",
+                       "realpath ~/.claude/skills/trevskills-scrum"):
             self.assertIn(phrase, digest, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))

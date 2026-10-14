@@ -452,10 +452,11 @@ Learns from finished jobs. It runs from the main checkout (Setup applies, but no
    Write notes.md for this digest.
    ```
    If `$D/notes.md` is missing or its first line isn't exactly `DIGEST NOTES` (`head -1 "$D/notes.md"`), spawn it once more. If it still fails, write `$D/error.md` containing the one line `digest reader produced no notes` and stop.
-3. Spawn `scrum-digester` and wait for it. Prompt:
+3. Set `R=$(cd "$(realpath ~/.claude/skills/trevskills-scrum)/../.." && pwd)`, then spawn `scrum-digester` and wait for it. Prompt:
    ```
    DIGEST_DIR=$D
    PROJECT=$F/project.md
+   ROUTING=$R/local/routing.json
    Write proposals.json for this digest.
    ```
    If `python3 -m json.tool "$D/proposals.json"` fails, or the file has no `proposals` list (`python3 -c 'import json,sys; sys.exit(not isinstance(json.load(open(sys.argv[1])).get("proposals"), list))' "$D/proposals.json"` exits non-zero), spawn it once more. If it still fails, write `$D/error.md` containing the one line `digester produced no valid proposals` and stop.
