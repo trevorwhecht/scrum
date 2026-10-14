@@ -65,3 +65,5 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - The loop: `skills/trevskills-scrum/SKILL.md`
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
+
+For an opt-in local model fallback covering Claude agents and the Codex review, see [local/README.md](local/README.md).
