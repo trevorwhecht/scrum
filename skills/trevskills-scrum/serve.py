@@ -11,7 +11,8 @@ origin or a localhost origin; a cross-site page can't send that without a CORS p
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values restored from disk, and a permissions or hooks change
 only with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
-settings.json or a project's settings.local.json. Every write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
+settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
+key; it refuses keys managed settings pin, and rolls the file back (409) if the effective value didn't change. Every write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
 Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
 never echo a config value, and the Audit treats session transcripts as data it only counts.
 Research this (Audit rows) starts a read-only `claude -p` run (web tools only, no Edit/Write/Bash) that compares one item,
@@ -165,6 +166,10 @@ def claude_home():
     return Path(os.environ.get("CLAUDE_HOME") or Path.home() / ".claude")
 
 
+def managed_dir():
+    return Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+
+
 def skill_files():
     """{name: (source, SKILL.md path)} for user skills and user-scope plugin skills, named <plugin>:<skill>."""
     home = claude_home()
@@ -280,7 +285,7 @@ def ai_inventory(scope_id):
     if scope_id not in scopes:
         return None
     root, home, user = scopes[scope_id][2], user_home(), claude_home()
-    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    managed = managed_dir()
     claude_json = home / ".claude.json"
     cj = as_dict(load_json(claude_json))
     raw = []  # (category, scope, name, path, is_json, entry, loc): loc is a JSON entry's key path from its file's root
@@ -758,7 +763,7 @@ def covered(entry, cards):
 def scan_security():
     """[{severity, rule, file, line, fix}] over every scope ai_scopes() knows. Each file is read once, by real path."""
     user, home = claude_home(), user_home()
-    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    managed = managed_dir()
     roots = [s[2] for s in ai_scopes().values() if s[2]]
     seen, texts, findings, commands = set(), {}, [], []
 
@@ -982,7 +987,7 @@ def shingles(text):
 
 def merged_settings(root, key):
     """`key` merged over user < project < local < managed settings files (later wins)."""
-    managed = Path(os.environ.get("CLAUDE_MANAGED_DIR") or "/Library/Application Support/ClaudeCode")
+    managed = managed_dir()
     files = [claude_home() / "settings.json"]
     files += [root / ".claude" / "settings.json", root / ".claude" / "settings.local.json"] if root else []
     out = {}
@@ -1084,37 +1089,52 @@ def audit(scope_id):
             r["verdict"], r["reason"] = "Improve", " ".join(FLAG_TEXT[f] for f in improve)
         else:
             r["verdict"], r["reason"] = "Keep", "No problems found."
-        r["disable"] = (r["verdict"] == "Retire" and r["category"] in ("skills", "plugins") and r["scope"] in ("user", "project")
-                        and "disabled" not in r["flags"] and bool(SAFE_NAME.fullmatch(r["name"])))
+        r["disable"] = (r["verdict"] == "Retire" and r["scope"] in TOGGLE_SCOPES.get(r["category"], ()) and "disabled" not in r["flags"]
+                        and bool(SAFE_NAME.fullmatch(r["name"])) and not managed_pins(r["category"], r["name"]))
         del r["_it"]
     return {"scope": scope_id, "rows": rows}
 
 
+TOGGLE_SCOPES = {"skills": ("user", "project"), "plugins": ("user", "project", "local")}
+TOGGLE_KEY = {"skills": "skillOverrides", "plugins": "enabledPlugins"}
+
+
+def managed_pins(cat, name):
+    """True when managed settings have an entry for this skill or plugin, so no write of ours can change it."""
+    return name in as_dict(as_dict(load_json(managed_dir() / "managed-settings.json")).get(TOGGLE_KEY[cat]))
+
+
 def ai_toggle(item_id, enable):
-    """Disable or Enable one user/project skill or plugin by writing one key of one settings file. Returns (code, body)."""
+    """Disable or Enable one skill or plugin by writing one key of one settings file. Returns (code, body)."""
     scope_id = item_id.split("|", 1)[0] if isinstance(item_id, str) and "|" in item_id else None
     data = audit(scope_id) if scope_id else None
     row = next((r for r in (data or {}).get("rows", []) if r["id"] == item_id), None)
     if not row:
         return 404, {"error": "no such item"}
     cat, name = row["category"], row["name"]
-    if cat not in ("skills", "plugins") or row["scope"] not in ("user", "project") or not SAFE_NAME.fullmatch(name):
+    if row["scope"] not in TOGGLE_SCOPES.get(cat, ()) or not SAFE_NAME.fullmatch(name):
         return 403, {"error": "only a user or project skill, or a plugin, can be turned off"}
+    key = TOGGLE_KEY[cat]
+    if managed_pins(cat, name):
+        return 409, {"error": "managed settings decide this"}
     root = ai_scopes(with_mac=scope_id.startswith("m:"))[scope_id][2]
-    target = claude_home() / "settings.json"
-    if cat == "skills" and row["scope"] == "project":
-        target = root / ".claude" / "settings.local.json"
-    elif cat == "plugins" and root and as_dict(as_dict(load_json(root / ".claude" / "settings.json")).get("enabledPlugins")).get(name) is True:
-        target = root / ".claude" / "settings.local.json"  # a checked-in project enable beats a user-level false
+    local = root / ".claude" / "settings.local.json" if root else None
+    # Write where the effective value is decided: project/local rows always in settings.local.json; a user row there too
+    # when a project file (higher than user settings.json) already has an entry for it, whatever its value.
+    if row["scope"] != "user" or (root and any(name in as_dict(as_dict(load_json(f)).get(key))
+                                               for f in (root / ".claude" / "settings.json", local))):
+        target = local
+    else:
+        target = claude_home() / "settings.json"
     try:
         settings = json.loads(target.read_text()) if target.exists() else {}
     except (OSError, ValueError):
         settings = None
-    key = "skillOverrides" if cat == "skills" else "enabledPlugins"
     if not isinstance(settings, dict) or not isinstance(settings.get(key, {}), dict):
         return 409, {"error": "settings file isn't a JSON object"}
     try:
-        if not target.exists():
+        before = target.read_bytes() if target.exists() else None
+        if before is None:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("{}\n")
         ai_backup(target)
@@ -1127,9 +1147,16 @@ def ai_toggle(item_id, enable):
             if not settings[key]:
                 del settings[key]
         target.write_text(json.dumps(settings, indent=2) + "\n")  # in place, so a symlinked settings file keeps its link
+        now = merged_settings(root, key).get(name)
+        if (now is enable) if cat == "plugins" else ((now == "off") is not enable):
+            return 200, next(r for r in audit(scope_id)["rows"] if r["id"] == item_id)
+        if before is None:  # roll back to exactly what was there; the backup stays
+            target.unlink()
+        else:
+            target.write_bytes(before)
     except OSError as e:
         return 500, {"error": str(e)}
-    return 200, next(r for r in audit(scope_id)["rows"] if r["id"] == item_id)
+    return 409, {"error": "a higher-precedence settings file still decides this"}
 
 
 RESEARCH_FLAGS = ("--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash")
