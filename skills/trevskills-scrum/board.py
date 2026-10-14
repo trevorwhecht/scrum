@@ -251,12 +251,14 @@ def cmd_next(root, index=None):
 
 def cmd_abort(root, job_id, requeue, reason=None):
     """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
-    feature = Path(root) / "jobs" / check_id(job_id) / "feature.md"
+    folder = Path(root) / "jobs" / check_id(job_id)
+    feature = folder / "feature.md"
     with locked_board(root) as board:
         job = find(board, job_id)
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
-        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now())
+        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now(),
+                   files=job_files(folder))
         if requeue:
             text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
             lines, _ = read_backlog(root)
@@ -279,7 +281,7 @@ def merge_summary(text):
 def cmd_reopen(root, job_id, note):
     """Start a new job that follows up a done or aborted one; its feature.md carries the old job's context."""
     old_dir = Path(root) / "jobs" / check_id(job_id)
-    note = clean(note)
+    note = clean(note, ITEM_MAX)
     with locked_board(root) as board:
         old = find(board, job_id)
         if old["stage"] not in ("done", "aborted"):
@@ -483,6 +485,8 @@ def cmd_triage_apply(root, triage_id):
                 pts = pts if type(pts) is int and pts in FIB else None  # bool and 5.0 are not points
                 if got and kind == "merge" and not clean(e.get("text") or ""):
                     cause = "merged text is empty"
+                elif got and kind == "merge" and len(clean(e["text"], None)) > ITEM_MAX:
+                    cause = "merged text is over 2000 characters"
                 elif got and kind == "retire" and not clean(e.get("reason") or ""):
                     cause = "no reason given"
                 elif got and kind == "estimate" and got[0]["points"] is not None:
@@ -886,7 +890,7 @@ def main(argv=None):
     else:
         # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
         for text in cmd_backlog_add(a.dir, a.items):
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), "--estimate", text,
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
                               "--dir", str(a.dir.resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
 
