@@ -94,6 +94,7 @@ def setup_done(project, root, job_id):
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
     return 200, {"id": job_id, **out}
 
+
 def estimate(root, text):
     """Ask Sonnet for Fibonacci points in the background; on any failure the item just stays unestimated."""
     try:
