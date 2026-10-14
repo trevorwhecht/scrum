@@ -9,7 +9,7 @@ Projects come from the registry that /trevskills-scrum fills in (board.py regist
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
-server, plugin) spliced back into its file with "[redacted]" values restored from disk, and a change to what runs (a
+server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk, and a change to what runs (a
 hook or plugin entry, an MCP server's command/args, a settings file's permissions/hooks/statusLine/apiKeyHelper) only
 with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
 settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
@@ -18,7 +18,7 @@ write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
 Its Security scan and Audit only read files: they never run a hook, fetch anything or connect to an MCP server, findings
 never echo a config value, and the Audit treats session transcripts as data it only counts.
 Research this (Audit rows) starts a read-only `claude -p` run (web tools only, no Edit/Write/Bash) that compares one item,
-as the redacted content the item view shows, against current docs and replies with suggested edits. Its log lands in the
+as the redacted content the item view shows (Markdown too: its secret-looking values are redacted), against current docs and replies with suggested edits. Its log lands in the
 scrum/runs/ of the registered project serve.py runs from; nothing is applied except by hand in the editor.
 """
 import argparse, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
@@ -235,9 +235,13 @@ def as_dict(v):
     return v if isinstance(v, dict) else {}
 
 
+def redact_str(s: str) -> str:
+    return SECRET_VALUE.sub("[redacted]", s)
+
+
 def redact(v, key=""):
-    """Every value under env/headers, the whole value under a secret-looking key (any type), and every string matching
-    SECRET_VALUE becomes "[redacted]"."""
+    """Every value under env/headers and the whole value under a secret-looking key (any type) becomes "[redacted]";
+    elsewhere each SECRET_VALUE match inside a string does, and the rest of the string stays."""
     if key.lower() in ("env", "headers"):
         return {k: "[redacted]" for k in v} if isinstance(v, dict) else "[redacted]"
     if SECRET_KEY.search(key):
@@ -246,7 +250,7 @@ def redact(v, key=""):
         return {k: redact(x, str(k)) for k, x in v.items()}
     if isinstance(v, list):
         return [redact(x, key) for x in v]
-    return "[redacted]" if isinstance(v, str) and SECRET_VALUE.search(v) else v
+    return redact_str(v) if isinstance(v, str) else v
 
 
 def walk_claude_dirs(d, depth, found):
@@ -441,17 +445,35 @@ MISSING = object()
 
 
 def ai_unredact(new, old, path=()):
-    """new with every "[redacted]" string swapped for old's value at the same key path (dict key or list index)."""
-    if new == "[redacted]":
+    """new with every "[redacted]" swapped for old's value at the same key path: a whole string takes old's value, and
+    one inside a string takes old's SECRET_VALUE matches in order (the counts must agree). A list item holding a
+    "[redacted]" pairs with the next old item whose redacted form equals it, so inserts and deletes don't shift it;
+    an item that matches none falls back to the same index."""
+    p = ".".join(map(str, path)) or "(root)"
+    if isinstance(new, str) and "[redacted]" in new:
         if old is MISSING:
-            raise ValueError(f"[redacted] at {'.'.join(map(str, path)) or '(root)'} has no saved value")
-        return old
+            raise ValueError(f"[redacted] at {p} has no saved value")
+        if new == "[redacted]":
+            return old
+        parts = new.split("[redacted]")
+        found = [m.group() for m in SECRET_VALUE.finditer(old)] if isinstance(old, str) else None
+        if found is None or len(found) != len(parts) - 1:
+            raise ValueError(f"[redacted] at {p} does not match its saved value")
+        return "".join(x + y for x, y in zip(parts, found + [""]))
     if isinstance(new, dict):
         o = as_dict(old)
         return {k: ai_unredact(v, o.get(k, MISSING), (*path, k)) for k, v in new.items()}
     if isinstance(new, list):
         o = old if isinstance(old, list) else []
-        return [ai_unredact(v, o[i] if i < len(o) else MISSING, (*path, i)) for i, v in enumerate(new)]
+        key, start, out = str(path[-1]) if path else "", 0, []
+        for i, v in enumerate(new):
+            pair = o[i] if i < len(o) else MISSING
+            if "[redacted]" in json.dumps(v):
+                j = next((j for j in range(start, len(o)) if redact(o[j], key) == v), None)
+                if j is not None:
+                    pair, start = o[j], j + 1
+            out.append(ai_unredact(v, pair, (*path, i)))
+        return out
     return new
 
 
@@ -1226,7 +1248,7 @@ def ai_research(item_id):
     home = research_home()
     if not home:
         return 409, {"error": "No research home. Run /trevskills-scrum in the trevskills-scrum repo to register it."}
-    content = it["content"]
+    content = redact_str(it["content"])
     if len(content) > RESEARCH_CAP:
         content = content[:RESEARCH_CAP] + f"\n[truncated: only the first {RESEARCH_CAP:,} characters are shown]"
     prompt = RESEARCH_PROMPT.format(name=it["name"], category=item_id.split("|")[1], scope=it["scope"], path=it["path"],
