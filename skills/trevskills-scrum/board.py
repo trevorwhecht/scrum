@@ -17,6 +17,8 @@
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec), print
                                    {"ready","merged","total","in_progress","all_merged"}
+  board.py runall-start           make a Run-all parent with every open backlog item as a waiting child, print
+                                   {"id","children"} (id null = nothing open); `ready <id>` then schedules them
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -37,7 +39,7 @@ TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$"),
-          "lane": re.compile(r"^(?:fast|standard|debug|bigboy)$"),  # no lane key = standard
+          "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
@@ -223,6 +225,12 @@ def backlog_set_estimate(root, text, points, why):
     return False
 
 
+def claim_item(lines, item, job_id):
+    """Mark one backlog item claimed by job_id in lines. Caller holds the lock and writes the backlog once."""
+    item["done"], item["job"] = True, job_id
+    lines[item["line"]] = format_item(item)
+
+
 def cmd_next(root, index=None):
     """Claim the first open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
     with locked_board(root) as board:
@@ -236,8 +244,7 @@ def cmd_next(root, index=None):
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
         job_id = add_job(root, board, item["text"][:60])
-        item["done"], item["job"] = True, job_id
-        lines[item["line"]] = format_item(item)
+        claim_item(lines, item, job_id)
         write_backlog(root, lines)
         return {"id": job_id, "feature": item["text"]}
 
@@ -518,6 +525,8 @@ TICKET_RE = re.compile(r"^### (T\d+):[ \t]*(.*?)\s*$")
 PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with a / or . and nothing code-like
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
 BLOCKED = "bigboy blocked"
+RUNALL_BLOCKED = "run-all blocked"
+RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent never has more children than this in progress at once
 
 
 def likely_files(spec_text):
@@ -578,12 +587,14 @@ def parse_plan(text):
     return (md_section(text, "Goal") or "").strip(), tickets
 
 
-def add_child(root, board, parent, t, depends_on, goal):
-    """Create one waiting child job for ticket t and write its feature.md. Caller holds the board lock."""
+def add_child(root, board, parent, t, depends_on, goal, plain=False):
+    """Create one waiting child job for ticket t and write its feature.md (just t's text when plain).
+    Caller holds the board lock."""
     job_id = add_job(root, board, t["title"][:60])
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
-    feature = f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
+    feature = t["text"] + "\n" if plain else \
+        f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "")
     (Path(root) / "jobs" / job_id / "feature.md").write_text(feature)
@@ -625,6 +636,25 @@ def cmd_plan_apply(root, parent_id, fix=False):
         return {"children": new}
 
 
+def cmd_runall_start(root):
+    """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock."""
+    with locked_board(root) as board:
+        lines, items = read_backlog(root)
+        todo = [i for i in items if not i["done"]]
+        if not todo:
+            return {"id": None, "children": []}
+        parent_id = add_job(root, board, "Run all")
+        parent = board["jobs"][-1]
+        kids = []
+        for item in todo:
+            t = {"ticket": None, "title": item["text"][:60], "text": item["text"], "parallel": True}
+            kids.append(add_child(root, board, parent, t, [], "", plain=True))
+            claim_item(lines, item, kids[-1])
+        write_backlog(root, lines)
+        parent.update(lane="runall", stage="running", children=kids, updatedAt=now())
+        return {"id": parent_id, "children": kids}
+
+
 def cmd_ready(root, parent_id):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
     jobs_dir = Path(root) / "jobs"
@@ -634,7 +664,8 @@ def cmd_ready(root, parent_id):
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
         stage = {k["id"]: k["stage"] for k in kids}
-        blocked = parent["stage"] == "needs-human" and (parent.get("reason") or "").startswith(BLOCKED)
+        runall = parent.get("lane") == "runall"  # aborted children count as finished, and at most 3 run at once
+        blocked = parent["stage"] == "needs-human" and (parent.get("reason") or "").startswith((BLOCKED, RUNALL_BLOCKED))
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
@@ -644,6 +675,8 @@ def cmd_ready(root, parent_id):
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
+            if runall and len(busy) >= RUNALL_MAX_IN_PROGRESS:
+                continue
             # parallel=no runs alone; parallel=yes never beside a parallel=no sibling or one sharing a Likely file.
             if busy and (not k.get("parallel")
                          or any(not o.get("parallel") or files[k["id"]] & files[o["id"]] for o in busy)):
@@ -652,16 +685,22 @@ def cmd_ready(root, parent_id):
             busy.append(k)
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
-        if ready and blocked:
+        finished = sum(k["stage"] in (("done", "aborted") if runall else ("done",)) for k in kids)
+        if blocked and (ready or (runall and finished == len(kids))):
             parent.update(stage="running", reason=None, updatedAt=now())
-        elif not ready and not busy and merged < len(kids) and (parent["stage"] == "running" or blocked):
-            stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")] \
-                or [k["id"] for k in kids if k.get("setup") == "pending"]
-            parent.update(stage="needs-human", updatedAt=now(), reason=f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each "
-                          "listed child (Approve & merge, Send back to builder or Setup done); if one was aborted, "
-                          "click Abort job on this BigBoy.")
+        elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or blocked):
+            if runall:  # an aborted Run-all child is finished, so it never blocks
+                stuck = [k["id"] for k in kids if k["stage"] == "needs-human"]
+                reason = f"{RUNALL_BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, " \
+                    "Send back to builder or Discuss)."
+            else:
+                stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")] \
+                    or [k["id"] for k in kids if k.get("setup") == "pending"]
+                reason = f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, Send back to " \
+                    "builder or Setup done); if one was aborted, click Abort job on this BigBoy."
+            parent.update(stage="needs-human", updatedAt=now(), reason=reason)
         return {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
-                "all_merged": merged == len(kids)}
+                "all_merged": finished == len(kids)}
 
 
 def cmd_set(root, job_id, pairs):
@@ -807,6 +846,7 @@ def main(argv=None):
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
     sub.add_parser("ready").add_argument("id")
+    sub.add_parser("runall-start")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
@@ -841,6 +881,8 @@ def main(argv=None):
         print(json.dumps(cmd_plan_apply(a.dir, a.id, a.fix)))
     elif a.cmd == "ready":
         print(json.dumps(cmd_ready(a.dir, a.id)))
+    elif a.cmd == "runall-start":
+        print(json.dumps(cmd_runall_start(a.dir)))
     else:
         # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
         for text in cmd_backlog_add(a.dir, a.items):
