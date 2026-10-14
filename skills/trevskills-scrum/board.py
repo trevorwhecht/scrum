@@ -19,12 +19,15 @@
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child, print
                                    {"id","children"} (id null = nothing open); `ready <id>` then schedules them
+  board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
+                                   default 540; stale after 1800 s), print {"acquired","holder"}
+  board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, json, os, re, shutil, subprocess, sys
+import argparse, fcntl, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -678,6 +681,7 @@ def cmd_ready(root, parent_id):
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if k["stage"] not in IDLE]
+        alone = lambda k: not k.get("parallel") or not files[k["id"]]  # unknown Likely files = may touch anything
         ready = []
         for k in kids if parent["stage"] == "running" or blocked else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
@@ -685,9 +689,9 @@ def cmd_ready(root, parent_id):
                 continue
             if runall and len(busy) >= RUNALL_MAX_IN_PROGRESS:
                 continue
-            # parallel=no runs alone; parallel=yes never beside a parallel=no sibling or one sharing a Likely file.
-            if busy and (not k.get("parallel")
-                         or any(not o.get("parallel") or files[k["id"]] & files[o["id"]] for o in busy)):
+            # parallel=no, or no readable Likely files, runs alone; anything else never beside such a sibling
+            # or one sharing a Likely file.
+            if busy and (alone(k) or any(alone(o) or files[k["id"]] & files[o["id"]] for o in busy)):
                 continue
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
@@ -709,6 +713,57 @@ def cmd_ready(root, parent_id):
             parent.update(stage="needs-human", updatedAt=now(), reason=reason)
         return {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                 "all_merged": finished == len(kids)}
+
+
+CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
+
+
+def cmd_chain_lock(root, parent_id, holder, wait=540):
+    """Take jobs/<parent>/.chain.lock for holder, polling every 2 s for up to `wait` seconds.
+    The same holder re-acquires (refreshing it); a lock older than CHAIN_LOCK_STALE is taken over."""
+    root, holder = Path(root), check_id(holder)
+    lock = root / "jobs" / check_id(parent_id) / ".chain.lock"
+    if not lock.parent.is_dir():
+        raise SystemExit(f"no job folder {lock.parent}")
+    deadline = time.monotonic() + wait
+    while True:
+        # The guard makes read-check-take atomic, so two waiters can never both take over a stale lock.
+        with open(root / ".board.lock", "w") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                other = lock_holder(lock)
+                if other != holder and time.time() - lock.stat().st_mtime <= CHAIN_LOCK_STALE:
+                    fd = None
+                else:
+                    fd = os.open(lock, os.O_WRONLY | os.O_TRUNC)
+            if fd is not None:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps({"holder": holder, "at": now()}) + "\n")
+                return {"acquired": True, "holder": holder}
+        if time.monotonic() >= deadline:
+            return {"acquired": False, "holder": other}
+        time.sleep(2)
+
+
+def lock_holder(lock):
+    try:
+        return json.loads(lock.read_text()).get("holder") or ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def cmd_chain_unlock(root, parent_id, holder):
+    """Remove jobs/<parent>/.chain.lock only when holder holds it."""
+    root = Path(root)
+    lock = root / "jobs" / check_id(parent_id) / ".chain.lock"
+    with open(root / ".board.lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        if lock.is_file() and lock_holder(lock) == check_id(holder):
+            lock.unlink()
+            return {"released": True}
+    return {"released": False}
 
 
 def cmd_set(root, job_id, pairs):
@@ -856,6 +911,13 @@ def main(argv=None):
     pa.add_argument("--fix", action="store_true")
     sub.add_parser("ready").add_argument("id")
     sub.add_parser("runall-start")
+    cl = sub.add_parser("chain-lock")
+    cl.add_argument("id")
+    cl.add_argument("holder")
+    cl.add_argument("--wait", type=int, default=540)
+    cu = sub.add_parser("chain-unlock")
+    cu.add_argument("id")
+    cu.add_argument("holder")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
@@ -892,6 +954,10 @@ def main(argv=None):
         print(json.dumps(cmd_ready(a.dir, a.id)))
     elif a.cmd == "runall-start":
         print(json.dumps(cmd_runall_start(a.dir)))
+    elif a.cmd == "chain-lock":
+        print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
+    elif a.cmd == "chain-unlock":
+        print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     else:
         # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
         for text in cmd_backlog_add(a.dir, a.items):

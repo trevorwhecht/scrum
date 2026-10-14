@@ -276,6 +276,8 @@ class BoardTest(unittest.TestCase):
 
     def test_ready_claims_once(self):
         parent, (c1, c2, c3) = self.three()
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/b.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
         again = board.cmd_ready(self.root, parent)
         self.assertEqual((again["ready"], again["in_progress"]), ([], 2))
@@ -305,6 +307,59 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_ready_unknown_likely_files_runs_alone(self):
+        # T2 has no spec, then a Likely files section holding only a non-path token: both mean "files unknown".
+        for unknown in (None, "# x\n## Likely files\n- `cmd_ready(root)`: the scheduler\n## Assumptions\n- `src/z.py`\n"):
+            parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+            c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            self.spec(c1, "src/a.py")
+            if unknown:
+                self.write(f"{c2}/spec.md", unknown)
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1], unknown)
+            board.cmd_set(self.root, c1, ["stage=done"])
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2], unknown)
+        # Reversed: the spec-less child is claimed first, and a disjoint sibling waits until it is done.
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(d2, "src/c.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, d1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
+
+    def test_chain_lock_acquire_wait_reenter_stale(self):
+        parent, _ = self.three()
+        lock = self.root / "jobs" / parent / ".chain.lock"
+        self.assertEqual(board.CHAIN_LOCK_STALE, 1800)
+        self.assertEqual(board.cmd_chain_lock(self.root, parent, "002-part-1"), {"acquired": True, "holder": "002-part-1"})
+        self.assertIn("002-part-1", lock.read_text())
+        self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0),
+                         {"acquired": False, "holder": "002-part-1"})
+        old = lock.stat().st_mtime - 1000
+        os.utime(lock, (old, old))
+        self.assertEqual(board.cmd_chain_lock(self.root, parent, "002-part-1", wait=0), {"acquired": True, "holder": "002-part-1"})
+        self.assertGreater(lock.stat().st_mtime, old + 900)  # re-acquiring refreshed it
+        stale = lock.stat().st_mtime - 1801
+        os.utime(lock, (stale, stale))
+        self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0), {"acquired": True, "holder": "003-part-2"})
+        self.assertIn("003-part-2", lock.read_text())
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "chain-lock", parent, "002-part-1",
+                              "--wait", "0"], capture_output=True, text=True)
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"acquired": False, "holder": "003-part-2"}))
+
+    def test_chain_unlock_only_by_holder(self):
+        parent, _ = self.three()
+        lock = self.root / "jobs" / parent / ".chain.lock"
+        self.assertEqual(board.cmd_chain_unlock(self.root, parent, "002-part-1"), {"released": False})
+        board.cmd_chain_lock(self.root, parent, "002-part-1")
+        self.assertEqual(board.cmd_chain_unlock(self.root, parent, "003-part-2"), {"released": False})
+        self.assertTrue(lock.exists())
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "chain-unlock", parent, "002-part-1"],
+                             capture_output=True, text=True)
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"released": True}))
+        self.assertFalse(lock.exists())
+        self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0)["acquired"], True)
+
     def test_likely_files_reads_only_that_section(self):
         text = "## Problem\n`a/x.py`\n## Likely files\n- `skills/board.py`: `SHAPES[\"lane\"]` and `cmd_ready(root)`\n- `tests/t.py`\n## Assumptions\n- `b/y.py`\n"
         self.assertEqual(board.likely_files(text), {"skills/board.py", "tests/t.py"})
@@ -317,6 +372,8 @@ class BoardTest(unittest.TestCase):
 
     def test_ready_failed_child_blocks_only_dependents(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
+        for k in (c1, c2, c4):
+            self.spec(k, f"src/{k}.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
         board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
         board.cmd_set(self.root, c2, ["stage=done"])
@@ -410,12 +467,20 @@ class BoardTest(unittest.TestCase):
     def test_runall_ready_caps_in_progress_at_three(self):
         self.assertEqual(board.RUNALL_MAX_IN_PROGRESS, 3)
         parent, kids = self.runall(5)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/{i}.py")
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"]), (kids[:3], 3))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         board.cmd_set(self.root, kids[0], ["stage=done"])
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"]), ([kids[3]], 3))
+        # A spec-less Run-all child starts only alone.
+        parent, (a, b) = self.runall(2)
+        self.spec(b, "src/b.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a])
+        board.cmd_set(self.root, a, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
 
     def test_runall_ready_aborted_counts_as_finished(self):
         parent, (a, b, c) = self.runall(3)
@@ -447,6 +512,8 @@ class BoardTest(unittest.TestCase):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
         c1, c2, c3, c4, c5 = board.cmd_plan_apply(self.root, parent)["children"]
+        for k in (c1, c2, c3, c4):
+            self.spec(k, f"src/{k}.py")
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"]), ([c1, c2, c3, c4], 4))
         for k in (c1, c2, c3):
