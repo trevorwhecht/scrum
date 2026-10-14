@@ -1,0 +1,21 @@
+{
+  "roles": {
+    "estimator": "approved",
+    "scrum-digest-reader": "approved",
+    "codex-review": "approved",
+    "scrum-spec-writer": "trial",
+    "scrum-builder": "trial"
+  },
+  "models": {
+    "estimator": "qwen3.5:4b",
+    "scrum-digest-reader": "qwen3.5:4b",
+    "scrum-spec-writer": "qwen2.5-coder:7b",
+    "scrum-builder": "qwen2.5-coder:7b",
+    "codex-review": "qwen2.5-coder:7b"
+  },
+  "thresholds": {
+    "codex_5h": 85,
+    "codex_weekly": 90,
+    "spec_writer_max_points": 2
+  }
+}
