@@ -51,7 +51,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for name in AGENTS:
             self.assertIn(name, text)
-        for cmd in ("board.py", " new ", " set ", " sync ", "digest-due", "digest-start", "digest-trim"):
+        for cmd in ("board.py", " new ", " set ", " sync ", "digest-due", "digest-start", "digest-trim", "runall-start"):
             self.assertIn(cmd, text)
         fm = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")
         self.assertEqual(fm.get("name"), "trevskills-scrum")
@@ -246,6 +246,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**BigBoy lane**", cleanup)
         self.assertIn("parent", cleanup)
 
+    def test_skill_bigboy_lane_handles_runall_parent(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        bigboy = self.section(text, "## BigBoy lane", "## Check gate")
+        self.assertIn("runall", self.section(bigboy, "## BigBoy lane", "1. **Plan.**"))
+        self.assertIn("runall", self.section(bigboy, "1. **Tracker.**", "   2. Run `B ready $P`"))
+        self.assertIn("runall", self.section(bigboy, "   3. If `all_merged`", "6. **After a child stops.**"))
+        self.assertIn("B set $P stage=done reason=", self.section(bigboy, "5. **Chaining**", "6. **After a child stops.**"))
+
     def test_debugger_contract(self):
         text = (ROOT / "agents" / "scrum-debugger.md").read_text()
         for phrase in ("ASSESSMENT: NO_REPRO", "ASSESSMENT: BLOCKED", "Repro:", "Repro test:", "## Allowed files",
@@ -378,13 +386,20 @@ class ContractTest(unittest.TestCase):
 
     def test_skill_defines_run_all(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        self.assertIn("run-all", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
-        self.assertIn("- **`/trevskills-scrum run-all`**", text)
+        description = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"]
+        self.assertIn("run-all", description)
+        self.assertIn("in parallel", description)
+        command = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum run-all`**"))
+        for phrase in ("in parallel", "Terminal window"):
+            self.assertIn(phrase, command, phrase)
         run_all = self.section(text, "## Run all", "## Fast lane")
         for phrase in ("B triage-start", "scrum-triager", "TRIAGE_DIR=$F/triage/", "B triage-apply",
-                       "Triage <id> failed: <message>", "$F/triage/latest.md", "B next",
-                       "A needs-human job does not stop the loop", "final stage"):
+                       "Triage <id> failed: <message>", "$F/triage/latest.md", "B runall-start",
+                       "**BigBoy lane** step 2", "**BigBoy lane** step 3",
+                       "final report", "parent", "started", "triage"):
             self.assertIn(phrase, run_all, phrase)
+        for phrase in ("B next", "one after another", "nohup", "scrum-spec-writer"):
+            self.assertNotIn(phrase, run_all, phrase)
 
     def test_triager_contract(self):
         self.assertEqual(frontmatter(ROOT / "agents" / "scrum-triager.md").get("tools"), "Read, Grep, Glob, Write")
@@ -401,6 +416,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         button = re.search(r'<button[^>]*id="blRunAll"[^>]*>', text).group(0)
         self.assertIn("data-agent-hint=", button)
+        self.assertNotIn("one after another", button)
 
     def test_skill_documents_askme(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -705,6 +721,7 @@ class ContractTest(unittest.TestCase):
                        "<option>fast</option>", "<option>standard</option>", "<option>debug</option>"):
             self.assertIn(phrase, text, phrase)
         self.assertIn("<option>bigboy</option>", text)
+        self.assertIn("<option>runall</option>", text)
         self.assertNotIn("<option>epic</option>", text)
         shown = re.search(r"^const shown = .*$", text, re.M).group(0)
         self.assertIn("lane", shown)
@@ -722,15 +739,24 @@ class ContractTest(unittest.TestCase):
                 {"key": "p/003-b", "project": "p", "id": "003-b", "ticket": "T2", "stage": "waiting", "parent": "001-big",
                  "depends_on": [], "setup": "pending"},
                 {"key": "p/004-c", "project": "p", "id": "004-c", "ticket": "T3", "stage": "waiting", "parent": "001-big",
-                 "depends_on": ["002-a", "003-b"]}]
+                 "depends_on": ["002-a", "003-b"]},
+                {"key": "p/005-run-all", "project": "p", "id": "005-run-all", "lane": "runall", "children": ["006-x", "007-y"]},
+                {"key": "p/006-x", "project": "p", "id": "006-x", "ticket": None, "stage": "spec", "parent": "005-run-all",
+                 "depends_on": []},
+                {"key": "p/007-y", "project": "p", "id": "007-y", "ticket": None, "stage": "waiting", "parent": "005-run-all",
+                 "depends_on": []}]
         out = subprocess.run([node, "-e", f"let jobs = {json.dumps(jobs)};\n{src}\n"
-                              "console.log(JSON.stringify([bigboyLines(jobs[0]), bigboyLines(jobs[3]), jobs.map(setupWait)]))"],
+                              "console.log(JSON.stringify([bigboyLines(jobs[0]), bigboyLines(jobs[3]), jobs.map(setupWait),"
+                              " bigboyLines(jobs[4]), bigboyLines(jobs[5])]))"],
                              capture_output=True, text=True, check=True).stdout
-        parent, child, waits = json.loads(out)
+        parent, child, waits, run_parent, run_child = json.loads(out)
+        self.assertEqual(run_parent, '<span class="meta">T0/2 merged</span><span class="meta kid">006-x spec</span>'
+                         '<span class="meta kid">007-y waiting</span>')
+        self.assertEqual(run_child, '<span class="meta">Child of 005-run-all</span>')
         self.assertEqual(parent, '<span class="meta">T1/3 merged</span><span class="meta kid">T1 done</span>'
                          '<span class="meta kid">T2 waiting</span><span class="meta kid">T3 waiting ← T1, T2</span>')
         self.assertEqual(child, '<span class="meta">T3 of 001-big</span>')
-        self.assertEqual(waits, [False, False, True, False])
+        self.assertEqual(waits, [False, False, True, False, False, False, False])
         card = text[text.index("function card(job)"):text.index("function render()")]
         for phrase in ('human || setup ? " human"', "Human setup: ${esc(job.setup_text", '"waiting", "plan", "running"'):
             self.assertIn(phrase, card, phrase)
