@@ -1328,6 +1328,42 @@ class AiSecurityTest(unittest.TestCase):
         self.assertIn("`b`", mine[1])
         self.assertTrue(all(f["rule"] == "mcp-inline-secret" and f["severity"] == "high" for f in findings if f["file"] == mcp))
 
+    def test_var_refs_in_mcp_args_and_url_are_not_flagged(self):
+        self.write(self.home / ".claude.json", {})  # drop setUp's planted inline env/header secrets
+        self.write(self.reg / ".mcp.json", {"mcpServers": {"a": {"command": "x", "args": ["--token=${TOKEN}"]},
+                                                           "b": {"url": "https://h.example/mcp?key=${API_KEY}"}}})
+        self.assertEqual(self.scan()[0], [])
+
+    def test_split_arg_mcp_credentials_are_flagged(self):
+        servers = {"a": {"command": "x", "args": ["-y", "pkg", "--token", "abc123"]},
+                   "b": {"command": "x", "args": ["--api-key", "abc123"]},
+                   "c": {"command": "x", "args": ["--token=abc${X}"]},
+                   "d": {"command": "x", "args": ["--token", "abc${X}"]},
+                   "e": {"command": "x", "args": ["--token=abc123", "--api-key", "abc123"]},
+                   "f": {"command": "x", "args": ["--token=abc123"]},
+                   "g": {"url": "https://h.example/mcp?key=abc123&x=1"}}
+        mcp = self.write(self.reg / ".mcp.json", {"mcpServers": servers})
+        findings, body = self.scan()
+        self.assertNotIn("abc123", body)
+        mine = [f for f in findings if f["file"] == mcp]
+        self.assertTrue(all(f["rule"] == "mcp-inline-secret" and f["severity"] == "high" for f in mine))
+        got = sorted((f["line"], f["fix"]) for f in mine)
+        want = sorted((self.line(mcp, f'"{n}"'),
+                       f"Move the token in `{'url' if n == 'g' else 'args'}` for server `{n}` into an env var reference like `${{TOKEN}}`.")
+                      for n in servers)
+        self.maxDiff = None
+        self.assertEqual(got, want)
+
+    def test_split_arg_edge_cases_not_flagged(self):
+        self.write(self.home / ".claude.json", {})  # drop setUp's planted inline env/header secrets
+        self.write(self.reg / ".mcp.json", {"mcpServers": {
+            "a": {"command": "x", "args": ["--token", "${TOKEN}"]},
+            "b": {"command": "x", "args": ["--token"]},
+            "c": {"command": "x", "args": ["--token", "--verbose"]},
+            "d": {"command": "x", "args": ["--token", ""]},
+            "e": {"command": "x", "args": ["--token", 5]}}})
+        self.assertEqual(self.scan()[0], [])
+
     def test_scan_is_static_read_only_and_covers_all_scopes(self):
         import http.client, socket, subprocess
         reg = self.write(self.reg / ".claude" / "settings.json", {"permissions": {"allow": ["Bash"]}})

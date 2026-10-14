@@ -707,7 +707,23 @@ BROAD = re.compile(r"Bash(\((\*|(npx|python3?|gh api|curl)(:| )\*)\))?")
 WILDCARD = re.compile(r"(\w+)(?:\((.+?)(?::| )\*\))?")
 ENTRY = re.compile(r"(\w+)\((.*)\)")
 VAR_REF = re.compile(r"\$\{\w+\}")
-TOKENISH = re.compile(r"--token=|--api-key=|[?&][\w-]*(token|key)=|Bearer |sk-|ghp_|github_pat_|xox[bp]-", re.I)
+TOKENISH = re.compile(r"(--token=|--api-key=|[?&][\w-]*(token|key)=|Bearer )[^&\s]|sk-|ghp_|github_pat_|xox[bp]-", re.I)
+FLAG = re.compile(r"--?([\w-]+)")
+
+
+def mcp_arg_secret(vals: list) -> bool:
+    """True when an MCP `args`/`url` list carries a literal credential: inline (`--token=abc`) or split (`--token`, `abc`).
+    `${NAME}` refs are removed first, so a value that is only an env var reference is not a finding."""
+    for i, v in enumerate(vals):
+        if not isinstance(v, str):
+            continue
+        if TOKENISH.search(VAR_REF.sub("", v)):
+            return True
+        n = vals[i + 1] if i + 1 < len(vals) else None
+        if ((m := FLAG.fullmatch(v)) and SECRET_KEY.search(m.group(1)) and isinstance(n, str)
+                and VAR_REF.sub("", n).strip() and not n.startswith("-")):
+            return True
+    return False
 INJECTION = re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\b.*\binstructions|do not tell the user"
                        r"|without telling the user|you are now|reveal your system prompt|\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba)?sh\b", re.I)
 FIX = {
@@ -816,7 +832,7 @@ def scan_security():
                                 f"Move `{k}` for server `{name}` into an env var reference like `${{{k}}}`.")
                 for field in ("args", "url"):
                     vals = s.get(field) if isinstance(s.get(field), list) else [s.get(field)]
-                    if any(isinstance(v, str) and TOKENISH.search(v) for v in vals):
+                    if mcp_arg_secret(vals):
                         add("mcp-inline-secret", "high", real, line,
                             f"Move the token in `{field}` for server `{name}` into an env var reference like `${{TOKEN}}`.")
 
