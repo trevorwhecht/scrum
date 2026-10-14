@@ -246,7 +246,8 @@ class ContractTest(unittest.TestCase):
         for phrase in ("stage=plan", "B plan-apply", "planner output unreadable", "OBSOLETE:", "B abort", "B ready",
                        "runlog=runs/", "--permission-mode acceptEdits", "track-", "TRACK: ADJUST", "TRACK: OFF TRACK",
                        "bigboy off track", "gh pr diff", "Refresh spec.md: dependencies", "all_merged", "BIGBOY: GAPS",
-                       "--fix", "bigboy review: gaps remain", "Phase 2 of", "no worktree"):
+                       "--fix", "bigboy review: gaps remain", "Phase 2 of", "no worktree",
+                       "chain-lock", "chain-unlock"):
             self.assertIn(phrase, bigboy, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertIn("**BigBoy lane**", cleanup)
