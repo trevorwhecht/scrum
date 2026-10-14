@@ -355,6 +355,118 @@ class BoardTest(unittest.TestCase):
         self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
         self.assertEqual(self.child(parent)["stage"], "running")
 
+    # --- run all: runall-start / ready ---
+    def test_lane_accepts_runall(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["lane=runall"])
+        self.assertEqual(self.jobs()[0]["lane"], "runall")
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, job_id, ["lane=epic"])
+        self.assertEqual(self.jobs()[0]["lane"], "runall")
+
+    def test_runall_start_without_open_items_creates_nothing(self):
+        for backlog in (None, "# Backlog\n- [x] old → 001-old\n", "# Backlog\n## Later\n"):
+            self.tmp.cleanup()
+            self.root.mkdir(parents=True)
+            if backlog is not None:
+                (self.root / "backlog.md").write_text(backlog)
+            self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+            self.assertFalse((self.root / "jobs").exists() and any((self.root / "jobs").iterdir()), backlog)
+            self.assertEqual(self.jobs() if (self.root / "board.json").exists() else [], [], backlog)
+
+    def test_runall_start_claims_every_open_item(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Add CSV export <!-- small -->\n"
+                                              "- [x] Old thing → 009-old\n- [ ] Dark mode\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-add-csv-export", "003-dark-mode"]})
+        p = self.child("001-run-all")
+        self.assertEqual((p["title"], p["lane"], p["stage"], p["children"]),
+                         ("Run all", "runall", "running", ["002-add-csv-export", "003-dark-mode"]))
+        for kid, text in (("002-add-csv-export", "Add CSV export"), ("003-dark-mode", "Dark mode")):
+            c = self.child(kid)
+            self.assertEqual((c["stage"], c["parent"], c["depends_on"], c["parallel"]), ("waiting", "001-run-all", [], True))
+            self.assertEqual((self.root / "jobs" / kid / "feature.md").read_text(), text + "\n")
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] [3] Add CSV export → 002-add-csv-export <!-- small -->\n"
+                         "- [x] Old thing → 009-old\n- [x] Dark mode → 003-dark-mode\n")
+
+    def runall(self, n):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text("".join(f"- [ ] item {chr(97 + i)}\n" for i in range(n)))
+        out = board.cmd_runall_start(self.root)
+        return out["id"], out["children"]
+
+    def test_runall_ready_disjoint_parallel_shared_serial(self):
+        parent, (a, b, c) = self.runall(3)
+        self.spec(a, "src/a.py", "src/b.py")
+        self.spec(b, "src/b.py")
+        self.spec(c, "src/c.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, c])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, a, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
+
+    def test_runall_ready_caps_in_progress_at_three(self):
+        self.assertEqual(board.RUNALL_MAX_IN_PROGRESS, 3)
+        parent, kids = self.runall(5)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), (kids[:3], 3))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, kids[0], ["stage=done"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([kids[3]], 3))
+
+    def test_runall_ready_aborted_counts_as_finished(self):
+        parent, (a, b, c) = self.runall(3)
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, a, ["stage=done"])
+        board.cmd_set(self.root, b, ["stage=done"])
+        board.cmd_abort(self.root, c, requeue=False)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["merged"], out["total"], out["in_progress"], out["all_merged"]), (2, 3, 0, True))
+        self.assertEqual(self.child(parent)["stage"], "running")
+
+    def test_runall_ready_marks_parent_blocked_and_resumes(self):
+        parent, (a, b, c) = self.runall(3)
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, a, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_abort(self.root, b, requeue=False)
+        board.cmd_set(self.root, c, ["stage=done"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
+        p = self.child(parent)
+        self.assertEqual(p["stage"], "needs-human")
+        self.assertTrue(p["reason"].startswith(f"run-all blocked: {a}. Fix: "), p["reason"])
+        board.cmd_set(self.root, a, ["stage=done", "reason="])
+        self.assertTrue(board.cmd_ready(self.root, parent)["all_merged"])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_bigboy_ready_unchanged_by_runall(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4),
+                           self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
+        c1, c2, c3, c4, c5 = board.cmd_plan_apply(self.root, parent)["children"]
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([c1, c2, c3, c4], 4))
+        for k in (c1, c2, c3):
+            board.cmd_set(self.root, k, ["stage=done"])
+        board.cmd_abort(self.root, c4, requeue=False)
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["merged"], out["all_merged"]), (3, False))
+        self.assertTrue(self.child(parent)["reason"].startswith(f"bigboy blocked: {c4}. Fix: "))
+
+    def test_cli_runall_start(self):
+        run = lambda *a: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *a],
+                                        capture_output=True, text=True)
+        self.assertIn("runall-start", run("--help").stdout)
+        out = run("runall-start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"id": None, "children": []})
+        (self.root / "backlog.md").write_text("- [ ] Dark mode\n")
+        out = run("runall-start")
+        self.assertEqual(json.loads(out.stdout), {"id": "001-run-all", "children": ["002-dark-mode"]})
+
     def test_diverged_reads_plan_md(self):
         parent, _ = self.three()
         board.cmd_set(self.root, parent, ["stage=running"])
