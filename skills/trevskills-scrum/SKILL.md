@@ -391,7 +391,7 @@ The orchestrator never edits code or review files itself, except for three sanct
 
 ## Digest
 
-Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never pushes, merges or opens a PR. It never edits an agent, skill, rule or memory file itself: Trevor approves or rejects each proposal in the dashboard's **Digest** dialog, and the dashboard trims the digested job folders once the last one is decided.
+Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never pushes, merges or opens a PR. It never edits an agent, skill, rule or memory file itself. Step 4 auto-approves the proposals the digester marked obvious, which only ever queues a repo backlog item. Trevor approves or rejects every other proposal from its needs-human card on the board or in the dashboard's **Digest** dialog. The last decision trims the digested job folders.
 
 1. Run `B digest-start`. Under the board lock it claims every `done` job that's in no earlier digest and prints `{"id", "jobs"}`. If `id` is null, say there is nothing to digest and stop. Otherwise `D=$F/digests/<id>`.
 2. Spawn `scrum-digest-reader` and wait for it. Prompt:
@@ -408,7 +408,7 @@ Learns from finished jobs. It runs from the main checkout (Setup applies, but no
    Write proposals.json for this digest.
    ```
    If `python3 -m json.tool "$D/proposals.json"` fails, or the file has no `proposals` list (`python3 -c 'import json,sys; sys.exit(not isinstance(json.load(open(sys.argv[1])).get("proposals"), list))' "$D/proposals.json"` exits non-zero), spawn it once more. If it still fails, write `$D/error.md` containing the one line `digester produced no valid proposals` and stop.
-4. If the `proposals` list is empty, run `B digest-trim <id>`. Otherwise report how many proposals wait in the dashboard's **Digest** dialog.
+4. If the `proposals` list is empty, run `B digest-trim <id>`. Otherwise run `python3 ~/.claude/skills/trevskills-scrum/serve.py --digest-auto <id> --dir $F`. It prints `{"approved": [{"id", "target", "obvious_reason"}], "human": [{"id", "reason"}]}`. Report each approved proposal as `<pid> → <target>: <obvious_reason>`, then the number of `human` proposals left for Trevor on the board.
 
 ## Final report
 
