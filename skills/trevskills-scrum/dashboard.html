@@ -751,7 +751,9 @@ const charted = [...Object.values(PIPELINES), ...Object.values(MAINTENANCE)].fla
 
 function renderFlow() {
   const tab = pipelineTab, loop = LOOPS[tab];
-  $("pipeTabs").querySelectorAll("[role=tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  $("pipeTabs").querySelectorAll("[role=tab]").forEach(b => {  // roving tabindex: Tab reaches the selected tab only
+    b.setAttribute("aria-selected", b.dataset.tab === tab); b.setAttribute("tabindex", b.dataset.tab === tab ? 0 : -1);
+  });
   const other = agents.map(a => a.name).filter(n => !charted.includes(n));
   $("flow").innerHTML = tab === "all"
     ? stepNode(ORCH) + '<div class="fan" aria-hidden="true"></div><div class="pcols">'
@@ -817,7 +819,9 @@ function showAgents(name) {
 }
 
 function renderSkills() {
-  const a = agents.find(x => x.name === $("agDetail").dataset.agent), q = $("agFilter").value.trim().toLowerCase();
+  const a = agents.find(x => x.name === $("agDetail").dataset.agent), f = $("agFilter");
+  if (!a || !f || $("agDetail").hidden) return;  // a late call (addSkill's catch) after Back or a reopen: no live picker
+  const q = f.value.trim().toLowerCase();
   const left = (skills || []).filter(s => !a.skills.includes(s.name));
   const hits = left.filter(s => s.name.toLowerCase().includes(q));
   $("agSkills").innerHTML = !skills ? '<p class="empty">loading…</p>'
