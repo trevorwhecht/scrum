@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then schedule every open item in parallel where files don't overlap), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then schedule every open item in parallel where files don't overlap), "/trevskills-scrum lilguy <feature>" (cheap mode: no subagents; this session makes the change in the main checkout, runs the checks, then lands it with commitpush), and bare "/trevskills-scrum" for status.
 hooks:
   PermissionRequest:
     - hooks:
@@ -32,12 +32,12 @@ hooks:
 
 # Trevskills Scrum: orchestrator
 
-The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. It never writes code, and it never reads diffs or reviews beyond their first lines, which keeps its context small. Agents get their context from files, never from this conversation.
+The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. It never writes code (except in the **Lilguy lane**), and it never reads diffs or reviews beyond their first lines, which keeps its context small. Agents get their context from files, never from this conversation.
 
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**
 - never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
-- never push `main`/`master`
+- never push `main`/`master`, except through commitpush invoked with the Skill tool in the **Lilguy lane**
 - never `--auto` or `--admin`
 - never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from **approve** on a `Hard stop: schema` job. Sub-agents never migrate
 
@@ -59,13 +59,13 @@ Shell variables and functions don't survive between Bash calls, so re-derive `RE
 
 If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard.
 
-**Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
+**Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `lilguy`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
 - `command -v gh && gh auth status` succeeds. If not, stop and tell the user to run `brew install gh && gh auth login`.
 
 If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
-**Record your terminal** (New job, `start`, `approve`, `rework`, `discuss`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
+**Record your terminal** (New job, `start`, `approve`, `rework`, `discuss`, `lilguy`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
 
 ```bash
 T=$(ps -o tty= -p $PPID | tr -d ' '); case "$T" in ttys[0-9]*) B set $ID tty=$T ;; esac
@@ -112,6 +112,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum bigboy <feature text>`**: run **New job** steps 1-2, then `B set $ID lane=bigboy` and go straight to the **BigBoy lane**. No spec writer runs for the parent.
+- **`/trevskills-scrum lilguy <feature text>`**: run the **Lilguy lane**. No agent is spawned.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2. For a BigBoy child (the job has a `parent`; started as `/trevskills-scrum start <child>` by **BigBoy lane** step 3 or by the dashboard's Setup done), run **BigBoy lane** step 4 (Spec refresh) after step 2: it skips step 3 when `spec.md` exists and no refresh is needed.
 - **`/trevskills-scrum start <id> askme <1-3>`**: the same, but the dashboard's Run now had Askme set, so it opened this session in a new Terminal window. Load the job and run **New job** from step 1c (Askme) at that level; a missing or bad level means level 2.
 - **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer` or `obsolete`; there is nothing approved to merge. Also run Merge step 1's **main checkout guard**; while it fails, **refuse** with the same message it would write as the reason (`Uncommitted change in <repo name>: <first files>. Fix: commit + push it (or undo it), then click Approve & merge.` or `<repo name> main checkout is on <branch>, not <default>. Fix: switch it back to <default>, then click Approve & merge.`) and don't write `human-approval.md`. Once it passes, continue. If the reason contains `Hard stop: schema`, Trevor's approve is the go-ahead to migrate: `cd "$WT"` and invoke `/trevskills-migrate` there with args `base=$BASE`, following it exactly. If it stops or any check fails, run `B set <id> stage=needs-human reason='migrate stopped: <one line why>. Fix: fix that cause, then click Approve & merge to run it again.'` and stop; never work around it. On success, commit what it generated (`git -C "$WT" add prisma/migrations && git -C "$WT" commit -m "Add migration"`) and `cd "$REPO"`. Skip the migrate step when the prompt says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard when he ticks that box). Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
@@ -274,6 +275,26 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
    - `BIGBOY: GAPS` the first time: run `B plan-apply $P --fix`. It adds one child, ticket `FIX`, from the `## Fix ticket` text, with no dependencies, and moves the parent back to `running`. Run step 2 for it, then `B ready $P` and **start** it. When it merges, step 5 brings the parent back here and the reviewer runs once more.
    - `BIGBOY: GAPS` again, or `plan-apply --fix` exits non-zero (no `## Fix ticket`, or the FIX child already exists): run `B set $P stage=needs-human reason='bigboy review: gaps remain — <line 2 of bigboy-review.md>. Fix: read bigboy-review.md, add a backlog item for each gap, then click Abort job.'` and stop.
 
+## Lilguy lane
+
+Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This session makes the whole change itself in `$REPO` (the main checkout), on whatever branch is checked out, and spawns no agent: no spec writer, builder, reviewer or approver, no worktree, no `scrum/<id>` branch, no Digest check, no BigBoy chaining (a lilguy job never has a `parent`). Every needs-human reason here leaves the change uncommitted in the main checkout, so its Fix says to finish it by hand or discard it; Approve and rework do not apply.
+
+1. **Refuse (before any `B new`).** After Setup and Prerequisites, give a plain message, create no job, and stop when:
+   - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything (tracked or untracked): `<repo name> has uncommitted changes: <first files>. Fix: commit or discard them, then run lilguy again.`
+   - `git -C "$REPO" symbolic-ref -q --short HEAD` fails (detached HEAD): `<repo name> is on a detached HEAD. Fix: check out a branch, then run lilguy again.`
+
+   While lilguy's change is uncommitted, pipeline jobs merging at the same time stop at the **Merge** main checkout guard until lilguy has committed.
+2. **Job.** Run **New job** steps 1-1b, then `B set $ID lane=lilguy stage=build` and **record your terminal**. If any `B set` fails with `was aborted`, follow the Setup **Abort** rule: stop and leave the working tree untouched.
+3. **Build.** Read `$F/project.md` and every convention file it lists, then make the change in `$REPO`.
+4. **Check.** Run `B set $ID stage=check`. In `$REPO`, run the **Check gate** step 2 commands (each project.md Test / Typecheck / Lint / Build that isn't `none`). The changed files are `{ git -C "$REPO" diff --name-only HEAD; git -C "$REPO" ls-files --others --exclude-standard; }`; run the **Check gate** `.env` check (`(^|/)\.env`) over them, and the **Merge** schema guard regex over them. Write `$F/jobs/$ID/check.md` in the **Check gate** step 3 format (no `round-N/`; `round` and `limit` stay unset).
+   - A schema match: run `B set $ID stage=needs-human reason='Hard stop: schema — <first matching file>. Fix: run /trevskills-migrate yourself in the main checkout, then /trevskills-commitpush, or discard the change.'` right away and stop, with no fix attempts. lilguy never runs /trevskills-migrate itself.
+   - Any other failure: fix it yourself and re-run this step, up to **3** fix attempts. If it still fails, run `B set $ID stage=needs-human reason="lilguy: checks still fail after 3 fixes. Fix: read scrum/jobs/$ID/check.md, then fix and run /trevskills-commitpush in the main checkout, or discard the change."` and stop without landing.
+5. **Land.** Run `B set $ID stage=merging`. `DEFAULT` is found as in **New job** step 2 (without `B set base`). Invoke commitpush only through the Skill tool: `trevskills-commitpush-nextjs` when `python3 -c` finds `"next"` in `$REPO/package.json` under `dependencies` or `devDependencies` (a missing or unreadable package.json means not Next.js), `trevskills-commitpush` otherwise, and `trevskills-commitpush` too if the Skill tool says the nextjs one is not installed. It does the `git add -A`, commit and publish; this lane never runs those git or gh commands itself.
+   - **Path A (on `$DEFAULT`):** done when `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` is empty and `git -C "$REPO" rev-list @{u}..HEAD` prints nothing (an error, e.g. no upstream, counts as unpushed).
+   - **Path B (any other branch):** the same test, then `B set $ID pr=<url>` with the url from `gh pr view --json url`.
+   - Both pass: `B set $ID stage=done reason=` (board.py plays the done sound). If commitpush stopped, the test fails, or Path B finds no PR, run `B set $ID stage=needs-human reason='lilguy: commitpush did not finish — <one line why>. Fix: finish /trevskills-commitpush by hand in the main checkout, or discard the change.'` and stop.
+6. End with the **Final report** (job id, stage, PR URL on Path B, and for needs-human the reason).
+
 ## Check gate
 
 If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review). If the job's `lane` is `debug`, step 2 adds the debug checks and step 4 ends differently.
@@ -387,7 +408,7 @@ Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored
 1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `B set $ID builder=<new id>`.
 
-The orchestrator never edits code or review files itself, except for three sanctioned review files: the UI/UX skip files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
+Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for three sanctioned review files: the UI/UX skip files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
 
 ## Digest
 

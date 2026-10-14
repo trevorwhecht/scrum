@@ -112,7 +112,7 @@ class BoardTest(unittest.TestCase):
     def test_set_lane_stored(self):
         job_id = board.cmd_new(self.root, "x")
         self.assertNotIn("lane", self.jobs()[0])  # no lane key = standard
-        for lane in ("fast", "standard", "debug", "bigboy"):
+        for lane in ("fast", "standard", "debug", "bigboy", "lilguy"):
             board.cmd_set(self.root, job_id, [f"lane={lane}"])
             self.assertEqual(self.jobs()[0]["lane"], lane)
         board.cmd_set(self.root, job_id, ["lane="])
