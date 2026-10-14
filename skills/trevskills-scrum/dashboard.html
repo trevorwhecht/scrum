@@ -162,12 +162,14 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .diff{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .diff div{min-width:0}.diff pre{margin:4px 0 0}
 .prop .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-@media (max-width:640px){#agents,#aiSettings,#digest{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article{padding-inline:12px}
+@media (max-width:640px){#agents,#aiSettings,#digest,#backlog,#viewer{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article{padding-inline:12px}
+  #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select,#filter,#laneFilter{font-size:16px}}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select,#filter,#laneFilter{font-size:16px}
+  #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
 <body>

@@ -775,6 +775,34 @@ class ContractTest(unittest.TestCase):
         self.assertIn("lane", shown)
         self.assertRegex(text, r"@media \(max-width:640px\)\{[^\n]*#laneFilter[^\n]*font-size:16px")
 
+    def mobile_css(self):
+        return "\n".join(re.findall(r"@media \(max-width:640px\)\{.*?\}\}", DASHBOARD.read_text(), re.S))
+
+    def test_backlog_and_viewer_full_bleed_below_640(self):
+        rule = re.search(r"([#\w,]+)\{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0\}",
+                         self.mobile_css()).group(1).split(",")
+        for sel in ("#agents", "#aiSettings", "#digest", "#backlog", "#viewer"):
+            self.assertIn(sel, rule)
+        self.assertRegex(self.mobile_css(), r"#backlog article,#viewer article[^{]*\{padding-inline:12px\}")
+
+    def test_backlog_header_nowrap_below_640(self):
+        css = self.mobile_css()
+        self.assertRegex(css, r"#backlog \.tabs\{[^}]*flex-wrap:nowrap")
+        self.assertRegex(css, r"#blProject\{[^}]*min-width:0")
+        self.assertRegex(css, r"#backlog \.tabs \.close\{[^}]*min-height:44px;min-width:44px")
+
+    def test_board_column_min_zero_below_640(self):
+        css = self.mobile_css()
+        self.assertIn("main{grid-template-columns:minmax(0,1fr)!important}", css)
+        self.assertNotIn("main{grid-template-columns:1fr", css)
+
+    def test_viewer_tabs_single_row_below_640(self):
+        css = self.mobile_css()
+        self.assertRegex(css, r"#tabs\{[^}]*flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain")
+        self.assertIn("#tabs>*{flex:none}", css)
+        self.assertRegex(css, r"#tabs \.close\{position:sticky;right:0;background:var\(--card\)")
+        self.assertNotRegex(DASHBOARD.read_text().split("@media")[0], r"#tabs\{[^}]*nowrap")
+
     def test_dashboard_pipelines_rename(self):
         text = DASHBOARD.read_text()
         for phrase in ('>Pipelines</button>', 'aria-label="Pipelines"', "<b>Pipelines</b>"):
