@@ -25,7 +25,8 @@ def preflight(base: str, model: str, context: int) -> None:
             loaded = json.loads(reply.read()).get('models') or []
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise SystemExit(f'Ollama preflight failed at {base}: {e}')
-    entry = next((m for m in loaded if model in (m.get('name'), m.get('model'))), None)
+    want = model if ':' in model else model + ':latest'  # /api/ps always reports the tag
+    entry = next((m for m in loaded if want in (m.get('name'), m.get('model'))), None)
     if entry is None:
         raise SystemExit(f'Ollama preflight: {model} is not loaded after /api/generate')
     if 'context_length' not in entry:

@@ -115,6 +115,13 @@ class PreflightTests(unittest.TestCase):
         settings = json.loads(execute.call_args.args[1][-1])['env']
         self.assertEqual(settings['ANTHROPIC_BASE_URL'], self.url)
 
+    def test_preflight_matches_untagged_model_as_latest(self):
+        OllamaStub.ps = {'models': [{'name': 'scrum-local:latest', 'model': 'scrum-local:latest', 'context_length': 65536}]}
+        code, _, execute = self.launch(['claude', '-p', 'hi'], self.url, context=65536, model='scrum-local')
+        self.assertIsNone(code)
+        execute.assert_called_once()
+        self.assertIn(('POST', '/api/generate', {'model': 'scrum-local', 'keep_alive': '10m'}), OllamaStub.requests)
+
     def test_preflight_warns_without_context_field(self):
         OllamaStub.ps = {'models': [{'name': 'qwen2.5-coder:7b', 'model': 'qwen2.5-coder:7b'}]}
         code, err, execute = self.launch(['claude', '-p', 'hi'], self.url)
