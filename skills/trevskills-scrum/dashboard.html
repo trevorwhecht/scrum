@@ -916,7 +916,18 @@ $("aiBtn").addEventListener("click", async () => {
   aiLoadScope();
 });
 $("aiScope").addEventListener("change", aiLoadScope);
+// Leaving an editor with unsaved text asks once, like backlog Run/Delete: the first Back, ✕, backdrop click or Escape
+// only warns, the second goes through. Typing again re-arms it.
+function aiBlockLeave() {
+  const form = $("aiEdit");
+  if (!form?.isConnected || !aiItem || $("aiText").value === aiItem.baseline || form.dataset.leave) return false;
+  form.dataset.leave = "1"; $("aiError").textContent = "Unsaved changes. Press again to discard.";
+  return true;
+}
+$("aiSettings").addEventListener("cancel", e => { if (aiBlockLeave()) e.preventDefault(); });
 $("aiBack").addEventListener("click", () => {
+  if (aiBlockLeave()) return;
+  $("aiError").textContent = "";
   renderAi();  // hides Back while it still has focus, so Back itself counts as lost focus
   aiRefocus([...$("aiList").querySelectorAll("button[data-id]")].find(x => x.dataset.id === aiOpenedId)
     || $("aiCats").querySelector('[aria-pressed="true"]'), $("aiBack"));
@@ -1039,7 +1050,7 @@ $("aiList").addEventListener("click", async e => {
 // Save and Undo both answer with the fresh item; a reply for an item the user already left is dropped.
 async function aiWrite(route, body, busy, fail) {
   const form = $("aiEdit"), item = aiItem;
-  $("aiError").textContent = ""; $("aiStatus").textContent = busy; $("aiSave").disabled = $("aiUndo").disabled = true;
+  delete form.dataset.leave; $("aiError").textContent = ""; $("aiStatus").textContent = busy; $("aiSave").disabled = $("aiUndo").disabled = true;
   try {
     const it = await post(`api/ai-settings/${route}`, {id: item.id, ...body});
     if (!form.isConnected) return;
@@ -1066,6 +1077,7 @@ $("aiList").addEventListener("input", e => {
   if (e.target.id !== "aiText") return;
   $("aiSave").disabled = e.target.value === aiItem.baseline;
   if ($("aiEdit").dataset.armed) aiDisarm();
+  if ($("aiEdit").dataset.leave) { delete $("aiEdit").dataset.leave; $("aiError").textContent = ""; }
 });
 $("aiList").addEventListener("submit", async e => {
   e.preventDefault();
@@ -1084,7 +1096,10 @@ $("aiList").addEventListener("submit", async e => {
   const ok = await aiWrite("save", body, "Saving…", "Couldn't save. Is serve.py running?");
   if (form.isConnected) aiDisarm();
   if (!ok) return;
-  if (AI_JSON.includes(aiItem.category)) { $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true; }
+  if (AI_JSON.includes(aiItem.category)) {  // reformat to the saved file, unless the user typed on while it saved
+    if ($("aiText").value === text) { $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; }
+    $("aiSave").disabled = $("aiText").value === aiItem.baseline;
+  }
   $("aiStatus").textContent = "Saved"; $("aiUndo").hidden = false;
 });
 $("aiList").addEventListener("click", async e => {
@@ -1106,7 +1121,7 @@ $("tabs").addEventListener("click", e => {
   if (job) show(job, b.dataset.file);
 });
 document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e => {
-  if (e.target === d || e.target.closest(".close")) d.close();
+  if ((e.target === d || e.target.closest(".close")) && !(d.id === "aiSettings" && aiBlockLeave())) d.close();
 }));
 
 poll();
