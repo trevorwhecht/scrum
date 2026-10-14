@@ -32,7 +32,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent.parent / "local"))  # HERE is resolved, so this is the real repo's local/
 import board  # noqa: E402
+import route  # noqa: E402
 
 # Started from the app icon, PATH can be bare, so look in the usual install spots too. Tests set SCRUM_CLAUDE.
 CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
@@ -100,20 +102,51 @@ def setup_done(project, root, job_id):
     return 200, {"id": job_id, **out}
 
 
-def estimate(root, text):
-    """Ask Sonnet for Fibonacci points in the background; on any failure the item just stays unestimated."""
+def run_estimate(argv, root, env):
+    """One estimate attempt: the last {...} carrying "points" in its reply, or None (no JSON, timeout, OSError)."""
     try:
-        out = subprocess.run([CLAUDE, "-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob",
-                              ESTIMATE_PROMPT.format(text=text)], cwd=root.parent, capture_output=True, text=True,
-                             timeout=180, stdin=subprocess.DEVNULL,
-                             env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1")).stdout
-        for blob in reversed(re.findall(r"\{[^{}]*\}", out)):
+        out = subprocess.run(argv, cwd=root.parent, capture_output=True, text=True, timeout=180,
+                             stdin=subprocess.DEVNULL, env=env).stdout or ""
+    except (subprocess.SubprocessError, OSError):
+        return None
+    for blob in reversed(re.findall(r"\{[^{}]*\}", out)):
+        try:
             data = json.loads(blob)
-            if "points" in data:
+        except ValueError:
+            continue
+        if isinstance(data, dict) and "points" in data:
+            return data
+    return None
+
+
+def estimate(root, text):
+    """Ask the router where the estimator runs (cloud Sonnet or local Ollama), retry a failed local run once on cloud,
+    log each attempt to root/routing.log. On any failure the item just stays unestimated."""
+    prompt, env = ESTIMATE_PROMPT.format(text=text), dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1")
+    try:
+        pick = route.route("estimator", scrum_dir=root)
+        model = pick["model"] if pick["runner"] == "local" and pick["model"] else None
+    except Exception:  # a broken or unparseable router answer must never stop an estimate: treat it as cloud
+        model = None
+    attempts = []
+    if model:
+        attempts.append(("local", model, [sys.executable, str(HERE.parent.parent / "local" / "run.py"), "claude", "-p",
+                                          "--allowedTools", "Read,Grep,Glob", prompt], dict(env, SCRUM_LOCAL_MODEL=model)))
+    attempts.append(("cloud", "sonnet", [CLAUDE, "-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob", prompt], env))
+    for runner, name, argv, attempt_env in attempts:
+        start = time.monotonic()
+        data = run_estimate(argv, root, attempt_env)
+        outcome = "fallback" if runner == "cloud" and model else "ok" if data else "invalid-artifact"
+        try:
+            route.record(root, "estimator", runner, name, round(time.monotonic() - start, 1), outcome)
+        except (ValueError, OSError):
+            pass  # a missing scrum dir loses the log line, not the estimate
+        if data:
+            try:
                 board.backlog_set_estimate(root, text, data["points"], data.get("why"))
-                return
-    except (subprocess.SubprocessError, OSError, ValueError, SystemExit):
-        pass
+            except (ValueError, SystemExit, OSError):
+                pass
+            return
 
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
@@ -628,9 +661,11 @@ def activity(root, job):
 
 
 def board_with_activity(root):
-    """board.json plus a computed `activity` on every job that isn't done or aborted."""
+    """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
+    (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it)."""
     data = json.loads((root / "board.json").read_text())
     for job in data.get("jobs", []):
+        job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
             job["activity"] = activity(root, job)
     return data
@@ -1478,6 +1513,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such item"})
         if path == "/api/projects":
             return self.send_json(200, [{"name": name} for name in board.projects()])
+        if path == "/api/routing-status":  # the header spans every project, so no scrum dir
+            return self.send_json(200, route.status())
         if path == "/api/runs":
             with RUNS_LOCK:
                 return self.send_json(200, [{"project": k.rsplit("/", 1)[0], "id": k.rsplit("/", 1)[1], "action": r["action"],
