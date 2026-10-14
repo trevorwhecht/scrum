@@ -4,6 +4,7 @@ files, and a small JSON API so the buttons can edit backlogs and start Claude ru
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
+  python3 serve.py --digest-auto <NNN> --dir <scrum>      → auto-approve a digest's obvious proposals, print JSON, exit
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
@@ -23,7 +24,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
+import argparse, fnmatch, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1279,7 +1280,10 @@ def valid_proposal(p):
         return None
     if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
-    return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending")}
+    # "obvious" is the digester's claim; anything but a literal true is false, and never drops the proposal.
+    reason = p.get("obvious_reason")
+    return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "obvious": p.get("obvious") is True,
+                                               "obvious_reason": reason if isinstance(reason, str) else ""}
 
 
 def read_proposals(path):
@@ -1378,6 +1382,44 @@ def digest_decide(root, digest_id, pid, decision):
         if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
             board.cmd_digest_trim(root, digest_id)
     return 200, prop | {"status": status}
+
+
+def digest_target_auto_ok(target):
+    """None when target may be auto-approved: a scrum agent or SKILL.md in a registered repo (rule 3) that is no global
+    file (rule 5), checked on both the given and the real path. Else a short reason it stays with Trevor."""
+    homes = {os.path.abspath(claude_home()), os.path.realpath(claude_home())}
+    for t in {os.path.abspath(target), os.path.realpath(target)}:
+        for h in homes:
+            rel = Path(os.path.relpath(t, h)).parts
+            if rel == ("CLAUDE.md",) or rel[:1] == ("rules",) or (rel[:1] == ("projects",) and "memory" in rel[2:]):
+                return "global file"
+    if digest_denied(target):
+        return "settings or hooks file"
+    if not repo_of(target):
+        return "outside every registered repo"
+    real = Path(os.path.realpath(target))
+    if real.name != "SKILL.md" and not (real.parent.name == "agents" and fnmatch.fnmatch(real.name, "scrum-*.md")):
+        return "not a scrum agent or SKILL.md"
+    return None
+
+
+def digest_auto(root, digest_id):
+    """Approve each pending proposal the digester marked obvious and that passes digest_target_auto_ok; the rest stay
+    pending for Trevor, with the digester's reason or the re-check's."""
+    out = {"approved": [], "human": []}
+    if not board.DIGEST_RE.fullmatch(digest_id):
+        return out
+    path = root / "digests" / digest_id / "proposals.json"
+    for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
+        reason = digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
+        if p["obvious"] and reason is None:
+            code, res = digest_decide(root, digest_id, p["id"], "approve")
+            if code == 200:
+                out["approved"].append({"id": p["id"], "target": p["target"], "obvious_reason": p["obvious_reason"]})
+                continue
+            reason = res["error"]
+        out["human"].append({"id": p["id"], "reason": reason})
+    return out
 
 
 def scrum_dir(project):
@@ -1585,8 +1627,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
-    p.add_argument("--dir", type=Path, default=Path("scrum"), help="the project's scrum/ folder, for --estimate")
+    p.add_argument("--digest-auto", metavar="NNN", help="auto-approve this digest's obvious proposals, print JSON and exit")
+    p.add_argument("--dir", type=Path, default=Path("scrum"), help="the project's scrum/ folder, for --estimate and --digest-auto")
     a = p.parse_args()
+    if a.digest_auto is not None:
+        return print(json.dumps(digest_auto(a.dir.resolve(), a.digest_auto)))
     if a.estimate is not None:
         return estimate(a.dir.resolve(), a.estimate)
     server = make_server(a.port)
