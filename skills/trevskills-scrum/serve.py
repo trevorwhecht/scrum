@@ -9,8 +9,9 @@ Projects come from the registry that /trevskills-scrum fills in (board.py regist
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
-server, plugin) spliced back into its file with "[redacted]" values restored from disk, and a permissions or hooks change
-only with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
+server, plugin) spliced back into its file with "[redacted]" values restored from disk, and a change to what runs (a
+hook or plugin entry, an MCP server's command/args, a settings file's permissions/hooks/statusLine/apiKeyHelper) only
+with confirm. The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user
 settings.json, or in a project's settings.local.json for project/local rows and whenever a project settings file decides the
 key; it refuses keys managed settings pin, and rolls the file back (409) if the effective value didn't change. Every
 write is backed up to <CLAUDE_HOME>/backups/ai-settings/ first.
@@ -453,10 +454,12 @@ def ai_unredact(new, old, path=()):
 
 
 def ai_guarded(cat, new, old):
-    """True when saving new over old changes what Claude Code may run: a hook entry, or a settings file's permissions/hooks."""
-    if cat == "hooks":
+    """True when saving new over old changes what Claude Code may run: a hook or plugin entry, an MCP server's
+    command/args, or a settings file's permissions/hooks/statusLine/apiKeyHelper. An added or removed key counts."""
+    if cat in ("hooks", "plugins"):
         return new != old
-    return cat == "settings" and any(new.get(k, MISSING) != old.get(k, MISSING) for k in ("permissions", "hooks"))
+    keys = {"mcp": ("command", "args"), "settings": ("permissions", "hooks", "statusLine", "apiKeyHelper")}.get(cat, ())
+    return any(as_dict(new).get(k, MISSING) != as_dict(old).get(k, MISSING) for k in keys)
 
 
 def ai_refind(it):

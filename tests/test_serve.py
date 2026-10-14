@@ -902,7 +902,7 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(server, self.item(server["id"])[1]["content"])[0], 200)
         self.assertEqual(self.save(hook, self.item(hook["id"])[1]["content"])[0], 200)
         self.assertEqual((json.loads(mcp.read_text()), json.loads(settings.read_text())), (mcp_before, settings_before))
-        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace('"npx"', '"node"'))[0], 200)
+        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace('"npx"', '"node"'), confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text()),
                          {"mcpServers": {"s": {"command": "node", "args": ["-y", "pkg", "--key", self.SK], "url": self.URL}}})
         settings.write_text(json.dumps(self.SUBTREES))
@@ -949,8 +949,8 @@ class AiSettingsTest(unittest.TestCase):
         items = [i for c in self.scope("r:reg")[0].values() for i in c["items"]]
         return {label: (f, next(i for i in items if i["path"] == str(f))) for label, f in files.items()}
 
-    def save(self, it, content, version=None):
-        return self.post("/api/ai-settings/save", {"id": it["id"], "content": content,
+    def save(self, it, content, version=None, confirm=False):
+        return self.post("/api/ai-settings/save", {"id": it["id"], "content": content, "confirm": confirm,
                                                     "version": version or self.item(it["id"])[1]["version"]})
 
     def test_save_writes_file_and_backup(self):
@@ -1174,12 +1174,12 @@ class AiSettingsTest(unittest.TestCase):
                          '            "command": "b"\n          }\n        ]\n      }\n    ]\n  },\n  "z": 1\n}\n')
 
         server = self.json_item("r:reg", "mcp", self.reg / ".mcp.json", "dup")
-        self.assertEqual(self.save(server, '{"command": "p2"}')[0], 200)
+        self.assertEqual(self.save(server, '{"command": "p2"}', confirm=True)[0], 200)
         self.assertEqual(json.loads((self.reg / ".mcp.json").read_text()),
                          {"mcpServers": {"dup": {"command": "p2"}, "other": {"command": "o"}}, "keep": True})
 
         local = self.json_item("r:reg", "mcp", cj, "dup", "local")
-        self.assertEqual(self.save(local, '{"command": "l2", "args": ["-v"]}')[0], 200)
+        self.assertEqual(self.save(local, '{"command": "l2", "args": ["-v"]}', confirm=True)[0], 200)
         self.assertEqual(json.loads(cj.read_text()), {
             "mcpServers": {"dup": {"command": "u", "env": {"API": SECRET}, "headers": {"X": SECRET}}},
             "projects": {str(self.reg): {"mcpServers": {"dup": {"command": "l2", "args": ["-v"]}}}, str(self.listed): {},
@@ -1187,7 +1187,7 @@ class AiSettingsTest(unittest.TestCase):
 
         plugin = self.json_item("r:reg", "plugins", plugins, "p@m", "project")
         self.assertEqual(json.loads(self.item(plugin["id"])[1]["content"]), {"scope": "project", "projectPath": str(self.reg)})
-        self.assertEqual(self.save(plugin, json.dumps({"scope": "project", "projectPath": str(self.reg), "version": "2"}))[0], 200)
+        self.assertEqual(self.save(plugin, json.dumps({"scope": "project", "projectPath": str(self.reg), "version": "2"}), confirm=True)[0], 200)
         self.assertEqual(plugins.read_text(), '{\n  "version": 2,\n  "plugins": {\n    "p@m": [\n      {\n        "scope": "user"\n'
                          '      },\n      {\n        "scope": "project",\n        "projectPath": ' + json.dumps(str(self.reg)) + ',\n'
                          '        "version": "2"\n      }\n    ],\n    "b@x": [\n      {\n        "scope": "user"\n      }\n    ]\n  }\n}\n')
@@ -1197,7 +1197,7 @@ class AiSettingsTest(unittest.TestCase):
         changed = json.dumps({"plugins": {"p@m": [{"scope": "user"}, {"scope": "project", "projectPath": str(self.reg), "version": "3"}]}})
         plugins.write_text(changed)
         os.utime(plugins, ns=(int(version) + 5_000_000, int(version) + 5_000_000))
-        self.assertEqual(self.save(plugin, "{}", version)[0], 409)
+        self.assertEqual(self.save(plugin, "{}", version, confirm=True)[0], 409)
         self.assertEqual(plugins.read_text(), changed)
         self.assertEqual(len(self.backups()), 4)
 
@@ -1232,7 +1232,7 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(json.loads(mcp.read_text()), {"mcpServers": {
             "api": {"command": "x", "env": {"API_KEY": "s3cret"}, "headers": {"Authorization": "Bearer t"}},
             "raw": {"url": "u", "headers": "X-Key: abc"}}})
-        self.assertEqual(self.save(api, view.replace('"x"', '"y"'))[0], 200)
+        self.assertEqual(self.save(api, view.replace('"x"', '"y"'), confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["api"],
                          {"command": "y", "env": {"API_KEY": "s3cret"}, "headers": {"Authorization": "Bearer t"}})
         s_it = self.json_item("global", "settings", settings)
@@ -1263,6 +1263,59 @@ class AiSettingsTest(unittest.TestCase):
                          {"permissions": {"allow": ["Bash(rm -rf /)"]}, "model": "a", "hooks": {"Stop": [{"hooks": []}]}})
         self.assertEqual(self.post("/api/ai-settings/save", {"id": s_it["id"], "content": allow.replace("rm", "dd"),
                                                              "version": version(s_it), "confirm": "yes"})[0], 428)
+
+    def test_save_mcp_plugin_statusline_apikey_need_confirm(self):
+        mcp = self.reg / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"dup": {"command": "p", "args": ["a"], "env": {"K": "v"}}}}))
+        cj = self.home / ".claude.json"
+        settings = self.user / "settings.json"
+        settings.write_text(json.dumps({"model": "a", "statusLine": {"type": "command", "command": "s"}, "apiKeyHelper": "/bin/k"}))
+        (self.user / "plugins").mkdir()
+        plugins = self.user / "plugins" / "installed_plugins.json"
+        plugins.write_text(json.dumps({"plugins": {"p@m": [{"scope": "user", "installPath": "/a"}]}}))
+
+        def refused(it, f, content, confirm=None):
+            before, backups = f.read_bytes(), len(self.backups())
+            body = {"id": it["id"], "content": content, "version": self.item(it["id"])[1]["version"]}
+            if confirm is not None:
+                body["confirm"] = confirm
+            self.assertEqual(self.post("/api/ai-settings/save", body)[0], 428, content)
+            self.assertEqual((f.read_bytes(), len(self.backups())), (before, backups), content)
+
+        server = self.json_item("r:reg", "mcp", mcp, "dup")
+        refused(server, mcp, '{"command": "evil", "args": ["a"], "env": {"K": "v"}}')
+        refused(server, mcp, '{"command": "p", "args": ["a", "-x"], "env": {"K": "v"}}')
+        refused(server, mcp, '{"args": ["a"], "env": {"K": "v"}}')
+        refused(server, mcp, '{"command": "evil", "args": ["a"], "env": {"K": "v"}}', "yes")
+        self.assertEqual(self.save(server, '{"command": "p", "args": ["a"], "env": {"K": "w"}}')[0], 200)
+        self.assertEqual(self.save(server, '{"command": "p", "args": ["a"], "env": {"K": "w"}, "headers": {"H": "1"}}')[0], 200)
+        self.assertEqual(self.save(server, '{"command": "q", "args": ["b"]}', confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text()), {"mcpServers": {"dup": {"command": "q", "args": ["b"]}}})
+
+        local = self.json_item("r:reg", "mcp", cj, "dup", "local")
+        refused(local, cj, '{"command": "l", "args": ["-v"]}')
+        self.assertEqual(self.save(local, '{"command": "l", "args": ["-v"]}', confirm=True)[0], 200)
+        self.assertEqual(json.loads(cj.read_text())["projects"][str(self.reg)]["mcpServers"]["dup"], {"command": "l", "args": ["-v"]})
+
+        s_it = self.json_item("global", "settings", settings)
+        line = '"statusLine": {"type": "command", "command": "s"}'
+        refused(s_it, settings, '{"model": "a", "statusLine": {"type": "command", "command": "evil"}, "apiKeyHelper": "/bin/k"}')
+        refused(s_it, settings, '{"model": "a", "apiKeyHelper": "/bin/k"}')
+        refused(s_it, settings, '{"model": "a", ' + line + ', "apiKeyHelper": "/bin/evil"}')
+        refused(s_it, settings, '{"model": "a", ' + line + '}')
+        self.assertEqual(self.save(s_it, '{"model": "b", ' + line + ', "apiKeyHelper": "[redacted]"}')[0], 200)
+        self.assertEqual(json.loads(settings.read_text()),
+                         {"model": "b", "statusLine": {"type": "command", "command": "s"}, "apiKeyHelper": "/bin/k"})
+        self.assertEqual(self.save(s_it, '{"model": "b", "apiKeyHelper": "/bin/k2"}', confirm=True)[0], 200)
+        refused(s_it, settings, '{"model": "b", "statusLine": "x", "apiKeyHelper": "[redacted]"}')
+        self.assertEqual(json.loads(settings.read_text()), {"model": "b", "apiKeyHelper": "/bin/k2"})
+
+        plugin = self.json_item("global", "plugins", plugins, "p@m")
+        refused(plugin, plugins, '{"scope": "user", "installPath": "/evil"}')
+        refused(plugin, plugins, '{"scope": "user"}')
+        self.assertEqual(self.save(plugin, '{"scope": "user", "installPath": "/a"}')[0], 200)
+        self.assertEqual(self.save(plugin, '{"scope": "user", "installPath": "/b"}', confirm=True)[0], 200)
+        self.assertEqual(json.loads(plugins.read_text()), {"plugins": {"p@m": [{"scope": "user", "installPath": "/b"}]}})
 
 class AiSecurityTest(unittest.TestCase):
     """Page 3: the Security scan, on the same fake home as AiSettingsTest."""
