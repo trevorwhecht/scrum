@@ -131,7 +131,9 @@ def estimate(root, text):
     attempts = []
     if model:
         attempts.append(("local", model, [sys.executable, str(HERE.parent.parent / "local" / "run.py"), "claude", "-p",
-                                          "--allowedTools", "Read,Grep,Glob", prompt], dict(env, SCRUM_LOCAL_MODEL=model)))
+                                          "--allowedTools", "Read,Grep,Glob", prompt],
+                         # 32768 matches SKILL.md's local runner, so one OLLAMA_CONTEXT_LENGTH serves both
+                         dict(env, SCRUM_LOCAL_MODEL=model, SCRUM_LOCAL_CONTEXT="32768")))
     attempts.append(("cloud", "sonnet", [CLAUDE, "-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob", prompt], env))
     for runner, name, argv, attempt_env in attempts:
         start = time.monotonic()

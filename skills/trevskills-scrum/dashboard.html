@@ -15,7 +15,8 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
-#status{color:var(--muted);font-size:12px}
+#status,#routing{color:var(--muted);font-size:12px}
+#routing{white-space:nowrap}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .col h2 span{white-space:nowrap}
 .col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
@@ -31,6 +32,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .chip{font-size:11px;padding:1px 5px;border-radius:99px;color:#fff;background:var(--pending)}
 .chip.PASS{background:var(--pass)}.chip.CHANGES,.chip.FAIL{background:var(--changes)}.chip.INVALID{background:var(--invalid)}
 .chip.pending{background:transparent;color:var(--muted);border:1px dashed var(--pending)}
+.chip.rt{background:transparent;color:var(--muted);border:1px solid var(--line)}.chip.rt.local{color:var(--accent);border-color:var(--accent)}
 .meta{display:block;font-size:12px;color:var(--muted);margin-top:6px}
 .meta.activity{display:flex;gap:4px;white-space:nowrap}.activity>span{flex:none}
 .activity .what{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -175,6 +177,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
+  <span id="routing" hidden data-agent-hint="Codex 5h and weekly quota used, from the newest Codex rollout file, and whether local Ollama answers. local/route.py sends work to Ollama when Codex passes its thresholds in local/routing.json. Refreshed every 60 s."></span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
@@ -248,7 +251,7 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || laneOf(j) === laneFilter));
@@ -274,6 +277,14 @@ function divergedBullets(md) {
   return out;
 }
 
+// One tag per valid routing.log line, in file order: role minus "scrum-" and runner; model, seconds and outcome in the title.
+// Pinned by test_dashboard_routing.
+function routeTags(text) {
+  const tags = String(text ?? "").split("\n").flatMap(line => {
+    try { const r = JSON.parse(line); return r?.role && r?.runner ? [r] : []; } catch { return []; }
+  }).map(r => `<span class="chip rt${["cloud", "local"].includes(r.runner) ? " " + r.runner : ""}" title="${esc(`${r.model ?? "—"} · ${r.duration_s ?? "—"}s · ${r.outcome ?? "—"}`)}">${esc(String(r.role).replace(/^scrum-/, ""))} ${esc(r.runner)}</span>`);
+  return tags.length ? `<span class="row">${tags.join("")}</span>` : "";
+}
 const chip = (verdict, label) => `<span class="chip ${esc(verdict)}" title="${esc(label)}: ${esc(verdict)}">${esc(label)}</span>`;
 const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || "pending", "check")}${REVIEWERS.map(([k, l]) => chip(r[k] || "pending", l)).join("")}</span>`;
 // Rough % done from the card's own data, or null for no bar (aborted / unknown stage). Pinned by test_dashboard_progress_estimate.
@@ -320,6 +331,7 @@ function card(job) {
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${bigboyLines(job)}
     ${(job.rounds || []).map(roundRow).join("")}
+    ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
     ${human && !paused(job) && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
@@ -388,12 +400,17 @@ async function poll() {
     digests = Object.fromEntries(projects.map((p, i) => [p, digestList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
+    // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll.
+    const final = j => ["done", "aborted"].includes(j.stage);
+    await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key)))
+      .map(j => fetch(`p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`, {cache: "no-store"})
+        .then(r => r.ok ? r.text() : "").catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); })));
     auditRunsChanged();
     const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
     const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
     backlogs = nextBacklogs;
     renderSelect($("filter"), filter, true);
-    const text = JSON.stringify([all, runs, backlogs, digests, filter]);
+    const text = JSON.stringify([all, runs, backlogs, digests, filter, routes]);
     if (text !== lastText) {
       jobs = all; lastText = text; render();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
@@ -1176,8 +1193,22 @@ document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e =
   if ((e.target === d || e.target.closest(".close")) && !(d.id === "aiSettings" && aiBlockLeave())) d.close();
 }));
 
+// Pinned by test_dashboard_routing.
+function routingText(s) {
+  const pct = v => typeof v === "number" ? `${Math.round(v)}%` : "—";
+  return `Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)} · Ollama ${s.ollama === "up" ? "up" : "down"}`;
+}
+// Status reads a rollout file and pings Ollama, too much for the 2 s poll. A 404 (older serve.py) or an error hides it.
+async function loadRouting() {
+  const s = await getJson("api/routing-status", null);
+  $("routing").hidden = !s;
+  if (s) $("routing").textContent = routingText(s);
+}
+
 poll();
 setInterval(poll, 2000);
+loadRouting();
+setInterval(loadRouting, 60000);
 </script>
 </body>
 </html>

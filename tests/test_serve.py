@@ -482,8 +482,7 @@ class ServeTest(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        return {"SCRUM_OLLAMA_URL": f"http://127.0.0.1:{server.server_port}", "SCRUM_REAL_CLAUDE": str(self.stub),
-                "SCRUM_LOCAL_CONTEXT": "65536"}
+        return {"SCRUM_OLLAMA_URL": f"http://127.0.0.1:{server.server_port}", "SCRUM_REAL_CLAUDE": str(self.stub)}
 
     def test_estimate_local_route_uses_run_py(self):
         scrum = self.estimate_scrum("est-local", "Local item")
@@ -496,8 +495,8 @@ class ServeTest(unittest.TestCase):
         argv, kw = run.call_args.args[0], run.call_args.kwargs
         self.assertEqual(argv[:6], [sys.executable, str(ROOT / "local" / "run.py"), "claude", "-p", "--allowedTools", "Read,Grep,Glob"])
         self.assertNotIn("--model", argv)
-        self.assertEqual((kw["cwd"], kw["timeout"], kw["env"]["SCRUM_LOCAL_MODEL"], kw["env"]["CLAUDE_NOTIFIER_DISABLE"]),
-                         (scrum.parent, 180, "qwen3.5:4b", "1"))
+        self.assertEqual((kw["cwd"], kw["timeout"], kw["env"]["SCRUM_LOCAL_MODEL"], kw["env"]["SCRUM_LOCAL_CONTEXT"],
+                          kw["env"]["CLAUDE_NOTIFIER_DISABLE"]), (scrum.parent, 180, "qwen3.5:4b", "32768", "1"))
         [stub_argv] = self.stub_calls_for("Local item")
         self.assertEqual(stub_argv[stub_argv.index("--model") + 1], "qwen3.5:4b")
         self.assertNotIn("sonnet", stub_argv)

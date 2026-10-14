@@ -54,6 +54,7 @@ Each card carries a project tag, and the **All projects** menu filters to one pr
   - **+** adds an item, and Sonnet estimates it in Fibonacci points (1 2 3 5 8 13, colour-coded). Change the points or text inline.
   - ↑/↓ reorders the queue; `/trevskills-scrum next` takes the top item.
   - ▶ starts a job now, and ✕ deletes an item. Both ask once on the button.
+- A card whose job has a `routing.log` shows one tag per routed step, such as `builder local` or `builder cloud`; hover for the model, seconds and outcome. The header shows `Codex 5h 42% · wk 61% · Ollama up`, refreshed every minute.
 - **Pipelines** shows each pipeline's chart with each agent's model, in tabs: All (the orchestrator fanning out to all four), Fast, Standard, Debug, BigBoy and Maintenance. Click an agent for its prompt, tools and skills; **+** adds an installed skill to its frontmatter (live on the next spawn, and an uncommitted change in this checkout).
 
 The server listens on localhost only and refuses requests from other websites.
@@ -67,4 +68,16 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
 
-For an opt-in local model fallback covering Claude agents and the Codex review, see [local/README.md](local/README.md).
+## Local routing
+
+`local/route.py` picks cloud or local Ollama for each routed step; the full rules are in [local/README.md](local/README.md#how-routing-decides).
+
+- **Eligible roles:** the estimator, digest reader and Codex review always; the builder only on a `fast`-lane job; the spec writer only for a backlog item of 2 points or less (`spec_writer_max_points`). Reviewers, the approver, planner, tracker, debugger, triager and digester always run on cloud.
+- **Trust** per role in `local/routing.json`: `off` (cloud), `trial` (local when eligible or a BigBoy child), `approved` (local when eligible).
+- **Ollama health check:** local only when Ollama's `/api/tags` answers within 2 s and lists the role's model (`qwen2.5-coder:7b` or `qwen3.5:4b`).
+- **Claude session limit:** while a recent `scrum/runs/` log shows Claude's session limit, trial and approved roles go local until it resets.
+- **Codex quota:** the Codex review moves to local once the 5h window reaches 85 % used or the weekly one 90 % (`codex_5h`, `codex_weekly`), and is skipped when Ollama is down.
+- **`SCRUM_ROUTE=cloud`** forces every routed step to cloud; **`SCRUM_ROUTE=local`** forces local for eligible steps when Ollama is up.
+- **One cloud retry:** a local run with no valid artifact is retried once on cloud, never again and never back to local. Every attempt is logged to `routing.log`.
+
+For the opt-in local launcher and setup, see [local/README.md](local/README.md).
