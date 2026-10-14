@@ -13,7 +13,8 @@ import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 if any("estimating" in a for a in sys.argv):
-    print("Looking around...\n{\"points\": 5, \"why\": \"several files\"}")
+    if not (os.environ.get("STUB_LOCAL_FAILS") and os.environ.get("ANTHROPIC_BASE_URL")):
+        print("Looking around...\n{\"points\": 5, \"why\": \"several files\"}")
 else:
     import time; time.sleep(1.5)  # a job run stays "running" long enough to test double clicks
 '''
@@ -31,7 +32,10 @@ class ServeTest(unittest.TestCase):
         stub = base / "claude"
         stub.write_text(STUB)
         stub.chmod(0o755)
-        os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"))
+        cls.stub = stub
+        # SCRUM_ROUTE=cloud keeps every estimate on the stub cloud path whatever the local Ollama state.
+        os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
+                          SCRUM_ROUTE="cloud")
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
         serve.CLAUDE = str(stub)  # another test class may have imported serve first
         cls.serve = serve
@@ -47,6 +51,7 @@ class ServeTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
         os.environ.pop("SCRUM_REGISTRY", None)
+        os.environ.pop("SCRUM_ROUTE", None)
         cls.tmp.cleanup()
 
     def req(self, method, path, body=None, headers=None):
@@ -434,9 +439,128 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve.subprocess, "run") as run:
             run.return_value = mock.Mock(stdout="")
             self.serve.estimate(self.root, "quiet estimate")
+        self.assertEqual(run.call_count, 1)  # a failed cloud run is never retried
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["CLAUDE_NOTIFIER_DISABLE"], "1")
         self.assertEqual(env["PATH"], os.environ["PATH"])
+
+    def estimate_scrum(self, name, item):
+        """A fresh scrum dir holding one unestimated item, so its routing.log starts empty."""
+        scrum = Path(self.tmp.name) / name / "scrum"
+        scrum.mkdir(parents=True)
+        (scrum / "backlog.md").write_text(f"# Backlog\n- [ ] {item}\n")
+        return scrum
+
+    def routing_lines(self, scrum):
+        """routing.log lines without ts and duration_s, after checking those two are present and sane."""
+        lines = [json.loads(l) for l in (scrum / "routing.log").read_text().splitlines()]
+        for line in lines:
+            self.assertIsInstance(line.pop("duration_s"), float)
+            self.assertRegex(line.pop("ts"), r"^\d{4}-\d\d-\d\dT")
+        return lines
+
+    def stub_calls_for(self, item):
+        return [c for c in self.calls() if any(item in a for a in c)]
+
+    def test_estimate_cloud_route_records_routing_log(self):
+        scrum = self.estimate_scrum("est-cloud", "Cloud item")
+        with mock.patch.object(self.serve.route, "route", return_value={"runner": "cloud", "model": None, "why": "x"}) as r:
+            self.serve.estimate(scrum, "Cloud item")
+        self.assertEqual(r.call_args.args[0], "estimator")
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Cloud item <!-- several files -->\n")
+        [argv] = self.stub_calls_for("Cloud item")
+        self.assertEqual(argv[:5], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
+        self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
+
+    def ollama(self):
+        """A fake Ollama that reports qwen3.5:4b loaded with a 64K context, for local/run.py's preflight."""
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_local import OllamaStub
+        from http.server import HTTPServer
+        OllamaStub.ps = {"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b", "context_length": 65536}]}
+        server = HTTPServer(("127.0.0.1", 0), OllamaStub)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return {"SCRUM_OLLAMA_URL": f"http://127.0.0.1:{server.server_port}", "SCRUM_REAL_CLAUDE": str(self.stub)}
+
+    def test_estimate_local_route_uses_run_py(self):
+        scrum = self.estimate_scrum("est-local", "Local item")
+        real_run = subprocess.run
+        with mock.patch.dict(os.environ, self.ollama()), \
+                mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
+                mock.patch.object(self.serve.subprocess, "run", wraps=real_run) as run:
+            self.serve.estimate(scrum, "Local item")
+        self.assertEqual(run.call_count, 1)
+        argv, kw = run.call_args.args[0], run.call_args.kwargs
+        self.assertEqual(argv[:6], [sys.executable, str(ROOT / "local" / "run.py"), "claude", "-p", "--allowedTools", "Read,Grep,Glob"])
+        self.assertNotIn("--model", argv)
+        self.assertEqual((kw["cwd"], kw["timeout"], kw["env"]["SCRUM_LOCAL_MODEL"], kw["env"]["SCRUM_LOCAL_CONTEXT"],
+                          kw["env"]["CLAUDE_NOTIFIER_DISABLE"]), (scrum.parent, 180, "qwen3.5:4b", "32768", "1"))
+        [stub_argv] = self.stub_calls_for("Local item")
+        self.assertEqual(stub_argv[stub_argv.index("--model") + 1], "qwen3.5:4b")
+        self.assertNotIn("sonnet", stub_argv)
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Local item <!-- several files -->\n")
+        self.assertEqual(self.routing_lines(scrum),
+                         [{"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "ok"}])
+
+    def test_estimate_local_failure_retries_cloud_once(self):
+        scrum = self.estimate_scrum("est-fallback", "Fallback item")
+        with mock.patch.dict(os.environ, {**self.ollama(), "STUB_LOCAL_FAILS": "1"}), \
+                mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}):
+            self.serve.estimate(scrum, "Fallback item")
+        local, cloud = self.stub_calls_for("Fallback item")
+        self.assertEqual(local[local.index("--model") + 1], "qwen3.5:4b")
+        self.assertEqual(cloud[:3], ["-p", "--model", "sonnet"])
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Fallback item <!-- several files -->\n")
+        self.assertEqual(self.routing_lines(scrum), [
+            {"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "invalid-artifact"},
+            {"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "fallback"}])
+
+    def test_estimate_failed_cloud_retry_is_not_retried(self):
+        scrum = self.estimate_scrum("est-double-fail", "Double fail")
+        with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
+                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")) as run:
+            self.serve.estimate(scrum, "Double fail")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Double fail\n")
+        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact", "fallback"])
+
+    def test_estimate_router_error_falls_back_to_cloud(self):
+        for i, kw in enumerate(({"side_effect": RuntimeError("router broke")}, {"return_value": "garbage"})):
+            scrum = self.estimate_scrum(f"est-router-error-{i}", f"Router error {i}")
+            with mock.patch.object(self.serve.route, "route", **kw):
+                self.serve.estimate(scrum, f"Router error {i}")
+            self.assertEqual((scrum / "backlog.md").read_text(), f"# Backlog\n- [ ] [5] Router error {i} <!-- several files -->\n")
+            [argv] = self.stub_calls_for(f"Router error {i}")
+            self.assertEqual(argv[:3], ["-p", "--model", "sonnet"])
+            self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
+
+    def test_routing_status_endpoint(self):
+        fixed = {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}
+        with mock.patch.object(self.serve.route, "status", return_value=fixed) as status, \
+                mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.assertEqual(self.req("GET", "/api/routing-status"),
+                             (200, {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}))
+            self.assertEqual(self.req("GET", "/api/routing-status", headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(status.call_count, 1)
+        run.assert_not_called()
+        popen.assert_not_called()
+
+    def test_board_json_routed_flag(self):
+        stages = {"routed-active": "build", "routed-done": "done", "routed-aborted": "aborted", "plain-done": "done", "plain": "spec"}
+        ids = {}
+        for name, stage in stages.items():
+            ids[name] = self.serve.board.cmd_new(self.root, name)
+            self.serve.board.cmd_set(self.root, ids[name], [f"stage={stage}"])
+        for name in ("routed-active", "routed-done", "routed-aborted"):
+            (self.root / "jobs" / ids[name] / "routing.log").write_text('{"role": "scrum-builder", "runner": "local"}\n')
+        code, data = self.req("GET", "/p/repo/board.json")
+        self.assertEqual(code, 200)
+        routed = {j["id"]: j["routed"] for j in data["jobs"]}
+        self.assertEqual({name: routed[ids[name]] for name in stages},
+                         {"routed-active": True, "routed-done": True, "routed-aborted": True, "plain-done": False, "plain": False})
+        self.assertTrue(all(isinstance(j["routed"], bool) for j in data["jobs"]))
 
     def test_terminal_sessions_silence_notifier(self):
         argvs = []
