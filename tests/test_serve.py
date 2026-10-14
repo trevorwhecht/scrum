@@ -1746,7 +1746,8 @@ class AiResearchTest(unittest.TestCase):
     """Page 5: Research this on Audit rows, on the AiAuditTest fake home. The registered "reg" project is the research home."""
     get, post, USER_SETTINGS = AiSettingsTest.get, AiSettingsTest.post, AiAuditTest.USER_SETTINGS
     write, skill, plant, audit, row = AiSecurityTest.write, AiAuditTest.skill, AiAuditTest.plant, AiAuditTest.audit, AiAuditTest.row
-    FLAGS = ["--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash"]
+    FLAGS = ["--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash",
+             "--strict-mcp-config", "--settings", '{"disableAllHooks": true}']
 
     def setUp(self):
         AiSettingsTest.setUp(self)
@@ -1783,6 +1784,8 @@ class AiResearchTest(unittest.TestCase):
         self.assertEqual(argv[:2], ["claude-stub", "-p"])
         self.assertEqual(argv[3:], self.FLAGS)
         self.assertNotIn("acceptEdits", argv)
+        self.assertNotIn("--mcp-config", argv)
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]), {"disableAllHooks": True})
         prompt = argv[2]
         for s in ("/trevskills-research", str(rule), "## Suggested edits", "Always do X.", "rules", "user"):
             self.assertIn(s, prompt)

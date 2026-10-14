@@ -1162,7 +1162,9 @@ def ai_toggle(item_id, enable):
     return 409, {"error": "a higher-precedence settings file still decides this"}
 
 
-RESEARCH_FLAGS = ("--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash")
+# --strict-mcp-config with no --mcp-config loads zero MCP servers; disableAllHooks skips user and project hooks.
+RESEARCH_FLAGS = ("--allowedTools", "WebSearch,WebFetch,Skill,Task", "--disallowedTools", "Edit,Write,NotebookEdit,Bash",
+                  "--strict-mcp-config", "--settings", '{"disableAllHooks": true}')
 RESEARCH_CAP = 60_000
 RESEARCH_LOCK = threading.Lock()
 RESEARCH_PROMPT = """Use /trevskills-research to compare one Claude Code {category} item against Anthropic's current Claude Code
