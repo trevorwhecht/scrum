@@ -937,5 +937,14 @@ class ContractTest(unittest.TestCase):
         self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
 
 
+    def test_child_start_silences_notifier(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" '
+                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', text)
+
+    def test_no_sound_clip_committed(self):
+        out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(out, "")
+
 if __name__ == "__main__":
     unittest.main()

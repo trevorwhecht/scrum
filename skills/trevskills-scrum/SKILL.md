@@ -236,7 +236,7 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
 3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run detached from the main checkout, logging to `scrum/runs/`:
    ```bash
    mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-start-<child>.log"
-   (cd "$REPO" && nohup claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
+   (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
    B set <child> runlog=runs/$LOG
    ```
    This session is then done with the parent: each child chains the next from its own Merge step 7. Give the final report.

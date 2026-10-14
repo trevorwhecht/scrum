@@ -43,10 +43,39 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
+# Scrum's only sounds: Blow on done, the clip (Morse without it) on needs-human, Funk on a question in a silenced session.
+BLOW, MORSE, FUNK = "/System/Library/Sounds/Blow.aiff", "/System/Library/Sounds/Morse.aiff", "/System/Library/Sounds/Funk.aiff"
+CLIP = "~/.claude/trevskills-scrum/sounds/needs-human.mp3"
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def needs_human_sound():
+    p = Path(CLIP).expanduser()  # checked per call, so adding or removing the clip needs no restart
+    return str(p) if p.is_file() else MORSE
+
+
+def stage_sound(stage):
+    return BLOW if stage == "done" else needs_human_sound() if stage == "needs-human" else None
+
+
+def play(path):
+    """Fire-and-forget afplay; never blocks or breaks the board. SCRUM_MUTE (tests) silences it."""
+    if os.environ.get("SCRUM_MUTE"):
+        return
+    try:
+        subprocess.Popen(["afplay", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+def notifier_disabled():
+    """Same test as isDisabled in ~/.claude/hooks/_lib/config.js (the Claude Notifier)."""
+    v = os.environ.get("CLAUDE_NOTIFIER_DISABLE")
+    return bool(v) and v != "0" and v.lower() != "false"
 
 
 def first_word(path, allowed):
@@ -668,6 +697,7 @@ def cmd_ready(root, parent_id):
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
+        was = parent["stage"]
         kids = [find(board, k) for k in parent.get("children") or []]
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
@@ -707,8 +737,11 @@ def cmd_ready(root, parent_id):
                 reason = f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, Send back to " \
                     "builder or Setup done); if one was aborted, click Abort job on this BigBoy."
             parent.update(stage="needs-human", updatedAt=now(), reason=reason)
-        return {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
-                "all_merged": finished == len(kids)}
+        out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
+               "all_merged": finished == len(kids)}
+    if was != "needs-human" and parent["stage"] == "needs-human":
+        play(needs_human_sound())
+    return out
 
 
 def cmd_set(root, job_id, pairs):
@@ -716,6 +749,7 @@ def cmd_set(root, job_id, pairs):
     files, div = job_files(d), diverged(d)
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
+        was = job["stage"]
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:
@@ -729,6 +763,9 @@ def cmd_set(root, job_id, pairs):
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
+    sound = stage_sound(job["stage"]) if job["stage"] != was else None
+    if sound:
+        play(sound)
 
 
 def cmd_sync(root, job_id):
@@ -802,6 +839,8 @@ class _Gone(Exception):
 def cmd_hook(event, tty):
     """Set or clear `waiting` on the active job recorded on this tty (newest updatedAt across every registered repo).
     Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
+    if event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "AskUserQuestion" and notifier_disabled():
+        play(FUNK)  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
     text = waiting_text(event)
     if text is KEEP or not SHAPES["tty"].fullmatch(tty or ""):
         return

@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
 STUB = r'''#!/usr/bin/env python3
@@ -199,7 +200,7 @@ class ServeTest(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], [self.serve.CLAUDE, f"/trevskills-scrum start {job_id} askme 3"])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum start {job_id} askme 3"])
         spawn.assert_not_called()
         self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])
 
@@ -247,7 +248,7 @@ class ServeTest(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], [self.serve.CLAUDE, "/trevskills-scrum run-all"])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, "/trevskills-scrum run-all"])
         self.assertEqual((self.root / "backlog.md").read_text(), before)  # claims nothing; the session does
         code, _, run = self.run_all({"Origin": "https://evil.example"})
         self.assertEqual(code, 403)
@@ -414,9 +415,42 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertIn("quoted form of", argv[2])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], [self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
         popen.assert_not_called()
         self.assertFalse(self.serve.running("repo", job_id))
+
+    def test_spawn_silences_notifier(self):
+        job_id = self.job("quiet spawn")
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.serve.spawn("repo", self.root, job_id, "start", "x")
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env["CLAUDE_NOTIFIER_DISABLE"], "1")
+        self.assertEqual(env["PATH"], os.environ["PATH"])
+        self.assertNotIn("CLAUDE_NOTIFIER_DISABLE", os.environ)
+        with self.serve.RUNS_LOCK:
+            self.serve.RUNS.pop(f"repo/{job_id}", None)
+
+    def test_estimate_silences_notifier(self):
+        with mock.patch.object(self.serve.subprocess, "run") as run:
+            run.return_value = mock.Mock(stdout="")
+            self.serve.estimate(self.root, "quiet estimate")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["CLAUDE_NOTIFIER_DISABLE"], "1")
+        self.assertEqual(env["PATH"], os.environ["PATH"])
+
+    def test_terminal_sessions_silence_notifier(self):
+        argvs = []
+        with mock.patch.object(self.serve, "run_terminal", lambda tries: argvs.append(tries[0][0]) or (200, {"message": "ok"})):
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog/run-all", {})[0], 200)
+            i = self.backlog_index("Quiet askme")
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": i, "askme": 1})[0], 200)
+            job_id = self.job("quiet discuss", "stage=needs-human", "reason=Hard stop: x — y")
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {})[0], 200)
+        self.assertEqual(len(argvs), 3)
+        for argv in argvs:
+            self.assertEqual(argv[:2], ["osascript", "-e"])
+            self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE])
+            self.assertEqual(len(argv), 8)
 
     def test_terminal_none_errors(self):
         code, out, run, popen = self.terminal(self.job("nothing"))
