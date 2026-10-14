@@ -194,7 +194,8 @@ Applies only while the job's `lane` on the board is `fast`. A job with no `lane`
      - `git -C "$WT" diff --numstat "$BASE"...HEAD` sums to more than 100 added+deleted lines, or any line shows `-` (a binary file);
      - more than 3 files changed (exactly 100 lines or exactly 3 files stays fast);
      - any changed file (`git -C "$WT" diff --name-only "$BASE"...HEAD`) matches the Merge schema guard regex `(^|/)prisma/(schema\.prisma|migrations/)|\.sql$` or `(^|/)\.env`;
-     - any changed file matches `UI globs` from `project.md` (matching rules are in First-run setup).
+     - any changed file matches `UI globs` from `project.md` (matching rules are in First-run setup);
+     - any changed file matches the sensitive-path regex, case-insensitively: `grep -iE '(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing|checkout|stripe|webhook|secret|credential'` (trigger `sensitive path <first matching file>`).
 2. **Review.** Run `B set $ID stage=review`. Write `round-$N/review-security.md`, `round-$N/review-ux.md` and `round-$N/review-ui.md` yourself, each containing exactly:
    ```
    VERDICT: PASS
