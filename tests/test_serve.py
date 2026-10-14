@@ -993,7 +993,7 @@ class AiSettingsTest(unittest.TestCase):
         [b] = self.backups()
         self.assertLessEqual(len(os.fsencode(b.name)), 255)
         self.assertEqual(b.read_bytes(), b"old deep.md")
-        code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+        code, data = self.post("/api/ai-settings/undo", {"id": it["id"], "version": self.item(it["id"])[1]["version"]})
         self.assertEqual((code, data["content"], f.read_text()), (200, "old deep.md", "old deep.md"))
 
     def test_backup_tail_long_paths_distinct(self):
@@ -1066,11 +1066,28 @@ class AiSettingsTest(unittest.TestCase):
         f, it = planted["rule"]
         self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"]})[0], 404)
         self.assertEqual(self.save(planted["claude"][1], "other file")[0], 200)  # another path's backup is ignored
-        self.assertEqual(self.save(it, "new")[0], 200)
-        code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+        code, saved = self.save(it, "new")
+        self.assertEqual(code, 200)
+        code, data = self.post("/api/ai-settings/undo", {"id": it["id"], "version": saved["version"]})
         self.assertEqual((code, data["content"], f.read_bytes()), (200, "old rule\r\nline", b"old rule\r\nline"))
         mine = [b for b in self.backups() if b.name.endswith(urllib.parse.quote(str(f), safe=""))]
         self.assertEqual([b.read_bytes() for b in mine], [b"old rule\r\nline", b"new"])
+
+    def test_undo_refuses_when_file_changed_since_save(self):
+        f, it = self.plant_markdown()["rule"]
+        code, saved = self.save(it, "new")
+        self.assertEqual(code, 200)
+        before = sorted(b.name for b in self.backups())
+        for body in ({"id": it["id"]}, {"id": it["id"], "version": None}, {"id": it["id"], "version": 123}):
+            self.assertEqual(self.post("/api/ai-settings/undo", body)[0], 409, body)
+            self.assertEqual(f.read_bytes(), b"new")
+        f.write_bytes(b"changed by an agent")
+        t = int(saved["version"])
+        os.utime(f, ns=(t, t + 10**9))
+        self.assertEqual(self.post("/api/ai-settings/undo", {"id": it["id"], "version": saved["version"]})[0], 409)
+        self.assertEqual(self.serve.ai_settings_undo(it["id"], saved["version"]), (409, {"error": "file changed on disk"}))
+        self.assertEqual(f.read_bytes(), b"changed by an agent")
+        self.assertEqual(sorted(b.name for b in self.backups()), before)
 
     def test_save_and_undo_need_json_and_localhost(self):
         f, it = self.plant_markdown()["rule"]
@@ -1103,7 +1120,7 @@ class AiSettingsTest(unittest.TestCase):
             code, data = self.save(it, f"new {cat}")
             self.assertEqual((code, data["content"], real.read_text()), (200, f"new {cat}", f"new {cat}"), cat)
             self.assertEqual(len(self.backups()), before + 1, cat)
-            code, data = self.post("/api/ai-settings/undo", {"id": it["id"]})
+            code, data = self.post("/api/ai-settings/undo", {"id": it["id"], "version": data["version"]})
             self.assertEqual((code, data["content"], real.read_text()), (200, old, old), cat)
         self.assertTrue((self.user / "skills" / "s" / "SKILL.md").is_symlink())
 

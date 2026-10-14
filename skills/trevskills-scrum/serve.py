@@ -512,8 +512,9 @@ def ai_settings_save(item_id, content, version, confirm=False):
     return ai_refind(it)
 
 
-def ai_settings_undo(item_id):
-    """Restore the newest backup of the item's path, backing up the current content first."""
+def ai_settings_undo(item_id, version):
+    """Restore the newest backup of the item's path, backing up the current content first. Refuses with 409 when the
+    file's mtime no longer matches `version` (the one the dashboard shows), as save does."""
     it, err = ai_editable(item_id)
     if err:
         return err
@@ -522,6 +523,8 @@ def ai_settings_undo(item_id):
     if not found:
         return 404, {"error": "no backup to undo"}
     try:
+        if str(Path(it["path"]).stat().st_mtime_ns) != version:
+            return 409, {"error": "file changed on disk"}
         data = found[-1].read_bytes()
         ai_backup(it["path"])
         Path(it["path"]).write_bytes(data)
@@ -1390,7 +1393,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/save":
                 code, obj = ai_settings_save(body.get("id"), body.get("content"), body.get("version"), body.get("confirm") is True)
             elif path == "/api/ai-settings/undo":
-                code, obj = ai_settings_undo(body.get("id"))
+                code, obj = ai_settings_undo(body.get("id"), body.get("version"))
             elif path in ("/api/ai-settings/disable", "/api/ai-settings/enable"):
                 code, obj = ai_toggle(body.get("id"), path.endswith("/enable"))
             elif path == "/api/ai-settings/research":
