@@ -173,7 +173,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
-  <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option></select>
+  <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
@@ -181,7 +181,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
-  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then every open item runs as a job, one after another. Disabled when this project has no open items. Stop it by closing that window.">Run all</button><button class="close" type="button" aria-label="Close">✕</button></div>
+  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><label id="blAskmeLabel">Askme <select id="blAskme" aria-label="Askme" data-agent-hint="Askme level for Run now. Off starts the job headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: Run now then opens an interactive Terminal window that asks Trevor questions before the spec writer runs, and saves the answers to feature.md under ## Q&amp;A."><option value="">Off</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window.">Run all</button><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
     <form id="blAdd"><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
@@ -293,7 +293,7 @@ function bigboyLines(job) {
     return `<span class="meta">T${kids.filter(k => k.stage === "done").length}/${kids.length} merged</span>`
       + kids.map(k => `<span class="meta kid">${esc(k.ticket || k.id)} ${esc(k.stage)}${k.depends_on?.length ? ` ← ${esc(k.depends_on.map(ticketOf).join(", "))}` : ""}</span>`).join("");
   }
-  return job.parent ? `<span class="meta">${esc(job.ticket)} of ${esc(job.parent)}</span>` : "";
+  return job.parent ? `<span class="meta">${esc(job.ticket || "Child")} of ${esc(job.parent)}</span>` : "";
 }
 
 function card(job) {

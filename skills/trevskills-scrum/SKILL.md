@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then run every open item), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then schedule every open item in parallel where files don't overlap), and bare "/trevskills-scrum" for status.
 hooks:
   PermissionRequest:
     - hooks:
@@ -121,7 +121,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
   Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
 - **`/trevskills-scrum digest`**: run **Digest**. The dashboard's Digest now button starts it headless.
-- **`/trevskills-scrum run-all`**: run **Run all**. The dashboard's Run all button opens it in a new Terminal window.
+- **`/trevskills-scrum run-all`**: run **Run all**: triage, then schedule every open item in parallel where files don't overlap. The dashboard's Run all button opens it in a new Terminal window.
 
 ## New job
 
@@ -166,7 +166,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
 
 ## Run all
 
-Cleans the backlog, then works through every open item as jobs, one after another, with nobody watching. Setup and Prerequisites apply. Trevor stops it by interrupting or closing its Terminal window.
+Cleans the backlog, then runs every open item as a child job of one Run-all parent, in parallel where files don't overlap, with nobody watching. Setup and Prerequisites apply. Trevor stops it by interrupting or closing its Terminal window.
 
 1. Run `B triage-start`. Under the board lock it claims `$F/triage/<id>/` and prints `{"id", "open"}`. If `id` is null, say the backlog is empty and stop.
 2. Spawn `scrum-triager` and wait for it. Prompt:
@@ -178,9 +178,11 @@ Cleans the backlog, then works through every open item as jobs, one after anothe
    ```
    If `$F/triage/<id>/plan.json` is missing afterwards, spawn it once more.
 3. Run `B triage-apply <id>`. It merges, retires and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
-4. **Loop.** Run `B next`. If `id` is null, stop and give the final report. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text. Whatever the job ends in (done, needs-human, aborted from the dashboard, auto-aborted as obsolete), go back to `B next`. A needs-human job does not stop the loop: Trevor clears it later with approve, rework or discuss. Never ask questions here; there is no Askme step.
+4. Run `B runall-start`. Under the board lock it makes a `lane=runall` parent with every open backlog item as a `waiting` child and prints `{"id", "children"}`. If `id` is null, say the backlog is empty and stop. Otherwise `P` is that id.
+5. Run **BigBoy lane** step 2 for P's children.
+6. Run **BigBoy lane** step 3 for `P`, then give the final report. Never ask questions here; there is no Askme step.
 
-The final report lists every job id this run started with its final stage (and for needs-human, its reason), then what the triage merged, retired and estimated (counts from `triage-apply`, or the failure line).
+The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired and estimated (counts from `triage-apply`, or the failure line).
 
 ## Fast lane
 
@@ -216,7 +218,7 @@ Applies only while the job's `lane` on the board is `debug`. A job with any othe
 
 ## BigBoy lane
 
-Applies only to a job whose `lane` on the board is `bigboy` (the **parent**), and to its **children**. A request too big for one job is split by `scrum-planner` into 2-5 tickets; each ticket runs as its own child job (spec → build → check → review → approve → its own PR, in its own lane and its own session) and merges on its own. The parent gets no worktree, branch or PR, and never goes through Check gate, Review, Approve or Merge. Children never get a backlog line, so `B next` and Run all never claim them. In steps 1-3, `$ID` is the parent; in steps 4-7, `P` is the child's `parent` from the board.
+Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **parent**), and to its **children**. A request too big for one job is split by `scrum-planner` into 2-5 tickets; each ticket runs as its own child job (spec → build → check → review → approve → its own PR, in its own lane and its own session) and merges on its own. The parent gets no worktree, branch or PR, and never goes through Check gate, Review, Approve or Merge. `B next` never claims a child. A `runall` parent comes from **Run all**: steps 1 and 7 never run for it, and it has no plan.md. In steps 1-3, `$ID` is the parent; in steps 4-7, `P` is the child's `parent` from the board.
 
 1. **Plan.** Run `B set $ID stage=plan`. Spawn `scrum-planner` and wait for it. Prompt:
    ```
@@ -237,7 +239,7 @@ Applies only to a job whose `lane` on the board is `bigboy` (the **parent**), an
    This session is then done with the parent: each child chains the next from its own Merge step 7. Give the final report.
 4. **Spec refresh** (in the child's own `start` session, after New job step 2). For each id in the child's `depends_on`, list the files its PR changed: `gh pr diff <that job's pr> --name-only`. Compare them, as exact paths, with the backtick-quoted paths under `## Likely files` in the child's `spec.md`. If `spec.md` is missing, run New job step 3 as usual. If any path overlaps, run New job step 3 with the extra prompt line `Refresh spec.md: dependencies <ids> merged and changed <files>.`, then step 3b and 3c. Otherwise skip step 3 (3b and 3c ran in step 2). Then continue at New job step 4.
 5. **Chaining** (Merge step 7, after `stage=done`, for a job with a `parent`):
-   1. **Tracker.** Unless every child of `P` in `$F/board.json` is now `done`, spawn `scrum-tracker` with the Agent tool override `model: "sonnet"` and wait for it. `N` is how many children of `P` are `done`. Prompt:
+   1. **Tracker.** Skip it when P's `lane` is `runall`. Unless every child of `P` in `$F/board.json` is now `done`, spawn `scrum-tracker` with the Agent tool override `model: "sonnet"` and wait for it. `N` is how many children of `P` are `done`. Prompt:
       ```
       PARENT_DIR=$F/jobs/$P
       JOBS_DIR=$F/jobs
@@ -250,8 +252,8 @@ Applies only to a job whose `lane` on the board is `bigboy` (the **parent**), an
       - `TRACK: ADJUST`: it may have rewritten the `feature.md` of children still `waiting` (listed under `## Rewritten`), and logged each change under `## Diverged` in the parent's plan.md. Re-run step 2 for exactly those children.
       - `TRACK: OFF TRACK`: run `B set $P stage=needs-human reason="bigboy off track: <line 2 of track-N.md>. Fix: read the latest track file, then click Abort job and re-add the request with your decision."`, start no child, and stop.
       - `TRACK: ON TRACK`, or a missing or unreadable file: carry on.
-   2. Run `B ready $P`. Under the lock it claims (moves to `spec`) every `waiting` child whose `depends_on` are all `done`, whose `setup` is not `pending`, and that can run beside the siblings in progress (a `parallel=no` child only when none is; a `parallel=yes` child never beside a `parallel=no` one or one whose `## Likely files` overlap its own), so a second call never returns it again. When nothing is ready or in progress and not every child is done, it sets the parent `needs-human` with reason `bigboy blocked: <ids>`; a later claim sets it back to `running`. It prints `{"ready", "merged", "total", "in_progress", "all_merged"}`.
-   3. If `all_merged` is true, go to step 7. Otherwise **start** each id in `ready` (step 3; its own `start` runs the step 4 refresh).
+   2. Run `B ready $P`. Under the lock it claims (moves to `spec`) every `waiting` child whose `depends_on` are all `done`, whose `setup` is not `pending`, and that can run beside the siblings in progress (a `parallel=no` child only when none is; a `parallel=yes` child never beside a `parallel=no` one or one whose `## Likely files` overlap its own), so a second call never returns it again. When nothing is ready or in progress and not every child is done, it sets the parent `needs-human` with reason `bigboy blocked: <ids>` (`run-all blocked` for a `runall` parent); a later claim sets it back to `running`. It prints `{"ready", "merged", "total", "in_progress", "all_merged"}`.
+   3. If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` instead. Otherwise **start** each id in `ready` (step 3; its own `start` runs the step 4 refresh).
 6. **After a child stops.** When a child's run sets it `needs-human`, run `B ready $P` and **start** each id in `ready`, so tickets that don't depend on it keep going. A failed child blocks only its dependents.
 7. **Final BigBoy review.** Run `B set $P stage=review`. If Merge step 7 reported `main not updated`, run `B set $P stage=needs-human reason="bigboy review: main not updated. Fix: make the main checkout fast-forward, then click Abort job and re-add the request if anything is missing."` and stop. Otherwise spawn `scrum-bigboy-reviewer` and wait for it. Prompt:
    ```
