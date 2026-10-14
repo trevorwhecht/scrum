@@ -380,8 +380,8 @@ TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
 
 
 def digested_ids(root):
-    """Every job id listed in any digest's jobs.txt."""
-    return {line.strip() for f in (Path(root) / "digests").glob("*/jobs.txt")
+    """Every job id listed in any digest's jobs.txt, except a failed digest's (error.md), so the next digest re-claims them."""
+    return {line.strip() for f in (Path(root) / "digests").glob("*/jobs.txt") if not f.with_name("error.md").exists()
             for line in f.read_text().splitlines() if line.strip()}
 
 
