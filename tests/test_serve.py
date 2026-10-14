@@ -503,6 +503,16 @@ class ServeTest(unittest.TestCase):
         self.serve.board.cmd_set(self.root, job_id, ["waiting="])
         self.assertEqual(self.activity_of(job_id)["text"], "reviewers 1/4 done")
 
+    def test_activity_line_pr_only_in_pr_stages(self):
+        job_id = self.job("rework", "stage=build", "pr=https://x/1")  # sent back to rework after its PR opened
+        self.assertEqual(self.activity_of(job_id)["text"], "builder working")
+
+    def test_activity_line_waiting_only_in_active_stages(self):
+        job_id = self.job("stale", "stage=needs-human", "waiting=question: X")
+        self.assertEqual(self.activity_of(job_id)["text"], "waiting on you")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=plan"])
+        self.assertEqual(self.activity_of(job_id)["text"], "plan")
+
     def test_activity_line_builder_commit(self):
         wt = Path(self.tmp.name) / "wt-activity"
         job_id = self.job("commit")
