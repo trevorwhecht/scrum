@@ -106,7 +106,9 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
-                       "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it"):
+                       "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it",
+                       'route.py" codex-review --job', "local/run.py", "SCRUM_LOCAL_MODEL", 'route.py" record',
+                       "codex: skipped — <why>", "exits non-zero", "treat it as cloud", "$RUNNER codex exec review"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
 
