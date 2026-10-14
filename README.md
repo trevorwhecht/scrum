@@ -32,6 +32,7 @@ brew install gh && gh auth login   # needed to open and merge PRs
 | Command | Does |
 | --- | --- |
 | `/trevskills-scrum <feature>` | runs a new job |
+| `/trevskills-scrum lilguy "<feature>"` | makes the change in this checkout with no subagents, runs the checks, then lands it with commitpush |
 | `/trevskills-scrum next` | runs the first `- [ ]` item in `scrum/backlog.md` |
 | `/trevskills-scrum approve <id>` | merges a needs-human job |
 | `/trevskills-scrum rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |

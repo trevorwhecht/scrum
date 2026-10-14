@@ -253,6 +253,31 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**BigBoy lane**", cleanup)
         self.assertIn("parent", cleanup)
 
+    def test_skill_documents_lilguy_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("lilguy", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        commands = self.section(text, "## Commands", "## New job")
+        entry = next(l for l in commands.splitlines() if "/trevskills-scrum lilguy <feature text>" in l)
+        self.assertIn("**Lilguy lane**", entry)
+        self.assertLess(text.index("## BigBoy lane"), text.index("## Lilguy lane"))
+        lilguy = self.section(text, "## Lilguy lane", "## Check gate")
+        for phrase in ("lane=lilguy", "Skill tool", "trevskills-commitpush-nextjs", "trevskills-commitpush", '"next"',
+                       "detached HEAD", "git add -A", "3", "**Merge**", "schema guard", "**Check gate**", ".env",
+                       "no agent", ":(exclude)scrum", "symbolic-ref", "main checkout guard", "check.md",
+                       "Hard stop: schema", "rev-list", "pr=", "Path B", "stage=merging", "stage=done", "stage=build",
+                       "stage=check", "was aborted"):
+            self.assertIn(phrase, lilguy, phrase)
+        for line in lilguy.splitlines():
+            if "/trevskills-migrate" in line:
+                self.assertIn("never", line.lower(), line)
+            for banned in ("git push", "gh pr create", "gh pr merge"):
+                self.assertNotIn(banned, line, line)
+        prereq = next(l for l in text.splitlines() if l.startswith("**Prerequisites"))
+        record = next(l for l in text.splitlines() if l.startswith("**Record your terminal**"))
+        self.assertIn("lilguy", prereq)
+        self.assertIn("lilguy", record)
+        self.assertIn("lilguy", (ROOT / "README.md").read_text())
+
     def test_skill_bigboy_lane_handles_runall_parent(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         bigboy = self.section(text, "## BigBoy lane", "## Check gate")
@@ -770,6 +795,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         self.assertIn("<option>bigboy</option>", text)
         self.assertIn("<option>runall</option>", text)
+        self.assertIn("<option>lilguy</option>", text)
         self.assertNotIn("<option>epic</option>", text)
         shown = re.search(r"^const shown = .*$", text, re.M).group(0)
         self.assertIn("lane", shown)
