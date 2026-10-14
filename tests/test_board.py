@@ -797,6 +797,20 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6})
         self.assertEqual(board.digested_ids(self.root), set(done[:4]))
 
+    def test_failed_digest_releases_its_jobs(self):
+        a, b = self.done_jobs(2)
+        d = self.root / "digests" / "001"
+        d.mkdir(parents=True)
+        (d / "jobs.txt").write_text(f"{a}\n{b}\n")
+        self.assertEqual(board.digested_ids(self.root), {a, b})  # no error.md: still claimed
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+        (d / "error.md").write_text("digester produced no valid proposals\n")
+        self.assertEqual(board.digested_ids(self.root), set())
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2})
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b]})
+        self.assertEqual(board.digested_ids(self.root), {a, b})
+        self.assertTrue((d / "jobs.txt").exists())  # the failed digest stays as it was
+
     def test_digest_start_claims_jobs_once(self):
         self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
         self.assertFalse((self.root / "digests").exists())

@@ -1950,6 +1950,61 @@ class DigestTest(unittest.TestCase):
         self.board.cmd_digest_start(self.scrum)
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
 
+    def test_digest_now_retries_after_failed_digest(self):
+        a = self.done_job()
+        self.assertEqual(self.board.cmd_digest_start(self.scrum), {"id": "001", "jobs": [a]})
+        self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
+        (self.scrum / "digests" / "001" / "error.md").write_text("digester produced no valid proposals\nmore\n")
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
+            code, out = self.post("/api/p/reg/digest", {})
+            self.assertEqual(code, 202, out)
+            popen.assert_called_once()
+        data = self.get("/api/p/reg/digests")[1]
+        self.assertEqual(data["undigested"], 1)
+        self.assertEqual(data["digests"], [{"id": "001", "jobs": [a], "error": "digester produced no valid proposals",
+                                            "trimmed": False, "proposals": []}])
+
+    def test_proposal_id_must_be_word_chars(self):
+        rule = self.rule()
+        for pid in ("", "a/b", "../p1", "p 1", "p1\n"):
+            self.assertIsNone(self.serve.valid_proposal(self.prop(pid, rule)), repr(pid))
+        for pid in ("p1", "fix-rule_2"):
+            self.assertEqual(self.serve.valid_proposal(self.prop(pid, rule))["id"], pid)
+        self.digest([self.prop("p 1", rule), self.prop("p1\n", rule), self.prop("ok-1", rule)])
+        self.assertEqual([p["id"] for p in self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]], ["ok-1"])
+        self.assertEqual(self.decide("p%201", "approve")[0], 404)
+        self.assertEqual(self.decide("p1%0A", "reject")[0], 404)
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["pending"] * 3)
+
+    def test_approve_refuses_settings_and_hook_targets(self):
+        targets = []
+        for f in (self.user / "settings.json", self.user / "settings.local.json", self.reg / ".claude" / "settings.json",
+                  self.reg / ".claude" / "settings.local.json", self.user / "hooks" / "x.md",
+                  self.reg / ".claude" / "hooks" / "guard.sh"):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("old line\n")
+            targets.append(f)
+        (self.user / "rules").mkdir(exist_ok=True)
+        link = self.user / "rules" / "link.md"
+        link.symlink_to(self.user / "hooks" / "x.md")
+        targets.append(link)
+        self.assertFalse(self.serve.digest_denied(str(self.rule())))
+        self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)])
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "digests" not in p.parts}
+        before = snap()
+        for i in range(len(targets)):
+            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i}", "approve"),
+                             (403, {"error": "target is not editable"}), targets[i])
+        self.assertEqual(self.decide("p0", "approve")[0], 403)
+        self.assertEqual(snap(), before)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertEqual(self.statuses(), ["pending"] * len(targets))
+        self.assertEqual(self.decide("p3", "reject")[1]["status"], "rejected")
+        self.assertEqual(self.statuses()[3], "rejected")
+
     def test_digest_endpoints_need_json_and_localhost(self):
         rule = self.rule()
         self.digest([self.prop("p1", rule)])

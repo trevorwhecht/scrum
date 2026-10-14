@@ -1236,13 +1236,15 @@ def ai_research(item_id):
 DIGEST_LOCK = threading.Lock()
 PROPOSAL_KEYS = ("id", "target", "why", "old", "new")
 PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected")
+PROPOSAL_ID_RE = re.compile(r"[\w-]+")  # the id lands in a URL path segment and in backlog item text
+DIGEST_DENIED_NAMES = ("settings.json", "settings.local.json")  # permissions and hooks: never a digest edit
 
 
 def valid_proposal(p):
     """The proposal with its status, or None when a key is missing, a value isn't a string, or it changes nothing."""
     if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
         return None
-    if p.get("status", "pending") not in PROPOSAL_STATUSES:
+    if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
     return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending")}
 
@@ -1280,6 +1282,11 @@ def repo_of(target):
                  if real.startswith(os.path.realpath(r) + os.sep)), None)
 
 
+def digest_denied(target):
+    """True when target, or the file it really is, is a Claude settings file or sits under a hooks folder."""
+    return any(Path(t).name in DIGEST_DENIED_NAMES or "hooks" in Path(t).parts for t in (target, os.path.realpath(target)))
+
+
 def editable_path(target):
     """The path of the editable AI-Settings item at target (same real file), or None. Only Global and the scopes the file
     sits under can list it, so no other scope's inventory is built."""
@@ -1310,6 +1317,8 @@ def digest_decide(root, digest_id, pid, decision):
             return 409, {"error": f"proposal is already {prop['status']}"}
         if decision == "reject":
             status = "rejected"
+        elif digest_denied(prop["target"]):
+            return 403, {"error": "target is not editable"}
         elif repo := repo_of(prop["target"]):
             board.backlog_op(repo[0] / "scrum", "add", text=f"Apply digest {digest_id} {pid} to {repo[1]}: see {path}")
             status = "queued"
