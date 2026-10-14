@@ -43,22 +43,22 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
-# Scrum's only sounds: Blow on done, the clip (Morse without it) on needs-human, Funk on a question in a silenced session.
-BLOW, MORSE, FUNK = "/System/Library/Sounds/Blow.aiff", "/System/Library/Sounds/Morse.aiff", "/System/Library/Sounds/Funk.aiff"
-CLIP = "~/.claude/trevskills-scrum/sounds/needs-human.mp3"
+# Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
+# the repo), or its system sound when the clip is missing.
+SOUNDS_DIR = "~/.claude/trevskills-scrum/sounds"
+SOUNDS = {"done": ("done.mp3", "/System/Library/Sounds/Blow.aiff"),
+          "needs-human": ("needs-human.mp3", "/System/Library/Sounds/Morse.aiff"),
+          "question": ("question.mp3", "/System/Library/Sounds/Funk.aiff")}
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def needs_human_sound():
-    p = Path(CLIP).expanduser()  # checked per call, so adding or removing the clip needs no restart
-    return str(p) if p.is_file() else MORSE
-
-
-def stage_sound(stage):
-    return BLOW if stage == "done" else needs_human_sound() if stage == "needs-human" else None
+def sound(kind):
+    name, fallback = SOUNDS[kind]
+    p = Path(SOUNDS_DIR).expanduser() / name  # checked per call, so adding or removing a clip needs no restart
+    return str(p) if p.is_file() else fallback
 
 
 def play(path):
@@ -740,7 +740,7 @@ def cmd_ready(root, parent_id):
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids)}
     if was != "needs-human" and parent["stage"] == "needs-human":
-        play(needs_human_sound())
+        play(sound("needs-human"))
     return out
 
 
@@ -763,9 +763,8 @@ def cmd_set(root, job_id, pairs):
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
-    sound = stage_sound(job["stage"]) if job["stage"] != was else None
-    if sound:
-        play(sound)
+    if job["stage"] != was and job["stage"] in ("done", "needs-human"):
+        play(sound(job["stage"]))
 
 
 def cmd_sync(root, job_id):
@@ -840,7 +839,7 @@ def cmd_hook(event, tty):
     """Set or clear `waiting` on the active job recorded on this tty (newest updatedAt across every registered repo).
     Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
     if event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "AskUserQuestion" and notifier_disabled():
-        play(FUNK)  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
+        play(sound("question"))  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
     text = waiting_text(event)
     if text is KEEP or not SHAPES["tty"].fullmatch(tty or ""):
         return

@@ -348,18 +348,18 @@ class BoardTest(unittest.TestCase):
         self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
 
     def test_stage_sounds(self):
-        clip = Path(self.tmp.name) / "needs-human.mp3"
-        with mock.patch.object(board, "play") as play, mock.patch.object(board, "needs_human_sound", return_value=str(clip)):
+        clip = "/clips/needs-human"
+        with mock.patch.object(board, "play") as play, mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):
             job = board.cmd_new(self.root, "noisy")
             board.cmd_set(self.root, job, ["stage=build"])
             play.assert_not_called()
             board.cmd_set(self.root, job, ["stage=needs-human", "reason=x"])
-            play.assert_called_once_with(str(clip))
+            play.assert_called_once_with(clip)
             play.reset_mock()
             board.cmd_set(self.root, job, ["stage=needs-human"])  # already there: no sound
             play.assert_not_called()
             board.cmd_set(self.root, job, ["stage=done"])
-            play.assert_called_once_with("/System/Library/Sounds/Blow.aiff")
+            play.assert_called_once_with("/clips/done")
             play.reset_mock()
             board.cmd_set(self.root, job, ["stage=done"])
             play.assert_not_called()
@@ -370,7 +370,7 @@ class BoardTest(unittest.TestCase):
             play.reset_mock()
             board.cmd_ready(self.root, parent)
             self.assertEqual(self.child(parent)["stage"], "needs-human")
-            play.assert_called_once_with(str(clip))
+            play.assert_called_once_with(clip)
         with mock.patch.object(board.subprocess, "Popen", side_effect=FileNotFoundError("afplay")):
             with mock.patch.dict(os.environ, {"SCRUM_MUTE": ""}):
                 board.cmd_set(self.root, job, ["stage=build"])
@@ -390,18 +390,24 @@ class BoardTest(unittest.TestCase):
         popen.assert_called_once_with(["afplay", "/x.aiff"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, start_new_session=True)
 
-    def test_needs_human_sound_fallback(self):
+    def test_needs_human_sound_fallback(self):  # covers every scrum sound: a clip when present, else its system sound
         home = Path(self.tmp.name) / "home"
-        clip = home / ".claude" / "trevskills-scrum" / "sounds" / "needs-human.mp3"
+        sounds = home / ".claude" / "trevskills-scrum" / "sounds"
+        cases = {"done": ("done.mp3", "/System/Library/Sounds/Blow.aiff"),
+                 "needs-human": ("needs-human.mp3", "/System/Library/Sounds/Morse.aiff"),
+                 "question": ("question.mp3", "/System/Library/Sounds/Funk.aiff")}
         with mock.patch.object(board.Path, "home", return_value=home), mock.patch.dict(os.environ, {"HOME": str(home)}):
-            self.assertEqual(board.needs_human_sound(), "/System/Library/Sounds/Morse.aiff")
-            clip.mkdir(parents=True)
-            self.assertEqual(board.needs_human_sound(), "/System/Library/Sounds/Morse.aiff")
-            clip.rmdir()
-            clip.write_bytes(b"ID3")
-            self.assertEqual(board.needs_human_sound(), str(clip))
-            clip.unlink()
-            self.assertEqual(board.needs_human_sound(), "/System/Library/Sounds/Morse.aiff")
+            for kind, (name, fallback) in cases.items():
+                clip = sounds / name
+                self.assertEqual(board.sound(kind), fallback, kind)
+                clip.mkdir(parents=True)
+                self.assertEqual(board.sound(kind), fallback, kind)
+                clip.rmdir()
+                clip.write_bytes(b"ID3")
+                self.assertEqual(board.sound(kind), str(clip), kind)
+                self.assertEqual([board.sound(k) for k in cases if k != kind], [cases[k][1] for k in cases if k != kind])
+                clip.unlink()
+                self.assertEqual(board.sound(kind), fallback, kind)
 
     def test_next_skips_bigboy_children(self):
         self.root.mkdir(parents=True)
@@ -1052,11 +1058,12 @@ class HookTest(unittest.TestCase):
             if value is not None:
                 env["CLAUDE_NOTIFIER_DISABLE"] = value
             for tty in ("ttys004", "ttys099"):  # ttys099 matches no job
-                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(board, "play") as play:
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(board, "play") as play, \
+                        mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):
                     board.cmd_hook(ask, tty)
                     board.cmd_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash"}, tty)
                     board.cmd_hook({"hook_event_name": "Stop"}, tty)
-                self.assertEqual(play.call_args_list, [mock.call("/System/Library/Sounds/Funk.aiff")] if funk else [],
+                self.assertEqual(play.call_args_list, [mock.call("/clips/question")] if funk else [],
                                  (value, tty))
         self.assertEqual(self.get(self.job)["waiting"], "reply needed")
 
