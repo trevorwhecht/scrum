@@ -717,7 +717,7 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_lane_filter(self):
         text = DASHBOARD.read_text()
-        for phrase in ('id="laneFilter"', 'aria-label="Show lane"', "scrum.lane", '<option value="">All lanes</option>',
+        for phrase in ('id="laneFilter"', 'aria-label="Show pipeline"', "scrum.lane", '<option value="">All pipelines</option>',
                        "<option>fast</option>", "<option>standard</option>", "<option>debug</option>"):
             self.assertIn(phrase, text, phrase)
         self.assertIn("<option>bigboy</option>", text)
@@ -726,6 +726,36 @@ class ContractTest(unittest.TestCase):
         shown = re.search(r"^const shown = .*$", text, re.M).group(0)
         self.assertIn("lane", shown)
         self.assertRegex(text, r"@media \(max-width:640px\)\{[^\n]*#laneFilter[^\n]*font-size:16px")
+
+    def test_dashboard_pipelines_rename(self):
+        text = DASHBOARD.read_text()
+        for phrase in ('>Pipelines</button>', 'aria-label="Pipelines"', "<b>Pipelines</b>"):
+            self.assertIn(phrase, text, phrase)
+        for phrase in (">Agents<", "All lanes", "Show lane"):
+            self.assertNotIn(phrase, text, phrase)
+
+    def test_dashboard_pipeline_charts(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        src = text[text.index("// Pipelines: "):text.index("let agents = ")]
+        names = "seq => seq.flat().map(x => typeof x === 'string' ? x : x.agent).filter(Boolean)"
+        expr = ("{p: Object.fromEntries(Object.entries(PIPELINES).map(([k, v]) => [k, names(v)])),"
+                " m: Object.fromEntries(Object.entries(MAINTENANCE).map(([k, v]) => [k, names(v)])),"
+                " last: Object.fromEntries(Object.entries(PIPELINES).map(([k, v]) => [k, v[v.length - 1].step]))}")
+        out = subprocess.run([node, "-e", f"{src}\nconst names = {names};\nconsole.log(JSON.stringify({expr}))"],
+                             capture_output=True, text=True, check=True).stdout
+        got = json.loads(out)
+        reviews = ["scrum-review-security", "scrum-review-ux", "scrum-review-ui", "scrum-review-code"]
+        self.assertEqual(got["p"], {
+            "fast": ["scrum-spec-writer", "scrum-builder", "scrum-review-code"],
+            "standard": ["scrum-spec-writer", "scrum-builder", *reviews, "scrum-approver"],
+            "debug": ["scrum-spec-writer", "scrum-debugger", "scrum-builder", *reviews, "scrum-approver"],
+            "bigboy": ["scrum-planner", "scrum-spec-writer", "scrum-tracker", "scrum-bigboy-reviewer"],
+        })
+        self.assertEqual(got["m"], {"Run all": ["scrum-triager"], "Digest": ["scrum-digest-reader", "scrum-digester"]})
+        self.assertEqual(got["last"], {"fast": "PR / merge", "standard": "PR / merge", "debug": "PR / merge", "bigboy": "Fix ticket"})
 
     def test_dashboard_bigboy_cards(self):
         node = shutil.which("node")
