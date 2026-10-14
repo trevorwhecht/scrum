@@ -1556,6 +1556,19 @@ class AiAuditTest(unittest.TestCase):
         self.assertEqual(verdict("mcp", "corp", "managed"), ("Retire", False))
         self.assertEqual(verdict("plugins", "pl@mkt"), ("Keep", False))
 
+    def test_hook_without_records_is_not_retired(self):
+        self.skill(self.user, "idle", "Idle skill. Use when idle.")
+        self.write(self.user / "settings.json", {"hooks": {
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "never-logged"}]}],
+            "Stop": [{"hooks": [{"type": "prompt", "prompt": "x"}]}]}})
+        self.write(self.user / "projects" / "-p" / "s.jsonl", json.dumps(hook_ran("other-hook", 50)) + "\n")
+        rows, _ = self.audit()
+        hook = self.row(rows, "hooks", "UserPromptSubmit · *")
+        self.assertEqual((hook["recent"], hook["verdict"], hook["reason"], hook["disable"]), (0, "Keep", "No problems found.", False))
+        self.assertNotIn("unused", hook["flags"])
+        self.assertNotIn("unused", self.row(rows, "hooks", "Stop · *")["flags"])
+        self.assertEqual(self.row(rows, "skills", "idle")["verdict"], "Retire")
+
     def test_transcripts_untrusted_and_audit_read_only(self):
         import builtins, io
         self.plant()

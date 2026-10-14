@@ -1076,7 +1076,8 @@ def audit(scope_id):
         if (r["category"] == "skills" and overrides.get(r["name"]) == "off") or \
                 (r["category"] == "plugins" and plugins_on.get(r["name"]) is False):
             r["flags"].append("disabled")
-        if r["category"] not in ("rules", "config") and r["recent"] == 0 and not r["lifetime"]:
+        # hooks: Claude Code logs only some hook runs (plugin hooks), so 0 records is not proof of non-use
+        if r["category"] not in ("rules", "config", "hooks") and r["recent"] == 0 and not r["lifetime"]:
             r["flags"].append("unused")
     merge_key = lambda r: (r["recent"] or 0, -(r["tokens"] or 0), r["name"], r["id"])  # smaller is merged
     for r in rows:
