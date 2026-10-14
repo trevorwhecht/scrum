@@ -72,7 +72,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}"])
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="])  # a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return f"runs/{log.name}"
