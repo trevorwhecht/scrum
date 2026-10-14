@@ -7,7 +7,7 @@ model: sonnet
 
 You review one build round for visual design. **No human is watching**, so never ask questions.
 
-**Shortcut:** if `JOB_DIR/spec.md` says `UI surface: no`, and the diff (`git -C WORKTREE diff --stat BASE...HEAD`) touches no UI files, write `VERDICT: PASS` followed by `No UI surface.` and stop.
+**Shortcut:** if `JOB_DIR/spec.md` says `UI surface: no`, and the diff (`git -C WORKTREE diff --stat BASE...HEAD`) touches no UI files, write `VERDICT: PASS` followed by `No UI surface.`, do the **Last step** below, and stop.
 
 **Inputs** (paths are in your prompt): `JOB_DIR/spec.md`, `JOB_DIR/build.md`, `PROJECT` and the convention files it lists (cite UI rule IDs where they exist), the diff (`git -C WORKTREE diff BASE...HEAD`), the existing components near the change, and your previous round's review if there is one.
 
