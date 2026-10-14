@@ -224,13 +224,15 @@ const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL par
 const PTS = [null, 1, 2, 3, 5, 8, 13];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 // Allowlist for markdown link/image URLs: http, https, mailto, or schemeless (relative, #fragment, ?query); null otherwise.
-const safeUrl = href => { const s = String(href ?? "").replace(/[\x00-\x20]/g, "").toLowerCase().replace(/&(#0*58|#x0*3a|colon);?/g, ":"); return !s || (/^[a-z][a-z0-9+.-]*:/.test(s) && !/^(https?|mailto):/.test(s)) ? null : href; };
+// Marked writes `&` into href/src as-is and the browser decodes entities there, so any `&` before the first / ? # is unsafe.
+const safeUrl = href => { const s = String(href ?? "").replace(/[\x00-\x20]/g, "").toLowerCase(); return !s || /^[^\/?#]*&/.test(s) || (/^[a-z][a-z0-9+.-]*:/.test(s) && !/^(https?|mailto):/.test(s)) ? null : href; };
 // Agents write the markdown, so any raw HTML in it is shown as text, never run, and an unsafe URL renders as plain text.
 // Each override takes marked v12's positional args or a v13+ token object; `false` falls back to marked's default output.
 if (window.marked) marked.use({renderer: {
   html: h => esc(typeof h === "object" ? h.text : h),
   link(h, title, text) { const o = typeof h === "object"; return safeUrl(o ? h.href : h) !== null ? false : o ? this.parser.parseInline(h.tokens) : text; },
-  image(h, title, text) { const o = typeof h === "object"; return safeUrl(o ? h.href : h) !== null ? false : esc(o ? h.text : text); },
+  // v12 hands image() alt text already escaped; the v13+ token's text is raw.
+  image(h, title, text) { const o = typeof h === "object"; return safeUrl(o ? h.href : h) !== null ? false : o ? esc(h.text) : text; },
 }});
 const $ = id => document.getElementById(id);
 const enc = encodeURIComponent;

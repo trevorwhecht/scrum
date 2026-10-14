@@ -26,8 +26,15 @@ class SafeUrl(unittest.TestCase):
     def test_unsafe_urls_blocked(self):
         hrefs = ["javascript:alert(1)", "JavaScript:alert(1)", "  javascript:alert(1)", "java\tscript:alert(1)",
                  "java\nscript:alert(1)", "\x01javascript:alert(1)", "javascript&#58;alert(1)", "javascript&colon;alert(1)",
-                 "vbscript:x", "data:text/html,<script>alert(1)</script>", "file:///etc/passwd"]
-        self.assertEqual(safe_url(hrefs)[0], [None] * 11)
+                 "vbscript:x", "data:text/html,<script>alert(1)</script>", "file:///etc/passwd",
+                 # Entities anywhere in the scheme: the browser decodes them inside href/src after marked writes them.
+                 "&#106;avascript:alert(1)", "jav&#97;script:alert(1)", "javascript&Tab;:alert(1)", "java&#9;script:1",
+                 "java&#x73;cript:alert(1)", "&#106;avascript&#58;alert(1)"]
+        self.assertEqual(safe_url(hrefs)[0], [None] * 17)
+
+    def test_ampersand_after_path_or_query_passes(self):
+        self.assertEqual(safe_url(["a.md?x=1&y=2", "/p/a&b.md", "mailto:a@b.c?subject=a&body=b"])[0],
+                         ["a.md?x=1&y=2", "/p/a&b.md", "mailto:a@b.c?subject=a&body=b"])
 
     def test_empty_and_missing_href(self):
         results, undef = safe_url(["", "   ", "\t\n", None])
