@@ -44,7 +44,7 @@ dialog{width:min(900px,94vw);max-height:88dvh;border:1px solid var(--line);borde
 dialog::backdrop{background:#0007}
 .tabs{display:flex;flex-wrap:wrap;gap:4px;padding:10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
 .tabs button,#aiCats button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
-.tabs button[aria-pressed="true"],#aiCats button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.tabs button[aria-pressed="true"],.tabs button[aria-selected="true"],#aiCats button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .tabs .close{margin-left:auto}
 .vhead{position:sticky;top:0;z-index:1;background:var(--card)}.vhead .tabs{position:static}
 #viewerTitle{margin:0;padding:10px 10px 0;font-size:16px;overflow-wrap:anywhere;color:var(--ink)}
@@ -94,13 +94,17 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 .pts{font:600 12px ui-monospace,monospace;width:46px;min-height:32px;border:0;border-radius:6px;color:#fff;background:var(--pending);text-align:center;cursor:pointer}
 .pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
 .pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
-#agents,#aiSettings{width:min(1400px,96vw);max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
+#agents{width:calc(100vw - 24px)}#aiSettings{width:min(1400px,96vw)}
+#agents,#aiSettings{max-width:none;max-height:92dvh;overflow-x:hidden;overscroll-behavior:contain}
 #agents .tabs,#aiSettings .tabs,#digest .tabs{align-items:center}
 #agents [hidden],#aiSettings [hidden]{display:none}
-#agents .tabs button,#agents .btn,#aiSettings .tabs button,#aiCats button{min-height:44px;min-width:44px}
+#agents .tabs button,#agents .btn,#agents .links button,#aiSettings .tabs button,#aiCats button{min-height:44px;min-width:44px}
 #agents article{display:grid;gap:10px;padding-top:14px}
-#flow{display:grid;grid-template-columns:minmax(0,1fr) 44px;position:relative}
-#flow>*{grid-column:1;min-width:0}
+#pipeBar,#pipeTabs,#agZoomBar{display:flex;flex-wrap:wrap;gap:4px;align-items:center}#pipeBar{gap:4px 16px}
+#agZoom{min-width:44px;text-align:center;font:12px ui-monospace,monospace}
+#flow{display:grid;position:relative}
+#flow>*{min-width:0}
+#flow:has(>.loop){padding-right:44px}
 .node{position:relative;z-index:1;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px 12px;width:100%;min-height:44px;text-align:left;
   font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
 button.node{cursor:pointer;touch-action:manipulation}
@@ -108,11 +112,19 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .node b{font:600 13px ui-monospace,monospace;overflow-wrap:anywhere}
 .node span{font-size:12px;color:var(--muted)}
 .node.step{background:var(--bg);border-style:dashed}
-#flow>.node{width:auto;max-width:100%;justify-self:center}
+#flow>.node,#flow>.lane{width:auto;max-width:100%;justify-self:center}
+.links{display:flex;flex-wrap:wrap;gap:6px;flex-basis:100%}
 .arrow{text-align:center;color:var(--muted);font-size:16px;line-height:24px}
-.lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;align-items:start}
+.lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;align-items:start}
 .lane{display:grid;gap:4px}
-#flow>.loop{grid-column:2;position:relative;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0;margin:21px 8px 21px 0}
+#flow>.loop{position:absolute;right:8px;border:2px solid var(--changes);border-left:0;border-radius:0 8px 8px 0}
+/* All and Maintenance: one column per flow; columns stack on a phone. */
+.pcols{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:16px;align-items:start}
+.pcol{display:grid;align-content:start}
+.pcol h3{font-size:13px;margin:0 0 6px;text-align:center}
+.pcols .node{flex-direction:column;flex-wrap:nowrap;align-items:flex-start;justify-content:flex-start}.pcols .links{align-self:stretch}
+.fan{height:14px;margin:0 12.5%;border:2px solid var(--muted);border-bottom:0;border-radius:6px 6px 0 0;position:relative}
+.fan::before{content:"";position:absolute;left:50%;top:-16px;height:14px;border-left:2px solid var(--muted)}
 .loop::before{content:"";position:absolute;left:var(--tip,-2px);top:-7px;border:6px solid transparent;border-right:8px solid var(--changes);border-left:0}
 .loop span{position:absolute;top:50%;right:4px;transform:translateY(-50%);writing-mode:vertical-rl;font-size:11px;color:var(--changes)}
 .facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:0}
@@ -154,17 +166,17 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
-  .lanes{grid-template-columns:repeat(2,minmax(0,1fr))}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
+  .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:1fr!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#backlog .tabs select,#filter,#laneFilter{font-size:16px}}
 </style>
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
-  <select id="laneFilter" aria-label="Show lane"><option value="">All lanes</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option></select>
+  <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
   <button class="btn" id="digestBtn" type="button">Digest</button>
-  <button class="btn" id="agentsBtn" type="button">Agents</button>
+  <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
@@ -185,11 +197,14 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
     <div id="dgList"></div>
   </article>
 </dialog>
-<dialog id="agents" aria-label="Agents">
-  <div class="tabs"><button id="agBack" type="button" hidden>← Back</button><b>Agents</b><button class="close" type="button" aria-label="Close">✕</button></div>
+<dialog id="agents" aria-label="Pipelines">
+  <div class="tabs"><button id="agBack" type="button" hidden>← Back</button><b>Pipelines</b>
+    <span id="pipeBar"><span id="pipeTabs" role="tablist" aria-label="Pipeline"></span>
+      <span id="agZoomBar"><button id="agZoomOut" type="button" aria-label="Zoom out">−</button><span id="agZoom" aria-live="polite">100%</span><button id="agZoomIn" type="button" aria-label="Zoom in">+</button></span></span>
+    <button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
     <p class="error" id="agError" role="alert"></p>
-    <div id="flow"></div>
+    <div id="flow" role="tabpanel"></div>
     <div id="agDetail" hidden></div>
   </article>
 </dialog>
@@ -665,55 +680,112 @@ $("dgList").addEventListener("click", e => {
   digestCall(`api/p/${enc(dgProject())}/digests/${enc(row.dataset.digest)}/${enc(row.dataset.pid)}`, {decision: b.dataset.decide});
 });
 
-// The pipeline order is fixed by SKILL.md, so it lives here; everything about each agent comes from api/agents.
-const PIPELINE = [
-  {step: "Orchestrator", note: "main session", hint: "The /trevskills-scrum skill runs in the main Claude session, spawns every agent and moves the job between stages."},
-  "scrum-spec-writer", "scrum-builder",
-  {step: "Check gate", note: "test · lint · build", hint: "Runs the project's test, typecheck, lint and build commands; a failure goes back to the builder."},
-  ["scrum-review-security", "scrum-review-ux", "scrum-review-ui", "scrum-review-code"],
-  "scrum-approver",
-  {step: "PR / merge", note: "squash-merge", hint: "On APPROVE the orchestrator pushes scrum/<id>, opens a PR, waits for CI and squash-merges."}];
+// Pipelines: the order is fixed by SKILL.md, so it lives here; everything about each agent comes from api/agents.
+// Item format: string = agent, {agent, note} = agent with a note, array = parallel row, {step, note, hint} = step node,
+// {tab, step, note, hint} = a dashed button that switches to that tab. The Orchestrator is drawn by the renderer.
+const ORCH = {step: "Orchestrator", note: "main session", hint: "The /trevskills-scrum skill runs in the main Claude session, spawns every agent and moves the job between stages."};
+const CHECK = {step: "Check gate", note: "test · lint · build", hint: "Runs the project's test, typecheck, lint and build commands; a failure goes back to the builder."};
+const MERGE = {step: "PR / merge", note: "squash-merge", hint: "The orchestrator pushes scrum/<id>, opens a PR, waits for CI and squash-merges."};
 const CODEX = {step: "Codex", note: "read-only", hint: "codex exec review runs alongside scrum-review-code; the reviewer confirms each finding and tags it (codex)."};
+const PROMOTE = {tab: "standard", step: "→ Standard", note: ">100 lines · >3 files · UI · schema",
+  hint: "A fast job is promoted to the standard pipeline when its check fails twice in a round, or after a passing check when the diff has more than 100 lines or a binary file, more than 3 files, a UI glob file, or a schema/migration/.sql/.env file. It then carries on as standard from where it is."};
+const REVIEWS = ["scrum-review-security", "scrum-review-ux", "scrum-review-ui", "scrum-review-code"];
+const PIPELINES = {
+  fast: ["scrum-spec-writer", "scrum-builder", [CHECK, PROMOTE], "scrum-review-code", MERGE],
+  standard: ["scrum-spec-writer", "scrum-builder", CHECK, REVIEWS, "scrum-approver", MERGE],
+  debug: ["scrum-spec-writer", "scrum-debugger", {agent: "scrum-builder", note: "allowed files only"},
+    {...CHECK, note: "test · lint · build + repro must pass", hint: "As the standard check gate, plus the debugger's repro test must now pass."}, REVIEWS, "scrum-approver", MERGE],
+  bigboy: ["scrum-planner", {agent: "scrum-spec-writer", note: "per child"},
+    {step: "Children", note: "each runs its own pipeline", links: ["fast", "standard", "debug"], hint: "Each child ticket runs as its own job, in its own pipeline, with its own PR."},
+    {agent: "scrum-tracker", note: "after each child merge"}, "scrum-bigboy-reviewer",
+    {step: "Fix ticket", note: "one, on gaps", hint: "When the final review finds gaps, one FIX ticket is added to the backlog."}]};
+const MAINTENANCE = {
+  "Run all": ["scrum-triager", {step: "Jobs", note: "backlog, one by one", hint: "After triage every open backlog item runs as a job, one after another."}],
+  "Digest": ["scrum-digest-reader", "scrum-digester", {step: "Digest dialog", note: "you decide", hint: "Each proposed edit waits in the Digest dialog for Approve or Reject."}]};
+// Single-pipeline tabs draw a loop from `from` back up to scrum-builder.
+const LOOPS = {fast: ["scrum-review-code", "changes", "When the code review asks for CHANGES, the job goes back to the builder for another round."],
+  standard: ["scrum-approver", "changes · rework", "When the approver decides CHANGES or REWORK, the job goes back to the builder for another round."]};
+LOOPS.debug = LOOPS.standard;
+const TABS = {all: "All", fast: "Fast", standard: "Standard", debug: "Debug", bigboy: "BigBoy", maintenance: "Maintenance"};
+const ZOOMS = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150];
 let agents = [], skills = null;
 let adding = null;  // skill whose add POST is in flight; renderSkills() locks the picker while set
 const modelLabel = a => a.name === "scrum-approver" ? `${a.model} · sonnet if all green` : a.model || "—";
-const stepNode = s => `<div class="node step" data-agent-hint="${esc(s.hint)}"><b>${esc(s.step)}</b><span>${esc(s.note)}</span></div>`;
-const agentNode = name => {
+let pipelineTab = "all", zoom = ZOOMS.includes(+store.get("scrum.zoom")) ? +store.get("scrum.zoom") : 100;
+const tabBtn = k => `<button class="btn" type="button" data-tab="${k}">${TABS[k]}</button>`;
+const stepNode = s => s.tab
+  ? `<button class="node step" type="button" data-tab="${esc(s.tab)}" data-agent-hint="${esc(s.hint)}"><b>${esc(s.step)}</b><span>${esc(s.note)}</span></button>`
+  : `<div class="node step" data-agent-hint="${esc(s.hint)}"><b>${esc(s.step)}</b><span>${esc(s.note)}</span>${s.links ? `<span class="links">${s.links.map(tabBtn).join("")}</span>` : ""}</div>`;
+const agentNode = (name, note) => {
   const a = agents.find(x => x.name === name);
-  return a ? `<button class="node" type="button" data-agent="${esc(a.name)}"><b>${esc(a.name)}</b><span>${esc(modelLabel(a))}</span></button>` : "";
+  return a ? `<button class="node" type="button" data-agent="${esc(a.name)}"><b>${esc(a.name)}</b><span>${esc(modelLabel(a))}${note ? ` · ${esc(note)}` : ""}</span></button>` : "";
 };
 const ARROW = '<div class="arrow" aria-hidden="true">↓</div>';
+// The code reviewer always has Codex under it. `all` drops the promotion link.
+const item = x => typeof x === "string" || x.agent
+  ? (x === "scrum-review-code" ? `<div class="lane">${agentNode(x)}${stepNode(CODEX)}</div>` : agentNode(x.agent || x, x.note))
+  : stepNode(x);
+const row = (x, all) => {
+  const xs = Array.isArray(x) ? x.filter(y => !(all && y.tab)) : [x];
+  return xs.length > 1 ? `<div class="lanes">${xs.map(item).join("")}</div>` : item(xs[0]);
+};
+const chain = (seq, all) => seq.map(x => row(x, all)).join(ARROW);
+const column = (title, body, top = "") => `<section class="pcol">${top}<h3>${esc(title)}</h3>${body}</section>`;
+const charted = [...Object.values(PIPELINES), ...Object.values(MAINTENANCE)].flat(2).map(x => typeof x === "string" ? x : x.agent).filter(Boolean);
 
 function renderFlow() {
-  const known = PIPELINE.flat().filter(x => typeof x === "string");
-  const extra = agents.map(a => a.name).filter(n => !known.includes(n));
-  const rows = [...PIPELINE, ...extra].map(x => typeof x === "string" ? agentNode(x) : Array.isArray(x)
-    ? `<div class="lanes">${x.map(n => `<div class="lane">${agentNode(n)}${n === "scrum-review-code" ? stepNode(CODEX) : ""}</div>`).join("")}</div>`
-    : stepNode(x));
-  const row = name => 2 * PIPELINE.indexOf(name) + 1;  // every node row is followed by an arrow row
-  $("flow").innerHTML = rows.join(ARROW) + `<div class="loop" style="grid-row:${row("scrum-builder")}/${row("scrum-approver") + 1}"
-    data-agent-hint="When the approver decides CHANGES or REWORK, the job goes back to the builder for another round."><span>changes · rework</span></div>`;
+  const tab = pipelineTab, loop = LOOPS[tab];
+  $("pipeTabs").querySelectorAll("[role=tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  const other = agents.map(a => a.name).filter(n => !charted.includes(n));
+  $("flow").innerHTML = tab === "all"
+    ? stepNode(ORCH) + '<div class="fan" aria-hidden="true"></div><div class="pcols">'
+      + Object.entries(PIPELINES).map(([k, seq]) => column(TABS[k], chain(seq, true), ARROW)).join("") + "</div>"
+    : tab === "maintenance"
+    ? '<div class="pcols">' + Object.entries(MAINTENANCE).map(([h, seq]) => column(h, chain(seq))).join("") + "</div>"
+      + (other.length ? column("Other", other.map(n => agentNode(n)).join("")) : "")
+    : stepNode(ORCH) + ARROW + chain(PIPELINES[tab])
+      + (loop ? `<div class="loop" data-from="${loop[0]}" data-agent-hint="${esc(loop[2])}"><span>${esc(loop[1])}</span></div>` : "");
   alignLoop();
 }
 
-// The loop's ends meet the middle of the builder and approver nodes, whose height changes when a label wraps.
-// Nodes are centred and content-sized, so a negative left margin stretches the loop from its own column back to the
-// narrower node's right edge; it runs behind the wider one (nodes sit above it), and --tip moves the arrowhead out to
-// the builder's own edge. Spanning both columns instead would push the auto-placed nodes out of the loop's rows.
+// The loop's ends meet the middle of scrum-builder and its `from` node, whose heights change when a label wraps.
+// Its left edge sits at the narrower node's right edge; it runs behind the wider one (nodes sit above it), and --tip
+// moves the arrowhead out to the builder's own edge. Offsets are all inside #flow, so the chart's zoom cancels out.
 function alignLoop() {
   const flow = $("flow"), loop = flow.querySelector(".loop"), node = n => flow.querySelector(`[data-agent="${n}"]`);
-  const b = node("scrum-builder"), a = node("scrum-approver");
-  if (!loop || !b || !a || flow.hidden) return;
-  const left = Math.min(b.offsetLeft + b.offsetWidth, a.offsetLeft + a.offsetWidth) - 2;
-  const col = parseFloat(getComputedStyle(flow).gridTemplateColumns);  // width of the node column = where the loop's column starts
-  loop.style.margin = `${b.offsetHeight / 2 - 1}px 8px ${a.offsetHeight / 2 - 1}px ${left - col}px`;
-  loop.style.setProperty("--tip", `${b.offsetLeft + b.offsetWidth - left}px`);
+  const b = node("scrum-builder"), a = loop && node(loop.dataset.from);
+  if (!b || !a || flow.hidden) return;
+  const mid = n => n.offsetTop + n.offsetHeight / 2, right = n => n.offsetLeft + n.offsetWidth;
+  const left = Math.min(right(b), right(a)) - 2;
+  Object.assign(loop.style, {top: `${mid(b) - 1}px`, height: `${mid(a) - mid(b) + 2}px`, left: `${left}px`});
+  loop.style.setProperty("--tip", `${right(b) - left}px`);
 }
 window.addEventListener("resize", () => { if ($("agents").open) alignLoop(); });
 
+function setZoom(z) {
+  zoom = z; store.set("scrum.zoom", z);
+  $("flow").style.zoom = z / 100;
+  $("agZoom").textContent = `${z}%`;
+  $("agZoomOut").disabled = z === ZOOMS[0]; $("agZoomIn").disabled = z === ZOOMS[ZOOMS.length - 1];
+  alignLoop();
+}
+function setTab(k, focus) {
+  pipelineTab = k; renderFlow();
+  if (focus) $("pipeTabs").querySelector(`[data-tab="${k}"]`).focus();
+}
+$("pipeTabs").innerHTML = Object.keys(TABS).map(k => `<button type="button" role="tab" aria-controls="flow" data-tab="${k}" aria-selected="false">${TABS[k]}</button>`).join("");
+$("pipeTabs").addEventListener("click", e => { const b = e.target.closest("[data-tab]"); if (b) setTab(b.dataset.tab); });
+$("pipeTabs").addEventListener("keydown", e => {  // arrow keys move between tabs, as the ARIA tabs pattern expects
+  const keys = Object.keys(TABS), d = {ArrowRight: 1, ArrowLeft: -1}[e.key];
+  if (d) setTab(keys[(keys.indexOf(pipelineTab) + d + keys.length) % keys.length], true);
+});
+$("agZoomOut").addEventListener("click", () => setZoom(ZOOMS[ZOOMS.indexOf(zoom) - 1]));
+$("agZoomIn").addEventListener("click", () => setZoom(ZOOMS[ZOOMS.indexOf(zoom) + 1]));
+setZoom(zoom);
+
 function showAgents(name) {
   const a = name && agents.find(x => x.name === name);
-  $("flow").hidden = !!a; $("agDetail").hidden = !a; $("agBack").hidden = !a;
+  $("flow").hidden = !!a; $("agDetail").hidden = !a; $("agBack").hidden = !a; $("pipeBar").hidden = !!a || !agents.length;
   if (!a) return alignLoop();
   $("agDetail").innerHTML = `<dl class="facts">
       <dt>Agent</dt><dd><b>${esc(a.name)}</b></dd>
@@ -750,9 +822,9 @@ async function addSkill(skill) {
 }
 
 $("agentsBtn").addEventListener("click", async () => {
-  $("agError").textContent = ""; skills = null;
+  $("agError").textContent = ""; skills = null; agents = []; pipelineTab = "all";
   $("flow").innerHTML = '<p class="empty">loading…</p>';
-  showAgents(null);
+  showAgents(null);  // the tab row stays hidden until api/agents loads
   $("agents").showModal();
   const list = await getJson("api/agents", null, STALE);
   if (!Array.isArray(list)) {
@@ -760,12 +832,14 @@ $("agentsBtn").addEventListener("click", async () => {
     return $("agError").textContent = list || "Couldn't load agents. Is serve.py running?";
   }
   agents = list;
+  $("pipeBar").hidden = false;
   renderFlow();
 });
 $("agBack").addEventListener("click", () => showAgents(null));
 $("flow").addEventListener("click", e => {
-  const b = e.target.closest("[data-agent]");
+  const b = e.target.closest("[data-agent]"), t = e.target.closest("[data-tab]");
   if (b) { $("agError").textContent = ""; showAgents(b.dataset.agent); }
+  if (t) setTab(t.dataset.tab, true);
 });
 $("agDetail").addEventListener("click", async e => {
   if (e.target.id === "agAdd") {
