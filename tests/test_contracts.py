@@ -298,6 +298,29 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, fast, phrase)
         self.assertRegex(fast, r"never[^\n]*fast")
 
+    def test_skill_fast_lane_promotes_on_sensitive_paths(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Check gate")
+        regex = (r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password"
+                 r"|permission|payment|billing|checkout|stripe|webhook|secret|credential")
+        for phrase in (regex, "grep -iE", "sensitive path"):
+            self.assertIn(phrase, fast, phrase)
+        start = fast.index("After `CHECK: PASS`, before Review")
+        self.assertLess(start, fast.index(regex))
+        self.assertLess(fast.index(regex), fast.index("2. **Review.**"))
+        found = re.search(r"`grep -iE '([^']+)'`", fast)
+        self.assertIsNotNone(found)
+        pattern = found.group(1)
+        self.assertEqual(pattern, regex)
+        for path in ("src/middleware.ts", "src/proxy.ts", "src/lib/auth.ts", "src/app/api/auth/[...nextauth]/route.ts",
+                     "src/lib/Session.ts", "src/app/login/page.tsx", "src/app/api/stripe/webhook/route.ts",
+                     "src/lib/payments.ts", "src/app/checkout/page.tsx", "src/lib/permissions.ts", "src/lib/secrets.py"):
+            self.assertIsNotNone(re.search(pattern, path, re.I), path)
+        for path in ("skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/board.py",
+                     "agents/scrum-review-security.md", "tests/test_contracts.py", "src/components/ui/Button.tsx",
+                     "src/app/orders/page.tsx", "src/lib/middlewareUtils/format.ts"):
+            self.assertIsNone(re.search(pattern, path, re.I), path)
+
     def test_skill_fast_lane_skips_approver(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
