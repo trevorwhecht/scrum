@@ -296,7 +296,7 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
    Then spawn only `scrum-review-security` and `scrum-review-code`. Otherwise (`UI globs` missing or `none`, or any file matches), spawn all four.
 3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code` (minus the two skipped in step 2). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`
 4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`.
-   - `complete` must be `true`. If a file is missing, re-spawn only that reviewer, once. If it is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
+   - `complete` must be `true`. If it isn't, `missing` lists the absent files (e.g. `review-ui.md`): re-spawn only the reviewers named in `missing`, once. If a file is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
    - **Never resume the builder mid-round.**
 5. Route:
