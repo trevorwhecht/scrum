@@ -46,10 +46,39 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
+# Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
+# the repo), or its system sound when the clip is missing.
+SOUNDS_DIR = "~/.claude/trevskills-scrum/sounds"
+SOUNDS = {"done": ("done.mp3", "/System/Library/Sounds/Blow.aiff"),
+          "needs-human": ("needs-human.mp3", "/System/Library/Sounds/Morse.aiff"),
+          "question": ("question.mp3", "/System/Library/Sounds/Funk.aiff")}
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def sound(kind):
+    name, fallback = SOUNDS[kind]
+    p = Path(SOUNDS_DIR).expanduser() / name  # checked per call, so adding or removing a clip needs no restart
+    return str(p) if p.is_file() else fallback
+
+
+def play(path):
+    """Fire-and-forget afplay; never blocks or breaks the board. SCRUM_MUTE (tests) silences it."""
+    if os.environ.get("SCRUM_MUTE"):
+        return
+    try:
+        subprocess.Popen(["afplay", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+def notifier_disabled():
+    """Same test as isDisabled in ~/.claude/hooks/_lib/config.js (the Claude Notifier)."""
+    v = os.environ.get("CLAUDE_NOTIFIER_DISABLE")
+    return bool(v) and v != "0" and v.lower() != "false"
 
 
 def first_word(path, allowed):
@@ -671,6 +700,7 @@ def cmd_ready(root, parent_id):
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
+        was = parent["stage"]
         kids = [find(board, k) for k in parent.get("children") or []]
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
@@ -711,8 +741,11 @@ def cmd_ready(root, parent_id):
                 reason = f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, Send back to " \
                     "builder or Setup done); if one was aborted, click Abort job on this BigBoy."
             parent.update(stage="needs-human", updatedAt=now(), reason=reason)
-        return {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
-                "all_merged": finished == len(kids)}
+        out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
+               "all_merged": finished == len(kids)}
+    if was != "needs-human" and parent["stage"] == "needs-human":
+        play(sound("needs-human"))
+    return out
 
 
 CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
@@ -771,6 +804,7 @@ def cmd_set(root, job_id, pairs):
     files, div = job_files(d), diverged(d)
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
+        was = job["stage"]
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:
@@ -784,6 +818,8 @@ def cmd_set(root, job_id, pairs):
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
+    if job["stage"] != was and job["stage"] in ("done", "needs-human"):
+        play(sound(job["stage"]))
 
 
 def cmd_sync(root, job_id):
@@ -857,6 +893,8 @@ class _Gone(Exception):
 def cmd_hook(event, tty):
     """Set or clear `waiting` on the active job recorded on this tty (newest updatedAt across every registered repo).
     Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
+    if event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "AskUserQuestion" and notifier_disabled():
+        play(sound("question"))  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
     text = waiting_text(event)
     if text is KEEP or not SHAPES["tty"].fullmatch(tty or ""):
         return

@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -402,6 +403,68 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy off track: x. Fix: y"))
         self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
+
+    def test_stage_sounds(self):
+        clip = "/clips/needs-human"
+        with mock.patch.object(board, "play") as play, mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):
+            job = board.cmd_new(self.root, "noisy")
+            board.cmd_set(self.root, job, ["stage=build"])
+            play.assert_not_called()
+            board.cmd_set(self.root, job, ["stage=needs-human", "reason=x"])
+            play.assert_called_once_with(clip)
+            play.reset_mock()
+            board.cmd_set(self.root, job, ["stage=needs-human"])  # already there: no sound
+            play.assert_not_called()
+            board.cmd_set(self.root, job, ["stage=done"])
+            play.assert_called_once_with("/clips/done")
+            play.reset_mock()
+            board.cmd_set(self.root, job, ["stage=done"])
+            play.assert_not_called()
+            parent, (c1, c2, c3, c4, c5) = self.five()
+            board.cmd_ready(self.root, parent)
+            board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+            board.cmd_abort(self.root, c2, requeue=False)
+            play.reset_mock()
+            board.cmd_ready(self.root, parent)
+            self.assertEqual(self.child(parent)["stage"], "needs-human")
+            play.assert_called_once_with(clip)
+        with mock.patch.object(board.subprocess, "Popen", side_effect=FileNotFoundError("afplay")):
+            with mock.patch.dict(os.environ, {"SCRUM_MUTE": ""}):
+                board.cmd_set(self.root, job, ["stage=build"])
+                board.cmd_set(self.root, job, ["stage=done"])
+        self.assertEqual(self.child(job)["stage"], "done")
+        seen = []  # the sound starts after the board is written and the lock released
+        with mock.patch.object(board, "play", lambda p: seen.append(self.child(job)["stage"])):
+            board.cmd_set(self.root, job, ["stage=needs-human"])
+        self.assertEqual(seen, ["needs-human"])
+
+    def test_play_is_detached_and_muted_by_env(self):
+        with mock.patch.object(board.subprocess, "Popen") as popen:
+            board.play("/x.aiff")
+            popen.assert_not_called()
+            with mock.patch.dict(os.environ, {"SCRUM_MUTE": ""}):
+                board.play("/x.aiff")
+        popen.assert_called_once_with(["afplay", "/x.aiff"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def test_needs_human_sound_fallback(self):  # covers every scrum sound: a clip when present, else its system sound
+        home = Path(self.tmp.name) / "home"
+        sounds = home / ".claude" / "trevskills-scrum" / "sounds"
+        cases = {"done": ("done.mp3", "/System/Library/Sounds/Blow.aiff"),
+                 "needs-human": ("needs-human.mp3", "/System/Library/Sounds/Morse.aiff"),
+                 "question": ("question.mp3", "/System/Library/Sounds/Funk.aiff")}
+        with mock.patch.object(board.Path, "home", return_value=home), mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for kind, (name, fallback) in cases.items():
+                clip = sounds / name
+                self.assertEqual(board.sound(kind), fallback, kind)
+                clip.mkdir(parents=True)
+                self.assertEqual(board.sound(kind), fallback, kind)
+                clip.rmdir()
+                clip.write_bytes(b"ID3")
+                self.assertEqual(board.sound(kind), str(clip), kind)
+                self.assertEqual([board.sound(k) for k in cases if k != kind], [cases[k][1] for k in cases if k != kind])
+                clip.unlink()
+                self.assertEqual(board.sound(kind), fallback, kind)
 
     def test_next_skips_bigboy_children(self):
         self.root.mkdir(parents=True)
@@ -1053,6 +1116,23 @@ class HookTest(unittest.TestCase):
         with mock.patch.object(board, "caller_tty", side_effect=OSError("no ps")), mock.patch("sys.stdin", io.StringIO(stop)):
             self.assertEqual(board.main(["hook"]), 0)
         self.assertNotIn("waiting", self.get(self.job))
+
+    def test_hook_funk_only_when_notifier_disabled(self):
+        ask = {"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": {}}
+        cases = {"1": True, "yes": True, "TRUE": True, None: False, "0": False, "false": False, "FALSE": False, "": False}
+        for value, funk in cases.items():
+            env = {k: v for k, v in os.environ.items() if k != "CLAUDE_NOTIFIER_DISABLE"}
+            if value is not None:
+                env["CLAUDE_NOTIFIER_DISABLE"] = value
+            for tty in ("ttys004", "ttys099"):  # ttys099 matches no job
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(board, "play") as play, \
+                        mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):
+                    board.cmd_hook(ask, tty)
+                    board.cmd_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash"}, tty)
+                    board.cmd_hook({"hook_event_name": "Stop"}, tty)
+                self.assertEqual(play.call_args_list, [mock.call("/clips/question")] if funk else [],
+                                 (value, tty))
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
 
     def test_hook_ignores_inactive_and_other_tty(self):
         board.cmd_set(self.root, self.old, ["stage=needs-human"])

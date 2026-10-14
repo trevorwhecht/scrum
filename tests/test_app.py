@@ -1,5 +1,7 @@
-import struct, subprocess, sys, tempfile, unittest, zlib
+import os, struct, subprocess, sys, tempfile, unittest, zlib
 from pathlib import Path
+
+os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 
 ROOT = Path(__file__).resolve().parents[1]
 

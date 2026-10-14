@@ -70,7 +70,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
     with open(log, "w") as fh:
         proc = subprocess.Popen([CLAUDE, "-p", prompt, *flags], cwd=root.parent,
-                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))  # board.py plays scrum's sounds
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
@@ -100,7 +101,8 @@ def estimate(root, text):
     try:
         out = subprocess.run([CLAUDE, "-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob",
                               ESTIMATE_PROMPT.format(text=text)], cwd=root.parent, capture_output=True, text=True,
-                             timeout=180, stdin=subprocess.DEVNULL).stdout
+                             timeout=180, stdin=subprocess.DEVNULL,
+                             env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1")).stdout
         for blob in reversed(re.findall(r"\{[^{}]*\}", out)):
             data = json.loads(blob)
             if "points" in data:
@@ -1495,7 +1497,8 @@ class Handler(BaseHTTPRequestHandler):
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
-                code, obj = run_terminal([(osa_new_window(root.parent, CLAUDE, f"/trevskills-scrum start {out['id']} askme {askme}"),
+                code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
+                                                          f"/trevskills-scrum start {out['id']} askme {askme}"),
                                            "Askme opened in a new Terminal window.")])
                 return code, {"id": out["id"], **obj} if code == 200 else obj
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
@@ -1504,7 +1507,7 @@ class Handler(BaseHTTPRequestHandler):
             if all(i["done"] for i in board.backlog_items(root)):
                 return 409, {"error": "backlog is empty"}
             # ponytail: Terminal.app only, like discuss and askme
-            return run_terminal([(osa_new_window(root.parent, CLAUDE, "/trevskills-scrum run-all"),
+            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, "/trevskills-scrum run-all"),
                                   "Run all opened in a new Terminal window.")])
         if rest == "/digest":
             return digest_now(project, root)
@@ -1535,7 +1538,8 @@ class Handler(BaseHTTPRequestHandler):
             note = board.clean(body.get("feedback") or "")
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
-            code, obj = run_terminal([(osa_new_window(root.parent, CLAUDE, prompt), "Discussion opened in a new Terminal window.")])
+            code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, prompt),
+                                       "Discussion opened in a new Terminal window.")])
             return code, {"id": job_id, **obj} if code == 200 else obj
         else:
             feedback = board.clean(body.get("feedback") or "")
