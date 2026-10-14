@@ -1407,9 +1407,10 @@ def digest_auto(root, digest_id):
     """Approve each pending proposal the digester marked obvious and that passes digest_target_auto_ok; the rest stay
     pending for Trevor, with the digester's reason or the re-check's."""
     out = {"approved": [], "human": []}
+    if not board.DIGEST_RE.fullmatch(digest_id):
+        return out
     path = root / "digests" / digest_id / "proposals.json"
-    pending = [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]
-    for p in pending if board.DIGEST_RE.fullmatch(digest_id) else []:
+    for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
         reason = digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
         if p["obvious"] and reason is None:
             code, res = digest_decide(root, digest_id, p["id"], "approve")
