@@ -482,8 +482,10 @@ class ContractTest(unittest.TestCase):
 
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F", "on port <N>", "on port 8765"):
+        for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F", "on port <N>", "on port 8765",
+                       "curl -sfL localhost:<N>/", "curl -sfL localhost:8765/"):
             self.assertIn(phrase, text, phrase)
+        self.assertNotIn("curl -sf localhost", text)
 
     def test_skill_pulls_and_restarts_after_merge(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -492,7 +494,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         for phrase in ("Restart:", 'symbolic-ref --short HEAD', "status --porcelain", "pull --ff-only", "Restart pending",
-                       "lsof -ti tcp:<port> -sTCP:LISTEN", "curl -sf"):
+                       "lsof -ti tcp:<port> -sTCP:LISTEN", "curl -sfL"):
             self.assertIn(phrase, cleanup, phrase)
         self.assertNotIn("tcp:8765", cleanup)
         self.assertIn("grep -F", cleanup[cleanup.index("**Restart.**"):])
@@ -509,9 +511,10 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         restart = cleanup[cleanup.index("**Restart.**"):]
-        for phrase in ("Dev command:", "restart command not allowed", "curl -sf localhost:<port>/",
+        for phrase in ("Dev command:", "restart command not allowed", "curl -sfL localhost:<port>/",
                        "no port in Restart line"):
             self.assertIn(phrase, restart, phrase)
+        self.assertNotIn("curl -sf localhost", cleanup)
         self.assertNotIn("used as given", cleanup)
         self.assertIn("`restart command not allowed`", cleanup[cleanup.index("merged, not live: <why>"):])
 
