@@ -817,7 +817,9 @@ function showAgents(name) {
 }
 
 function renderSkills() {
-  const a = agents.find(x => x.name === $("agDetail").dataset.agent), q = $("agFilter").value.trim().toLowerCase();
+  const a = agents.find(x => x.name === $("agDetail").dataset.agent), f = $("agFilter");
+  if (!a || !f || $("agDetail").hidden) return;  // a late call (addSkill's catch) after Back or a reopen: no live picker
+  const q = f.value.trim().toLowerCase();
   const left = (skills || []).filter(s => !a.skills.includes(s.name));
   const hits = left.filter(s => s.name.toLowerCase().includes(q));
   $("agSkills").innerHTML = !skills ? '<p class="empty">loading…</p>'
