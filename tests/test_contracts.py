@@ -181,6 +181,12 @@ class ContractTest(unittest.TestCase):
                        "never from the spec's `UI surface:` line"):
             self.assertIn(phrase, review, phrase)
 
+    def test_skill_review_respawns_missing_reviewers(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("`missing`", "Reviewer produced no output."):
+            self.assertIn(phrase, review, phrase)
+
     def test_skill_review_file_exceptions_named(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
@@ -545,6 +551,10 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, f"{name}: {phrase}")
         template = next(l for l in text.splitlines() if l.strip().startswith("Rendered: yes"))
         self.assertIn("visible", template, name)
+        self.assertIn("<new element> visible", template, name)
+        for phrase in ("<expected change> visible|absent", "removal", "spacing",
+                       f"ls JOB_DIR/round-ROUND/review-{name}.md", "A verdict only in chat does not count"):
+            self.assertIn(phrase, text, f"{name}: {phrase}")
 
     def test_ux_reviewer_renders_page(self):
         self.assert_reviewer_renders("ux")
@@ -558,6 +568,8 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
         self.assertIn("visible", rule)
+        for phrase in ("absent", "expected change"):
+            self.assertIn(phrase, rule, phrase)
 
     def test_merge_guards_main_checkout_before_merge(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

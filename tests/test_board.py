@@ -522,6 +522,7 @@ class BoardTest(unittest.TestCase):
         self.assertFalse(status["complete"])
         self.assertIsNone(status["verdict"])
         self.assertEqual(status["check"], "PASS")
+        self.assertEqual(status["missing"], ["review-ui.md", "review-code.md"])
         job = self.jobs()[0]
         self.assertEqual(job["reviews"], {"security": "PASS", "ux": "CHANGES", "ui": "pending", "code": "pending"})
         self.assertIn("round-1/review-ux.md", job["files"])
@@ -605,6 +606,13 @@ class BoardTest(unittest.TestCase):
         status = board.cmd_sync(self.root, job_id)
         self.assertTrue(status["complete"])
         self.assertEqual((status["verdict"], status["invalid"]), ("INVALID", ["ux"]))
+        self.assertEqual(status["missing"], [])
+
+    def test_sync_no_rounds_lists_all_missing(self):
+        job_id = board.cmd_new(self.root, "x")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertFalse(status["complete"])
+        self.assertEqual(status["missing"], ["review-security.md", "review-ux.md", "review-ui.md", "review-code.md"])
 
     def test_sync_reads_decision(self):
         job_id = board.cmd_new(self.root, "x")

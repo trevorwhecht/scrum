@@ -753,7 +753,8 @@ def cmd_sync(root, job_id):
     invalid = [r for r, v in reviews.items() if v == "INVALID"]
     verdict = None if not complete else "INVALID" if invalid else \
         "PASS" if all(v == "PASS" for v in reviews.values()) else "CHANGES"
-    return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid,
+    missing = [f"review-{r}.md" for r, v in reviews.items() if v == "pending"]
+    return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid, "missing": missing,
             "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
 
 
