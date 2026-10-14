@@ -248,12 +248,15 @@ function laneLabel(job) {
   const lane = laneOf(job);
   return lane === "standard" && (job.files || []).includes("promoted.md") ? "fast→standard" : lane;
 }
-// Bullet texts under a `## Diverged` heading, minus a lone "none". Pinned by test_dashboard_extracts_diverged_bullets.
+// Bullet texts under a `## Diverged` heading, minus a lone "none", skipping fenced code (same rule as board.py diverged()).
+// Pinned by test_dashboard_extracts_diverged_bullets.
 function divergedBullets(md) {
-  let inside = false;
+  let inside = false, fence = false;
   const out = [];
   for (const line of md.split(/\r?\n/)) {
-    if (line.startsWith("## ")) inside = line === "## Diverged";
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    else if (fence) continue;
+    else if (line.startsWith("## ")) inside = line === "## Diverged";
     else if (inside && line.startsWith("- ") && line.slice(2).trim().toLowerCase() !== "none") out.push(line.slice(2).trim());
   }
   return out;
@@ -368,6 +371,7 @@ async function poll() {
       jobs = all; lastText = text; render();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
+      if (openJob) renderDiverged(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
     if ($("digest").open) loadDigests();
@@ -403,6 +407,7 @@ function open(job) {
   $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
+  $("diverged").innerHTML = "";  // the previous job's bullets must not show while this job's files load
   if (!termState[job.key]?.pending) delete termState[job.key];
   renderActions(job);
   renderDiverged(job);
@@ -412,16 +417,16 @@ function open(job) {
 }
 
 // Diverged bullets are read from the served files, not board.json; a file that fails to load is skipped.
+// Writes #diverged once, after the fetches, so a poll refresh doesn't blank the section first.
 async function renderDiverged(job) {
   const el = $("diverged");
-  el.innerHTML = "";
-  if (!job.diverged) return;
+  if (!job.diverged) return el.innerHTML = "";
   const files = ["spec.md", "build.md", "assessment.md", "plan.md"].filter(f => (job.files || []).includes(f));
   const found = await Promise.all(files.map(f => fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/${f}`, {cache: "no-store"})
     .then(r => r.ok ? r.text() : "").catch(() => "").then(md => divergedBullets(md).map(b => [f, b]))));
   const items = found.flat();
-  if ($("viewer").dataset.key !== job.key || !items.length) return;
-  el.innerHTML = `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
+  if ($("viewer").dataset.key !== job.key) return;
+  el.innerHTML = !items.length ? "" : `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
     <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
 }
 

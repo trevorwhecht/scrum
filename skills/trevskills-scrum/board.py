@@ -356,14 +356,18 @@ def job_files(d):
 
 
 def diverged(d):
-    """True if spec.md, build.md, assessment.md or plan.md has a `## Diverged` section with a bullet that isn't `- none`."""
+    """True if spec.md, build.md, assessment.md or plan.md has a `## Diverged` section with a bullet that isn't `- none`, outside fenced code."""
     for name in ("spec.md", "build.md", "assessment.md", "plan.md"):
         p = d / name
         if not p.is_file():
             continue
-        inside = False
+        inside = fence = False
         for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("## "):
+            if line.lstrip().startswith(("```", "~~~")):  # same fence rule as divergedBullets() in dashboard.html
+                fence = not fence
+            elif fence:
+                continue
+            elif line.startswith("## "):
                 inside = line == "## Diverged"
             elif inside and line.startswith("- ") and line[2:].strip().lower() != "none":
                 return True

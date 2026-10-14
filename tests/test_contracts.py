@@ -707,6 +707,15 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("# x\\n## Diverged\\n- a\\n- b\\n## Next\\n- c")'), ["a", "b"])
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n- none")'), [])
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Summary\\n- a")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n- a\\n```\\n- b\\n```\\n- c")'), ["a", "c"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("```\\n## Diverged\\n- a\\n```")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("~~~md\\n## Diverged\\n- a\\n")'), [])
+
+    def test_dashboard_poll_refreshes_diverged(self):
+        text = DASHBOARD.read_text()
+        start = text.index("async function poll(")
+        body = text[start:text.index("\n}\n", start)]
+        self.assertIn("renderDiverged(openJob)", body)
 
     def test_dashboard_lane_label(self):
         cases = [({}, "standard"), ({"lane": None}, "standard"), ({"lane": "fast"}, "fast"), ({"lane": "debug"}, "debug"),

@@ -569,6 +569,18 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, missing, ["stage=build"])
         self.assertIs(self.jobs()[1]["diverged"], False)
 
+    def test_diverged_ignores_fenced_code(self):
+        job_id = board.cmd_new(self.root, "x")
+        cases = {"```\n## Diverged\n- a\n```\n": False, "~~~md\n## Diverged\n- a\n~~~\n": False,
+                 "## Diverged\n```\n- a\n```\n": False, "```\n## Diverged\n- a\n": False,
+                 "  ```\n## Diverged\n- a\n  ```\n": False,
+                 "```\n## Summary\n```\n## Diverged\n- a → b — c\n": True,
+                 "## Diverged\n```\n- example\n```\n- a → b — c\n": True}
+        for text, want in cases.items():
+            self.write(f"{job_id}/build.md", text)
+            board.cmd_set(self.root, job_id, ["stage=build"])
+            self.assertIs(self.jobs()[0]["diverged"], want, text)
+
     def test_sync_complete_rounds_and_verdicts(self):
         job_id = board.cmd_new(self.root, "x")
         for r in board.REVIEWERS:
