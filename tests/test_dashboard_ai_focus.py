@@ -164,6 +164,32 @@ console.log(JSON.stringify(out));
 """)
         self.assertEqual(got, {"toggleMoved": "aiScope", "failMoved": "aiScope", "dropped": "body", "openMoved": "aiScope"})
 
+    def test_research_resolve_keeps_open_editor(self):
+        got = run(AUDIT + """
+const out = {};
+click(listBtn("button[data-research]"));
+click(listBtn("button[data-id]")); pending[1].res({...ITEM, editable: true, content: "unsaved"}); await tick();
+pending[0].res({key: "k", log: "runs/r.log", project: "reg"}); await tick();
+out.editor = /<form id="aiEdit">\\s*<textarea id="aiText"[^>]*>unsaved<\\/textarea>/.test($("aiList").innerHTML);
+out.backHidden = $("aiBack").hidden;
+back();
+out.researchDisabled = $("aiList").querySelectorAll("button[data-research]").find(b => b.dataset.research === ID).disabled;
+out.researching = $("aiList").innerHTML.includes("Researching…");
+console.log(JSON.stringify(out));
+""")
+        self.assertEqual(got, {"editor": True, "backHidden": False, "researchDisabled": True, "researching": True})
+
+    def test_research_resolve_rerenders_visible_audit(self):
+        got = run(AUDIT + """
+click(listBtn("button[data-research]"));
+pending.shift().res({key: "k", log: "runs/r.log", project: "reg"}); await tick();
+const html = $("aiList").innerHTML;
+console.log(JSON.stringify({researching: html.includes('Researching…</span><a href="p/reg/runs/r.log"'),
+  disabled: $("aiList").querySelectorAll("button[data-research]").find(b => b.dataset.research === ID).disabled,
+  backHidden: $("aiBack").hidden}));
+""")
+        self.assertEqual(got, {"researching": True, "disabled": True, "backHidden": True})
+
 
 if __name__ == "__main__":
     unittest.main()

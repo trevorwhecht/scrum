@@ -1015,7 +1015,7 @@ $("aiList").addEventListener("click", async e => {
     const out = await post("api/ai-settings/research", {id});
     if (aiAudit !== audit) return;  // left the tab or changed scope meanwhile
     audit.rows.find(r => r.id === id).research = {...out, alive: true};
-    renderAudit();
+    if ($("aiBack").hidden && aiCat === "audit") renderAudit();  // an open editor keeps its unsaved text; Back re-renders
   } catch (err) {
     if (aiAudit !== audit) return;
     b.disabled = false;
