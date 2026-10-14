@@ -656,9 +656,9 @@ class ContractTest(unittest.TestCase):
 
     def test_skill_every_needs_human_reason_has_fix(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        reasons = re.findall(r'stage=needs-human reason="([^"]*)"', text)
+        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
         self.assertGreaterEqual(len(reasons), 17)
-        self.assertEqual(len(reasons), text.count('stage=needs-human reason="'))
+        self.assertEqual(len(reasons), text.count('stage=needs-human reason="') + text.count("stage=needs-human reason='"))
         for reason in reasons:
             self.assertIn(" Fix: ", reason, reason)
             self.assertNotIn("`", reason, reason)
@@ -876,6 +876,65 @@ class ContractTest(unittest.TestCase):
         self.assertIn('<p class="note">No projects</p>', digests)
         self.assertIn("No projects yet. Run /trevskills-scrum in a repo and it shows up here.", text)  # board
         self.assertIn('<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>', text)  # backlog
+
+    def test_skill_untrusted_reasons_single_quoted(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertEqual(re.findall(r'reason="[^"]*<', text), [])
+        setup = self.section(text, "## Setup", "### First-run setup")
+        rule = self.section(setup, "**Untrusted reason text:**", "\n\n")
+        self.assertIn("single quotes", rule)
+        self.assertIn("`'`", rule)
+        self.assertLess(setup.index("**Abort:**"), setup.index("**Untrusted reason text:**"))
+        step3 = self.section(text, "3. **No repro or blocked.**", "\n4. ")
+        for ch in ("`` ` ``", "`$`", '`"`', "`'`"):
+            self.assertIn(ch, step3, ch)
+        self.assertIn("reason='debug: no repro — <line 2>.", step3)
+
+    def test_debug_repro_prefix_checked(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step2 = self.section(text, "2. **Validate `$F/jobs/$ID/assessment.md`.**", "\n3. ")
+        for phrase in ("starts with", "`Test:`", "`;` `&` `|` `` ` `` `$` `<` `>`", "newline", "`Repro test:` path"):
+            self.assertIn(phrase, step2, phrase)
+        debugger = (ROOT / "agents" / "scrum-debugger.md").read_text()
+        self.assertIn("must start with PROJECT's `Test:` command", debugger)
+        self.assertIn("no shell operators", debugger)
+
+    def test_debugger_respawn_reuses_or_drops_repro(self):
+        line = ("An earlier attempt may have committed a repro test: reuse it if it still fails for the reported "
+                "reason, otherwise remove it with git rm and commit that removal.")
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        debug = self.section(text, "## Debug lane", "## BigBoy lane")
+        self.assertIn(line, debug)
+        self.assertIn("re-spawn line", self.section(debug, "2. **Validate", "\n3. "))
+        debugger = (ROOT / "agents" / "scrum-debugger.md").read_text()
+        steps = self.section(debugger, "**Steps:**", "**assessment.md.**")
+        for phrase in ("earlier", "reuse", "git rm"):
+            self.assertIn(phrase, steps, phrase)
+        self.assertIn("leave no repro test at HEAD that you added", debugger)
+
+    def test_rework_debug_routes_to_diagnosis(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        rework = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum rework <id> <feedback>`**"))
+        for phrase in ("`lane` is `debug`", "ASSESSMENT: READY", "**Debug lane**", "assessment-prev.md",
+                       "Read JOB_DIR/rework.md first.", "re-spawn line"):
+            self.assertIn(phrase, rework, phrase)
+        self.assertLess(rework.index("**Debug lane**"), rework.index("Otherwise resume the builder"))
+
+    def test_merge_reruns_debug_checks_after_ci_fix(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
+        for phrase in ("`lane` is `debug`", "after CI fix", "Repro test untouched",
+                       "reason='debug: checks fail after CI fix — <first failing check>. Fix: click Send back to "
+                       "builder with what to change.'"):
+            self.assertIn(phrase, step6, phrase)
+        self.assertLess(step6.index("after CI fix"), step6.index("gh pr merge"))
+
+    def test_merge_gh_missing_fix_installs_first(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Resuming the builder")
+        self.assertIn("GitHub CLI is not installed or not signed in; branch scrum/$ID is local only. Fix: run brew "
+                      "install gh, then gh auth login in Terminal, then click Approve & merge.", merge)
+        self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
 
 
 if __name__ == "__main__":
