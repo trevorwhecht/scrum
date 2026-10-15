@@ -14,19 +14,40 @@ cd ~/Developer/repos/trevskills-scrum
 sysctl -n hw.memsize
 ollama pull qwen2.5-coder:7b
 ollama pull qwen3.5:4b
-launchctl setenv OLLAMA_CONTEXT_LENGTH 32768   # then quit and reopen the Ollama app
+# 32K variants (no extra disk): Ollama's Anthropic endpoint ignores per-request context, so it lives in the model
+printf 'FROM qwen3.5:4b\nPARAMETER num_ctx 32768\n' | ollama create scrum-qwen3.5:4b -f /dev/stdin
+printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 32768\n' | ollama create scrum-qwen2.5-coder:7b -f /dev/stdin
 ollama list
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b python3 local/diagnose.py
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py codex exec --sandbox read-only --ephemeral 'Reply with local-ok. Do not use tools.'
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py claude -p --allowedTools 'Read,Grep,Glob' 'Reply with local-ok. Do not use tools.'
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b python3 local/diagnose.py
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py codex exec --sandbox read-only --ephemeral 'Reply with local-ok. Do not use tools.'
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py claude -p 'Reply with local-ok. Do not use tools.' --allowedTools 'Read,Grep,Glob'
 ```
 
 The router uses two models, both named in `local/routing.json`: Qwen2.5-Coder 7B for the
 spec writer, the builder and the Codex review, and Qwen3.5 4B for the estimator and the
-digest reader. Every routed run asks for a 32K context, so Ollama must load models with
-`OLLAMA_CONTEXT_LENGTH=32768`; `run.py` refuses to start a Claude run when Ollama loaded
-the model with less (`Ollama loaded <model> with context 4096 < 32768`). Check `ollama ps`
-after the probe for heavy offloading.
+digest reader. Every routed run asks for a 32K context, so `routing.json` names the `scrum-`
+variants created above, which carry `num_ctx 32768`; `run.py` refuses to start a Claude run when
+Ollama loaded the model with less (`Ollama loaded <model> with context 4096 < 32768`). Check
+`ollama ps` after the probe for heavy offloading.
+
+A `claude -p` run through `run.py` adds `--bare --strict-mcp-config`: Claude Code's own prompt,
+CLAUDE.md, rules, hooks and plugins overflow 32K (`Prompt is too long`), so the prompt must carry
+everything the run needs. `--bare` also drops hooks, so `run.py` passes `~/.claude/settings.json`'s
+`permissions.deny` plus `SAFETY_DENY` (the global git/prisma hook restated as deny rules). Put the
+prompt right after `-p`: `--allowedTools` takes every value after it, and a prompt placed later is
+swallowed as a tool name (`Input must be provided ...`).
+
+## What the local models can do (measured 2026-10-15, M2 Air 16 GB)
+
+| Role | Local result | Trust |
+| --- | --- | --- |
+| Estimator | 26/26 valid, ~2 s each, as one `/api/chat` call with the repo's file list (`serve.local_estimate`) | approved |
+| Digest reader | Valid format, wrong content: invents counts and misses or splits the recurring findings (4B and 7B) | off |
+| Codex review | 7B prints its tool calls as text and reviews nothing (~3 min) | off |
+| Spec writer, builder | Not viable: in a Claude Code agent loop a 4B model fills 32K with tool output and auto-compacts until it gives up | off |
+
+The rule that follows: local work is **one bounded `route.chat` call with the context gathered by
+code**, never an agent loop, and anything countable is counted by code, not the model.
 
 ## How routing decides
 
@@ -77,7 +98,7 @@ terminate that specific server with `kill PID`. Let running jobs finish first.
 Then:
 
 ```sh
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py dashboard
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 local/run.py dashboard
 ```
 
 Open http://localhost:8765/dashboard.html. All model requests launched by this
@@ -86,13 +107,13 @@ wrappers. For an interactive Scrum session in any project:
 
 ```sh
 cd /path/to/project
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 ~/Developer/repos/trevskills-scrum/local/run.py claude
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 ~/Developer/repos/trevskills-scrum/local/run.py claude
 ```
 
 Use `/trevskills-scrum` as usual. For a separate local Codex coding session:
 
 ```sh
-SCRUM_LOCAL_MODEL=qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 ~/Developer/repos/trevskills-scrum/local/run.py codex --sandbox workspace-write
+SCRUM_LOCAL_MODEL=scrum-qwen2.5-coder:7b SCRUM_LOCAL_CONTEXT=32768 python3 ~/Developer/repos/trevskills-scrum/local/run.py codex --sandbox workspace-write
 ```
 
 To return to the original cloud pipeline, stop the local dashboard and start
@@ -106,11 +127,11 @@ Measure the routed models on the three bounded local tasks before trusting a rol
 
 ```sh
 python3 local/bench.py --runs 3
-python3 local/bench.py --model qwen3.5:4b --task estimate --runs 5
+python3 local/bench.py --model scrum-qwen3.5:4b --task estimate --runs 5
 ```
 
 Defaults: both models named in `routing.json` `models`, three runs, all three tasks. Requests
-go one at a time to `$SCRUM_OLLAMA_URL` (`POST /api/chat`, 16K context). Each run prints one
+go one at a time to `$SCRUM_OLLAMA_URL` (`POST /api/chat` through `route.chat`: thinking off, the model's own 32K context). Each run prints one
 JSON line (`model`, `task`, `run`, `pass`, `why`, `duration_s`, and `ps`: `size`, `size_vram`,
 `context_length` from `/api/ps`), then one `passed/total` line per model and task. Exit 0 when
 every run passed, 1 when any failed, 2 when Ollama is down or a model is missing or cloud-tagged.

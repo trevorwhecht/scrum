@@ -68,6 +68,18 @@ def _ollama_ready(model):
     return True, ''
 
 
+def chat(model, prompt, base=None, timeout=300):
+    """One /api/chat reply from local Ollama with thinking off. No num_ctx: the scrum- variant's own 32K applies,
+    and a different value would make Ollama reload the model. Bounded tasks use this, never a Claude Code agent loop:
+    a 4-7B model there fills 32K with tool output and auto-compacts until it gives up."""
+    base = (base or os.environ.get('SCRUM_OLLAMA_URL', 'http://127.0.0.1:11434')).rstrip('/')
+    body = {'model': model, 'stream': False, 'think': False, 'messages': [{'role': 'user', 'content': prompt}]}
+    request = urllib.request.Request(base + '/api/chat', data=json.dumps(body).encode(),
+                                     headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=timeout) as reply:
+        return json.loads(reply.read())['message']['content']
+
+
 def codex_quota():
     """Used percent of the 5h and weekly Codex windows, from the newest rollout file."""
     quota = {'5h': None, 'weekly': None}

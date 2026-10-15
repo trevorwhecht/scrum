@@ -12,6 +12,10 @@ STUB = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+# Like the real CLI, --allowedTools takes every value after it, so a prompt placed after it is lost.
+if "--allowedTools" in args and any("estimating" in a for a in args[args.index("--allowedTools"):]):
+    sys.exit("Error: Input must be provided either through stdin or as a prompt argument when using --print")
 if any("estimating" in a for a in sys.argv):
     if not (os.environ.get("STUB_LOCAL_FAILS") and os.environ.get("ANTHROPIC_BASE_URL")):
         print("Looking around...\n{\"points\": 5, \"why\": \"several files\"}")
@@ -656,62 +660,55 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(r.call_args.args[0], "estimator")
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Cloud item <!-- several files -->\n")
         [argv] = self.stub_calls_for("Cloud item")
-        self.assertEqual(argv[:5], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
+        self.assertEqual([argv[0], *argv[2:]], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
         self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
 
-    def ollama(self):
-        """A fake Ollama that reports qwen3.5:4b loaded with a 64K context, for local/run.py's preflight."""
-        sys.path.insert(0, str(ROOT / "tests"))
-        from test_local import OllamaStub
-        from http.server import HTTPServer
-        OllamaStub.ps = {"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b", "context_length": 65536}]}
-        server = HTTPServer(("127.0.0.1", 0), OllamaStub)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        return {"SCRUM_OLLAMA_URL": f"http://127.0.0.1:{server.server_port}", "SCRUM_REAL_CLAUDE": str(self.stub)}
-
-    def test_estimate_local_route_uses_run_py(self):
+    def test_estimate_local_route_is_one_ollama_chat(self):
         scrum = self.estimate_scrum("est-local", "Local item")
-        real_run = subprocess.run
-        with mock.patch.dict(os.environ, self.ollama()), \
-                mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
-                mock.patch.object(self.serve.subprocess, "run", wraps=real_run) as run:
+        with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
+                mock.patch.object(self.serve.route, "chat", return_value='{"points": 5, "why": "several files"}') as chat:
             self.serve.estimate(scrum, "Local item")
-        self.assertEqual(run.call_count, 1)
-        argv, kw = run.call_args.args[0], run.call_args.kwargs
-        self.assertEqual(argv[:6], [sys.executable, str(ROOT / "local" / "run.py"), "claude", "-p", "--allowedTools", "Read,Grep,Glob"])
-        self.assertNotIn("--model", argv)
-        self.assertEqual((kw["cwd"], kw["timeout"], kw["env"]["SCRUM_LOCAL_MODEL"], kw["env"]["SCRUM_LOCAL_CONTEXT"],
-                          kw["env"]["CLAUDE_NOTIFIER_DISABLE"]), (scrum.parent, 180, "qwen3.5:4b", "32768", "1"))
-        [stub_argv] = self.stub_calls_for("Local item")
-        self.assertEqual(stub_argv[stub_argv.index("--model") + 1], "qwen3.5:4b")
-        self.assertNotIn("sonnet", stub_argv)
+        (model, prompt), kw = chat.call_args.args, chat.call_args.kwargs
+        self.assertEqual((model, kw["timeout"]), ("qwen3.5:4b", 180))
+        self.assertIn("Item: Local item", prompt)
+        self.assertIn("Files in the repository:", prompt)  # the file map replaces browsing
+        self.assertNotIn(self.serve.ESTIMATE_LOOK, prompt)
+        self.assertEqual(self.stub_calls_for("Local item"), [])  # no claude process at all
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Local item <!-- several files -->\n")
         self.assertEqual(self.routing_lines(scrum),
                          [{"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "ok"}])
 
     def test_estimate_local_failure_retries_cloud_once(self):
         scrum = self.estimate_scrum("est-fallback", "Fallback item")
-        with mock.patch.dict(os.environ, {**self.ollama(), "STUB_LOCAL_FAILS": "1"}), \
-                mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}):
-            self.serve.estimate(scrum, "Fallback item")
-        local, cloud = self.stub_calls_for("Fallback item")
-        self.assertEqual(local[local.index("--model") + 1], "qwen3.5:4b")
-        self.assertEqual(cloud[:3], ["-p", "--model", "sonnet"])
-        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Fallback item <!-- several files -->\n")
-        self.assertEqual(self.routing_lines(scrum), [
-            {"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "invalid-artifact"},
-            {"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "fallback"}])
+        for failure in ({"return_value": "no json"}, {"side_effect": OSError("Ollama down")}):
+            (scrum / "backlog.md").write_text("# Backlog\n- [ ] Fallback item\n")
+            (scrum / "routing.log").unlink(missing_ok=True)
+            with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
+                    mock.patch.object(self.serve.route, "chat", **failure):
+                self.serve.estimate(scrum, "Fallback item")
+            self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Fallback item <!-- several files -->\n")
+            self.assertEqual(self.routing_lines(scrum), [
+                {"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "invalid-artifact"},
+                {"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "fallback"}])
+        [cloud, _] = self.stub_calls_for("Fallback item")
+        self.assertEqual([cloud[0], *cloud[2:4]], ["-p", "--model", "sonnet"])
 
     def test_estimate_failed_cloud_retry_is_not_retried(self):
         scrum = self.estimate_scrum("est-double-fail", "Double fail")
         with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
-                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")) as run:
+                mock.patch.object(self.serve.route, "chat", return_value="no json") as chat, \
+                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")):
             self.serve.estimate(scrum, "Double fail")
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(chat.call_count, 1)
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Double fail\n")
-        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact", "fallback"])
+        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact", "invalid-artifact"])
+
+    def test_estimate_non_fibonacci_points_are_invalid(self):
+        scrum = self.estimate_scrum("est-fib", "Fib item")
+        with mock.patch.object(self.serve.route, "route", return_value={"runner": "cloud", "model": None, "why": "x"}), \
+                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout='{"points": 4, "why": "x"}')):
+            self.serve.estimate(scrum, "Fib item")
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Fib item\n")
 
     def test_estimate_router_error_falls_back_to_cloud(self):
         for i, kw in enumerate(({"side_effect": RuntimeError("router broke")}, {"return_value": "garbage"})):
@@ -720,7 +717,7 @@ class ServeTest(unittest.TestCase):
                 self.serve.estimate(scrum, f"Router error {i}")
             self.assertEqual((scrum / "backlog.md").read_text(), f"# Backlog\n- [ ] [5] Router error {i} <!-- several files -->\n")
             [argv] = self.stub_calls_for(f"Router error {i}")
-            self.assertEqual(argv[:3], ["-p", "--model", "sonnet"])
+            self.assertEqual([argv[0], *argv[2:4]], ["-p", "--model", "sonnet"])
             self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
 
     def test_routing_status_endpoint(self):

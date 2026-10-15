@@ -74,7 +74,7 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 
 - **Eligible roles:** the estimator, digest reader and Codex review always; the builder only on a `fast`-lane job; the spec writer only for a backlog item of 2 points or less (`spec_writer_max_points`). Reviewers, the approver, planner, tracker, debugger, triager and digester always run on cloud.
 - **Trust** per role in `local/routing.json`: `off` (cloud), `trial` (local when eligible or a BigBoy child), `approved` (local when eligible).
-- **Ollama health check:** local only when Ollama's `/api/tags` answers within 2 s and lists the role's model (`qwen2.5-coder:7b` or `qwen3.5:4b`).
+- **Ollama health check:** local only when Ollama's `/api/tags` answers within 2 s and lists the role's model (`scrum-qwen2.5-coder:7b` or `scrum-qwen3.5:4b`, the 32K variants from local/README.md).
 - **Claude session limit:** while a recent `scrum/runs/` log shows Claude's session limit, trial and approved roles go local until it resets.
 - **Codex quota:** the Codex review moves to local once the 5h window reaches 85 % used or the weekly one 90 % (`codex_5h`, `codex_weekly`), and is skipped when Ollama is down.
 - **`SCRUM_ROUTE=cloud`** forces every routed step to cloud; **`SCRUM_ROUTE=local`** forces local for eligible steps when Ollama is up.

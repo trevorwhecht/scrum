@@ -45,8 +45,9 @@ LOCAL = {"localhost", "127.0.0.1"}
 TYPES = {".json": "application/json", ".md": "text/markdown; charset=utf-8", ".log": "text/plain; charset=utf-8",
          ".html": "text/html; charset=utf-8"}
 RUNS, RUNS_LOCK = {}, threading.Lock()  # "project/job id" -> {"action", "started", "proc", "log"}
+ESTIMATE_LOOK = "Look only at what you need (CLAUDE.md, the files the item would touch). Do not change anything."
 ESTIMATE_PROMPT = """You are estimating one backlog item for the repository in the current directory.
-Look only at what you need (CLAUDE.md, the files the item would touch). Do not change anything.
+""" + ESTIMATE_LOOK + """
 Reply with ONLY one JSON object: {{"points": <one of 1, 2, 3, 5, 8, 13>, "why": "<one short sentence>"}}
 Scale: 1 trivial tweak · 2 one small file · 3 a few files · 5 several layers (API + UI) · 8 large or risky · 13 too big, should be split.
 Item: {text}"""
@@ -231,21 +232,38 @@ def watchdog_loop():
         time.sleep(60)
 
 
-def run_estimate(argv, root, env):
-    """One estimate attempt: the last {...} carrying "points" in its reply, or None (no JSON, timeout, OSError)."""
-    try:
-        out = subprocess.run(argv, cwd=root.parent, capture_output=True, text=True, timeout=180,
-                             stdin=subprocess.DEVNULL, env=env).stdout or ""
-    except (subprocess.SubprocessError, OSError):
-        return None
-    for blob in reversed(re.findall(r"\{[^{}]*\}", out)):
+def points_in(out):
+    """The last {...} carrying Fibonacci "points" in a reply, or None."""
+    for blob in reversed(re.findall(r"\{[^{}]*\}", out or "")):
         try:
             data = json.loads(blob)
         except ValueError:
             continue
-        if isinstance(data, dict) and "points" in data:
+        if isinstance(data, dict) and data.get("points") in (1, 2, 3, 5, 8, 13):
             return data
     return None
+
+
+def run_estimate(argv, root, env):
+    """One cloud estimate attempt (the prompt goes right after -p: --allowedTools takes every value after it, so a
+    prompt placed later is swallowed as a tool name): its points JSON, or None (no JSON, timeout, OSError)."""
+    try:
+        return points_in(subprocess.run(argv, cwd=root.parent, capture_output=True, text=True, timeout=180,
+                                        stdin=subprocess.DEVNULL, env=env).stdout)
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def local_estimate(root, text, model):
+    """One local attempt: a single Ollama chat with the repo's file list in place of browsing, since a small model
+    in a Claude Code agent loop overflows 32K and never answers. Its points JSON, or None."""
+    try:
+        files = subprocess.run(["git", "ls-files"], cwd=root.parent, capture_output=True, text=True,
+                               timeout=30).stdout[:40000]  # ponytail: ~10K tokens cap; a big repo gets a truncated map
+        prompt = ESTIMATE_PROMPT.format(text=text).replace(ESTIMATE_LOOK, "Files in the repository:\n" + files)
+        return points_in(route.chat(model, prompt, timeout=180))
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def estimate(root, text):
@@ -259,15 +277,13 @@ def estimate(root, text):
         model = None
     attempts = []
     if model:
-        attempts.append(("local", model, [sys.executable, str(HERE.parent.parent / "local" / "run.py"), "claude", "-p",
-                                          "--allowedTools", "Read,Grep,Glob", prompt],
-                         # 32768 matches SKILL.md's local runner, so one OLLAMA_CONTEXT_LENGTH serves both
-                         dict(env, SCRUM_LOCAL_MODEL=model, SCRUM_LOCAL_CONTEXT="32768")))
-    attempts.append(("cloud", "sonnet", [CLAUDE, "-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob", prompt], env))
-    for runner, name, argv, attempt_env in attempts:
+        attempts.append(("local", model, lambda: local_estimate(root, text, model)))
+    cloud = [CLAUDE, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"]
+    attempts.append(("cloud", "sonnet", lambda: run_estimate(cloud, root, env)))
+    for runner, name, attempt in attempts:
         start = time.monotonic()
-        data = run_estimate(argv, root, attempt_env)
-        outcome = "fallback" if runner == "cloud" and model else "ok" if data else "invalid-artifact"
+        data = attempt()
+        outcome = "invalid-artifact" if not data else "fallback" if runner == "cloud" and model else "ok"
         try:
             route.record(root, "estimator", runner, name, round(time.monotonic() - start, 1), outcome)
         except (ValueError, OSError):

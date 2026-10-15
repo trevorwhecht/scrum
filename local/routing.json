@@ -1,17 +1,17 @@
 {
   "roles": {
     "estimator": "approved",
-    "scrum-digest-reader": "approved",
-    "codex-review": "approved",
+    "scrum-digest-reader": "off",
+    "codex-review": "off",
     "scrum-spec-writer": "off",
     "scrum-builder": "off"
   },
   "models": {
-    "estimator": "qwen3.5:4b",
-    "scrum-digest-reader": "qwen3.5:4b",
-    "scrum-spec-writer": "qwen2.5-coder:7b",
-    "scrum-builder": "qwen2.5-coder:7b",
-    "codex-review": "qwen2.5-coder:7b"
+    "estimator": "scrum-qwen3.5:4b",
+    "scrum-digest-reader": "scrum-qwen3.5:4b",
+    "scrum-spec-writer": "scrum-qwen2.5-coder:7b",
+    "scrum-builder": "scrum-qwen2.5-coder:7b",
+    "codex-review": "scrum-qwen2.5-coder:7b"
   },
   "thresholds": {
     "codex_5h": 85,

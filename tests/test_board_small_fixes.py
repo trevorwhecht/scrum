@@ -76,7 +76,7 @@ class SmallFixesTest(unittest.TestCase):
         stub.write_text(STUB)
         stub.chmod(0o755)
         (self.root / "backlog.md").write_text("# Backlog\n")
-        env = dict(os.environ, SCRUM_CLAUDE=str(stub))
+        env = dict(os.environ, SCRUM_CLAUDE=str(stub), SCRUM_ROUTE="cloud")
         r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "backlog-add", "--", "-dash"],
                            capture_output=True, text=True, timeout=5, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)

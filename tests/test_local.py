@@ -31,13 +31,15 @@ class LocalLauncherTests(unittest.TestCase):
     def test_claude_subagent_aliases_and_settings_use_local_endpoint(self):
         with patch.object(run, 'preflight'):
             _, command, env = self.launch(['claude', '-p', 'hello', '--model', 'sonnet'])
-        self.assertEqual(command[1:3], ['-p', 'hello'])
+        self.assertEqual(command[1:5], ['--bare', '--strict-mcp-config', '-p', 'hello'])
         self.assertEqual(command[command.index('--model') + 1], run.MODEL)
         settings = json.loads(command[-1])['env']
         self.assertEqual(settings['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:11434')
         for alias in ('SONNET', 'OPUS', 'HAIKU'):
             self.assertEqual(settings['ANTHROPIC_DEFAULT_' + alias + '_MODEL'], run.MODEL)
         self.assertEqual(env['ANTHROPIC_API_KEY'], '')
+        # --bare drops hooks, so the safety rules must arrive as deny rules
+        self.assertTrue(set(run.SAFETY_DENY) <= set(json.loads(command[-1])['permissions']['deny']))
 
     def test_dashboard_inherits_review_shim_and_claude_wrapper(self):
         _, command, env = self.launch(['dashboard', '--port', '8766'])

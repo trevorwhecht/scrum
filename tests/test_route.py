@@ -19,7 +19,7 @@ spec = importlib.util.spec_from_file_location('local_route', ROUTE_PY)
 route_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(route_mod)
 
-ALL_MODELS = ['qwen3.5:4b', 'qwen2.5-coder:7b']
+ALL_MODELS = ['scrum-qwen3.5:4b', 'scrum-qwen2.5-coder:7b']
 
 
 class FakeOllama(BaseHTTPRequestHandler):
@@ -38,6 +38,10 @@ class FakeOllama(BaseHTTPRequestHandler):
 
 
 TRIAL = {'scrum-spec-writer': 'trial', 'scrum-builder': 'trial'}
+# The routing logic is tested against these trust levels, not whatever routing.json says today.
+BASE_ROLES = {'estimator': 'approved', 'scrum-digest-reader': 'approved', 'codex-review': 'approved',
+              'scrum-spec-writer': 'off', 'scrum-builder': 'off'}
+LIVE_CONFIG = route_mod.CONFIG
 
 
 def tags(*names):
@@ -67,6 +71,7 @@ class RouteTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop('SCRUM_ROUTE', None)
+        self.config()
 
     def job(self, job_id, lane='standard', parent=None, points=None):
         self.jobs.append({'id': job_id, 'lane': lane, 'parent': parent})
@@ -108,8 +113,8 @@ class RouteTests(unittest.TestCase):
         os.utime(log, (stamp, stamp))
 
     def config(self, **roles):
-        data = json.loads(Path(route_mod.CONFIG).read_text())
-        data['roles'].update(roles)
+        data = json.loads(Path(LIVE_CONFIG).read_text())
+        data['roles'] = {**BASE_ROLES, **roles}
         path = self.root / 'routing.json'
         path.write_text(json.dumps(data))
         p = patch.object(route_mod, 'CONFIG', str(path))
@@ -121,14 +126,15 @@ class RouteTests(unittest.TestCase):
 
     # 1
     def test_routing_json_shape(self):
-        data = json.loads((ROUTE_PY.parent / 'routing.json').read_text())
+        data = json.loads(Path(LIVE_CONFIG).read_text())
         self.assertEqual(set(data), {'roles', 'models', 'thresholds'})
-        self.assertEqual(data['roles'], {'estimator': 'approved', 'scrum-digest-reader': 'approved',
-                                         'codex-review': 'approved', 'scrum-spec-writer': 'off',
+        # Digest reader and Codex review are off: local 4-7B notes invent counts, local Codex emits tool calls as text.
+        self.assertEqual(data['roles'], {'estimator': 'approved', 'scrum-digest-reader': 'off',
+                                         'codex-review': 'off', 'scrum-spec-writer': 'off',
                                          'scrum-builder': 'off'})
-        self.assertEqual(data['models'], {'estimator': 'qwen3.5:4b', 'scrum-digest-reader': 'qwen3.5:4b',
-                                          'scrum-spec-writer': 'qwen2.5-coder:7b',
-                                          'scrum-builder': 'qwen2.5-coder:7b', 'codex-review': 'qwen2.5-coder:7b'})
+        self.assertEqual(data['models'], {'estimator': 'scrum-qwen3.5:4b', 'scrum-digest-reader': 'scrum-qwen3.5:4b',
+                                          'scrum-spec-writer': 'scrum-qwen2.5-coder:7b',
+                                          'scrum-builder': 'scrum-qwen2.5-coder:7b', 'codex-review': 'scrum-qwen2.5-coder:7b'})
         self.assertEqual(data['thresholds'], {'codex_5h': 85, 'codex_weekly': 90, 'spec_writer_max_points': 2})
 
     # 2
@@ -156,7 +162,7 @@ class RouteTests(unittest.TestCase):
         data = json.loads(out.stdout)
         self.assertEqual(set(data), {'runner', 'model', 'why'})
         self.assertEqual(data['runner'], 'local')
-        self.assertEqual(data['model'], 'qwen3.5:4b')
+        self.assertEqual(data['model'], 'scrum-qwen3.5:4b')
         self.assertIsInstance(data['why'], str)
 
     # 3
@@ -167,7 +173,7 @@ class RouteTests(unittest.TestCase):
     def test_builder_fast_lane_local(self):
         self.config(**TRIAL)
         result = route_mod.route('scrum-builder', self.job('003-x', lane='fast'))
-        self.assertEqual((result['runner'], result['model']), ('local', 'qwen2.5-coder:7b'))
+        self.assertEqual((result['runner'], result['model']), ('local', 'scrum-qwen2.5-coder:7b'))
 
     def test_builder_standard_lane_cloud(self):
         self.config(**TRIAL)
@@ -194,7 +200,7 @@ class RouteTests(unittest.TestCase):
 
     def test_approved_estimator_local(self):
         result = route_mod.route('estimator')
-        self.assertEqual((result['runner'], result['model']), ('local', 'qwen3.5:4b'))
+        self.assertEqual((result['runner'], result['model']), ('local', 'scrum-qwen3.5:4b'))
 
     # 4
     def test_ollama_down_cloud(self):
@@ -220,10 +226,10 @@ class RouteTests(unittest.TestCase):
         self.assertIn('timeout', result['why'])
 
     def test_model_missing_from_tags_cloud(self):
-        self.handler.body = tags('qwen2.5-coder:7b')
+        self.handler.body = tags('scrum-qwen2.5-coder:7b')
         result = route_mod.route('estimator')
         self.assertEqual(result['runner'], 'cloud')
-        self.assertIn('qwen3.5:4b', result['why'])
+        self.assertIn('scrum-qwen3.5:4b', result['why'])
         self.assertIn('missing', result['why'])
 
     def test_cloud_tagged_model_refused(self):
@@ -247,7 +253,7 @@ class RouteTests(unittest.TestCase):
     def test_codex_5h_90_local(self):
         self.rollout(primary=90.0, secondary=10.0)
         result = route_mod.route('codex-review')
-        self.assertEqual((result['runner'], result['model']), ('local', 'qwen2.5-coder:7b'))
+        self.assertEqual((result['runner'], result['model']), ('local', 'scrum-qwen2.5-coder:7b'))
 
     def test_codex_weekly_95_local(self):
         self.rollout(primary=10.0, secondary=95.0)
@@ -348,14 +354,14 @@ class RouteTests(unittest.TestCase):
     # 8
     def test_record_appends_jsonl(self):
         job = self.job('014-x')
-        self.assertEqual(route_mod.main(['record', job, 'codex-review', 'local', 'qwen2.5-coder:7b', '12.5', 'ok']), 0)
+        self.assertEqual(route_mod.main(['record', job, 'codex-review', 'local', 'scrum-qwen2.5-coder:7b', '12.5', 'ok']), 0)
         self.assertEqual(route_mod.main(['record', job, 'codex-review', 'skip', 'none', '0', 'skipped']), 0)
         lines = [json.loads(x) for x in Path(job, 'routing.log').read_text().splitlines()]
         self.assertEqual(len(lines), 2)
         first = dict(lines[0])
         ts = first.pop('ts')
         self.assertEqual(datetime.fromisoformat(ts).utcoffset(), timedelta(0))
-        self.assertEqual(first, {'role': 'codex-review', 'runner': 'local', 'model': 'qwen2.5-coder:7b',
+        self.assertEqual(first, {'role': 'codex-review', 'runner': 'local', 'model': 'scrum-qwen2.5-coder:7b',
                                  'duration_s': 12.5, 'outcome': 'ok'})
         self.assertEqual(lines[1]['duration_s'], 0.0)
         self.assertEqual(lines[1]['runner'], 'skip')

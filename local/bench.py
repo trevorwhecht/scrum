@@ -24,7 +24,6 @@ sys.path.insert(0, str(HERE.parent / 'skills' / 'trevskills-scrum'))
 import route  # noqa: E402
 from serve import ESTIMATE_PROMPT  # noqa: E402
 
-CONTEXT = 16384
 POINTS = (1, 2, 3, 5, 8, 13)
 TASKS = ('estimate', 'summary', 'edit')
 ITEM = 'Add a --json flag to board.py status that prints the board as one JSON object instead of a table.'
@@ -115,9 +114,7 @@ def call(base, path, body=None, timeout=600):
 
 
 def chat(base, model, prompt):
-    body = {'model': model, 'stream': False, 'options': {'num_ctx': CONTEXT},
-            'messages': [{'role': 'user', 'content': prompt}]}
-    return call(base, '/api/chat', body)['message']['content']
+    return route.chat(model, prompt, base)
 
 
 def ps_entry(base, model):

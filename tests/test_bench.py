@@ -84,7 +84,7 @@ class BenchServerTests(unittest.TestCase):
                                       'm2 estimate 2/2', 'm2 summary 2/2', 'm2 edit 2/2'])
         chats = [body for method, path, body in OllamaStub.requests if path == '/api/chat']
         self.assertEqual(len(chats), 12)
-        self.assertTrue(all(b['stream'] is False and b['options']['num_ctx'] == 16384 for b in chats))
+        self.assertTrue(all(b['stream'] is False and b['think'] is False and 'options' not in b for b in chats))
         self.assertIn('Item: Add a --json flag', chats[0]['messages'][0]['content'])
 
     def test_one_failed_run_exits_one(self):
@@ -95,7 +95,7 @@ class BenchServerTests(unittest.TestCase):
         self.assertEqual(lines[1], 'm1 estimate 0/1')
 
     def test_defaults_are_routing_models_deduplicated(self):
-        self.assertEqual(bench.default_models(), ['qwen3.5:4b', 'qwen2.5-coder:7b'])
+        self.assertEqual(bench.default_models(), ['scrum-qwen3.5:4b', 'scrum-qwen2.5-coder:7b'])
 
     def test_unreachable_or_missing_or_cloud_model_exits_two(self):
         code, lines, err = self.run_main(['--model', 'absent'])

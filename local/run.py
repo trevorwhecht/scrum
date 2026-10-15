@@ -12,6 +12,21 @@ HERE = Path(__file__).resolve().parent
 MODEL = os.environ.get('SCRUM_LOCAL_MODEL', 'scrum-local')
 CONTEXT = int(os.environ.get('SCRUM_LOCAL_CONTEXT', '65536'))
 BASE = os.environ.get('SCRUM_OLLAMA_URL', 'http://127.0.0.1:11434').rstrip('/')
+# --bare drops settings hooks, so the global git/prisma safety hook is restated as deny rules on -p runs.
+SAFETY_DENY = ['Bash(git reset:*)', 'Bash(git rebase:*)', 'Bash(git -C * reset:*)', 'Bash(git -C * rebase:*)',
+               'Bash(git push --force:*)', 'Bash(git push -f:*)', 'Bash(git push --force-with-lease:*)',
+               'Bash(*prisma migrate reset*)', 'Bash(*--accept-data-loss*)', 'Bash(*--force-reset*)',
+               'Bash(*prisma db push*)']
+
+
+def user_deny():
+    """permissions.deny from ~/.claude/settings.json; [] when it is missing or unreadable."""
+    try:
+        deny = json.loads((Path.home() / '.claude' / 'settings.json').read_text())['permissions']['deny']
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    return deny if isinstance(deny, list) else []
+
 
 def preflight(base: str, model: str, context: int) -> None:
     """Load `model` the way the compat endpoint will, then refuse if Ollama gave it less than `context`."""
@@ -71,8 +86,14 @@ def main():
         for key in ('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
             settings[key] = '0'
         env.update(settings)
-        command = [env['SCRUM_REAL_CLAUDE'], *without_model(args), '--model', MODEL,
-                   '--settings', json.dumps({'env': settings})]
+        extra, config = [], {'env': settings}
+        if '-p' in args or '--print' in args:
+            # Claude Code's own prompt, CLAUDE.md, rules, hooks and plugins overflow a 32K local context;
+            # --bare skips them, so the prompt must carry everything the run needs.
+            extra = ['--bare', '--strict-mcp-config']
+            config['permissions'] = {'deny': user_deny() + SAFETY_DENY}
+        command = [env['SCRUM_REAL_CLAUDE'], *extra, *without_model(args), '--model', MODEL,
+                   '--settings', json.dumps(config)]
     elif mode == 'codex':
         command = [env['SCRUM_REAL_CODEX'], '--oss', '--local-provider', 'ollama',
                    '-m', MODEL, '-c', f'model_context_window={CONTEXT}',
