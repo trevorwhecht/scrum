@@ -18,6 +18,9 @@ class BoardTest(unittest.TestCase):
         guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
         guard.start()
         self.addCleanup(guard.stop)
+        usage = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})  # no pacing
+        usage.start()
+        self.addCleanup(usage.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

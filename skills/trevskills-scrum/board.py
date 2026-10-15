@@ -23,7 +23,8 @@
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/estimate) to backlog.md, write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
-  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec), print
+  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
+                                   by ~/.claude/usage.json), print
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child, print
                                    {"id","children"} (id null = nothing open); `ready <id>` then schedules them
@@ -33,6 +34,7 @@
   board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
                                    needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
+  board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
@@ -651,7 +653,72 @@ IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage 
 BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
-RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent never has more children than this in progress at once
+RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
+WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
+USAGE_FRESH = 300  # seconds; an older usage.json means no status line is running, so no pacing
+
+
+def usage_path():
+    return Path(os.environ.get("SCRUM_USAGE") or Path.home() / ".claude" / "usage.json")
+
+
+def read_usage():
+    try:
+        u = json.loads(usage_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return u if isinstance(u, dict) else None
+
+
+def is_num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def pace_cap(usage, now, base):
+    """The in-progress cap for this `ready` call from usage.json, or None (no pacing, so base stands). Each usable
+    window is projected to its reset at the current burn rate; the highest projection P picks the tier."""
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    at = usage.get("written_at") if isinstance(limits, dict) else None
+    if not is_num(at) or now - at > USAGE_FRESH:
+        return None
+    projected = []
+    for name, length in WINDOWS.items():
+        w = limits.get(name)
+        used, resets = (w.get("used_percentage"), w.get("resets_at")) if isinstance(w, dict) else (None, None)
+        if not (is_num(used) and 0 <= used <= 100 and is_num(resets) and resets > now):
+            continue
+        left = resets - now
+        elapsed = length - left
+        if elapsed < length / 10:  # a few minutes of data extrapolate wildly
+            continue
+        projected.append(used + used / elapsed * left)
+    if not projected:
+        return None
+    p = max(projected)
+    if p < 60:
+        return None if base is None else base + 2
+    if p < 100:
+        return base
+    if p < 125:
+        return 2 if base is None else min(base, 2)
+    return 1
+
+
+def cmd_statusline(text):
+    """Claude Code's status line: save stdin's rate_limits to usage.json (temp file + os.replace), return the line."""
+    try:
+        limits = json.loads(text).get("rate_limits")
+    except (ValueError, AttributeError):
+        return ""
+    if not isinstance(limits, dict):
+        return ""  # no rate_limits (yet): leave the old file alone
+    path = usage_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # pid: several sessions may write at once
+    tmp.write_text(json.dumps({"rate_limits": limits, "written_at": int(time.time())}))
+    os.replace(tmp, path)
+    return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
+                      if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
 
 def likely_files(spec_text):
@@ -791,7 +858,7 @@ def cmd_ready(root, parent_id):
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
         stage = {k["id"]: k["stage"] for k in kids}
-        runall = parent.get("lane") == "runall"  # aborted children count as finished, and at most 3 run at once
+        runall = parent.get("lane") == "runall"  # aborted children count as finished, and a count cap always applies
         reason = parent.get("reason") or ""
         # A legacy needs-human parent (blocked before WAITING_ON existed) is re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED))
@@ -801,12 +868,16 @@ def cmd_ready(root, parent_id):
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if k["stage"] not in IDLE]
         alone = lambda k: not k.get("parallel") or not files[k["id"]]  # unknown Likely files = may touch anything
+        # Usage pacing only gates new claims; it is always >= 1, so with nothing in progress one child still starts.
+        cap = pace_cap(read_usage(), time.time(), RUNALL_MAX_IN_PROGRESS if runall else None)
+        if runall and cap is None:
+            cap = RUNALL_MAX_IN_PROGRESS
         ready = []
         for k in kids if parent["stage"] == "running" or legacy else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
-            if runall and len(busy) >= RUNALL_MAX_IN_PROGRESS:
+            if cap is not None and len(busy) >= cap:
                 continue
             # parallel=no, or no readable Likely files, runs alone; anything else never beside such a sibling
             # or one sharing a Likely file.
@@ -1333,6 +1404,7 @@ def main(argv=None):
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
+    sub.add_parser("statusline")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
@@ -1353,6 +1425,14 @@ def main(argv=None):
             cmd_hook(json.loads(sys.stdin.read()), caller_tty())
         except (Exception, SystemExit):
             pass
+        return 0
+    if a.cmd == "statusline":
+        # Never show a traceback in the status line: an empty line and exit 0 whatever happens.
+        try:
+            line = cmd_statusline(sys.stdin.read())
+        except (Exception, SystemExit):
+            line = ""
+        print(line)
         return 0
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title))
