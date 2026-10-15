@@ -47,6 +47,11 @@ class ServeTest(unittest.TestCase):
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
+    def setUp(self):
+        guard = mock.patch.object(self.serve.board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
+
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
@@ -2195,6 +2200,9 @@ class DigestTest(unittest.TestCase):
         AiSettingsTest.setUp(self)
         self.scrum = self.reg / "scrum"
         self.board = self.serve.board
+        guard = mock.patch.object(self.board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
         self.addCleanup(self.serve.RUNS.pop, "reg/digest", None)
 
     def done_job(self, title="shipped"):

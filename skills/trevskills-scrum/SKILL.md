@@ -295,6 +295,7 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
    - **Path A (on `$DEFAULT`):** done when `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` is empty and `git -C "$REPO" rev-list @{u}..HEAD` prints nothing (an error, e.g. no upstream, counts as unpushed).
    - **Path B (any other branch):** the same test, then `B set $ID pr=<url>` with the url from `gh pr view --json url`.
    - Both pass: `B set $ID stage=done reason=` (board.py plays the done sound). If commitpush stopped, the test fails, or Path B finds no PR, run `B set $ID stage=needs-human reason='lilguy: commitpush did not finish — <one line why>. Fix: finish /trevskills-commitpush by hand in the main checkout, or discard the change.'` and stop.
+   - If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.
 6. End with the **Final report** (job id, stage, PR URL on Path B, and for needs-human the reason).
 
 ## Check gate
@@ -401,6 +402,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
           No match is `verify failed`.
         - With no verify string (behavioural): it passes only when the PID from `lsof -ti tcp:<port> -sTCP:LISTEN` after the start differs from the one recorded before the kill, and `curl -sfL localhost:<port>/<path>` exits 0. Either failing is `verify failed`; passing is reported as `restarted + verified (behavioural)`.
    - **Mark done, only now.** If the guard, the fast-forward, the restart or the verify failed, run `B set $ID stage=done reason='merged, not live: <why>'`, where `<why>` is `not on <default>`, `uncommitted changes`, `fast-forward failed`, `restart failed`, `restart command not allowed` or `verify failed`. Otherwise (including `Restart: none` after a successful fast-forward) run `B set $ID stage=done reason=`. The dashboard card shows the `merged, not live` reason as a warning; Trevor clears it with `B set <id> reason=` once he has made the change live.
+   - If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 

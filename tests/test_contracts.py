@@ -699,6 +699,13 @@ class ContractTest(unittest.TestCase):
         self.assertLess(approve.index("Uncommitted change in"), approve.index("human-approval.md"))
         self.assertIn("--untracked-files=no", self.section(text, "7. **Clean up:**", "## Resuming the builder"))
 
+    def test_done_refusal_fallback_in_skill(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        line = ("If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. "
+                "Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.")
+        self.assertIn(line, self.section(text, "7. **Clean up:**", "## Resuming the builder"))
+        self.assertIn(line, self.section(text, "5. **Land.**", "6. End with the **Final report**"))
+
     def test_done_only_when_live(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
