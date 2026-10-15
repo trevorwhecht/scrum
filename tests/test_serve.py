@@ -96,6 +96,64 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(items[0]["text"], "Dark mode")
 
+    # --- GET /api/p/<project>/roadmap ---
+    def roadmap(self, text):
+        (self.root / "roadmap.md").write_text(text)
+        self.addCleanup(lambda: (self.root / "roadmap.md").unlink(missing_ok=True))
+
+    def raw_get(self, path):
+        """(status, parsed JSON body) for error responses too; req() drops the body of a non-2xx."""
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read())
+
+    def test_roadmap_endpoint_without_roadmap_is_null(self):
+        (self.root / "roadmap.md").unlink(missing_ok=True)
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap"), (200, None))
+
+    def test_roadmap_endpoint_returns_roadmap_show(self):
+        done, running = self.job("Roadmap step one"), self.job("Roadmap step two")
+        self.roadmap("ROADMAP: speed pass\n"
+                     "## P1 Split files\n"
+                     f"- [x] S1 bigboy {done}: Split the builder\n"
+                     f"- [~] S2 standard {running}: Move state into hooks\n"
+                     "- [ ] S3 standard: Split the designer\n"
+                     "## P2 Speed\n"
+                     "- [ ] S1 standard: Profile the endpoint\n")
+        want = {"name": "speed pass",
+                "phases": [{"n": 1, "title": "Split files", "steps": [
+                               {"n": 1, "kind": "bigboy", "job": done, "status": "done", "request": "Split the builder"},
+                               {"n": 2, "kind": "standard", "job": running, "status": "running",
+                                "request": "Move state into hooks"},
+                               {"n": 3, "kind": "standard", "job": None, "status": "todo", "request": "Split the designer"}]},
+                           {"n": 2, "title": "Speed", "steps": [
+                               {"n": 1, "kind": "standard", "job": None, "status": "todo",
+                                "request": "Profile the endpoint"}]}],
+                "current": {"p": 1, "s": 2},
+                "next": {"p": 1, "s": 3, "kind": "standard", "request": "Split the designer"},
+                "blocker": None}
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap"), (200, want))
+        self.patch_board(running, stage="needs-human", reason="tests fail on CI")
+        want["blocker"] = {"job": running, "reason": "tests fail on CI"}
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap"), (200, want))
+
+    def test_roadmap_endpoint_malformed_is_422(self):
+        self.roadmap("Not a roadmap\n## P1 A\n- [ ] S1 standard: a\n")
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap"),
+                         (422, {"error": "roadmap.md line 1: first line must be 'ROADMAP: <name>'"}))
+        self.roadmap("ROADMAP: x\n## P1 A\nnot a step\n")
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap"),
+                         (422, {"error": "roadmap.md line 3: not a step "
+                                         "'- [ |~|x|!] S<n> <bigboy|standard>[ <job-id>]: <request>': 'not a step'"}))
+        self.roadmap("ROADMAP: x\n## P1 A\n- [ ] S1 standard: a\n")  # the server is still answering
+        self.assertEqual(self.raw_get("/api/p/repo/roadmap")[0], 200)
+
+    def test_roadmap_endpoint_unknown_project_404(self):
+        self.assertEqual(self.raw_get("/api/p/nope/roadmap"), (404, {"error": "no such project"}))
+
     def test_add_triggers_estimate_that_lands_in_backlog(self):
         code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": "Export PDF"})
         self.assertEqual(code, 200)
