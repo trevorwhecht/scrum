@@ -1117,7 +1117,7 @@ def cmd_hook(event, tty):
 
 
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
-WATCHED = ("build", "check", "review", "approve")
+WATCHED = ("spec", "build", "check", "review", "approve")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 # Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
@@ -1140,8 +1140,15 @@ def cmd_pause(root, job_id):
         return [j["id"] for j in hit]
 
 
+def _is_claude(command):
+    """True when claude is the program: argv0 named `claude`, a bare `claude` token, or the claude-code package.
+    A path that merely passes through `.claude/` (a worktree's dev server) does not count."""
+    toks = command.split()
+    return bool(toks) and (os.path.basename(toks[0]) == "claude" or "claude" in toks or "claude-code" in command)
+
+
 def session_alive_fn():
-    """One `ps` scan; a job is alive when a line containing `claude` has its id or runs on its recorded tty.
+    """One `ps` scan; a job is alive when a claude process line has its id or runs on its recorded tty.
     When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
     try:
         r = subprocess.run(["ps", "-axo", "tty=,command="], capture_output=True, text=True, timeout=5)
@@ -1150,7 +1157,7 @@ def session_alive_fn():
     out = r.stdout or ""
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
-    lines = [l.strip() for l in out.splitlines() if "claude" in l]
+    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 1) + [""])[1])]  # drop the tty field
     ttys = {l.split(None, 1)[0] for l in lines if l}
     # ponytail: a reused tty or an id inside another command reads as alive; an accepted miss, never a false flag
     return lambda job: (job.get("tty") or "") in ttys or any(job["id"] in l for l in lines)
