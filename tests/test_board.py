@@ -1185,7 +1185,7 @@ class BoardTest(unittest.TestCase):
         live = self.aged("Live", 31, stage="build")
         paused = self.aged("Paused", 31, stage="check", waiting="question: which one?")
         others = [self.aged(f"In {s}", 31, stage=s)
-                  for s in ("spec", "merging", "running", "waiting", "needs-human", "done", "aborted")]
+                  for s in ("merging", "running", "waiting", "needs-human", "done", "aborted")]
         before = self.jobs()
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
         self.assertEqual(self.jobs(), before)
@@ -1195,7 +1195,37 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
         self.assertEqual(self.jobs(), flagged)
         self.assertEqual([self.get(j)["stage"] for j in (fresh, live, paused)], ["review", "build", "check"])
-        self.assertEqual(len(others), 7)
+        self.assertEqual(len(others), 6)
+
+    def test_watchdog_flags_stalled_spec_job(self):
+        fresh = self.aged("Fresh spec", 1, stage="spec")
+        stuck = self.aged("Stuck spec", 31, stage="spec")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [stuck])
+        self.assertEqual(self.get(stuck)["stage"], "needs-human")
+        self.assertEqual(self.get(stuck)["reason"],
+                         "stalled in spec: no board update for 30 min and no live session. Fix: click Resume.")
+        self.assertEqual(self.get(fresh)["stage"], "spec")
+
+    def test_session_alive_ignores_claude_dir_paths(self):
+        lines = ("??      node /Users/t/onewitharts/.claude/worktrees/scrum-024-x/node_modules/.bin/next dev -p 3024\n"
+                 "ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
+                 "ttys004 /Users/t/.local/bin/claude --resume\n"
+                 "??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
+                 "??      python3 local/run.py claude -p /trevskills-scrum start 009-local\n"
+                 "??      node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js start 010-node\n")
+        ps = mock.Mock(stdout=lines, returncode=0)
+        with mock.patch.object(board.subprocess, "run", return_value=ps):
+            alive = board.session_alive_fn()
+            self.assertFalse(alive({"id": "024-x", "tty": None}))
+            self.assertFalse(alive({"id": "011-x", "tty": "ttys009"}))
+            self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004"}))
+            self.assertTrue(alive({"id": "005-headless", "tty": None}))
+            self.assertTrue(alive({"id": "009-local", "tty": None}))
+            self.assertTrue(alive({"id": "010-node", "tty": None}))
+        job_id = self.aged("Orphan dev server", 31, stage="build")
+        orphan = ps.stdout.replace("scrum-024-x", f"scrum-{job_id}")
+        with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=orphan, returncode=0)):
+            self.assertEqual(board.cmd_watchdog(self.root), [job_id])
 
     def test_session_alive_matches_id_or_tty_and_fails_safe(self):
         lines = ("ttys003 -zsh\n"
