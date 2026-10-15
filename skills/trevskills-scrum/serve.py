@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
-files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done).
+files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done,
+resume). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees.
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
@@ -96,10 +97,37 @@ def setup_done(project, root, job_id):
             job.update(setup="done", updatedAt=board.now())
     if not ok:
         return 409, {"error": "job isn't a BigBoy child waiting on Human setup"}
-    out = board.cmd_ready(root, job["parent"])
+    return 200, {"id": job_id, **start_ready(project, root, job["parent"])}
+
+
+def start_ready(project, root, parent_id):
+    """Claim the parent's startable children and start each one headless. Returns cmd_ready's output."""
+    out = board.cmd_ready(root, parent_id)
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
-    return 200, {"id": job_id, **out}
+    return out
+
+
+def watchdog_tick():
+    """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
+    whatever siblings are now ready. One project's failure never stops the others."""
+    for project, repo in board.projects().items():
+        try:
+            root = repo / "scrum"
+            flagged = set(board.cmd_watchdog(root))
+            if not flagged:
+                continue
+            jobs = json.loads((root / "board.json").read_text())["jobs"]
+            for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
+                start_ready(project, root, parent)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+
+
+def watchdog_loop():
+    while True:
+        watchdog_tick()
+        time.sleep(60)
 
 
 def run_estimate(argv, root, env):
@@ -1567,7 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen|setup-done))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen|setup-done|resume))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1638,6 +1666,12 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": new_id, "reopened_from": job_id}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
+        if action == "resume":  # only a job the watchdog flagged; never one stopped for any other reason
+            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
+                    or running(project, job_id):
+                return 409, {"error": "job isn't stalled, or is already running"}
+            spawn(project, root, job_id, action, f"/trevskills-scrum resume {job_id}")
+            return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}
         if action == "approve":
@@ -1674,6 +1708,7 @@ def main():
     if a.estimate is not None:
         return estimate(a.dir.resolve(), a.estimate)
     server = make_server(a.port)
+    threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}", flush=True)
     try:

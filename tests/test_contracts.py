@@ -295,6 +295,21 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**BigBoy lane**", cleanup)
         self.assertIn("parent", cleanup)
 
+    def test_skill_documents_resume_and_watchdog(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("resume", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        commands = self.section(text, "## Commands", "## New job")
+        resume = next(l for l in commands.splitlines() if "**`/trevskills-scrum resume <id>`**" in l)
+        for phrase in ("stalled in ", "**Check gate**", "**Review** step 4", "**Approve** step 1", "**Resuming the builder**",
+                       "**Fast lane**"):
+            self.assertIn(phrase, resume, phrase)
+        nxt = next(l for l in commands.splitlines() if "**`/trevskills-scrum next`**" in l)
+        self.assertIn("B watchdog", nxt)
+        approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
+        self.assertIn("`stalled`", approve)
+        runall = self.section(text, "## Run all", "## Fast lane")
+        self.assertIn("B watchdog", runall)
+
     def test_skill_documents_lilguy_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("lilguy", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
