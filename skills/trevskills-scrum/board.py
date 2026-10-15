@@ -8,6 +8,12 @@
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
                                    backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"}
+  board.py roadmap-show            print roadmap.md as {"name","phases","current","next","blocker"} (null = no roadmap)
+  board.py roadmap-link <P> <S> <id>  write the job id into step P/S and mark it [~] (also resumes a [!] step)
+  board.py roadmap-next <id>       mark the step holding <id> [x], print the next [ ] step {"p","s","kind","request"}
+                                   or null; a job in no step (or no roadmap.md) changes nothing
+  board.py roadmap-insert <P> <afterS> <bigboy|standard> <request>  add a [ ] step after S, renumber the rest of P
+  board.py roadmap-stop <id> <reason>  mark the step holding <id> [!] and log the reason
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
@@ -1110,6 +1116,186 @@ def cmd_watchdog(root, alive=None):
     return flagged
 
 
+# --- roadmap.md: ordered phases of bigboy/standard steps; the orchestrator's resume doc ---
+ROADMAP_STEP_RE = re.compile(r"^- \[(?P<status>[ ~x!])\] S(?P<n>\d+) (?P<kind>bigboy|standard)"
+                             r"(?: (?P<job>\d{3,}-[a-z0-9-]+))?: (?P<request>.*)$")
+ROADMAP_PHASE_RE = re.compile(r"^## P(\d+) (.+)$")
+ROADMAP_BOX = {" ": "todo", "~": "running", "x": "done", "!": "stopped"}
+ROADMAP_KINDS = ("bigboy", "standard")
+
+
+def parse_roadmap(lines):
+    """The parsed roadmap; each phase and step remembers its line index. SystemExit names a malformed line."""
+    first = next((i for i, line in enumerate(lines) if line.strip()), 0)
+    m = re.match(r"^ROADMAP: (.*\S)", lines[first].strip() if lines else "")
+    if not m:
+        raise SystemExit(f"roadmap.md line {first + 1}: first line must be 'ROADMAP: <name>'")
+    rm, phase = {"name": m.group(1), "phases": []}, None
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            pm = ROADMAP_PHASE_RE.match(line)
+            phase = pm and {"n": int(pm.group(1)), "title": pm.group(2).strip(), "line": i, "steps": []}
+            if phase:
+                rm["phases"].append(phase)
+        elif phase is not None and line.strip():
+            if not (sm := ROADMAP_STEP_RE.match(line)):
+                raise SystemExit(f"roadmap.md line {i + 1}: not a step "
+                                 f"'- [ |~|x|!] S<n> <bigboy|standard>[ <job-id>]: <request>': {line[:80]!r}")
+            phase["steps"].append({"n": int(sm["n"]), "kind": sm["kind"], "job": sm["job"],
+                                   "status": ROADMAP_BOX[sm["status"]], "request": sm["request"].strip(), "line": i})
+    return rm
+
+
+def read_roadmap(root):
+    """(lines, roadmap), or None when roadmap.md is missing. Split on \\n so writing the lines back is byte-exact."""
+    path = Path(root) / "roadmap.md"
+    if not path.is_file():
+        return None
+    lines = path.read_text(encoding="utf-8").split("\n")
+    return lines, parse_roadmap(lines)
+
+
+def write_roadmap(root, lines):
+    path = Path(root) / "roadmap.md"
+    tmp = path.with_name("roadmap.md.tmp")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def roadmap_steps(rm):
+    return [(ph, st) for ph in rm["phases"] for st in ph["steps"]]
+
+
+def roadmap_next_step(rm):
+    """The first todo step as {p, s, kind, request}, or None."""
+    return next(({"p": ph["n"], "s": st["n"], "kind": st["kind"], "request": st["request"]}
+                 for ph, st in roadmap_steps(rm) if st["status"] == "todo"), None)
+
+
+def roadmap_show(root):
+    """The roadmap for the orchestrator, serve.py and the dashboard, or None when there is no roadmap.md."""
+    got = read_roadmap(root)
+    if got is None:
+        return None
+    rm, steps = got[1], roadmap_steps(got[1])
+    cur = next(((ph, st) for ph, st in steps if st["status"] in ("running", "stopped")), None) \
+        or next(((ph, st) for ph, st in steps if st["status"] == "todo"), None)
+    blocker = None
+    if cur and cur[1]["job"]:
+        job_id, jobs = cur[1]["job"], read_board(root)["jobs"]
+        hit = next((j for j in jobs if j.get("id") == job_id and j.get("stage") == "needs-human"), None) \
+            or next((j for j in jobs if j.get("parent") == job_id and j.get("stage") == "needs-human"), None)
+        blocker = hit and {"job": hit["id"], "reason": hit.get("reason") or ""}
+    return {"name": rm["name"],
+            "phases": [{"n": ph["n"], "title": ph["title"],
+                        "steps": [{k: st[k] for k in ("n", "kind", "job", "status", "request")} for st in ph["steps"]]}
+                       for ph in rm["phases"]],
+            "current": cur and {"p": cur[0]["n"], "s": cur[1]["n"]}, "next": roadmap_next_step(rm), "blocker": blocker}
+
+
+def format_step(st):
+    box = next(k for k, v in ROADMAP_BOX.items() if v == st["status"])
+    return f"- [{box}] S{st['n']} {st['kind']}" + (f" {st['job']}" if st["job"] else "") + f": {st['request']}"
+
+
+def roadmap_log(lines, p, s, event):
+    """Append one log line at the end of ## Log, creating the section at the end of the file when missing."""
+    entry = f"- {datetime.now().strftime('%Y-%m-%d %H:%M')} P{p} S{s} {clean(event, ITEM_MAX)}"
+    head = next((i for i, line in enumerate(lines) if line.rstrip() == "## Log"), None)
+    if head is None:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.extend(["", "## Log", entry, ""])
+        return
+    end = next((i for i in range(head + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    while end > head + 1 and not lines[end - 1].strip():
+        end -= 1
+    lines.insert(end, entry)
+
+
+def roadmap_locked(root):
+    """(lines, roadmap) under the caller's lock; SystemExit when there is no roadmap.md."""
+    got = read_roadmap(root)
+    if got is None:
+        raise SystemExit(f"no roadmap.md in {root}")
+    return got
+
+
+def roadmap_job_step(rm, job_id):
+    return next(((ph, st) for ph, st in roadmap_steps(rm) if st["job"] == job_id), None)
+
+
+def cmd_roadmap_link(root, p, s, job_id):
+    """Write job_id into step P/S and mark it running (also resumes a stopped step)."""
+    check_id(job_id)
+    with locked_board(root):
+        lines, rm = roadmap_locked(root)
+        st = next((st for ph, st in roadmap_steps(rm) if ph["n"] == p and st["n"] == s), None)
+        if st is None:
+            raise SystemExit(f"roadmap.md has no step P{p} S{s}")
+        st.update(job=job_id, status="running")
+        lines[st["line"]] = format_step(st)
+        roadmap_log(lines, p, s, f"started: {job_id}")
+        write_roadmap(root, lines)
+
+
+def cmd_roadmap_next(root, job_id):
+    """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing."""
+    if not (Path(root) / "roadmap.md").is_file():
+        return None
+    with locked_board(root):
+        lines, rm = roadmap_locked(root)
+        hit = roadmap_job_step(rm, job_id)
+        if hit is None:
+            return None
+        ph, st = hit
+        st["status"] = "done"
+        lines[st["line"]] = format_step(st)
+        roadmap_log(lines, ph["n"], st["n"], f"done: {job_id}")
+        write_roadmap(root, lines)
+        return roadmap_next_step(parse_roadmap(lines))
+
+
+def cmd_roadmap_insert(root, p, after, kind, request):
+    """Add a todo step S<after+1> to phase P and renumber the later steps of that phase by position."""
+    request = clean(request, ITEM_MAX)
+    if kind not in ROADMAP_KINDS:
+        raise SystemExit(f"bad kind {kind!r}; allowed: {', '.join(ROADMAP_KINDS)}")
+    if not request:
+        raise SystemExit("roadmap step request is empty")
+    with locked_board(root):
+        lines, rm = roadmap_locked(root)
+        ph = next((ph for ph in rm["phases"] if ph["n"] == p), None)
+        if ph is None:
+            raise SystemExit(f"roadmap.md has no phase P{p}")
+        steps = ph["steps"]
+        if not 0 <= after <= len(steps):
+            raise SystemExit(f"roadmap.md P{p} has {len(steps)} steps; cannot insert after S{after}")
+        for st in steps[after:]:
+            st["n"] += 1
+            lines[st["line"]] = format_step(st)
+        at = steps[after - 1]["line"] + 1 if after else steps[0]["line"] if steps else ph["line"] + 1
+        new = {"n": after + 1, "kind": kind, "job": None, "status": "todo", "request": request}
+        lines.insert(at, format_step(new))
+        roadmap_log(lines, p, after + 1, f"inserted: {request}")
+        write_roadmap(root, lines)
+    return {"p": p, "s": after + 1, "kind": kind, "request": request}
+
+
+def cmd_roadmap_stop(root, job_id, reason):
+    """Mark job_id's step stopped (needs a human) and log the reason."""
+    with locked_board(root):
+        lines, rm = roadmap_locked(root)
+        hit = roadmap_job_step(rm, job_id)
+        if hit is None:
+            raise SystemExit(f"job {job_id!r} is in no roadmap.md step")
+        ph, st = hit
+        st["status"] = "stopped"
+        lines[st["line"]] = format_step(st)
+        roadmap_log(lines, ph["n"], st["n"], f"stopped: {reason}")
+        write_roadmap(root, lines)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", type=Path, default=Path("scrum"))
@@ -1121,6 +1307,20 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("roadmap-show")
+    rl = sub.add_parser("roadmap-link")
+    rl.add_argument("p", type=int)
+    rl.add_argument("s", type=int)
+    rl.add_argument("id")
+    sub.add_parser("roadmap-next").add_argument("id")
+    ri = sub.add_parser("roadmap-insert")
+    ri.add_argument("p", type=int)
+    ri.add_argument("after", type=int)
+    ri.add_argument("kind")
+    ri.add_argument("request", nargs="+")
+    rs = sub.add_parser("roadmap-stop")
+    rs.add_argument("id")
+    rs.add_argument("reason", nargs="+")
     sub.add_parser("backlog-spec").add_argument("id")
     sub.add_parser("register").add_argument("repo", type=Path)
     ab = sub.add_parser("abort")
@@ -1162,6 +1362,16 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "roadmap-show":
+        print(json.dumps(roadmap_show(a.dir)))
+    elif a.cmd == "roadmap-link":
+        cmd_roadmap_link(a.dir, a.p, a.s, a.id)
+    elif a.cmd == "roadmap-next":
+        print(json.dumps(cmd_roadmap_next(a.dir, a.id)))
+    elif a.cmd == "roadmap-insert":
+        print(json.dumps(cmd_roadmap_insert(a.dir, a.p, a.after, a.kind, " ".join(a.request))))
+    elif a.cmd == "roadmap-stop":
+        cmd_roadmap_stop(a.dir, a.id, " ".join(a.reason))
     elif a.cmd == "register":
         cmd_register(a.repo)
     elif a.cmd == "abort":
