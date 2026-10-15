@@ -105,7 +105,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(code, 'Ollama loaded qwen2.5-coder:7b with context 4096 < 32768; '
                                'start Ollama with OLLAMA_CONTEXT_LENGTH=32768')
         execute.assert_not_called()
-        self.assertIn(('POST', '/api/generate', {'model': 'qwen2.5-coder:7b', 'keep_alive': '10m'}),
+        self.assertIn(('POST', '/api/generate', {'model': 'qwen2.5-coder:7b', 'keep_alive': '2m'}),
                       OllamaStub.requests)
         self.assertIn(('GET', '/api/ps', None), OllamaStub.requests)
 
@@ -122,7 +122,7 @@ class PreflightTests(unittest.TestCase):
         code, _, execute = self.launch(['claude', '-p', 'hi'], self.url, context=65536, model='scrum-local')
         self.assertIsNone(code)
         execute.assert_called_once()
-        self.assertIn(('POST', '/api/generate', {'model': 'scrum-local', 'keep_alive': '10m'}), OllamaStub.requests)
+        self.assertIn(('POST', '/api/generate', {'model': 'scrum-local', 'keep_alive': '2m'}), OllamaStub.requests)
 
     def test_preflight_warns_without_context_field(self):
         OllamaStub.ps = {'models': [{'name': 'qwen2.5-coder:7b', 'model': 'qwen2.5-coder:7b'}]}

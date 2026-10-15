@@ -218,7 +218,7 @@ Applies only while the job's `lane` on the board is `fast`. A job with no `lane`
    VERDICT: PASS
    Skipped by orchestrator: fast lane.
    ```
-   Spawn only `scrum-review-code`, with the 5 lines (`ROUND=$N`), the line `LANE=fast`, and `Review this round. Write only your own review file.` Wait for it, then handle `B sync $ID` exactly as **Review** step 4.
+   Spawn only `scrum-review-code`, with the 5 lines (`ROUND=$N`), the line `LANE=fast`, and `Review this round. Write only your own review file.` Wait for it, then handle `B sync $ID` exactly as **Review** step 4. That includes the `review-pass`/`review-changes` line for a local build.
 3. **Route:**
    - `verdict` is `PASS`: go straight to **Merge**. Spawn no approver; there is no decision.md. The PR uses the no-Merge-summary fallback in Merge step 3 (job title, spec acceptance criteria as bullets), and the body line `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` is replaced by `Fast lane: check gate + code review. Spec and review: scrum/jobs/$ID/`. The schema guard still runs unchanged. With no decision.md, the `Restart:` line counts as `none`.
    - `verdict` is `CHANGES` and `round < limit`: resume the builder as in **Review** step 5, run `B set $ID stage=build`, and go to **Check gate**. The job stays fast.
@@ -371,7 +371,7 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
    ```
    Then spawn only `scrum-review-security` and `scrum-review-code`. Otherwise (`UI globs` missing or `none`, or any file matches), spawn all four.
 3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code` (minus the two skipped in step 2). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.` Pass the Agent tool override `model: "sonnet"` to `scrum-review-security` only when no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Fast lane** sensitive-path regex, the **Merge** schema guard regex, or `(^|/)\.env`; re-check every round. Otherwise (a match, or the diff can't be read) omit the override so the agent's default, Opus, runs.
-4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`.
+4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`. If the board says `builder=local`, log `review-pass` or `review-changes` (see **Routing** step 5).
    - `complete` must be `true`. If it isn't, `missing` lists the absent files (e.g. `review-ui.md`): re-spawn only the reviewers named in `missing`, once. If a file is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
    - **Never resume the builder mid-round.**
@@ -481,15 +481,16 @@ Only `scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` are routed, 
    )"
    SCRUM_LOCAL_MODEL=<model> SCRUM_LOCAL_CONTEXT=32768 python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py" claude -p "$PROMPT" --allowedTools "$TOOLS"
    ```
+   **The builder is the exception:** its local runner is one Ollama call with no agent loop (a small model in Claude Code fills 32K with tool output and never finishes). Run, from `$REPO`, `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/build.py" "$F/jobs/$ID" "$WT" <model>` for the first build, adding the resume text as one more quoted argument on every resume (**Routing** step 4). It edits only the spec's `## Likely files`, commits on the branch and writes `build.md`; a non-zero exit is an invalid run.
    A local build runs `B set $ID builder=local` instead of recording an agent id. A local follow-up-mode spec writer records no `specwriter`.
 3. **One cloud retry, never loop.** A local run is invalid when: **spec writer**, `spec.md` is missing; **follow-up-mode spec writer** (**Approve** step 3), `$F/jobs/$ID/followups/` has no `*.md`; **digest reader**, `notes.md` is missing or its first line is not `DIGEST NOTES`; **builder**, `build.md` is missing. A subprocess that exits non-zero is invalid too, even when an older artifact from an earlier attempt is still there (a refused run.py preflight is one such case); its last stderr line is the reason. Retry an invalid run once on cloud with the Agent tool and the same prompt plus one extra line `Local run failed: <reason>.` That retry replaces the step's own "spawn it once more", so the step still makes at most 2 attempts before its existing needs-human or `error.md` stop. A step gets one cloud retry at most and never goes back to local.
-4. **Builder while the board says `builder=local`.** Every fix attempt and every review, approver, rework, CI or merge resume re-runs the local builder subprocess, with the 5 lines (current `ROUND`) and the resume text as the prompt lines. A local build has no Agent id, so there is no SendMessage.
+4. **Builder while the board says `builder=local`.** Every fix attempt and every review, approver, rework, CI or merge resume re-runs `local/build.py` with the resume text as its last argument (it reads the check, review or decision files that text names). A local build has no Agent id, so there is no SendMessage.
    - **Check gate:** fix attempts 1 and 2 run local. If the check still fails after them, fix attempt 3 is the cloud retry: a fresh `scrum-builder` with the 5 lines, the resume text and `Local run failed: check still failing after 2 local fix attempts.` The 3-attempt cap is unchanged.
    - **Fast lane:** promotion on the 2nd check failure moves the next fix attempt to cloud (`Local run failed: check failed twice.`), and that move is the step's one cloud retry.
    - Whenever a build moves to cloud, run `B set $ID builder=<cloud agent id>` and stop routing the builder for this job. From then on, resumes use SendMessage as in **Resuming the builder**.
 5. **Log every routed attempt.** Run `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> <runner> <model> $(( $(date +%s) - START )) <outcome>`, taking a fresh `START` before each attempt. `<dir>` is `$F/jobs/$ID`, or `$F` for the digest reader. `<runner>` is `local` or `cloud`. `<model>` is the router's `model`, or `-` for cloud. `<outcome>`:
    - a local spec writer or digest reader: `ok` or `invalid-artifact`;
-   - a local build: `ok` or `invalid-artifact`, plus one more line, `check-pass` or `check-fail`, when that build reaches the Check gate;
+   - a local build: `ok` or `invalid-artifact`, plus one more line, `check-pass` or `check-fail`, when that build reaches the Check gate, and one more, `review-pass` or `review-changes`, after **Review** step 4 or **Fast lane** step 2 syncs a round the board still records as `builder=local` (`review-pass` when the synced `verdict` is `PASS`). That last line is the paid reviewers' judgement of the local build, the evidence the digest uses for the builder's trust;
    - a first-try cloud run: `ok`;
    - the cloud retry: its own line, runner `cloud`, outcome `fallback`.
 

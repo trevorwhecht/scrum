@@ -31,7 +31,7 @@ def user_deny():
 def preflight(base: str, model: str, context: int) -> None:
     """Load `model` the way the compat endpoint will, then refuse if Ollama gave it less than `context`."""
     load = urllib.request.Request(base + '/api/generate', method='POST',
-                                  data=json.dumps({'model': model, 'keep_alive': '10m'}).encode(),
+                                  data=json.dumps({'model': model, 'keep_alive': '2m'}).encode(),
                                   headers={'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(load, timeout=300) as reply:

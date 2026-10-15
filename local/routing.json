@@ -16,6 +16,7 @@
   "thresholds": {
     "codex_5h": 85,
     "codex_weekly": 90,
-    "spec_writer_max_points": 2
+    "spec_writer_max_points": 2,
+    "min_free_gb": 3
   }
 }

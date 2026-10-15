@@ -44,7 +44,17 @@ swallowed as a tool name (`Input must be provided ...`).
 | Estimator | 26/26 valid, ~2 s each, as one `/api/chat` call with the repo's file list (`serve.local_estimate`) | approved |
 | Digest reader | Valid format, wrong content: invents counts and misses or splits the recurring findings (4B and 7B) | off |
 | Codex review | 7B prints its tool calls as text and reviews nothing (~3 min) | off |
-| Spec writer, builder | Not viable: in a Claude Code agent loop a 4B model fills 32K with tool output and auto-compacts until it gives up | off |
+| Spec writer | Not viable: in a Claude Code agent loop a 4B model fills 32K with tool output and auto-compacts until it gives up | off |
+| Builder | `local/build.py`: one 7B call returns SEARCH/REPLACE edits for the spec's `## Likely files` (big files as excerpts around what the spec names), applied, committed. Replay of past fast jobs in progress | off until the replay passes |
+
+**Memory (16 GB Mac).** A loaded model holds ~1.4x its download size (6.4 GB for the 7B), and Illustrator
+needs the rest. So every local call:
+- asks Ollama to unload the model after `KEEP_ALIVE` (2 minutes) idle, freeing it when scrum goes quiet;
+- unloads any other `scrum-` model first, so the 4B and 7B are never loaded together (~12 GB);
+- runs only when macOS's free memory (`kern.memorystatus_level`) covers the model plus `min_free_gb` (3) in
+  `routing.json`; otherwise the router answers cloud with `low memory (...)`, as if Ollama were down.
+  An already-loaded model always passes.
+Ollama ignores KV-cache quantization and flash attention on its MLX engine, so they are not set.
 
 The rule that follows: local work is **one bounded `route.chat` call with the context gathered by
 code**, never an agent loop, and anything countable is counted by code, not the model.

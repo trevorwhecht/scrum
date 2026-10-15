@@ -135,7 +135,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(data['models'], {'estimator': 'scrum-qwen3.5:4b', 'scrum-digest-reader': 'scrum-qwen3.5:4b',
                                           'scrum-spec-writer': 'scrum-qwen2.5-coder:7b',
                                           'scrum-builder': 'scrum-qwen2.5-coder:7b', 'codex-review': 'scrum-qwen2.5-coder:7b'})
-        self.assertEqual(data['thresholds'], {'codex_5h': 85, 'codex_weekly': 90, 'spec_writer_max_points': 2})
+        self.assertEqual(data['thresholds'], {'codex_5h': 85, 'codex_weekly': 90, 'spec_writer_max_points': 2, 'min_free_gb': 3})
 
     # 2
     def test_always_cloud_roles(self):
@@ -201,6 +201,28 @@ class RouteTests(unittest.TestCase):
     def test_approved_estimator_local(self):
         result = route_mod.route('estimator')
         self.assertEqual((result['runner'], result['model']), ('local', 'scrum-qwen3.5:4b'))
+
+    def test_low_memory_routes_cloud_unless_model_already_loaded(self):
+        self.handler.body = json.dumps({'models': [{'name': 'scrum-qwen3.5:4b', 'size': 4 * 2**30}]}).encode()
+        with patch.object(route_mod, 'free_gb', return_value=6.0), patch.object(route_mod, 'loaded_models', return_value=[]):
+            result = route_mod.route('estimator')  # needs 4*1.4 + 3 reserve = 8.6 GB
+        self.assertEqual(result['runner'], 'cloud')
+        self.assertIn('low memory', result['why'])
+        with patch.object(route_mod, 'free_gb', return_value=9.0), patch.object(route_mod, 'loaded_models', return_value=[]):
+            self.assertEqual(route_mod.route('estimator')['runner'], 'local')
+        with patch.object(route_mod, 'free_gb', return_value=1.0), \
+                patch.object(route_mod, 'loaded_models', return_value=['scrum-qwen3.5:4b']):
+            self.assertEqual(route_mod.route('estimator')['runner'], 'local')  # already loaded: costs nothing more
+
+    def test_chat_unloads_other_scrum_models_and_sets_keep_alive(self):
+        posts = []
+        with patch.object(route_mod, 'loaded_models', return_value=['scrum-qwen2.5-coder:7b', 'llama3:8b']), \
+                patch.object(route_mod, '_post', side_effect=lambda path, body, **kw: posts.append((path, body))
+                             or {'message': {'content': 'hi'}}):
+            self.assertEqual(route_mod.chat('scrum-qwen3.5:4b', 'p'), 'hi')
+        self.assertEqual(posts[0], ('/api/generate', {'model': 'scrum-qwen2.5-coder:7b', 'keep_alive': 0}))
+        self.assertEqual(len(posts), 2)  # Trevor's own llama3 is left alone
+        self.assertEqual((posts[1][1]['keep_alive'], posts[1][1]['options']), ('2m', {'num_predict': 1024}))
 
     # 4
     def test_ollama_down_cloud(self):

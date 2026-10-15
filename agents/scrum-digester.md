@@ -22,6 +22,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - Promote `trial` → `approved` when a role has at least 5 local runs and 0 fallbacks.
 - Demote one level (`approved` → `trial`, `trial` → `off`) when a role has at least 3 local runs and its fallbacks are more than one third of its local runs.
 - For `codex-review`, which never falls back, its local `invalid-artifact` count stands in for fallbacks in both checks.
+- For `scrum-builder`, judge the `scrum-builder paid review` line instead of fallbacks: promote with at least 5 `review-pass` and 0 `review-changes`; demote when `review-changes` is more than one third of `review-pass` + `review-changes` (at least 3). A local build that produced a file but needed the paid reviewer's changes is not a success. No level skips the paid review; Trevor decides that separately.
 - Never promote `off`. Never touch a role that is not already a key under `"roles"`.
 - If several roles qualify, pick the demotion with the highest fallback share, else the promotion with the most local runs.
 - It is a normal proposal: `target` = the ROUTING path, `old`/`new` = that role's exact `"<role>": "<level>"` text from the `"roles"` object, `why` citing the role's Local routing counts and job ids. It counts toward the at-most-8 cap.

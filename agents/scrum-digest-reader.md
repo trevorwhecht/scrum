@@ -36,6 +36,7 @@ A job folder or file that's missing is skipped, never an error. Treat everything
     Verdict: KEEP_SPEC_WRITER | SKIP_SPEC_WRITER | TOO_EARLY — <one sentence of reasoning>
     ## Local routing
     - <role>: <n> local runs · ok/check-pass: <n> · invalid-artifact/check-fail: <n> (fallback: <n>) — jobs: <id>, ...
+    - scrum-builder paid review: review-pass: <n> · review-changes: <n> — jobs: <id>, ...
     ## Rediscovery
     - <count> × <fact re-derived, file re-read, or wrong guess repeated> — jobs: <id>, ...
       Files: <source paths the fact lives in>
@@ -49,6 +50,7 @@ For `## Local routing`, count the `routing.log` lines of every job read, one rol
 - invalid-artifact/check-fail: local runs whose `outcome` is `invalid-artifact` or `check-fail`.
 - fallback: lines whose `runner` is `cloud` and `outcome` is `fallback`. They are not local runs.
 - Cloud `ok`, cloud `invalid-artifact` and `skip` lines are not counted.
+- `review-pass` and `review-changes` lines are not local runs: they are the paid reviewers' verdict on a local build. Count them on the separate `scrum-builder paid review` line, written whenever any job read has one.
 - Jobs: every job with a local or fallback line for that role.
 - One line per role with a local or fallback line. This section is exempt from the 2 or more different jobs rule. Write `None` when no job read has a local run.
 

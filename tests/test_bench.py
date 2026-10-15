@@ -84,7 +84,7 @@ class BenchServerTests(unittest.TestCase):
                                       'm2 estimate 2/2', 'm2 summary 2/2', 'm2 edit 2/2'])
         chats = [body for method, path, body in OllamaStub.requests if path == '/api/chat']
         self.assertEqual(len(chats), 12)
-        self.assertTrue(all(b['stream'] is False and b['think'] is False and 'options' not in b for b in chats))
+        self.assertTrue(all(b['stream'] is False and b['think'] is False and set(b['options']) == {'num_predict'} for b in chats))
         self.assertIn('Item: Add a --json flag', chats[0]['messages'][0]['content'])
 
     def test_one_failed_run_exits_one(self):

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -23,6 +24,7 @@ ALWAYS_CLOUD = frozenset({
     'scrum-bigboy-reviewer', 'scrum-triager', 'scrum-digester', 'scrum-review-ui', 'scrum-review-ux'})
 RUNNERS = ('cloud', 'local', 'skip')
 TIMEOUT = 2
+KEEP_ALIVE = '2m'  # idle scrum models free their ~4-7 GB after 2 minutes instead of Ollama's default 5
 CLAUDE_LIMIT = 'hit your session limit'
 RESET = re.compile(r'resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)', re.I)
 
@@ -65,19 +67,72 @@ def _ollama_ready(model):
         return False, 'Ollama down (malformed /api/tags reply)'
     if model not in names:
         return False, f'model {model} missing from Ollama'
+    size = next((m.get('size') for m in json.loads(body)['models'] if m['name'] == model), None)
+    return memory_ok(model, size)
+
+
+def _base(base=None):
+    return (base or os.environ.get('SCRUM_OLLAMA_URL', 'http://127.0.0.1:11434')).rstrip('/')
+
+
+def _get(path, base=None):
+    with urllib.request.urlopen(_base(base) + path, timeout=TIMEOUT) as reply:
+        return json.loads(reply.read())
+
+
+def _post(path, body, timeout=TIMEOUT, base=None):
+    request = urllib.request.Request(_base(base) + path, data=json.dumps(body).encode(),
+                                     headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=timeout) as reply:
+        return json.loads(reply.read())
+
+
+def loaded_models(base=None):
+    """Names in Ollama's /api/ps, or [] when it can't be read."""
+    try:
+        return [m['name'] for m in _get('/api/ps', base).get('models') or []]
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
+def free_gb():
+    """macOS's own free-memory figure (kern.memorystatus_level, % of RAM) in GB; None when unreadable."""
+    try:
+        level = int(subprocess.run(['sysctl', '-n', 'kern.memorystatus_level'], capture_output=True, text=True,
+                                   timeout=5).stdout)
+        total = int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True, timeout=5).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return level / 100 * total / 2**30
+
+
+def memory_ok(model, size):
+    """Local only when loading `model` still leaves `min_free_gb` for Trevor's apps (Illustrator etc). An already
+    loaded model costs nothing more. Loaded size is ~1.4x the download size (KV cache at 32K)."""
+    if model in loaded_models() or not size:
+        return True, ''
+    free, reserve = free_gb(), json.loads(Path(CONFIG).read_text())['thresholds'].get('min_free_gb', 3)
+    need = size * 1.4 / 2**30 + reserve
+    if free is not None and free < need:
+        return False, f'low memory ({free:.1f} GB free, {model} needs {need:.1f} GB with the {reserve} GB reserve)'
     return True, ''
 
 
-def chat(model, prompt, base=None, timeout=300):
+def chat(model, prompt, base=None, timeout=300, max_tokens=1024):
     """One /api/chat reply from local Ollama with thinking off. No num_ctx: the scrum- variant's own 32K applies,
     and a different value would make Ollama reload the model. Bounded tasks use this, never a Claude Code agent loop:
-    a 4-7B model there fills 32K with tool output and auto-compacts until it gives up."""
-    base = (base or os.environ.get('SCRUM_OLLAMA_URL', 'http://127.0.0.1:11434')).rstrip('/')
-    body = {'model': model, 'stream': False, 'think': False, 'messages': [{'role': 'user', 'content': prompt}]}
-    request = urllib.request.Request(base + '/api/chat', data=json.dumps(body).encode(),
-                                     headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=timeout) as reply:
-        return json.loads(reply.read())['message']['content']
+    a 4-7B model there fills 32K with tool output and auto-compacts until it gives up.
+    Memory: other scrum- models are unloaded first (one model at a time), and the model unloads after KEEP_ALIVE idle."""
+    for other in loaded_models(base):
+        if other.startswith('scrum-') and other != model:
+            try:
+                _post('/api/generate', {'model': other, 'keep_alive': 0}, timeout=30, base=base)
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+    # num_predict caps a runaway reply (a 7B once generated 6000+ tokens at 10 t/s); it does not reload the model
+    body = {'model': model, 'stream': False, 'think': False, 'keep_alive': KEEP_ALIVE,
+            'options': {'num_predict': max_tokens}, 'messages': [{'role': 'user', 'content': prompt}]}
+    return _post('/api/chat', body, timeout=timeout, base=base)['message']['content']
 
 
 def codex_quota():
