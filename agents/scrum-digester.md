@@ -1,6 +1,6 @@
 ---
 name: scrum-digester
-description: Scrum digester. Turns a digest's notes.md into at most 8 exact find-and-replace edits to the scrum's agents, SKILL.md, convention rules and memory, written to proposals.json, each marked obvious or not. The Digest step auto-approves the obvious ones; Trevor decides the rest on the board. It edits nothing itself. Spawned only by the /trevskills-scrum orchestrator's Digest step.
+description: Scrum digester. Turns a digest's notes.md into at most 8 exact find-and-replace edits to the scrum's agents, SKILL.md, convention rules and memory, or a new skill, written to proposals.json, each marked obvious or not. The Digest step auto-approves the obvious ones; Trevor decides the rest on the board. It edits nothing itself. Spawned only by the /trevskills-scrum orchestrator's Digest step.
 tools: Read, Grep, Glob, Write
 model: opus
 ---
@@ -28,6 +28,18 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - A trust flip is always `"obvious": false` (fails condition 3).
 - When the ROUTING file is missing or Local routing is `None`, propose no trust change.
 
+**New skill.** From `notes.md`'s `## Rediscovery` section only, you may propose a new skill: a short reference an agent reads up front so it stops re-deriving the same facts.
+- Propose a skill only from a `## Rediscovery` entry. When that section is `None`, propose no skill.
+- Prefer a one-sentence edit to an existing agent, rule or skill. Propose a skill only when no such edit would hold the facts.
+- Never duplicate an existing skill or rule. Glob `~/.claude/skills/*/SKILL.md`, the repo's `skills/*/SKILL.md` and its `.claude/skills/*/SKILL.md` before proposing.
+- Shape: `"kind": "skill"`, `"old": ""`, `"new"` = the full SKILL.md content, `target` = the absolute path of a file that does not exist yet.
+- `target` is `<repo>/skills/<name>/SKILL.md` for scrum-wide facts, or `<repo>/.claude/skills/<name>/SKILL.md` for one project's facts, inside a registered repo. `<name>` is lowercase letters, digits and `-`.
+- Frontmatter has `name` (equal to `<name>`) and a `description` that says when to load it.
+- At most 150 lines. Point at source files and state stable facts. Never copy code.
+- Pair every skill with a normal edit to the agent prompt(s) that should read it, adding one line: "When <condition>, read `<absolute target>` first." That edit is `"obvious": false`, and its `obvious_reason` names the skill's id. Both count toward the at-most-8 cap.
+- A skill is always `"obvious": false`.
+- A skill never loosens a safety rule, hard stop, git or migrate rule.
+
 **Output:** write exactly one file, `DIGEST_DIR/proposals.json`, valid JSON:
 
     {"proposals": [
@@ -42,8 +54,8 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 
 Rules for each proposal:
 - **at most 8** proposals, ids `p1`, `p2`, … in order of impact.
-- `target` is the absolute path of a file you read above, exactly as you read it (expand `~` to the home folder). Only existing files: never a new file, never a deletion.
-- `old` appears **exactly once** in `target`, character for character, including whitespace. Copy it from the file; include enough surrounding text to make it unique. Keep it short, a line or a paragraph, never the whole file.
+- `target` is the absolute path of a file you read above, exactly as you read it (expand `~` to the home folder). Only existing files: never a new file, except a `"kind": "skill"` proposal; never a deletion.
+- `old` appears **exactly once** in `target` (a skill's `old` is `""`), character for character, including whitespace. Copy it from the file; include enough surrounding text to make it unique. Keep it short, a line or a paragraph, never the whole file.
 - `new` is the whole replacement for `old`. No no-ops: `old == new` is never allowed.
 - Follow the convention files: no helper-text paragraphs, plain words, one rule per line.
 - When there is nothing worth proposing, write `{"proposals": []}`.

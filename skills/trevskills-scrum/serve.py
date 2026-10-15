@@ -1385,18 +1385,25 @@ PROPOSAL_KEYS = ("id", "target", "why", "old", "new")
 PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected")
 PROPOSAL_ID_RE = re.compile(r"[\w-]+")  # the id lands in a URL path segment and in backlog item text
 DIGEST_DENIED_NAMES = ("settings.json", "settings.local.json")  # permissions and hooks: never a digest edit
+SKILL_MAX_LINES = 150
+SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 
 
 def valid_proposal(p):
-    """The proposal with its status, or None when a key is missing, a value isn't a string, or it changes nothing."""
+    """The proposal with its status and kind, or None when a key is missing, a value isn't a string, it changes nothing,
+    or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
     if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
         return None
     if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
+    kind = p.get("kind", "edit")
+    if kind not in ("edit", "skill") or kind == "skill" and (
+            p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
+        return None
     # "obvious" is the digester's claim; anything but a literal true is false, and never drops the proposal.
     reason = p.get("obvious_reason")
     return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "obvious": p.get("obvious") is True,
-                                               "obvious_reason": reason if isinstance(reason, str) else ""}
+                                               "obvious_reason": reason if isinstance(reason, str) else "", "kind": kind}
 
 
 def read_proposals(path):
@@ -1437,6 +1444,17 @@ def digest_denied(target):
     return any(Path(t).name in DIGEST_DENIED_NAMES or "hooks" in Path(t).parts for t in (target, os.path.realpath(target)))
 
 
+def digest_skill_target(target):
+    """target relative to its registered repo when it is skills/<name>/SKILL.md or .claude/skills/<name>/SKILL.md there,
+    <name> matching SKILL_NAME_RE, and not digest_denied; else None."""
+    repo = os.path.isabs(target) and not digest_denied(target) and repo_of(target)
+    if not repo:
+        return None
+    parts = Path(repo[1]).parts
+    ok = parts[-1:] == ("SKILL.md",) and parts[:-2] in (("skills",), (".claude", "skills")) and SKILL_NAME_RE.fullmatch(parts[-2])
+    return repo[1] if ok else None
+
+
 def editable_path(target):
     """The path of the editable AI-Settings item at target (same real file), or None. Only Global and the scopes the file
     sits under can list it, so no other scope's inventory is built."""
@@ -1467,6 +1485,13 @@ def digest_decide(root, digest_id, pid, decision):
             return 409, {"error": f"proposal is already {prop['status']}"}
         if decision == "reject":
             status = "rejected"
+        elif prop["kind"] == "skill":
+            if not (rel := digest_skill_target(prop["target"])):
+                return 403, {"error": "target is not editable"}
+            if os.path.lexists(prop["target"]):
+                return 409, {"error": "skill already exists"}
+            board.backlog_op(repo_of(prop["target"])[0] / "scrum", "add", text=f"Create digest {digest_id} {pid} skill at {rel}: see {path}")
+            status = "queued"
         elif digest_denied(prop["target"]):
             return 403, {"error": "target is not editable"}
         elif repo := repo_of(prop["target"]):
@@ -1524,7 +1549,7 @@ def digest_auto(root, digest_id):
         return out
     path = root / "digests" / digest_id / "proposals.json"
     for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
-        reason = digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
+        reason = "new skill" if p["kind"] == "skill" else digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
         if p["obvious"] and reason is None:
             code, res = digest_decide(root, digest_id, p["id"], "approve")
             if code == 200:
