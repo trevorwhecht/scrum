@@ -18,6 +18,9 @@ h1{font-size:16px;margin:0}
 #status,#routing{color:var(--muted);font-size:12px}
 #routing{white-space:nowrap}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
+#roadmaps{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:0 16px 12px}#roadmaps:empty{display:none}
+.rm{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;min-width:0}
+.rm>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rm>span+span{color:var(--muted)}.rm b{color:var(--human);font-weight:inherit}
 .col h2 span{white-space:nowrap}
 .col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
 .col.human h2{color:var(--human)}
@@ -185,6 +188,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
+<section id="roadmaps" aria-label="Roadmaps"></section>
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -252,7 +256,7 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || laneOf(j) === laneFilter));
@@ -331,15 +335,40 @@ const childLinks = job => !job.children?.length ? "" : `<div class="kids">${job.
 const jobTitle = job => `<span class="id">${esc(job.id)}</span> ${esc(job.title || job.id)}`;
 // When anything last happened: the board update or serve.py's newest activity event (run log, worktree files...).
 const staleAt = job => Math.max(Date.parse(job.updatedAt), (job.activity?.at || 0) * 1000);
+// Card meta "P1/2 · S2/10" for a roadmap job, "" for every other job. roadmapLookup() rebuilds it each poll.
+let roadmapSteps = {};
+const roadmapMeta = job => roadmapSteps[job.key]?.text || "";
 // BigBoy parent: merged count, then one line per child with the tickets it waits on. Child: which parent it belongs to.
 function bigboyLines(job) {
+  const rm = roadmapMeta(job);
   if (job.children?.length) {
     const kids = job.children.map(id => kidOf(job, id) || {id, stage: "—"});
     const ticketOf = id => kids.find(k => k.id === id)?.ticket || id;
-    return `<span class="meta">T${kids.filter(k => k.stage === "done").length}/${kids.length} merged</span>`
+    return (rm ? `<span class="meta">${rm}</span>` : "") + `<span class="meta">T${kids.filter(k => k.stage === "done").length}/${kids.length} merged</span>`
       + kids.map(k => `<span class="meta kid">${esc(k.ticket || k.id)} ${esc(k.stage)}${k.depends_on?.length ? ` ← ${esc(k.depends_on.map(ticketOf).join(", "))}` : ""}</span>`).join("");
   }
-  return job.parent ? `<span class="meta">${esc(job.ticket || "Child")} of ${esc(job.parent)}</span>` : "";
+  return job.parent ? `<span class="meta">${rm ? `${rm} · ` : ""}${esc(job.ticket || "Child")} of ${esc(job.parent)}</span>`
+    : rm ? `<span class="meta">${rm}</span>` : "";
+}
+
+// Roadmap position per job key: a step's own job, then any child whose parent is a step's job (own step wins).
+function roadmapLookup(all) {
+  const out = {};
+  for (const [p, rm] of Object.entries(roadmaps)) for (const ph of rm?.phases || []) for (const st of ph.steps)
+    if (st.job) out[`${p}/${st.job}`] = {p: ph.n, s: st.n, text: `P${ph.n}/${rm.phases.length} · S${st.n}/${ph.steps.length}`};
+  for (const j of all) if (j.parent && !out[j.key] && out[`${j.project}/${j.parent}`]) out[j.key] = out[`${j.project}/${j.parent}`];
+  return out;
+}
+// Per-project banner: where the roadmap is, what runs next, and what blocks it. No roadmap = no element.
+function roadmapBanner(p) {
+  const rm = roadmaps[p], cur = rm?.current;
+  if (!rm) return "";
+  const ph = cur && rm.phases.find(x => x.n === cur.p), n = rm.next, b = rm.blocker;
+  const row1 = `${p} roadmap · ${cur ? `P${cur.p}/${rm.phases.length} ${ph.title} · S${cur.s}/${ph.steps.length}` : "done"}`;
+  const next = `next: ${n ? `${n.p !== cur?.p ? `P${n.p} ` : ""}S${n.s} ${n.request}` : "none"}`;
+  const block = b ? `${b.job} ${b.reason}`.trim() : "none";
+  return `<div class="rm"><span title="${esc(row1)}">${esc(row1)}</span>${cur
+    ? `<span title="${esc(`${next} · blocker: ${block}`)}">${esc(next)} · blocker: ${b ? `<b>${esc(block)}</b>` : "none"}</span>` : ""}</div>`;
 }
 
 function card(job) {
@@ -383,6 +412,8 @@ function render() {
   const list = shown(), dcards = digestCards();
   const cols = [...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
   const count = s => list.filter(j => colOf(j) === s).length + (s === "needs-human" ? dcards.length : 0);
+  // Roadmap banners follow the project filter only: a banner is per project, not per job.
+  $("roadmaps").innerHTML = projects.filter(p => !filter || p === filter).map(roadmapBanner).join("");
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   $("board").innerHTML = cols.map(stage => {
@@ -413,13 +444,16 @@ async function poll() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     projects = (await res.json()).map(p => p.name);
     if (filter && !projects.includes(filter)) filter = "";
-    const [boards, items, runList, digestList] = await Promise.all([
+    const [boards, items, runList, digestList, roadmapList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
       getJson("api/runs", []),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests`, null)))]);
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests`, null))),
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
     digests = Object.fromEntries(projects.map((p, i) => [p, digestList[i]]));
+    roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
+    roadmapSteps = roadmapLookup(all);
     runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
     // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll.
     const final = j => ["done", "aborted"].includes(j.stage);
@@ -431,7 +465,7 @@ async function poll() {
     const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
     backlogs = nextBacklogs;
     renderSelect($("filter"), filter, true);
-    const text = JSON.stringify([all, runs, backlogs, digests, filter, routes]);
+    const text = JSON.stringify([all, runs, backlogs, digests, roadmaps, filter, routes]);
     if (text !== lastText) {
       jobs = all; lastText = text; render();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
