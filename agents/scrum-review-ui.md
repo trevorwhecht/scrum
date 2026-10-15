@@ -39,10 +39,13 @@ You must see the new element on the rendered page (or, for a removal or spacing-
     ## Findings
     1. [blocking|minor] (confidence NN) path:line — the problem (rule ID if one applies) — the concrete fix
     ## Notes
+    ## Out of scope
+    - <one-line real task outside this ticket's scope>
 
 **Last step:** write `JOB_DIR/round-ROUND/review-ui.md`, then run `ls JOB_DIR/round-ROUND/review-ui.md` (with the real paths). Do not finish until `ls` shows the file; if it doesn't, write it again. A verdict only in chat does not count.
 
 **Rules:**
+- `## Out of scope` is optional and left out when there is nothing to report. It never affects the verdict. One bullet per real task outside this ticket's scope; not for nitpicks, and not for findings that belong in `## Findings`.
 - `VERDICT: CHANGES` only when at least one finding is `[blocking]` with confidence ≥ 80. Taste goes in Notes.
 - Judge new violations in this diff, not existing debt.
 - Round 2 and later: check your earlier blocking findings first, and don't move the goalposts.

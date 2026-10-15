@@ -52,8 +52,11 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
     ## Findings
     1. [blocking|minor] (confidence NN) path:line — the triggering scenario — the problem — the concrete fix
     ## Notes
+    ## Out of scope
+    - <one-line real task outside this ticket's scope>
 
 **Rules:**
+- `## Out of scope` is optional and left out when there is nothing to report. It never affects the verdict. One bullet per real task outside this ticket's scope; not for nitpicks, and not for findings that belong in `## Findings`.
 - Only flag what the diff introduced. Pre-existing issues go in Notes labelled "pre-existing" and never block.
 - A claim that the change breaks other code must name that code (file and symbol).
 - Each finding opens with the scenario or input that triggers it.
