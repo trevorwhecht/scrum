@@ -399,6 +399,72 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
+    def test_ready_parent_waits_on_needs_human_children(self):
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        with mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 002-part-1, 003-part-2"))
+        play.assert_not_called()
+
+    def test_ready_parent_waits_on_setup_children(self):
+        parent, (c1, c2, c3) = self.three(setup="Create the S3 bucket")
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done"])
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 003-part-2"))
+        play.assert_not_called()
+
+    def test_ready_clears_waiting_note(self):
+        parent, (c1, c2, c3) = self.three(setup="Create the S3 bucket")
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(parent)["reason"], "waiting on you in: 003-part-2")
+        board.cmd_set(self.root, c2, ["setup=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])  # a claim clears it
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        parent, (d1, d2, d3, d4, d5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, d1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(parent)["reason"], f"waiting on you in: {d1}, {d2}")
+        board.cmd_set(self.root, d2, ["stage=build", "reason="])  # Send back to builder: in progress, nothing new ready
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_ready_recovers_legacy_blocked_parent(self):
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, parent, ["stage=needs-human", f"reason=bigboy blocked: {c1}, {c2}. Fix: y"])
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 002-part-1, 003-part-2"))
+        play.assert_not_called()
+        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy blocked: old. Fix: y"])
+        board.cmd_set(self.root, c1, ["stage=build", "reason="])
+        board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        rparent, (a, b) = self.runall(2)
+        board.cmd_ready(self.root, rparent)
+        board.cmd_set(self.root, rparent, ["stage=needs-human", "reason=run-all blocked: x. Fix: y"])
+        board.cmd_ready(self.root, rparent)  # a is in progress
+        p = self.child(rparent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
     def test_ready_leaves_other_parent_stops_alone(self):
         parent, kids = self.three()
         board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy off track: x. Fix: y"])
@@ -558,17 +624,18 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((out["merged"], out["total"], out["in_progress"], out["all_merged"]), (2, 3, 0, True))
         self.assertEqual(self.child(parent)["stage"], "running")
 
-    def test_runall_ready_marks_parent_blocked_and_resumes(self):
+    def test_runall_ready_parent_waits_and_resumes(self):
         parent, (a, b, c) = self.runall(3)
         board.cmd_ready(self.root, parent)
         board.cmd_set(self.root, a, ["stage=needs-human", "reason=blocked: x. Fix: y"])
         board.cmd_abort(self.root, b, requeue=False)
         board.cmd_set(self.root, c, ["stage=done"])
-        out = board.cmd_ready(self.root, parent)
+        with mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
         p = self.child(parent)
-        self.assertEqual(p["stage"], "needs-human")
-        self.assertTrue(p["reason"].startswith(f"run-all blocked: {a}. Fix: "), p["reason"])
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {a}"))
+        play.assert_not_called()
         board.cmd_set(self.root, a, ["stage=done", "reason="])
         self.assertTrue(board.cmd_ready(self.root, parent)["all_merged"])
         p = self.child(parent)

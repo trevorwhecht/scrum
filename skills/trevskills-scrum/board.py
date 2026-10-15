@@ -574,6 +574,7 @@ PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
 BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
+WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
 RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent never has more children than this in progress at once
 
 
@@ -714,14 +715,17 @@ def cmd_ready(root, parent_id):
             raise SystemExit(f"job {parent_id} has no children")
         stage = {k["id"]: k["stage"] for k in kids}
         runall = parent.get("lane") == "runall"  # aborted children count as finished, and at most 3 run at once
-        blocked = parent["stage"] == "needs-human" and (parent.get("reason") or "").startswith((BLOCKED, RUNALL_BLOCKED))
+        reason = parent.get("reason") or ""
+        # A legacy needs-human parent (blocked before WAITING_ON existed) is re-evaluated so existing boards recover.
+        legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED))
+        blocked = legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON))
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if k["stage"] not in IDLE]
         alone = lambda k: not k.get("parallel") or not files[k["id"]]  # unknown Likely files = may touch anything
         ready = []
-        for k in kids if parent["stage"] == "running" or blocked else []:
+        for k in kids if parent["stage"] == "running" or legacy else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
@@ -736,19 +740,19 @@ def cmd_ready(root, parent_id):
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in (("done", "aborted") if runall else ("done",)) for k in kids)
-        if blocked and (ready or (runall and finished == len(kids))):
-            parent.update(stage="running", reason=None, updatedAt=now())
-        elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or blocked):
-            if runall:  # an aborted Run-all child is finished, so it never blocks
-                stuck = [k["id"] for k in kids if k["stage"] == "needs-human"]
-                reason = f"{RUNALL_BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, " \
-                    "Send back to builder or Discuss)."
-            else:
-                stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")] \
-                    or [k["id"] for k in kids if k.get("setup") == "pending"]
-                reason = f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve & merge, Send back to " \
-                    "builder or Setup done); if one was aborted, click Abort job on this BigBoy."
-            parent.update(stage="needs-human", updatedAt=now(), reason=reason)
+        new = parent["stage"], parent.get("reason")
+        if blocked and (ready or busy or finished == len(kids)):
+            new = "running", None
+        elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
+            human = [k["id"] for k in kids if k["stage"] == "needs-human"]
+            if not runall and any(k["stage"] == "aborted" for k in kids):  # only Abort on the parent fixes this
+                stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")]  # Run-all: aborted = finished
+                new = "needs-human", f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve " \
+                    "& merge, Send back to builder or Setup done); if one was aborted, click Abort job on this BigBoy."
+            else:  # every action is on a child, so the parent keeps running and names them
+                new = "running", WAITING_ON + ", ".join(human or [k["id"] for k in kids if k.get("setup") == "pending"])
+        if new != (parent["stage"], parent.get("reason")):
+            parent.update(stage=new[0], reason=new[1], updatedAt=now())
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids)}
     if was != "needs-human" and parent["stage"] == "needs-human":
