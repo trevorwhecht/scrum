@@ -934,8 +934,11 @@ def session_alive_fn():
     """One `ps` scan; a job is alive when a line containing `claude` has its id or runs on its recorded tty.
     When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
     try:
-        out = subprocess.run(["ps", "-axo", "tty=,command="], capture_output=True, text=True, timeout=5).stdout
+        r = subprocess.run(["ps", "-axo", "tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
+        return lambda job: True
+    out = r.stdout or ""
+    if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
     lines = [l.strip() for l in out.splitlines() if "claude" in l]
     ttys = {l.split(None, 1)[0] for l in lines if l}

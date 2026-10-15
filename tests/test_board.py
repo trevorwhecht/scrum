@@ -1058,6 +1058,9 @@ class BoardTest(unittest.TestCase):
         for err in (OSError("no ps"), subprocess.TimeoutExpired("ps", 5)):
             with mock.patch.object(board.subprocess, "run", side_effect=err):
                 self.assertTrue(board.session_alive_fn()({"id": "007-plain-python", "tty": None}))
+        denied = subprocess.CompletedProcess(["ps"], 1, stdout="", stderr="ps: Operation not permitted\n")
+        with mock.patch.object(board.subprocess, "run", return_value=denied):  # e.g. a sandboxed Bash call
+            self.assertTrue(board.session_alive_fn()({"id": "007-plain-python", "tty": None}))
 
     def test_watchdog_cli_prints_flagged(self):
         run = lambda: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "watchdog"],
