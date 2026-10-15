@@ -569,6 +569,14 @@ class ContractTest(unittest.TestCase):
         self.assertRegex(text, r"## Q&A[^\n]*Trevor's decisions[^\n]*Assumptions")
         self.assertIn("Never ask questions", text)
 
+    def test_spec_writer_documents_followup_mode(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("**Follow-up mode.**", "followups/", "Backlog: new", "Backlog: update", "Item:", "BACKLOG",
+                       "character for character", "backlog-specs/", "(in follow-up mode, only `followups/*.md`)"):
+            self.assertIn(phrase, text, phrase)
+        self.assertIn("never contradict", text.lower())
+        self.assertRegex(text, r"followups/[^\n]*nothing else")
+
     def test_dashboard_has_askme_select(self):
         text = DASHBOARD.read_text()
         m = re.search(r'<select id="blAskme"[^>]*>(.*?)</select>', text)
