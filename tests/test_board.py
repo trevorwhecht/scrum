@@ -998,6 +998,81 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(len(list((self.root / "jobs" / review).rglob("*"))), 10)
         self.assertEqual(len(list((self.root / "jobs" / listed).rglob("*"))), 3)
 
+    # --- watchdog ---
+    def aged(self, title, minutes, **fields):
+        """A new job with `fields` written straight into board.json and updatedAt `minutes` ago."""
+        from datetime import datetime, timedelta, timezone
+        job_id = board.cmd_new(self.root, title)
+        data = json.loads((self.root / "board.json").read_text())
+        job = next(j for j in data["jobs"] if j["id"] == job_id)
+        job.update(fields, updatedAt=(datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds"))
+        (self.root / "board.json").write_text(json.dumps(data))
+        return job_id
+
+    def get(self, job_id):
+        return next(j for j in self.jobs() if j["id"] == job_id)
+
+    def test_watchdog_flags_stalled_review_job(self):
+        job_id = self.aged("Stuck review", 31, stage="review")
+        old = self.get(job_id)["updatedAt"]
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [job_id])
+        job = self.get(job_id)
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertEqual(job["reason"], "stalled in review: no board update for 30 min and no live session. Fix: click Resume.")
+        self.assertNotEqual(job["updatedAt"], old)
+        for stage in ("build", "check", "approve"):
+            other = self.aged(f"Stuck {stage}", 45, stage=stage)
+            self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [other])
+            self.assertTrue(self.get(other)["reason"].startswith(f"stalled in {stage}: "))
+
+    def test_watchdog_skips_fresh_live_waiting_and_inactive_jobs(self):
+        fresh = self.aged("Fresh", 29, stage="review")
+        live = self.aged("Live", 31, stage="build")
+        paused = self.aged("Paused", 31, stage="check", waiting="question: which one?")
+        others = [self.aged(f"In {s}", 31, stage=s)
+                  for s in ("spec", "merging", "running", "waiting", "needs-human", "done", "aborted")]
+        before = self.jobs()
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
+        self.assertEqual(self.jobs(), before)
+        stuck = self.aged("Stuck", 31, stage="approve")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [stuck])
+        flagged = self.jobs()
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
+        self.assertEqual(self.jobs(), flagged)
+        self.assertEqual([self.get(j)["stage"] for j in (fresh, live, paused)], ["review", "build", "check"])
+        self.assertEqual(len(others), 7)
+
+    def test_session_alive_matches_id_or_tty_and_fails_safe(self):
+        lines = ("ttys003 -zsh\n"
+                 "ttys004 /Users/t/.local/bin/claude --resume\n"
+                 "??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
+                 "??      python3 runner.py 007-plain-python\n")
+        with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=lines, returncode=0)) as run:
+            alive = board.session_alive_fn()
+            self.assertTrue(alive({"id": "005-headless", "tty": None}))
+            self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004"}))
+            self.assertFalse(alive({"id": "007-plain-python"}))
+            self.assertFalse(alive({"id": "008-shell-only", "tty": "ttys003"}))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "tty=,command="])
+        for err in (OSError("no ps"), subprocess.TimeoutExpired("ps", 5)):
+            with mock.patch.object(board.subprocess, "run", side_effect=err):
+                self.assertTrue(board.session_alive_fn()({"id": "007-plain-python", "tty": None}))
+
+    def test_watchdog_cli_prints_flagged(self):
+        run = lambda: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "watchdog"],
+                                     capture_output=True, text=True)
+        fresh = self.aged("Fresh one", 1, stage="build")
+        before = (self.root / "board.json").read_text()
+        out = run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"flagged": []})
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        stuck = self.aged("Zq watchdog cli probe", 40, stage="check")
+        out = run()
+        self.assertEqual(json.loads(out.stdout), {"flagged": [stuck]})
+        self.assertEqual((self.get(stuck)["stage"], self.get(fresh)["stage"]), ("needs-human", "build"))
+
 
 
 class HookTest(unittest.TestCase):

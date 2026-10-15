@@ -536,8 +536,11 @@ function renderActions(job) {
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
   if (job.stage !== "needs-human") return el.innerHTML = banner + why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work).
-  const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete)/.test(reason);
-  el.innerHTML = banner + last + (canApprove ? `<form data-act="approve">
+  // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
+  const stalled = /^stalled in /.test(reason);
+  const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
+  el.innerHTML = banner + last + (stalled ? `<form data-act="resume"><button class="btn primary" type="submit">Resume</button></form>` : "")
+    + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
@@ -559,7 +562,7 @@ $("actions").addEventListener("submit", async e => {
   btn.disabled = true;
   try {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
-      : act === "reopen" ? {note: form.note.value} : act === "setup-done" ? {} : {feedback: form.feedback.value};
+      : act === "reopen" ? {note: form.note.value} : act === "resume" || act === "setup-done" ? {} : {feedback: form.feedback.value};
     const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();

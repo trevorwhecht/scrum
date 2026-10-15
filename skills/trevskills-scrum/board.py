@@ -22,6 +22,8 @@
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
+  board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
+                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -29,7 +31,7 @@ from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
@@ -922,6 +924,56 @@ def cmd_hook(event, tty):
         pass
 
 
+# --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
+WATCHED = ("build", "check", "review", "approve")
+STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
+STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+
+
+def session_alive_fn():
+    """One `ps` scan; a job is alive when a line containing `claude` has its id or runs on its recorded tty.
+    When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
+    try:
+        out = subprocess.run(["ps", "-axo", "tty=,command="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return lambda job: True
+    lines = [l.strip() for l in out.splitlines() if "claude" in l]
+    ttys = {l.split(None, 1)[0] for l in lines if l}
+    # ponytail: a reused tty or an id inside another command reads as alive; an accepted miss, never a false flag
+    return lambda job: (job.get("tty") or "") in ttys or any(job["id"] in l for l in lines)
+
+
+def stalled_since(job, cutoff):
+    try:
+        return datetime.fromisoformat(job["updatedAt"]) < cutoff
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def cmd_watchdog(root, alive=None):
+    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
+    Returns the flagged ids; writes board.json only when it flags something."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
+    flagged = []
+    try:
+        with locked_board(root) as board:
+            stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
+                     and stalled_since(j, cutoff)]
+            alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
+            for job in stale:
+                if not alive(job):
+                    job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
+                               f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
+                    flagged.append(job["id"])
+            if not flagged:
+                raise _Gone
+    except _Gone:
+        pass
+    if flagged:
+        play(sound("needs-human"))
+    return flagged
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", type=Path, default=Path("scrum"))
@@ -949,6 +1001,7 @@ def main(argv=None):
     pa.add_argument("--fix", action="store_true")
     sub.add_parser("ready").add_argument("id")
     sub.add_parser("runall-start")
+    sub.add_parser("watchdog")
     cl = sub.add_parser("chain-lock")
     cl.add_argument("id")
     cl.add_argument("holder")
@@ -992,6 +1045,8 @@ def main(argv=None):
         print(json.dumps(cmd_ready(a.dir, a.id)))
     elif a.cmd == "runall-start":
         print(json.dumps(cmd_runall_start(a.dir)))
+    elif a.cmd == "watchdog":
+        print(json.dumps({"flagged": cmd_watchdog(a.dir)}))
     elif a.cmd == "chain-lock":
         print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
     elif a.cmd == "chain-unlock":

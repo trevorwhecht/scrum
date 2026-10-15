@@ -180,6 +180,45 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(spawn.call_count, 1)
         self.assertEqual(self.stage_of(c2)["setup"], None)
 
+    def edit_job(self, job_id, **fields):
+        data = json.loads((self.root / "board.json").read_text())
+        next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
+        (self.root / "board.json").write_text(json.dumps(data))
+
+    def test_watchdog_tick_flags_child_and_starts_ready_sibling(self):
+        b = self.serve.board
+        parent, a, c = (b.cmd_new(self.root, t) for t in ("Watchdog run all", "Stalled child", "Next child"))
+        self.edit_job(parent, lane="runall", stage="running", children=[a, c])
+        self.edit_job(a, parent=parent, stage="review", updatedAt="2020-01-01T00:00:00+00:00")
+        self.edit_job(c, parent=parent, stage="waiting")
+        broken = Path(self.tmp.name) / "broken"
+        (broken / "scrum").mkdir(parents=True, exist_ok=True)
+        (broken / "scrum" / "board.json").write_text("{not json")
+        projects = {"broken": broken, "repo": self.root.parent}  # the broken one first: its error must not stop the sweep
+        with mock.patch.object(b, "projects", return_value=projects), \
+                mock.patch.object(b, "session_alive_fn", return_value=lambda job: False):
+            self.serve.watchdog_tick()
+        self.assertEqual(self.stage_of(a)["stage"], "needs-human")
+        self.assertTrue(self.stage_of(a)["reason"].startswith("stalled in review: "))
+        self.assertEqual(self.stage_of(c)["stage"], "spec")
+        self.assertTrue(self.wait_for(lambda: [f"/trevskills-scrum start {c}"] in [x[1:2] for x in self.calls()]))
+        self.assertTrue(self.serve.running("repo", c))
+
+    def test_resume_endpoint_only_for_stalled_jobs(self):
+        b = self.serve.board
+        stalled, blocked, active = (b.cmd_new(self.root, t) for t in ("Resume me", "Blocked one", "Active one"))
+        b.cmd_set(self.root, stalled, ["stage=needs-human",
+                                       "reason=stalled in check: no board update for 30 min and no live session. Fix: click Resume."])
+        b.cmd_set(self.root, blocked, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        b.cmd_set(self.root, active, ["stage=check"])
+        for job_id in (blocked, active):
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/resume", {})[0], 409, job_id)
+        code, out = self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})
+        self.assertEqual((code, out), (202, {"id": stalled, "action": "resume"}))
+        self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum resume {stalled}" in a for c in self.calls() for a in c)))
+        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
+        self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
+
     def test_dashboard_has_bigboy_lane_option(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         self.assertIn("<option>bigboy</option>", text)
