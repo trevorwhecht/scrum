@@ -907,6 +907,68 @@ class BoardTest(unittest.TestCase):
         board.main(["--dir", str(self.root), "abort", job_id])
         self.assertTrue(self.jobs()[0]["reason"].startswith("Aborted by Trevor "))
 
+    # --- pause ---
+    def test_pause_records_stage_in_reason_and_keeps_fields(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build", "round=2", "limit=3", "pr=https://x/1", "worktree=/wt/x",
+                                          "builder=agent-1"])
+        self.write(f"{job_id}/build.md", "STATUS: READY\n")
+        before = self.jobs()[0]
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(board.cmd_pause(self.root, job_id), [job_id])
+        play.assert_not_called()
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]),
+                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        for key in ("worktree", "branch", "pr", "round", "limit", "builder", "files"):
+            self.assertEqual(job[key], before[key], key)
+        self.assertEqual((self.root / "jobs" / job_id / "build.md").read_text(), "STATUS: READY\n")
+
+    def test_pause_refuses_job_not_in_progress(self):
+        for stage in ("waiting", "done", "needs-human", "aborted"):
+            job_id = board.cmd_new(self.root, f"x {stage}")
+            if stage == "aborted":
+                board.cmd_abort(self.root, job_id, requeue=False)
+            else:
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+            before = (self.root / "board.json").read_text()
+            with self.assertRaises(SystemExit) as e:
+                board.cmd_pause(self.root, job_id)
+            self.assertEqual(str(e.exception), f"job {job_id} is {stage}; only a job in progress can be paused")
+            self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_paused_job_refuses_orchestrator_writes_until_reason_cleared(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=review"])
+        board.cmd_pause(self.root, job_id)
+        for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
+                     lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                     lambda: board.cmd_sync(self.root, job_id)):
+            with self.assertRaises(SystemExit) as e:
+                call()
+            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+        board.cmd_set(self.root, job_id, ["stage=review", "reason="])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
+        self.assertEqual(self.jobs()[0]["stage"], "approve")
+
+    def test_pause_parent_pauses_children_and_blocks_ready(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"),
+                           self.ticket(4, deps="T1, T2, T3", parallel="no — last", exposure="yes"))
+        c1, c2, c3, c4 = board.cmd_plan_apply(self.root, parent)["children"]
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_set(self.root, c2, ["stage=build"])
+        self.assertEqual(sorted(board.cmd_pause(self.root, parent)), sorted([parent, c2]))
+        stalled = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
+        self.assertEqual(stalled[parent], ("needs-human", "stalled in running: paused by Trevor. Fix: click Play."))
+        self.assertEqual(stalled[c2], ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual((stalled[c1][0], stalled[c3][0], stalled[c4][0]), ("done", "waiting", "waiting"))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # c3's only dependency is done
+        after = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
+        self.assertEqual(after[parent], stalled[parent])
+        self.assertEqual(after[c3][0], "waiting")
+
     # --- reopen ---
     def test_reopen_creates_linked_job(self):
         old = board.cmd_new(self.root, "Modal title")

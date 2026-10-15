@@ -134,11 +134,14 @@ def find(board, job_id):
     raise SystemExit(f"no job {job_id!r} on the board")
 
 
-def live(board, job_id):
-    """find() for the orchestrator: an aborted job refuses every further write, so a running session stops."""
+def live(board, job_id, unpause=False):
+    """find() for the orchestrator: an aborted job refuses every further write, so a running session stops. So does a
+    paused one, unless this write un-pauses it (unpause)."""
     job = find(board, job_id)
     if job["stage"] == "aborted":
         raise SystemExit(f"job {job_id} was aborted by Trevor; stop working on it")
+    if not unpause and job["stage"] == "needs-human" and PAUSED_RE.match(job.get("reason") or ""):
+        raise SystemExit(f"job {job_id} was paused by Trevor; stop working on it")
     return job
 
 
@@ -832,21 +835,24 @@ def merge_refusal(job: dict) -> str | None:
     return f"not done: could not confirm PR {pr} is merged: {why}"
 
 
-def cmd_set(root, job_id, pairs):
+def cmd_set(root, job_id, pairs, unpause=False):
+    """unpause (library only: serve.py's spawn bookkeeping) writes to a paused job; so does any set with an empty
+    reason=, which is how resume and rework un-pause it."""
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
+    unpause = unpause or given.get("reason", None) == ""
     if given.get("stage") == "done":
         # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
         # so the read-then-write race is accepted.
-        job = dict(live(read_board(root), job_id))
+        job = dict(live(read_board(root), job_id, unpause))
         if job["stage"] != "done":
             job.update({k: given[k] or None for k in ("pr", "lane") if k in given})
             msg = merge_refusal(job)
             if msg:
                 raise SystemExit(msg)
     with locked_board(root) as board:
-        job = live(board, check_id(job_id))
+        job = live(board, check_id(job_id), unpause)
         was = job["stage"]
         for pair in pairs:
             key, sep, value = pair.partition("=")
@@ -969,6 +975,24 @@ def cmd_hook(event, tty):
 WATCHED = ("build", "check", "review", "approve")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+# Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
+PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
+PAUSED = "paused by Trevor"
+PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+
+
+def cmd_pause(root, job_id):
+    """Mark a job in progress (and its children in progress) needs-human with a stalled reason naming its stage.
+    Every other field is kept, so resume picks up where it stopped. Returns the paused ids; plays no sound."""
+    with locked_board(root) as board:
+        job = find(board, check_id(job_id))
+        if job["stage"] not in PAUSABLE:
+            raise SystemExit(f"job {job_id} is {job['stage']}; only a job in progress can be paused")
+        by_id = {j["id"]: j for j in board["jobs"]}
+        hit = [job] + [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k]["stage"] in PAUSABLE]
+        for j in hit:
+            j.update(stage="needs-human", reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+        return [j["id"] for j in hit]
 
 
 def session_alive_fn():

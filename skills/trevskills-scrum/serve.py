@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
 files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done,
-resume). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees.
+pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees.
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
@@ -69,6 +69,27 @@ def stop(project, job_id):
             pass
 
 
+def kill_session(project, job_id):
+    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan
+    SIGTERMs the process group of every claude line running /trevskills-scrum <cmd> <id> (nohup child, Terminal)."""
+    with RUNS_LOCK:
+        run = RUNS.get(f"{project}/{job_id}")
+    if run and run["proc"].poll() is None:
+        return stop(project, job_id)
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,pgid=,command="], capture_output=True, text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return
+    match = re.compile(rf"/trevskills-scrum \S+ {re.escape(job_id)}(\s|$)")
+    groups = {int(f[1]) for f in (l.split(None, 2) for l in out.splitlines())
+              if len(f) == 3 and f[1].isdigit() and "claude" in f[2] and match.search(f[2])}
+    for pgid in sorted(groups - {os.getpgrp()}):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/. The dashboard shows it as running.
     Returns the log path relative to root."""
@@ -82,7 +103,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="])  # a stale interactive tty would win over the log tail
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job  # a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return f"runs/{log.name}"
@@ -639,9 +660,32 @@ STAGE_TEXT = {"spec": "spec writer working", "build": "builder working", "check"
               "needs-human": "waiting on you"}
 
 
+WT_MTIME = {}  # worktree path -> (checked_at, newest file mtime or None); the 2 s poll re-walks at most every 10 s
+WT_SKIP = {".git", "node_modules", ".next", "__pycache__"}
+
+
+def worktree_mtime(wt):
+    """Newest file mtime under the worktree (symlinks not followed, WT_SKIP dirs pruned), or None; cached 10 s."""
+    hit = WT_MTIME.get(wt)
+    if hit and time.time() - hit[0] < 10:
+        return hit[1]
+    # ponytail: full walk per 10 s; a huge worktree makes this slow, switch to a watcher if that ever shows
+    newest = None
+    for top, dirs, names in os.walk(wt):
+        dirs[:] = [x for x in dirs if x not in WT_SKIP]
+        for n in names:
+            try:
+                t = os.stat(os.path.join(top, n), follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            newest = t if newest is None or t > newest else newest
+    WT_MTIME[wt] = (time.time(), newest)
+    return newest
+
+
 def activity(root, job):
     """{"text", "at"} for what happened last on an active job: the stage, the job folder's files, the branch's last
-    commit, the PR. The newest event wins; on a tie the more specific (earlier in the list) one does."""
+    commit, the run log, the worktree's files, the PR. The newest event wins; on a tie the more specific (earlier in the list) one does."""
     d, events = root / "jobs" / job["id"], []
     if job.get("waiting") and job.get("stage") in board.ACTIVE:  # paused on Trevor: wins over every event
         try:
@@ -677,6 +721,10 @@ def activity(root, job):
                 events.append((int(ct), f"builder committed: {subject}"))
         except (subprocess.SubprocessError, OSError):
             pass
+    if job.get("runlog") and (t := mtime(root / job["runlog"])):
+        events.append((t, "run log updated"))
+    if wt and (t := worktree_mtime(wt)):
+        events.append((t, "files changed"))
     text = STAGE_TEXT.get(job["stage"], job["stage"])
     if job.get("pr") and job["stage"] in ("merging", "needs-human"):
         text = "CI running" if job["stage"] == "merging" else "PR ready"
@@ -1595,7 +1643,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|terminal|reopen|setup-done|resume))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1658,6 +1706,11 @@ class Handler(BaseHTTPRequestHandler):
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))
             return 200, {"id": job_id, "stage": "aborted"}
+        if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
+            ids = board.cmd_pause(root, job_id)
+            for i in ids:
+                kill_session(project, i)
+            return 200, {"id": job_id, "paused": ids}
         if action == "setup-done":
             return setup_done(project, root, job_id)
         if action == "reopen":
@@ -1670,6 +1723,14 @@ class Handler(BaseHTTPRequestHandler):
             if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
+            if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):  # Play on a paused parent
+                board.cmd_set(root, job_id, ["stage=running", "reason="])
+                for k in job["children"]:
+                    kid = next((j for j in jobs if j["id"] == k), None)
+                    if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
+                        spawn(project, root, k, action, f"/trevskills-scrum resume {k}")
+                start_ready(project, root, job_id)
+                return 202, {"id": job_id, "action": action}
             spawn(project, root, job_id, action, f"/trevskills-scrum resume {job_id}")
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):

@@ -363,6 +363,90 @@ class ServeTest(unittest.TestCase):
         self.assertIn("abort me", [i["text"] for i in self.serve.board.backlog_items(self.root) if not i["done"]])
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/abort", {})[0], 400)  # already aborted
 
+    # --- pause / play ---
+    def test_pause_endpoint_kills_fake_run_and_marks_paused(self):
+        job_id = self.serve.board.cmd_new(self.root, "pause me")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"])
+        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "try again"})[0], 202)
+        self.assertTrue(self.serve.running("repo", job_id))
+        self.serve.board.cmd_set(self.root, job_id, ["stage=build", "reason="])  # what the rework session does first
+        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {}), (200, {"id": job_id, "paused": [job_id]}))
+        self.assertTrue(self.wait_for(lambda: not self.serve.running("repo", job_id)))
+        job = self.stage_of(job_id)
+        self.assertEqual((job["stage"], job["reason"]), ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {})[0], 400)  # not in progress any more
+
+    def test_kill_session_falls_back_to_ps_match(self):
+        ps = ("  101   101 /usr/local/bin/claude -p /trevskills-scrum resume 090-ps --permission-mode acceptEdits\n"
+              "  102   500 claude /trevskills-scrum start 090-ps\n"  # serve.py's own group: never signalled
+              "  103   103 claude /trevskills-scrum start 090-ps-two\n"  # another job whose id starts the same
+              "  104   104 tail -f /trevskills-scrum resume 090-ps\n"  # no claude on the line
+              "  105   105 claude /trevskills-scrum start 090-ps\n")
+        with mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=ps)) as run, \
+                mock.patch.object(self.serve.os, "getpgrp", return_value=500), \
+                mock.patch.object(self.serve.os, "killpg") as killpg:
+            self.serve.kill_session("repo", "090-ps")
+        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "pid=,pgid=,command="])
+        self.assertEqual(sorted(c.args for c in killpg.call_args_list), [(101, 15), (105, 15)])
+
+    def test_play_on_paused_job_calls_resume(self):
+        job_id = self.serve.board.cmd_new(self.root, "play me")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=check"])
+        self.serve.board.cmd_pause(self.root, job_id)
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/resume", {}), (202, {"id": job_id, "action": "resume"}))
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[2:], (job_id, "resume", f"/trevskills-scrum resume {job_id}"))
+
+    def test_play_on_paused_parent_resumes_children_and_starts_ready(self):
+        b = self.serve.board
+        parent, a, w, r = (b.cmd_new(self.root, t) for t in ("Play parent", "Paused kid", "Waiting kid", "Live kid"))
+        self.edit_job(parent, lane="runall", stage="running", children=[a, w, r])
+        self.edit_job(a, parent=parent, stage="build")
+        self.edit_job(w, parent=parent, stage="waiting")
+        self.edit_job(r, parent=parent, stage="review")
+        self.assertEqual(sorted(b.cmd_pause(self.root, parent)), sorted([parent, a, r]))
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.serve, "running", side_effect=lambda p, i: i == r):  # r's session still alive
+            code, out = self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})
+        self.assertEqual(code, 202, out)
+        self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["reason"]), ("running", None))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                         [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
+        self.assertEqual(self.stage_of(w)["stage"], "spec")
+
+    def test_activity_picks_newest_of_runlog_worktree_and_board(self):
+        wt = Path(self.tmp.name) / "wt-newest"
+        (wt / "src").mkdir(parents=True)
+        (wt / "node_modules").mkdir()
+        log = self.root / "runs" / "newest.log"
+        log.parent.mkdir(exist_ok=True)
+        log.write_text("x")
+        job_id = self.job("newest", "stage=build", f"worktree={wt}", "runlog=runs/newest.log")
+        job = self.stage_of(job_id)
+        now = time.time()
+
+        def at(path, ahead):
+            path.write_text("x")
+            os.utime(path, (now + ahead, now + ahead))
+
+        def act():
+            self.serve.WT_MTIME.clear()
+            return self.serve.activity(self.root, job)
+
+        at(wt / "node_modules" / "skip.js", 900)  # skipped dir never counts
+        at(log, 100); at(wt / "src" / "a.py", 50)
+        self.assertEqual(act(), {"text": "run log updated", "at": now + 100})
+        at(wt / "src" / "a.py", 200)
+        self.assertEqual(act(), {"text": "files changed", "at": now + 200})
+        at(log, -1000); at(wt / "src" / "a.py", -1000)
+        self.assertEqual(act()["text"], "builder working")
+        log.unlink()  # a missing runlog adds nothing
+        at(wt / "src" / "a.py", 300)
+        self.assertEqual(act(), {"text": "files changed", "at": now + 300})
+        at(wt / "src" / "a.py", 400)  # within 10 s the cached walk is reused
+        self.assertEqual(self.serve.activity(self.root, job), {"text": "files changed", "at": now + 300})
+
     # --- runlog, Open terminal, activity line ---
     def job(self, title, *pairs):
         job_id = self.serve.board.cmd_new(self.root, title)

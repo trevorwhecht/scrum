@@ -21,7 +21,8 @@ def run(expr):
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
     esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
-    helpers = text[text.index("const setupWait = "):text.index("function bigboyLines(")]
+    helpers = text[text.index("const setupWait = "):text.index("function bigboyLines(")] \
+        + text[text.index("const abortForm = "):text.index("const termState = ")]
     script = f"{esc}\nlet jobs = {json.dumps(JOBS)};\n{helpers}\nconsole.log(JSON.stringify({expr}));"
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
 
@@ -59,6 +60,35 @@ class JobModal(unittest.TestCase):
         self.assertEqual(run(f'waitingNote({{...jobs[0], reason: "{reason}"}}, "meta")'),
                          '<span class="meta">Waiting on you in: 007-b, 008-c</span>')
         self.assertEqual(run('waitingNote({...jobs[0], reason: null}, "meta")'), "")
+
+    def test_pause_and_play_buttons_render(self):
+        pause = '<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>'
+        for stage in ("spec", "build", "check", "review", "approve", "merging", "plan", "running"):
+            self.assertEqual(run(f'pauseForm({{stage: "{stage}"}})'), pause, stage)
+        for stage in ("waiting", "needs-human", "done", "aborted"):
+            self.assertEqual(run(f'pauseForm({{stage: "{stage}"}})'), "", stage)
+        resume = '<form data-act="resume"><button class="btn primary tall" type="submit">{}</button></form>'
+        self.assertEqual(run('resumeForm("stalled in build: paused by Trevor. Fix: click Play.")'), resume.format("Play"))
+        self.assertEqual(run('resumeForm("stalled in check: no board update for 30 min. Fix: click Resume.")'),
+                         resume.format("Resume"))
+        self.assertEqual(run('resumeForm("blocked: x. Fix: y")'), "")
+        text = DASHBOARD.read_text()
+        body = text[text.index("function renderActions(job)"):text.index('$("actions").addEventListener("submit"')]
+        self.assertEqual(body.count("pauseForm(job) + abortForm(job)"), 2)  # run alive, and no run
+        self.assertIn("resumeForm(reason)", body)
+        self.assertIn("|stalled)/.test(reason)", body)  # Approve stays hidden for a paused (stalled) job
+        submit = text[text.index('$("actions").addEventListener("submit"'):]
+        self.assertIn('act === "resume" || act === "pause" || act === "setup-done" ? {}', submit)
+
+    def test_stale_uses_newest_activity(self):
+        # 2026-01-01T00:00:00Z is 1767225600 s
+        self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: {at: 1767229200}})'), 1767229200000)
+        self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: {at: 1767222000}})'), 1767225600000)
+        self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: null})'), 1767225600000)
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function digestCard(")]
+        self.assertIn("Date.now() - staleAt(job) > STALE_MS", card)
+        self.assertNotIn("Date.parse(job.updatedAt)", card)
 
 
 if __name__ == "__main__":
