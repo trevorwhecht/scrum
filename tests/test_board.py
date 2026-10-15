@@ -1228,6 +1228,195 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(json.loads(out.stdout), {"flagged": [stuck]})
         self.assertEqual((self.get(stuck)["stage"], self.get(fresh)["stage"]), ("needs-human", "build"))
 
+    # --- roadmap.md ---
+    ROADMAP = ("ROADMAP: onewitharts cleanup\n"
+               "Goal: clean up mixed v0/Cursor/Claude patterns, make it faster, ready to clone into billmeez.\n"
+               "\n"
+               "## Constraints\n"
+               "- Zero behaviour change in splits.\n"
+               "- `calculateBlankCostFromSizes` stays the single blank-cost function.\n"
+               "\n"
+               "## P1 Split giant files\n"
+               "- [x] S1 bigboy 011-split-quote-builder-content-tsx-13-5k-li: Split quote-builder-content.tsx, part 1\n"
+               "- [~] S2 bigboy 017-quote-builder-bigboy-2-move-state-and-ef: Quote builder part 2, state and effects into hooks\n"
+               "- [ ] S3 bigboy: Quote builder part 3, <request>\n"
+               "- [ ] S4 standard: Split garmentDesigner\n"
+               "## P2 Speed\n"
+               "- [ ] S1 standard: Profile and fix the order-progress endpoint (~3.3s)\n"
+               "\n"
+               "## Log\n"
+               "- 2026-10-15 09:12 P1 S1 done: BIGBOY PASS\n")
+    J2 = "017-quote-builder-bigboy-2-move-state-and-ef"
+    LOG_RE = r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} "
+
+    def roadmap(self, text=None):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "roadmap.md").write_text(self.ROADMAP if text is None else text)
+
+    def rm_text(self):
+        return (self.root / "roadmap.md").read_text()
+
+    def rm_cli(self, *args):
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *args], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_roadmap_show_parses_design_example(self):
+        self.roadmap()
+        want = {
+            "name": "onewitharts cleanup",
+            "phases": [
+                {"n": 1, "title": "Split giant files", "steps": [
+                    {"n": 1, "kind": "bigboy", "job": "011-split-quote-builder-content-tsx-13-5k-li", "status": "done",
+                     "request": "Split quote-builder-content.tsx, part 1"},
+                    {"n": 2, "kind": "bigboy", "job": self.J2, "status": "running",
+                     "request": "Quote builder part 2, state and effects into hooks"},
+                    {"n": 3, "kind": "bigboy", "job": None, "status": "todo", "request": "Quote builder part 3, <request>"},
+                    {"n": 4, "kind": "standard", "job": None, "status": "todo", "request": "Split garmentDesigner"}]},
+                {"n": 2, "title": "Speed", "steps": [
+                    {"n": 1, "kind": "standard", "job": None, "status": "todo",
+                     "request": "Profile and fix the order-progress endpoint (~3.3s)"}]}],
+            "current": {"p": 1, "s": 2},
+            "next": {"p": 1, "s": 3, "kind": "bigboy", "request": "Quote builder part 3, <request>"},
+            "blocker": None}
+        self.assertEqual(board.roadmap_show(self.root), want)
+        self.assertEqual(self.rm_cli("roadmap-show"), want)
+        # No [~]/[!] step: current falls back to the first todo step; none left at all = None.
+        self.roadmap(self.ROADMAP.replace("[~] S2", "[x] S2"))
+        self.assertEqual(board.roadmap_show(self.root)["current"], {"p": 1, "s": 3})
+        self.roadmap("ROADMAP: x\n## P1 A\n- [x] S1 standard: a\n")
+        got = board.roadmap_show(self.root)
+        self.assertEqual((got["current"], got["next"]), (None, None))
+
+    def test_roadmap_show_none_without_file(self):
+        self.assertIsNone(board.roadmap_show(self.root))
+        self.root.mkdir(parents=True)
+        self.assertIsNone(self.rm_cli("roadmap-show"))
+
+    def test_roadmap_show_blocker_from_needs_human_child(self):
+        self.roadmap()
+        jobs = [{"id": self.J2, "stage": "running", "reason": None},
+                {"id": "020-other", "stage": "needs-human", "reason": "not related"},
+                {"id": "021-child-ok", "parent": self.J2, "stage": "build", "reason": None},
+                {"id": "022-child-stuck", "parent": self.J2, "stage": "needs-human", "reason": "tests fail"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        want = {"job": "022-child-stuck", "reason": "tests fail"}
+        self.assertEqual(board.roadmap_show(self.root)["blocker"], want)
+        self.assertEqual(self.rm_cli("roadmap-show")["blocker"], want)
+        jobs[0].update(stage="needs-human", reason=None)  # the step's own job wins, empty reason -> ""
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(board.roadmap_show(self.root)["blocker"], {"job": self.J2, "reason": ""})
+
+    def test_roadmap_write_round_trips_unchanged(self):
+        self.roadmap()
+        lines, _ = board.read_roadmap(self.root)
+        board.write_roadmap(self.root, lines)
+        self.assertEqual(self.rm_text(), self.ROADMAP)
+        board.cmd_roadmap_link(self.root, 2, 1, "030-profile")
+        before, after = self.ROADMAP.split("\n"), self.rm_text().split("\n")
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[13], "- [~] S1 standard 030-profile: Profile and fix the order-progress endpoint (~3.3s)")
+        self.assertRegex(after[17], self.LOG_RE + r"P2 S1 started: 030-profile$")
+        self.assertEqual(after[:13] + after[14:17] + after[18:], before[:13] + before[14:])
+
+    def test_roadmap_link_marks_running(self):
+        self.roadmap()
+        board.cmd_roadmap_link(self.root, 1, 3, "021-qb-part-3")
+        step = board.roadmap_show(self.root)["phases"][0]["steps"][2]
+        self.assertEqual((step["status"], step["job"]), ("running", "021-qb-part-3"))
+        self.assertIn("- [~] S3 bigboy 021-qb-part-3: Quote builder part 3, <request>\n", self.rm_text())
+        logs = (board.md_section(self.rm_text(), "Log") or "").strip().splitlines()
+        self.assertEqual(len(logs), 2)
+        self.assertRegex(logs[1], self.LOG_RE + r"P1 S3 started: 021-qb-part-3$")
+        board.roadmap_show(self.root)  # still parses
+        self.assertEqual(self.jobs(), [])  # board.json job data untouched
+
+    def test_roadmap_stop_then_link_resumes(self):
+        self.roadmap()
+        board.cmd_roadmap_stop(self.root, self.J2, "tests flaky on CI")
+        self.assertIn(f"- [!] S2 bigboy {self.J2}:", self.rm_text())
+        self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + r"P1 S2 stopped: tests flaky on CI$")
+        self.assertEqual(board.roadmap_show(self.root)["current"], {"p": 1, "s": 2})
+        before = self.rm_text()
+        with self.assertRaises(SystemExit):
+            board.cmd_roadmap_stop(self.root, "099-not-in-roadmap", "x")
+        self.assertEqual(self.rm_text(), before)
+        board.cmd_roadmap_link(self.root, 1, 2, self.J2)
+        self.assertIn(f"- [~] S2 bigboy {self.J2}:", self.rm_text())
+        self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + rf"P1 S2 started: {self.J2}$")
+
+    def test_roadmap_link_unknown_step_errors(self):
+        self.roadmap()
+        for args in ((9, 1, "030-x"), (1, 9, "030-x"), (1, 3, "Bad Id"), (1, 3, "../030-x")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                board.cmd_roadmap_link(self.root, *args)
+            self.assertEqual(self.rm_text(), self.ROADMAP)
+
+    def test_roadmap_next_marks_done_and_returns_next(self):
+        self.roadmap()
+        got = self.rm_cli("roadmap-next", self.J2)
+        self.assertEqual(got, {"p": 1, "s": 3, "kind": "bigboy", "request": "Quote builder part 3, <request>"})
+        self.assertIn(f"- [x] S2 bigboy {self.J2}:", self.rm_text())
+        self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + rf"P1 S2 done: {self.J2}$")
+
+    def test_roadmap_next_last_step_returns_null(self):
+        self.roadmap("ROADMAP: x\n## P1 A\n- [x] S1 standard 001-a: a\n## P2 B\n- [~] S1 bigboy 002-b: b\n")
+        self.assertIsNone(board.cmd_roadmap_next(self.root, "002-b"))
+        self.assertIn("- [x] S1 bigboy 002-b: b\n", self.rm_text())
+        self.assertRegex(self.rm_text(), r"\n## Log\n" + self.LOG_RE[1:] + r"P2 S1 done: 002-b\n")
+
+    def test_roadmap_next_unknown_job_is_noop(self):
+        self.root.mkdir(parents=True)
+        self.assertIsNone(self.rm_cli("roadmap-next", "099-nope"))
+        self.assertFalse((self.root / "roadmap.md").exists())
+        self.roadmap()
+        self.assertIsNone(board.cmd_roadmap_next(self.root, "099-nope"))
+        self.assertEqual(self.rm_text(), self.ROADMAP)
+
+    def test_roadmap_insert_renumbers_rest_of_phase(self):
+        self.roadmap()
+        got = self.rm_cli("roadmap-insert", "1", "2", "standard", "Extract", "the", "pricing", "hook")
+        self.assertEqual(got, {"p": 1, "s": 3, "kind": "standard", "request": "Extract the pricing hook"})
+        self.assertIn("## P1 Split giant files\n"
+                      "- [x] S1 bigboy 011-split-quote-builder-content-tsx-13-5k-li: Split quote-builder-content.tsx, part 1\n"
+                      f"- [~] S2 bigboy {self.J2}: Quote builder part 2, state and effects into hooks\n"
+                      "- [ ] S3 standard: Extract the pricing hook\n"
+                      "- [ ] S4 bigboy: Quote builder part 3, <request>\n"
+                      "- [ ] S5 standard: Split garmentDesigner\n"
+                      "## P2 Speed\n"
+                      "- [ ] S1 standard: Profile and fix the order-progress endpoint (~3.3s)\n", self.rm_text())
+        self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + r"P1 S3 inserted: Extract the pricing hook$")
+        self.assertEqual(board.cmd_roadmap_insert(self.root, 2, 0, "bigboy", "Tax"),
+                         {"p": 2, "s": 1, "kind": "bigboy", "request": "Tax"})
+        self.assertIn("## P2 Speed\n- [ ] S1 bigboy: Tax\n- [ ] S2 standard: Profile", self.rm_text())
+        self.assertEqual(board.cmd_roadmap_insert(self.root, 2, 2, "standard", "Last"),
+                         {"p": 2, "s": 3, "kind": "standard", "request": "Last"})
+        self.assertIn("- [ ] S2 standard: Profile and fix the order-progress endpoint (~3.3s)\n- [ ] S3 standard: Last\n",
+                      self.rm_text())
+
+    def test_roadmap_insert_bad_kind_errors(self):
+        self.roadmap()
+        for args in ((1, 2, "epic", "x"), (9, 0, "standard", "x"), (1, 5, "standard", "x"), (1, 2, "standard", "  ")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                board.cmd_roadmap_insert(self.root, *args)
+            self.assertEqual(self.rm_text(), self.ROADMAP)
+
+    def test_roadmap_malformed_line_reports_line_number(self):
+        bad = {12: self.ROADMAP.replace("S4 standard:", "S4 epic:"),
+               14: self.ROADMAP.replace("## P2 Speed\n", "## P2 Speed\nsome note\n"),
+               1: "# Roadmap\n" + self.ROADMAP,
+               2: "\n" + self.ROADMAP.replace("ROADMAP:", "ROADMAP")}
+        cmds = (lambda: board.roadmap_show(self.root), lambda: board.cmd_roadmap_link(self.root, 1, 3, "030-x"),
+                lambda: board.cmd_roadmap_next(self.root, self.J2), lambda: board.cmd_roadmap_stop(self.root, self.J2, "r"),
+                lambda: board.cmd_roadmap_insert(self.root, 1, 0, "standard", "x"))
+        for n, text in bad.items():
+            self.roadmap(text)
+            for cmd in cmds:
+                with self.subTest(line=n), self.assertRaises(SystemExit) as e:
+                    cmd()
+                self.assertIn(f"roadmap.md line {n}", str(e.exception.code))
+                self.assertEqual(self.rm_text(), text)
+
 
 
 class HookTest(unittest.TestCase):
