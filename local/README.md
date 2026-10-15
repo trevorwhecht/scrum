@@ -45,7 +45,7 @@ swallowed as a tool name (`Input must be provided ...`).
 | Digest reader | Valid format, wrong content: invents counts and misses or splits the recurring findings (4B and 7B) | off |
 | Codex review | 7B prints its tool calls as text and reviews nothing (~3 min) | off |
 | Spec writer | Not viable: in a Claude Code agent loop a 4B model fills 32K with tool output and auto-compacts until it gives up | off |
-| Builder | `local/build.py`: one 7B call returns SEARCH/REPLACE edits for the spec's `## Likely files` (big files as excerpts around what the spec names), applied, committed. Replay of past fast jobs in progress | off until the replay passes |
+| Builder | `local/build.py`: one 7B call returns SEARCH/REPLACE edits for the spec's `## Likely files` (big files as excerpts around what the spec names), applied, committed. Replay of 6 past fast jobs: 1 made the real core fix but skipped its test, 2 incomplete (1 line where the real change was 64), 1 wrong, 1 failed the tests, 1 could not apply. None would pass the paid review as built | off |
 
 **Memory (16 GB Mac).** A loaded model holds ~1.4x its download size (6.4 GB for the 7B), and Illustrator
 needs the rest. So every local call:
