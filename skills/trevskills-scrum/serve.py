@@ -1710,6 +1710,13 @@ class Handler(BaseHTTPRequestHandler):
             project = unquote(m.group(1))
             root = scrum_dir(project)
             return self.send_json(200, digests(project, root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/roadmap", path):
+            if not (root := scrum_dir(unquote(m.group(1)))):
+                return self.send_json(404, {"error": "no such project"})
+            try:
+                return self.send_json(200, board.roadmap_show(root))
+            except SystemExit as e:  # parse_roadmap names the malformed line
+                return self.send_json(422, {"error": str(e)})
         if m := re.fullmatch(r"/p/([^/]+(?:%2F[^/]+)?)/(.+)", path):
             return self.send_project_file(unquote(m.group(1)), unquote(m.group(2)))
         self.send_json(404, {"error": "not found"})
