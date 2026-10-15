@@ -2338,9 +2338,9 @@ class DigestTest(unittest.TestCase):
                                               "trimmed": True, "proposals": []})
         self.assertEqual(data["digests"][1], {"id": "001", "jobs": [a], "error": None, "trimmed": False, "proposals": [
             {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line", "status": "pending",
-             "obvious": False, "obvious_reason": ""},
+             "obvious": False, "obvious_reason": "", "kind": "edit"},
             {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "old": "keep A", "new": "kept A", "status": "applied",
-             "obvious": False, "obvious_reason": ""}]})
+             "obvious": False, "obvious_reason": "", "kind": "edit"}]})
         (self.scrum / "digests" / "003").mkdir()  # the reader hasn't written proposals.json yet
         self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
         self.assertEqual(self.get("/api/p/nope/digests")[0], 404)
@@ -2444,7 +2444,7 @@ class DigestTest(unittest.TestCase):
         memory.write_text("remember: old line\r\n")
         self.digest([self.prop("p1", rule), self.prop("p2", memory)])
         code, out = self.decide("p1", "approve")
-        self.assertEqual((code, out), (200, {**self.prop("p1", rule), "status": "applied"}))
+        self.assertEqual((code, out), (200, {**self.prop("p1", rule), "status": "applied", "kind": "edit"}))
         self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
         self.assertEqual([b.read_bytes() for b in self.backups()], [b"keep A\nold line\nkeep B\n"])
         self.assertTrue(self.backups()[0].name.endswith(urllib.parse.quote(str(rule), safe="")))
@@ -2485,7 +2485,7 @@ class DigestTest(unittest.TestCase):
         self.digest([self.prop("p1", rule), self.prop("p2", rule)])
         snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and p.name != "proposals.json"}
         before = snap()
-        self.assertEqual(self.decide("p1", "reject"), (200, {**self.prop("p1", rule), "status": "rejected"}))
+        self.assertEqual(self.decide("p1", "reject"), (200, {**self.prop("p1", rule), "status": "rejected", "kind": "edit"}))
         self.assertEqual(snap(), before)
         self.assertEqual(self.statuses(), ["rejected", "pending"])
         self.assertEqual(self.decide("p1", "reject")[0], 409)
@@ -2506,7 +2506,7 @@ class DigestTest(unittest.TestCase):
         (self.user / "agents").mkdir()
         (self.user / "agents" / "scrum-x.md").symlink_to(agent)  # how install.sh links agents into ~/.claude
         d = self.digest([self.prop("p1", claude_md), self.prop("p2", self.user / "agents" / "scrum-x.md")])
-        self.assertEqual(self.decide("p1", "approve"), (200, {**self.prop("p1", claude_md), "status": "queued"}))
+        self.assertEqual(self.decide("p1", "approve"), (200, {**self.prop("p1", claude_md), "status": "queued", "kind": "edit"}))
         self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
         self.assertEqual((claude_md.read_text(), agent.read_text()), ("old line\n", "old line\n"))
         self.assertEqual(self.backups(), [])
@@ -2626,6 +2626,55 @@ class DigestTest(unittest.TestCase):
         self.digest([], "003")
         self.assertEqual(cli("003"), {"approved": [], "human": []})
         self.assertEqual(cli("009"), {"approved": [], "human": []})
+
+    def skill(self, pid, target, old="", new="---\nname: k\ndescription: Load when k.\n---\nFacts.\n", kind="skill", **extra):
+        return self.prop(pid, target, old=old, new=new, kind=kind, **extra)
+
+    def test_skill_proposal_shape_validated(self):
+        target = self.reg / "skills" / "k" / "SKILL.md"
+        agent = self.repo_file("agents/scrum-x.md")
+        self.digest([self.skill("p1", target), self.skill("p2", target, old="x"),
+                     self.skill("p3", target, new="---\n" + "line\n" * 150), self.skill("p4", target, new="name: k\n"),
+                     self.skill("p5", target, kind="other"), self.prop("p6", agent),
+                     self.skill("p7", target, new="---\n" + "line\n" * 149)])
+        props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
+        self.assertEqual([(p["id"], p["kind"]) for p in props], [("p1", "skill"), ("p6", "edit"), ("p7", "skill")])
+
+    def test_digest_auto_never_approves_skill(self):
+        target = self.reg / "skills" / "k" / "SKILL.md"
+        self.digest([self.skill("p1", target, obvious=True, obvious_reason="claimed obvious")])
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001"), {"approved": [], "human": [{"id": "p1", "reason": "new skill"}]})
+        self.assertEqual(self.statuses(), ["pending"])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_approve_skill_queues_backlog_and_writes_nothing(self):
+        target, dot = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "my-skill-2" / "SKILL.md"
+        d = self.digest([self.skill("p1", target), self.skill("p2", dot)])
+        self.assertEqual(self.decide("p1", "approve")[:2], (200, {**self.skill("p1", target), "status": "queued"}))
+        self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
+        self.assertEqual(self.statuses(), ["queued", "queued"])
+        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
+                         [f"Create digest 001 p1 skill at skills/k/SKILL.md: see {d / 'proposals.json'}",
+                          f"Create digest 001 p2 skill at .claude/skills/my-skill-2/SKILL.md: see {d / 'proposals.json'}"])
+        self.assertFalse(target.exists() or target.parent.exists())
+        self.assertFalse(dot.exists())
+
+    def test_approve_skill_refuses_bad_targets(self):
+        existing = self.repo_file("skills/e/SKILL.md")
+        bad = [self.user / "skills" / "x" / "SKILL.md", self.reg / "docs" / "x" / "SKILL.md",
+               self.reg / "skills" / "x" / "y" / "SKILL.md", self.reg / "skills" / "Bad_Name" / "SKILL.md",
+               self.reg / "skills" / "hooks" / "SKILL.md", self.reg / "skills" / "x" / "README.md", "skills/x/SKILL.md"]
+        self.digest([self.skill("p0", existing)] + [self.skill(f"p{i + 1}", t) for i, t in enumerate(bad)])
+        snap = lambda: sorted(p for p in [*self.home.rglob("*"), *self.reg.rglob("*")] if "digests" not in p.parts)
+        before = snap()
+        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p0", "approve"), (409, {"error": "skill already exists"}))
+        for i in range(len(bad)):
+            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i + 1}", "approve"),
+                             (403, {"error": "target is not editable"}), bad[i])
+        self.assertEqual(self.statuses(), ["pending"] * (len(bad) + 1))
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertEqual(existing.read_text(), "old line\n")
+        self.assertEqual(snap(), before)
 
 if __name__ == "__main__":
     unittest.main()
