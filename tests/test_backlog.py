@@ -1,4 +1,5 @@
-import json, subprocess, sys, tempfile, unittest
+import hashlib, io, json, subprocess, sys, tempfile, unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +216,99 @@ class BacklogTest(unittest.TestCase):
         (self.root / "jobs" / job_id / "feature.md").write_text("r" * 1000 + "\n")
         board.cmd_abort(self.root, job_id, requeue=True)
         self.assertTrue(self.text().endswith("- [ ] " + "r" * 1000 + "\n"))
+
+    # --- backlog-spec: pre-written specs for follow-up items ---
+    JOB = "095-bigboy"
+
+    def followup(self, name, text):
+        d = self.root / "jobs" / self.JOB / "followups"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(text)
+
+    def spec_file(self, text):
+        return self.root / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+
+    def test_backlog_spec_new_adds_item_and_spec(self):
+        before = self.text()
+        self.followup("a.md", "Backlog: new\nItem: Add retry to fetch\n\n# Retry\nDo it.\n\n")
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out, {"added": ["Add retry to fetch (from 095-bigboy)"], "updated": [], "skipped": []})
+        self.assertEqual(self.text(), before + "- [ ] Add retry to fetch (from 095-bigboy)\n")
+        self.assertEqual(self.spec_file("Add retry to fetch (from 095-bigboy)").read_text(), "# Retry\nDo it.\n")
+
+    def test_backlog_spec_update_replaces_spec_keeps_line(self):
+        before = self.text()
+        self.followup("a.md", "Backlog: update Dark mode\n\nFirst body\n")
+        self.assertEqual(board.cmd_backlog_spec(self.root, self.JOB),
+                         {"added": [], "updated": ["Dark mode"], "skipped": []})
+        self.assertEqual(self.text(), before)
+        self.assertEqual(self.spec_file("Dark mode").read_text(), "First body\n")
+        self.followup("a.md", "Backlog: update Dark mode\nSecond body\n")
+        board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(self.text(), before)
+        self.assertEqual(self.spec_file("Dark mode").read_text(), "Second body\n")
+
+    def test_backlog_spec_update_without_match_adds_new(self):
+        before = self.text()
+        self.followup("a.md", "Backlog: update Light mode\nLight body\n")
+        self.followup("b.md", "Backlog: update Old thing\nOld body\n")  # only a done item has this text
+        out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out, {"added": ["Light mode (from 095-bigboy)", "Old thing (from 095-bigboy)"],
+                               "updated": [], "skipped": []})
+        self.assertEqual(self.text(), before + "- [ ] Light mode (from 095-bigboy)\n- [ ] Old thing (from 095-bigboy)\n")
+        self.assertEqual(self.spec_file("Light mode (from 095-bigboy)").read_text(), "Light body\n")
+        self.assertEqual(self.spec_file("Old thing (from 095-bigboy)").read_text(), "Old body\n")
+        self.assertFalse(self.spec_file("Old thing").exists())
+
+    def test_backlog_spec_skips_malformed_and_fails_when_none_processed(self):
+        before = self.text()
+        with self.assertRaises(SystemExit):  # no followups/ folder
+            board.cmd_backlog_spec(self.root, self.JOB)
+        (self.root / "jobs" / self.JOB / "followups").mkdir(parents=True)
+        with self.assertRaises(SystemExit):  # empty folder
+            board.cmd_backlog_spec(self.root, self.JOB)
+        self.followup("1.md", "Backlog: maybe\nbody\n")
+        self.followup("2.md", "Backlog: update   \nbody\n")
+        self.followup("3.md", "Backlog: new\nNot an item line\nbody\n")
+        self.followup("4.md", "Backlog: new\nItem:   \nbody\n")
+        self.followup("5.md", "Backlog: new\nItem: Empty body\n\n  \n")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):  # every file skipped
+            board.cmd_backlog_spec(self.root, self.JOB)
+        lines = err.getvalue().splitlines()
+        self.assertEqual([line.split(":")[1].strip() for line in lines], ["skipped 1.md", "skipped 2.md", "skipped 3.md",
+                                                                       "skipped 4.md", "skipped 5.md"])
+        self.assertTrue(all(line.startswith("backlog-spec: skipped ") for line in lines))
+        self.assertEqual(self.text(), before)
+        self.assertFalse((self.root / "backlog-specs").exists())
+        self.followup("6.md", "Backlog: new\nItem: Good one\nbody\n")
+        with redirect_stderr(io.StringIO()):
+            out = board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(out, {"added": ["Good one (from 095-bigboy)"], "updated": [],
+                               "skipped": ["1.md", "2.md", "3.md", "4.md", "5.md"]})
+        self.assertEqual(self.text(), before + "- [ ] Good one (from 095-bigboy)\n")
+        self.assertEqual(sorted(p.name for p in (self.root / "backlog-specs").iterdir()),
+                         [self.spec_file("Good one (from 095-bigboy)").name])
+
+    def test_backlog_spec_cli_prints_json(self):
+        self.followup("a.md", "Backlog: update Dark mode\nBody\n")
+        r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "board.py"), "--dir",
+                            str(self.root), "backlog-spec", self.JOB], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"added": [], "updated": ["Dark mode"], "skipped": []})
+
+    def test_next_moves_prewritten_spec(self):
+        spec = self.spec_file("Add CSV export")
+        spec.parent.mkdir()
+        spec.write_text("# CSV\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out, {"id": "001-add-csv-export", "feature": "Add CSV export"})
+        self.assertEqual((self.root / "jobs" / "001-add-csv-export" / "spec.md").read_text(), "# CSV\n")
+        self.assertFalse(spec.exists())
+        out = board.cmd_next(self.root)  # no spec file for this one: unchanged behaviour
+        self.assertEqual(out, {"id": "002-dark-mode", "feature": "Dark mode"})
+        self.assertEqual(list((self.root / "jobs" / "002-dark-mode").iterdir()), [])
+        self.assertIn("- [x] Dark mode → 002-dark-mode\n", self.text())
 
 
 if __name__ == "__main__":
