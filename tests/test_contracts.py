@@ -975,7 +975,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn('aria-label="Job files"', dialog)
         self.assertLess(dialog.index('id="viewerTitle"'), dialog.index('id="tabs"'))
         opener = text[text.index("function open(job)"):text.index("function termForm")]
-        self.assertIn('$("viewerTitle").textContent = job.title || job.id;', opener)
+        self.assertIn('$("viewerTitle").innerHTML = jobTitle(job);', opener)  # id + escaped title: test_dashboard_job_modal
 
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()

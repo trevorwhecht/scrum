@@ -82,6 +82,7 @@ header{flex-wrap:wrap}
 .waiting b{color:var(--human)}.waiting p{margin:4px 0 0;overflow-wrap:anywhere}
 #actions:empty{display:none}
 #actions form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.kids{display:grid;gap:6px}.kids .btn{flex:1;text-align:left}.btn.kid.human{border-color:var(--human)}
 input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #backlog article{display:grid;gap:10px;padding-top:14px}
@@ -311,10 +312,27 @@ const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.
 const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
 // A BigBoy child that can't start until Trevor clicks Setup done.
 const setupWait = job => job.stage === "waiting" && job.setup === "pending";
+const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
+const needsYou = kid => !!kid && (kid.stage === "needs-human" || setupWait(kid));
+// board.py WAITING_ON: a running parent whose children wait on Trevor. Only ids still waiting on him are kept.
+const WAITING_ON = "waiting on you in: ";
+const waitingOn = job => job.stage === "running" && (job.reason || "").startsWith(WAITING_ON)
+  ? job.reason.slice(WAITING_ON.length).split(", ").filter(id => needsYou(kidOf(job, id))) : [];
+const waitingNote = (job, cls) => {
+  const ids = waitingOn(job);
+  return ids.length ? `<span class="${cls}">Waiting on you in: ${esc(ids.join(", "))}</span>` : "";
+};
+// One row per child of a parent; a row on the board opens that child's modal through the goto handler.
+const childLinks = job => !job.children?.length ? "" : `<div class="kids">${job.children.map(id => {
+  const k = kidOf(job, id);
+  return !k ? `<p class="note kid"><span class="id">${esc(id)}</span> —</p>`
+    : `<form data-act="goto" data-key="${esc(k.key)}"><button class="btn tall kid${needsYou(k) ? " human" : ""}" type="submit">${esc(k.ticket || "Child")} <span class="id">${esc(k.id)}</span> ${esc(k.stage)}</button></form>`;
+}).join("")}</div>`;
+const jobTitle = job => `<span class="id">${esc(job.id)}</span> ${esc(job.title || job.id)}`;
 // BigBoy parent: merged count, then one line per child with the tickets it waits on. Child: which parent it belongs to.
 function bigboyLines(job) {
   if (job.children?.length) {
-    const kids = job.children.map(id => jobs.find(j => j.key === `${job.project}/${id}`) || {id, stage: "—"});
+    const kids = job.children.map(id => kidOf(job, id) || {id, stage: "—"});
     const ticketOf = id => kids.find(k => k.id === id)?.ticket || id;
     return `<span class="meta">T${kids.filter(k => k.stage === "done").length}/${kids.length} merged</span>`
       + kids.map(k => `<span class="meta kid">${esc(k.ticket || k.id)} ${esc(k.stage)}${k.depends_on?.length ? ` ← ${esc(k.depends_on.map(ticketOf).join(", "))}` : ""}</span>`).join("");
@@ -330,6 +348,7 @@ function card(job) {
   return `<button class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${bigboyLines(job)}
+    ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
@@ -445,7 +464,7 @@ async function show(job, file) {
 
 function open(job) {
   $("viewer").dataset.key = job.key;
-  $("viewerTitle").textContent = job.title || job.id;
+  $("viewerTitle").innerHTML = jobTitle(job);
   const files = job.files || [];
   const pr = job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "";
   $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
@@ -530,16 +549,16 @@ const waitingBanner = job => {
 function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
   const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  const err = '<p class="error" role="alert"></p>';
-  if (run?.alive) return el.innerHTML = banner + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
+  const err = '<p class="error" role="alert"></p>', kids = waitingNote(job, "note") + childLinks(job);
+  if (run?.alive) return el.innerHTML = banner + kids + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? "stopped by Abort" : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = banner + why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + termForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work).
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const stalled = /^stalled in /.test(reason);
   const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
-  el.innerHTML = banner + last + (stalled ? `<form data-act="resume"><button class="btn primary" type="submit">Resume</button></form>` : "")
+  el.innerHTML = banner + kids + last + (stalled ? `<form data-act="resume"><button class="btn primary" type="submit">Resume</button></form>` : "")
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
