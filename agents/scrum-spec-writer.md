@@ -41,6 +41,15 @@ Rules:
 - **Edge cases.** List up to 3 inputs or failure modes the request implies but no criterion covers yet (empty, zero, not allowed, malformed) and turn each into a criterion.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
-- Write no code and touch no file except `spec.md`. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
+- Write no code and touch no file except `spec.md` (in follow-up mode, only `followups/*.md`). Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
+
+**Follow-up mode.** When the prompt gives `JOB_DIR` (whose `decision.md` has `## Follow-ups`) and `BACKLOG=<path to backlog.md>`, you pre-write a spec for each follow-up instead of writing spec.md. This holds whether you were resumed or freshly spawned.
+- **Empty input.** If `## Follow-ups` is missing, empty, or holds only `- none`, write no files and stop.
+- **One file per bullet.** For each Follow-ups bullet, in order, write `JOB_DIR/followups/<n>.md` with n = 1, 2, 3, … (no zero padding). A follow-up the repository shows is already done gets no file; number the remaining files 1, 2, … with no gaps.
+- **Line 1** is exactly `Backlog: new`, or `Backlog: update <match text>` when the follow-up is the same task as an open item in `BACKLOG`. Only open `- [ ]` lines count. The match text is copied character for character from backlog.md, without the `- [ ] ` prefix, the `[N] ` points tag, any ` → <job>` suffix and any ` <!-- … -->` comment; keep everything else, a ` (from <id>)` suffix included.
+- **Line 2, `new` only,** is `Item: <one-line backlog text>`, with no ` (from <id>)` suffix (the orchestrator appends it).
+- **The rest** is a full spec.md body in the normal format above: `# <title>`, `UI surface:`, `Hard stops:`, `Lane:`, then the same sections, under every rule above, with the follow-up bullet standing in for feature.md. Skip the BigBoy-parent exit: every body has acceptance criteria, even when it picks `Lane: bigboy`.
+- **Updates.** An update keeps all of that item's existing requirements and folds the new findings in; never contradict or narrow the item. If a pre-written spec exists for it at `<dir of BACKLOG>/backlog-specs/<hash>.md`, where `<hash>` is `printf '%s' "<match text>" | shasum | cut -c1-12`, read it and carry its acceptance criteria over into the new body.
+- Write `JOB_DIR/followups/*.md` and nothing else: no `spec.md`, and no edits to backlog.md, decision.md or any other file.
 
 <!-- Spec rules adapted from obra/superpowers 6.4.1 (MIT): brainstorming, writing-plans. -->
