@@ -110,7 +110,7 @@ class ContractTest(unittest.TestCase):
                        "Local run failed:", "never loop", 'route.py" record', "invalid-artifact", "fallback"):
             self.assertIn(phrase, routing, phrase)
         self.assertGreaterEqual(text.count("see **Routing**"), 4)
-        for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, all up front.**", "2. Spawn `scrum-digest-reader`"):
+        for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, startable children only.**", "2. Spawn `scrum-digest-reader`"):
             line = next(l for l in text.splitlines() if l.startswith(step) or l.strip().startswith(step))
             self.assertIn("see **Routing**", line, step)
 
@@ -215,6 +215,34 @@ class ContractTest(unittest.TestCase):
         self.assertIn("scrum-approver", approve)
         self.assertIn("Opus", approve)
         self.assertIn("Conflicts", approve)
+
+    def test_skill_uses_sonnet_security_only_when_not_sensitive(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ('model: "sonnet"', "scrum-review-security", "Fast lane", "schema guard", r"(^|/)\.env", "Opus"):
+            self.assertIn(phrase, review, phrase)
+        self.assertEqual(text.count("permission|payment|billing"), 1)
+
+    def test_spec_writer_exits_early_on_bigboy(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        self.assertIn("## Findings", text)
+        self.assertIn("no acceptance criteria", text.lower())
+        self.assertIn("do not re-audit", text)
+
+    def test_planner_reuses_parent_findings(self):
+        text = (ROOT / "agents" / "scrum-planner.md").read_text()
+        for phrase in ("spec.md", "## Findings", "do not re-audit"):
+            self.assertIn(phrase, text, phrase)
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step1 = self.section(skill, "1. **Plan.**", "2. **Child specs")
+        self.assertIn("spec.md", step1)
+
+    def test_bigboy_child_specs_lazy(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        line = next(l for l in text.splitlines() if l.startswith("2. **Child specs, startable children only.**"))
+        for phrase in ("depends_on", "see **Routing**", "runs alone"):
+            self.assertIn(phrase, line, phrase)
+        self.assertNotIn("all up front", text)
 
     def test_skill_defines_obsolete_stop(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

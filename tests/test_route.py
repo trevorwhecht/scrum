@@ -37,6 +37,9 @@ class FakeOllama(BaseHTTPRequestHandler):
         pass
 
 
+TRIAL = {'scrum-spec-writer': 'trial', 'scrum-builder': 'trial'}
+
+
 def tags(*names):
     return json.dumps({'models': [{'name': n} for n in names]}).encode()
 
@@ -121,8 +124,8 @@ class RouteTests(unittest.TestCase):
         data = json.loads((ROUTE_PY.parent / 'routing.json').read_text())
         self.assertEqual(set(data), {'roles', 'models', 'thresholds'})
         self.assertEqual(data['roles'], {'estimator': 'approved', 'scrum-digest-reader': 'approved',
-                                         'codex-review': 'approved', 'scrum-spec-writer': 'trial',
-                                         'scrum-builder': 'trial'})
+                                         'codex-review': 'approved', 'scrum-spec-writer': 'off',
+                                         'scrum-builder': 'off'})
         self.assertEqual(data['models'], {'estimator': 'qwen3.5:4b', 'scrum-digest-reader': 'qwen3.5:4b',
                                           'scrum-spec-writer': 'qwen2.5-coder:7b',
                                           'scrum-builder': 'qwen2.5-coder:7b', 'codex-review': 'qwen2.5-coder:7b'})
@@ -162,24 +165,30 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.runner('estimator'), 'cloud')
 
     def test_builder_fast_lane_local(self):
+        self.config(**TRIAL)
         result = route_mod.route('scrum-builder', self.job('003-x', lane='fast'))
         self.assertEqual((result['runner'], result['model']), ('local', 'qwen2.5-coder:7b'))
 
     def test_builder_standard_lane_cloud(self):
+        self.config(**TRIAL)
         self.assertEqual(self.runner('scrum-builder', self.job('004-x', lane='standard')), 'cloud')
 
     def test_builder_bigboy_child_trial_local(self):
+        self.config(**TRIAL)
         self.assertEqual(self.runner('scrum-builder', self.job('005-x', parent='084-parent')), 'local')
 
     def test_builder_no_job_cloud(self):
+        self.config(**TRIAL)
         self.assertEqual(self.runner('scrum-builder'), 'cloud')
 
     def test_spec_writer_points_le_threshold_local(self):
+        self.config(**TRIAL)
         self.job('006-a', points=5)
         self.assertEqual(self.runner('scrum-spec-writer', self.job('006-x', points=2)), 'local')
         self.assertEqual(self.runner('scrum-spec-writer', self.job('006-y', points=3)), 'cloud')
 
     def test_spec_writer_unpointed_cloud(self):
+        self.config(**TRIAL)
         self.assertEqual(self.runner('scrum-spec-writer', self.job('007-x')), 'cloud')
         self.assertEqual(self.runner('scrum-spec-writer'), 'cloud')
 
@@ -273,6 +282,7 @@ class RouteTests(unittest.TestCase):
 
     # 6
     def test_claude_exhausted_trial_builder_standard_lane_local(self):
+        self.config(**TRIAL)
         job = self.job('008-x', lane='standard')
         self.claude_limit(60, 3600)
         result = route_mod.route('scrum-builder', job)
@@ -282,15 +292,28 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.runner('codex-review', job), 'cloud')
 
     def test_claude_exhausted_expired_reset_ignored(self):
+        self.config(**TRIAL)
         job = self.job('009-x', lane='standard')
         self.claude_limit(3 * 3600, -2 * 3600)
         self.assertEqual(self.runner('scrum-builder', job), 'cloud')
         self.assertIsNone(route_mod.status(str(self.scrum))['claude_exhausted_until'])
 
     def test_claude_exhausted_unparseable_reset_ignored(self):
+        self.config(**TRIAL)
         job = self.job('010-x', lane='standard')
         (self.scrum / 'runs' / 'y.log').write_text("You've hit your session limit · resets soon\n")
         self.assertEqual(self.runner('scrum-builder', job), 'cloud')
+
+    def test_trial_roles_off_route_cloud(self):
+        job = self.job('016-x', lane='fast', parent='084-parent', points=2)
+        for role in ('scrum-builder', 'scrum-spec-writer'):
+            result = route_mod.route(role, job)
+            self.assertEqual((result['runner'], result['model']), ('cloud', None), role)
+            self.assertEqual(result['why'], f'{role} trust is off')
+        self.claude_limit(60, 3600)
+        os.environ['SCRUM_ROUTE'] = 'local'
+        for role in ('scrum-builder', 'scrum-spec-writer'):
+            self.assertEqual(self.runner(role, job), 'cloud', role)
 
     def test_claude_exhausted_off_role_stays_cloud(self):
         self.config(**{'scrum-builder': 'off'})
@@ -300,6 +323,7 @@ class RouteTests(unittest.TestCase):
 
     # 7
     def test_override_cloud(self):
+        self.config(**TRIAL)
         os.environ['SCRUM_ROUTE'] = 'cloud'
         self.rollout(primary=99.0)
         self.assertEqual(self.runner('codex-review'), 'cloud')
@@ -307,6 +331,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(self.runner('scrum-builder', self.job('012-x', lane='fast')), 'cloud')
 
     def test_override_local_trial_ineligible_still_needs_eligibility(self):
+        self.config(**TRIAL)
         os.environ['SCRUM_ROUTE'] = 'local'
         self.assertEqual(self.runner('scrum-builder', self.job('013-x', lane='standard')), 'cloud')
         self.assertEqual(self.runner('scrum-builder', self.job('013-y', lane='fast')), 'local')

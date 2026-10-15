@@ -3,8 +3,8 @@
     "estimator": "approved",
     "scrum-digest-reader": "approved",
     "codex-review": "approved",
-    "scrum-spec-writer": "trial",
-    "scrum-builder": "trial"
+    "scrum-spec-writer": "off",
+    "scrum-builder": "off"
   },
   "models": {
     "estimator": "qwen3.5:4b",
