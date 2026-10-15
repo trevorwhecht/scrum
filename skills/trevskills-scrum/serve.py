@@ -26,7 +26,7 @@ docs and replies with suggested edits. Its log lands in the scrum/runs/ of the r
 nothing is applied except by hand in the editor.
 """
 import argparse, fnmatch, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -144,24 +144,66 @@ def resume_job(project, root, job, jobs):
     spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
 
-AUTO_RESUME = {}  # "project/job id" -> [tries, last try time]; a usage-limit outage kills every session, this brings them back
+AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
+RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
+RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
+
+
+def limit_reset(root, job):
+    """(limit hit?, reset epoch or None) from the tail of the job's run log: the line Claude Code prints when the
+    account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm")."""
+    log = root / (job.get("runlog") or "")
+    try:
+        tail = log.read_bytes()[-8192:].decode("utf-8", "replace") if job.get("runlog") else ""
+    except OSError:
+        return False, None
+    if not LIMIT_RE.search(tail):
+        return False, None
+    m = RESET_EPOCH_RE.search(tail)
+    if m:
+        return True, int(m.group(1))
+    m = RESET_RE.search(tail)
+    if not m:
+        return True, None
+    mon, day, hour, minute, ampm = m.groups()
+    hour = int(hour) % 12 + (12 if ampm.lower() == "pm" else 0)
+    now = datetime.now()
+    try:
+        at = now.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
+        if mon:
+            at = at.replace(month=datetime.strptime(mon, "%b").month, day=int(day))
+            if at < now:
+                at = at.replace(year=at.year + 1)
+        elif at < now:
+            at += timedelta(days=1)
+    except ValueError:
+        return True, None
+    return True, at.timestamp()
 
 
 def auto_resume(project, root, jobs):
-    """Resume every stalled job the Resume button would accept, at most once per 30 min and 12 times per job.
-    A job Trevor paused is never touched. A session that cannot start (usage limit) leaves the job stalled and
-    costs nothing, so the next try happens when usage is back."""
+    """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
+    that line names, else every 30 min; at most 12 tries per job. A job stalled for any other reason, or paused
+    by Trevor, is left on the board. A refused restart costs nothing."""
     now = time.time()
     for job in jobs:
         reason = job.get("reason") or ""
         if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
                 or running(project, job["id"]):
             continue
-        tries, last = AUTO_RESUME.get(f"{project}/{job['id']}", [0, 0.0])
-        if tries >= AUTO_RESUME_MAX or now - last < AUTO_RESUME_EVERY:
+        key = f"{project}/{job['id']}"
+        tries, due = AUTO_RESUME.get(key, [0, 0.0])
+        if tries >= AUTO_RESUME_MAX or now < due:
             continue
-        AUTO_RESUME[f"{project}/{job['id']}"] = [tries + 1, now]
+        hit, reset = limit_reset(root, job)
+        if not hit:
+            continue
+        if reset and reset + 120 > now and due < reset + 120:
+            AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
+            continue
+        AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
 
 

@@ -2681,25 +2681,36 @@ if __name__ == "__main__":
 
 
 class AutoResumeTest(unittest.TestCase):
-    """The watchdog sweep resumes a stalled job itself, once per 30 min, at most 12 times, never a paused one."""
+    """The watchdog sweep resumes a job only when its log shows the usage limit killed it: at the reset time the
+    log names, else every 30 min, at most 12 times; never a paused job or one stalled for another reason."""
 
     def setUp(self):
         import serve
         self.serve = serve
         serve.AUTO_RESUME.clear()
-        self.jobs = [{"id": "j1", "stage": "needs-human", "reason": "stalled in build: no live session"},
-                     {"id": "j2", "stage": "needs-human", "reason": "stalled in build: paused by Trevor"},
-                     {"id": "j3", "stage": "build", "reason": ""}]
+        self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
+        self.jobs = []
+        for jid, text in [("limit", "You've hit your limit \u00b7 resets 2am (America/Los_Angeles)"),
+                          ("crash", "Traceback: something else broke"), ("paused", "hit your limit"), ("epoch", "rate_limit: rejected (five_hour) resets_at=1700000000")]:
+            (self.root / "runs" / f"{jid}.log").write_text(text)
+            reason = "stalled in build: paused by Trevor" if jid == "paused" else "stalled in build: no live session"
+            self.jobs.append({"id": jid, "stage": "needs-human", "reason": reason, "runlog": f"runs/{jid}.log"})
 
-    def test_resumes_stalled_once_per_window_up_to_max(self):
+    def sweep(self):
         s = self.serve
         with mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
-            s.auto_resume("p", Path("/x"), self.jobs)
-            s.auto_resume("p", Path("/x"), self.jobs)  # same minute: backoff
-            self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["j1"])
-            s.AUTO_RESUME["p/j1"][1] -= s.AUTO_RESUME_EVERY
-            s.auto_resume("p", Path("/x"), self.jobs)
-            self.assertEqual(resume.call_count, 2)
-            s.AUTO_RESUME["p/j1"] = [s.AUTO_RESUME_MAX, 0.0]
-            s.auto_resume("p", Path("/x"), self.jobs)
-            self.assertEqual(resume.call_count, 2, "capped")
+            s.auto_resume("p", self.root, self.jobs)
+            return [c.args[2]["id"] for c in resume.call_args_list]
+
+    def test_only_limit_killed_jobs_resume_and_wait_for_the_reset(self):
+        s = self.serve
+        self.assertEqual(self.sweep(), ["epoch"], "a past reset retries now; crash and paused never; 2am waits")
+        due = s.AUTO_RESUME["p/limit"][1]
+        self.assertGreater(due, time.time() + 60)
+        self.assertLessEqual(due, time.time() + 24 * 3600 + 120)
+        self.assertEqual(self.sweep(), [], "nothing due yet")
+        s.AUTO_RESUME["p/limit"][1] = 0.0; (self.root / "runs" / "limit.log").write_text("hit your limit")  # no reset named
+        self.assertEqual(self.sweep(), ["limit"])
+        self.assertEqual(self.sweep(), [], "30 min backoff")
+        s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.sweep(), [], "capped")
