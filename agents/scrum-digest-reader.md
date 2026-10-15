@@ -14,6 +14,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - every `round-*/review-*.md` and every `round-*/check.md`
 - `rework.md`, `promoted.md` and `assessment.md`, when present
 - `routing.log`, when present (one JSON object per line: `ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
+- `JOBS_DIR/../insights/<id>.md`, when present: written by the local background worker as soon as the job finished. Its fact lines (`Lane:`, `round-N:`, `Routing:`) are counted by code and can be used as counted. Its `## Findings` bullets come from a small local model and are unverified: use them as pointers, and count a finding only after confirming it in the cited job file. When the job file is gone, the bullet alone never makes a group.
 - `spec.md`'s `## Assumptions` and `## Likely files` sections
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
 

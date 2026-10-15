@@ -59,6 +59,24 @@ Ollama ignores KV-cache quantization and flash attention on its MLX engine, so t
 The rule that follows: local work is **one bounded `route.chat` call with the context gathered by
 code**, never an agent loop, and anything countable is counted by code, not the model.
 
+## Background worker
+
+`local/worker-install.sh` installs a launchd agent (`com.trevskills.scrum-worker`, low priority) that runs
+`local/worker.py` every 10 minutes; `--uninstall` removes it. A tick never spends paid usage and does nothing
+unless the router would run the task locally, which includes the memory gate above. While you are active it does
+one task; after 10 minutes without keyboard or mouse input it keeps going for up to 9 minutes, so a night with
+other apps closed gets the most done. It yields when another `scrum-` model is loaded (a running job keeps
+priority). Tasks, for every project on the dashboard:
+
+1. **Estimate** unpointed open backlog items (local only; the dashboard's `+` still falls back to Sonnet).
+2. **Insight notes**: `scrum/insights/<job>.md` for each done job not yet digested, written before the digest
+   trims the job folder. Code writes the facts (lane, rounds, check and review verdicts, routing outcomes); the
+   4B adds 2-5 bullets, each citing a job file, and bullets citing anything else are dropped. The paid digest
+   reader reads these files and confirms bullets against the job files.
+
+`python3 local/worker.py --status` says what a tick would do now. Each tick logs one line to
+`~/.claude/trevskills-scrum/worker.log`.
+
 ## How routing decides
 
 `local/route.py <role>` answers `cloud`, `local` or `skip` for one pipeline step, in this order:

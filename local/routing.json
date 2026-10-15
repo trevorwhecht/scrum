@@ -4,14 +4,16 @@
     "scrum-digest-reader": "off",
     "codex-review": "off",
     "scrum-spec-writer": "off",
-    "scrum-builder": "off"
+    "scrum-builder": "off",
+    "insights": "approved"
   },
   "models": {
     "estimator": "scrum-qwen3.5:4b",
     "scrum-digest-reader": "scrum-qwen3.5:4b",
     "scrum-spec-writer": "scrum-qwen2.5-coder:7b",
     "scrum-builder": "scrum-qwen2.5-coder:7b",
-    "codex-review": "scrum-qwen2.5-coder:7b"
+    "codex-review": "scrum-qwen2.5-coder:7b",
+    "insights": "scrum-qwen3.5:4b"
   },
   "thresholds": {
     "codex_5h": 85,

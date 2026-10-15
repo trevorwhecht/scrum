@@ -131,10 +131,11 @@ class RouteTests(unittest.TestCase):
         # Digest reader and Codex review are off: local 4-7B notes invent counts, local Codex emits tool calls as text.
         self.assertEqual(data['roles'], {'estimator': 'approved', 'scrum-digest-reader': 'off',
                                          'codex-review': 'off', 'scrum-spec-writer': 'off',
-                                         'scrum-builder': 'off'})
+                                         'scrum-builder': 'off', 'insights': 'approved'})
         self.assertEqual(data['models'], {'estimator': 'scrum-qwen3.5:4b', 'scrum-digest-reader': 'scrum-qwen3.5:4b',
                                           'scrum-spec-writer': 'scrum-qwen2.5-coder:7b',
-                                          'scrum-builder': 'scrum-qwen2.5-coder:7b', 'codex-review': 'scrum-qwen2.5-coder:7b'})
+                                          'scrum-builder': 'scrum-qwen2.5-coder:7b', 'codex-review': 'scrum-qwen2.5-coder:7b',
+                                          'insights': 'scrum-qwen3.5:4b'})
         self.assertEqual(data['thresholds'], {'codex_5h': 85, 'codex_weekly': 90, 'spec_writer_max_points': 2, 'min_free_gb': 3})
 
     # 2

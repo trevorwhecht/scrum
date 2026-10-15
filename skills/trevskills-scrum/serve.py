@@ -266,9 +266,10 @@ def local_estimate(root, text, model):
         return None
 
 
-def estimate(root, text):
+def estimate(root, text, local_only=False):
     """Ask the router where the estimator runs (cloud Sonnet or local Ollama), retry a failed local run once on cloud,
-    log each attempt to root/routing.log. On any failure the item just stays unestimated."""
+    log each attempt to root/routing.log. On any failure the item just stays unestimated. local_only (the background
+    worker) never spends paid usage: no cloud attempt at all. Returns True when points landed."""
     prompt, env = ESTIMATE_PROMPT.format(text=text), dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1")
     try:
         pick = route.route("estimator", scrum_dir=root)
@@ -279,7 +280,8 @@ def estimate(root, text):
     if model:
         attempts.append(("local", model, lambda: local_estimate(root, text, model)))
     cloud = [CLAUDE, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"]
-    attempts.append(("cloud", "sonnet", lambda: run_estimate(cloud, root, env)))
+    if not local_only:
+        attempts.append(("cloud", "sonnet", lambda: run_estimate(cloud, root, env)))
     for runner, name, attempt in attempts:
         start = time.monotonic()
         data = attempt()
@@ -292,8 +294,9 @@ def estimate(root, text):
             try:
                 board.backlog_set_estimate(root, text, data["points"], data.get("why"))
             except (ValueError, SystemExit, OSError):
-                pass
-            return
+                return False
+            return True
+    return False
 
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)

@@ -77,6 +77,7 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - **Ollama health check:** local only when Ollama's `/api/tags` answers within 2 s and lists the role's model (`scrum-qwen2.5-coder:7b` or `scrum-qwen3.5:4b`, the 32K variants from local/README.md).
 - **Claude session limit:** while a recent `scrum/runs/` log shows Claude's session limit, trial and approved roles go local until it resets.
 - **Codex quota:** the Codex review moves to local once the 5h window reaches 85 % used or the weekly one 90 % (`codex_5h`, `codex_weekly`), and is skipped when Ollama is down.
+- **Background worker:** `local/worker-install.sh` runs `local/worker.py` every 10 minutes: local backlog estimates and insight notes for the digest, only when memory allows, more while the Mac is idle. See [local/README.md](local/README.md#background-worker).
 - **`SCRUM_ROUTE=cloud`** forces every routed step to cloud; **`SCRUM_ROUTE=local`** forces local for eligible steps when Ollama is up.
 - **One cloud retry:** a local run with no valid artifact is retried once on cloud, never again and never back to local. Every attempt is logged to `routing.log`.
 
