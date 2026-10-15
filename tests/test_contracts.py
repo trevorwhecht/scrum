@@ -109,10 +109,31 @@ class ContractTest(unittest.TestCase):
                        "SCRUM_LOCAL_CONTEXT=32768", "--allowedTools", "builder=local", "one cloud retry",
                        "Local run failed:", "never loop", 'route.py" record', "invalid-artifact", "fallback"):
             self.assertIn(phrase, routing, phrase)
+        self.assertIn("followups/", routing)
         self.assertGreaterEqual(text.count("see **Routing**"), 4)
         for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, startable children only.**", "2. Spawn `scrum-digest-reader`"):
             line = next(l for l in text.splitlines() if l.startswith(step) or l.strip().startswith(step))
             self.assertIn("see **Routing**", line, step)
+
+    def test_skill_new_job_skips_spec_when_prewritten(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step = next(l for l in text.splitlines() if l.startswith("3. **Spec:**"))
+        for phrase in ("spec.md` already exists", "skip", "3b", "Refresh spec.md:", "see **Routing**"):
+            self.assertIn(phrase, step, phrase)
+
+    def test_skill_records_specwriter_id(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        new_job = self.section(text, "## New job", "## Run all")
+        for phrase in ("B set $ID specwriter=<id>", "specwriter=local"):
+            self.assertIn(phrase, new_job, phrase)
+
+    def test_skill_approve_prewrites_followups(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        approve = self.section(text, "## Approve", "## Merge")
+        for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer", "local",
+                       "BACKLOG=$F/backlog.md", "follow-up mode", "B backlog-spec $ID", "Resuming the builder",
+                       "backlog-add", "(from $ID)", "followups/", "non-zero", "never blocks", "- none"):
+            self.assertIn(phrase, approve, phrase)
 
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()

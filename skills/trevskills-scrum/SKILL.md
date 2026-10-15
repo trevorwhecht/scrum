@@ -155,7 +155,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    - **`BB` set:** if it does not match `^[A-Za-z0-9._/-]+$`, run `B set $ID stage=needs-human reason="Base branch line in scrum/project.md is malformed. Fix: correct or remove it, then click Abort job with Put back in backlog ticked and run it again."` and stop before the spec writer. If `git rev-parse --verify -q "origin/$BB"` fails, run `B set $ID stage=needs-human reason='Base branch <BB> not found on origin. Fix: push <BB> to origin or remove the Base branch line from scrum/project.md, then click Abort job with Put back in backlog ticked and run it again.'` and stop before the spec writer. Otherwise `DEFAULT=$BB`.
 
    Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
-3. **Spec:** spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
+3. **Spec:** if `$F/jobs/$ID/spec.md` already exists (pre-written from the backlog), skip the spec-writer spawn and the respawn below and go straight to 3b and 3c; this skip never applies when step 3 runs with the `Refresh spec.md:` line from **BigBoy lane** step 4, which still spawns over the existing spec.md. Otherwise spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID
    WORKTREE=none
@@ -164,7 +164,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    PROJECT=$F/project.md
    Write spec.md for this job.
    ```
-   If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing. Fix: click Abort job with Put back in backlog ticked, then run it again."` and stop.
+   If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing. Fix: click Abort job with Put back in backlog ticked, then run it again."` and stop. After each spawn, record it: `B set $ID specwriter=<id>` for a cloud spawn (the returned agent id), or `B set $ID specwriter=local` when **Routing** ran it locally. When the cloud retry replaces a local run, record the cloud agent's id instead.
    3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
    3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard|debug|bigboy>`. Set `lane=debug` when it says exactly `Lane: debug`, whatever the `Hard stops:` and `UI surface:` lines say. Set `lane=bigboy` when it says exactly `Lane: bigboy`, whatever the other header lines say; the job then goes to the **BigBoy lane** and gets no worktree (skip steps 4-6). A BigBoy child (the job has a `parent`) never gets `bigboy`: for it, `Lane: bigboy` counts as `standard`. Set `fast` only when it says exactly `Lane: fast`, the `Hard stops:` line is `none`, and the `UI surface:` line is `no`. Set `standard` in every other case: the line is missing or malformed, or it says `fast` but `Hard stops:` is anything but `none` or `UI surface:` is `yes`.
 4. **Worktree:**
@@ -348,7 +348,18 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 1. Run `B set $ID stage=approve`. Spawn `scrum-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
    - **Model:** pass the Agent tool override `model: "sonnet"` to `scrum-approver` only when all of these hold: the latest `round-$N/check.md` is `CHECK: PASS`; all four `round-$N/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count); the Merge schema guard regex matches nothing in the diff; and you know this round was not started by the Merge **Conflicts** step. In every other case (including when you can't tell, e.g. after a session restart) omit the override so the agent's default, Opus, runs.
 2. Copy `decision.md` into `round-$N/decision.md`; that's how the approver later sees whether REWORK has already been used. Run `B sync $ID` and read `decision`.
-3. Append the `## Follow-ups` bullets in `decision.md` to the backlog with `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. The lock keeps parallel sessions from clobbering each other.
+3. **Follow-ups.** When `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
+   - If the board's `specwriter` is a recorded agent id, use SendMessage to it, the same way **Resuming the builder** does. Spawn a fresh `scrum-spec-writer` (see **Routing**) instead when `specwriter` is `local`, missing or empty, or when SendMessage fails because the agent no longer exists. The message or prompt is:
+     ```
+     JOB_DIR=$F/jobs/$ID
+     BACKLOG=$F/backlog.md
+     PROJECT=$F/project.md
+     Run follow-up mode: pre-write a spec for each Follow-ups bullet in decision.md.
+     ```
+   - Wait for it, then run `B backlog-spec $ID`. If it reports `skipped` files, name them in the final report only.
+   - **Fallback:** if the spec writer fails, leaves no `$F/jobs/$ID/followups/*.md`, or `B backlog-spec $ID` exits non-zero, append the bullets with `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. The lock keeps parallel sessions from clobbering each other.
+
+   Approve never blocks or sets needs-human because of this step; go on to step 4.
 4. Route:
    - `APPROVE`: go to **Merge**.
    - `REWORK` and sync's `"reworks"` is greater than 1: the approver broke the once-only rule. Run `B set $ID stage=needs-human reason="approver requested second rework. Fix: read decision.md, then click Approve & merge or Send back to builder."` and stop.
@@ -432,8 +443,8 @@ Only `scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` are routed, 
    )"
    SCRUM_LOCAL_MODEL=<model> SCRUM_LOCAL_CONTEXT=32768 python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py" claude -p --allowedTools "$TOOLS" "$PROMPT"
    ```
-   A local build runs `B set $ID builder=local` instead of recording an agent id.
-3. **One cloud retry, never loop.** A local run is invalid when: **spec writer**, `spec.md` is missing; **digest reader**, `notes.md` is missing or its first line is not `DIGEST NOTES`; **builder**, `build.md` is missing. A subprocess that exits non-zero is invalid too, even when an older artifact from an earlier attempt is still there (a refused run.py preflight is one such case); its last stderr line is the reason. Retry an invalid run once on cloud with the Agent tool and the same prompt plus one extra line `Local run failed: <reason>.` That retry replaces the step's own "spawn it once more", so the step still makes at most 2 attempts before its existing needs-human or `error.md` stop. A step gets one cloud retry at most and never goes back to local.
+   A local build runs `B set $ID builder=local` instead of recording an agent id. A local follow-up-mode spec writer records no `specwriter`.
+3. **One cloud retry, never loop.** A local run is invalid when: **spec writer**, `spec.md` is missing; **follow-up-mode spec writer** (**Approve** step 3), `$F/jobs/$ID/followups/` has no `*.md`; **digest reader**, `notes.md` is missing or its first line is not `DIGEST NOTES`; **builder**, `build.md` is missing. A subprocess that exits non-zero is invalid too, even when an older artifact from an earlier attempt is still there (a refused run.py preflight is one such case); its last stderr line is the reason. Retry an invalid run once on cloud with the Agent tool and the same prompt plus one extra line `Local run failed: <reason>.` That retry replaces the step's own "spawn it once more", so the step still makes at most 2 attempts before its existing needs-human or `error.md` stop. A step gets one cloud retry at most and never goes back to local.
 4. **Builder while the board says `builder=local`.** Every fix attempt and every review, approver, rework, CI or merge resume re-runs the local builder subprocess, with the 5 lines (current `ROUND`) and the resume text as the prompt lines. A local build has no Agent id, so there is no SendMessage.
    - **Check gate:** fix attempts 1 and 2 run local. If the check still fails after them, fix attempt 3 is the cloud retry: a fresh `scrum-builder` with the 5 lines, the resume text and `Local run failed: check still failing after 2 local fix attempts.` The 3-attempt cap is unchanged.
    - **Fast lane:** promotion on the 2nd check failure moves the next fix attempt to cloud (`Local run failed: check failed twice.`), and that move is the step's one cloud retry.
