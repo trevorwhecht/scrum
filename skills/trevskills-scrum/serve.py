@@ -129,18 +129,55 @@ def start_ready(project, root, parent_id):
     return out
 
 
+def resume_job(project, root, job, jobs):
+    """Restart a watchdog-flagged job (the Resume button, and the auto-resume sweep). Play on a paused parent
+    resumes its paused children and starts whatever is ready instead."""
+    job_id = job["id"]
+    if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):
+        board.cmd_set(root, job_id, ["stage=running", "reason="])
+        for k in job["children"]:
+            kid = next((j for j in jobs if j["id"] == k), None)
+            if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
+                spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
+        start_ready(project, root, job_id)
+        return
+    spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
+
+
+AUTO_RESUME = {}  # "project/job id" -> [tries, last try time]; a usage-limit outage kills every session, this brings them back
+AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+
+
+def auto_resume(project, root, jobs):
+    """Resume every stalled job the Resume button would accept, at most once per 30 min and 12 times per job.
+    A job Trevor paused is never touched. A session that cannot start (usage limit) leaves the job stalled and
+    costs nothing, so the next try happens when usage is back."""
+    now = time.time()
+    for job in jobs:
+        reason = job.get("reason") or ""
+        if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
+                or running(project, job["id"]):
+            continue
+        tries, last = AUTO_RESUME.get(f"{project}/{job['id']}", [0, 0.0])
+        if tries >= AUTO_RESUME_MAX or now - last < AUTO_RESUME_EVERY:
+            continue
+        AUTO_RESUME[f"{project}/{job['id']}"] = [tries + 1, now]
+        resume_job(project, root, job, jobs)
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
-    whatever siblings are now ready. One project's failure never stops the others."""
+    whatever siblings are now ready, then auto-resume the stalled ones. One project's failure never stops the others."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
             flagged = set(board.cmd_watchdog(root))
-            if not flagged:
+            if not (root / "board.json").exists():
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
+            auto_resume(project, root, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
 
@@ -1748,15 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
             if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
-            if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):  # Play on a paused parent
-                board.cmd_set(root, job_id, ["stage=running", "reason="])
-                for k in job["children"]:
-                    kid = next((j for j in jobs if j["id"] == k), None)
-                    if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
-                        spawn(project, root, k, action, f"/trevskills-scrum resume {k}")
-                start_ready(project, root, job_id)
-                return 202, {"id": job_id, "action": action}
-            spawn(project, root, job_id, action, f"/trevskills-scrum resume {job_id}")
+            resume_job(project, root, job, jobs)
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}

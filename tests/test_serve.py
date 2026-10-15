@@ -2678,3 +2678,28 @@ class DigestTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoResumeTest(unittest.TestCase):
+    """The watchdog sweep resumes a stalled job itself, once per 30 min, at most 12 times, never a paused one."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.AUTO_RESUME.clear()
+        self.jobs = [{"id": "j1", "stage": "needs-human", "reason": "stalled in build: no live session"},
+                     {"id": "j2", "stage": "needs-human", "reason": "stalled in build: paused by Trevor"},
+                     {"id": "j3", "stage": "build", "reason": ""}]
+
+    def test_resumes_stalled_once_per_window_up_to_max(self):
+        s = self.serve
+        with mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
+            s.auto_resume("p", Path("/x"), self.jobs)
+            s.auto_resume("p", Path("/x"), self.jobs)  # same minute: backoff
+            self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["j1"])
+            s.AUTO_RESUME["p/j1"][1] -= s.AUTO_RESUME_EVERY
+            s.auto_resume("p", Path("/x"), self.jobs)
+            self.assertEqual(resume.call_count, 2)
+            s.AUTO_RESUME["p/j1"] = [s.AUTO_RESUME_MAX, 0.0]
+            s.auto_resume("p", Path("/x"), self.jobs)
+            self.assertEqual(resume.call_count, 2, "capped")
