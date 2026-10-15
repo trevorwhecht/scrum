@@ -228,10 +228,11 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
    ```
    JOB_DIR=$F/jobs/$ID
    PROJECT=$F/project.md
+   Read JOB_DIR/spec.md first when it exists; do not re-audit its ## Findings.
    Write plan.md for this job.
    ```
    Then run `B plan-apply $ID`. Under the board lock it checks plan.md (first line `PLAN: READY`, 2-5 tickets, every `Depends on:` names a known ticket other than itself with no cycle, exactly one `Exposure: yes` ticket and it depends on every other), creates one `waiting` child job per ticket with its `feature.md`, sets the parent's `children`, moves the parent to `running`, and prints `{"children": [...]}`. A refused plan creates nothing. If it exits non-zero, delete `$F/jobs/$ID/plan.md`, spawn the planner once more, and run `B plan-apply $ID` again. If that fails too, take its error line, strip quotes (`'` and `"`) and backticks, run `B set $ID stage=needs-human reason='planner output unreadable: <error line>. Fix: click Abort job with Put back in backlog ticked, then run it again.'` and stop.
-2. **Child specs, all up front.** Spawn one `scrum-spec-writer` per child **in ONE message**, in the background, and wait for all of them (see **Routing**: each child is routed on its own, and local ones run as background subprocesses alongside the cloud ones). Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Then, for each child:
+2. **Child specs, startable children only.** Spawn one `scrum-spec-writer` per child whose `depends_on` is empty, **in ONE message**, in the background, and wait for all of them (see **Routing**: each child is routed on its own, and local ones run as background subprocesses alongside the cloud ones). Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Every other child gets its spec in its own `start` session (step 4 runs New job step 3 when `spec.md` is missing); until then a child with no spec.md runs alone, which is the accepted cost. Then, for each child spawned for here:
    - **Obsolete:** if its `spec.md` starts with `OBSOLETE:`, run `B abort <child> --reason 'obsolete: <rest of that line, single quotes stripped>'`. Its dependents never become ready.
    - **Lane:** otherwise run New job step 3c with `ID=<child>` (`Lane: bigboy` counts as `standard`). A child without a `spec.md` is fine: its own `start` writes it.
 3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run detached from the main checkout, logging to `scrum/runs/`:
@@ -320,7 +321,7 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
    Skipped by orchestrator: no UI files in diff.
    ```
    Then spawn only `scrum-review-security` and `scrum-review-code`. Otherwise (`UI globs` missing or `none`, or any file matches), spawn all four.
-3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code` (minus the two skipped in step 2). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`
+3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code` (minus the two skipped in step 2). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.` Pass the Agent tool override `model: "sonnet"` to `scrum-review-security` only when no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Fast lane** sensitive-path regex, the **Merge** schema guard regex, or `(^|/)\.env`; re-check every round. Otherwise (a match, or the diff can't be read) omit the override so the agent's default, Opus, runs.
 4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`.
    - `complete` must be `true`. If it isn't, `missing` lists the absent files (e.g. `review-ui.md`): re-spawn only the reviewers named in `missing`, once. If a file is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
