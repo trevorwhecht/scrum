@@ -2,10 +2,12 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting (empty = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
+  board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
+                                   backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"}
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
@@ -29,7 +31,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, json, os, re, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,7 +40,7 @@ REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted")
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
-          "waiting")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
@@ -268,6 +270,18 @@ def backlog_set_estimate(root, text, points, why):
     return False
 
 
+def spec_path(root, text):
+    """Where a backlog item's pre-written spec waits, keyed by its stored text."""
+    return Path(root) / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+
+
+def take_spec(root, text, job_id):
+    """Move the item's pre-written spec, if any, to the new job's spec.md. Caller holds the lock."""
+    src = spec_path(root, text)
+    if src.is_file():
+        os.replace(src, Path(root) / "jobs" / job_id / "spec.md")
+
+
 def claim_item(lines, item, job_id):
     """Mark one backlog item claimed by job_id in lines. Caller holds the lock and writes the backlog once."""
     item["done"], item["job"] = True, job_id
@@ -287,6 +301,7 @@ def cmd_next(root, index=None):
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
         job_id = add_job(root, board, item["text"][:60])
+        take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
         return {"id": job_id, "feature": item["text"]}
@@ -391,6 +406,58 @@ def cmd_backlog_add(root, items):
             backlog_op(root, "add", text=item)
             added.append(clean(item, ITEM_MAX))
     return added
+
+
+def parse_followup(text):
+    """(kind, item text, body) for one followups/*.md file; raises ValueError with the reason when malformed."""
+    lines = text.splitlines()
+    head = lines[0].strip() if lines else ""
+    if head == "Backlog: new":
+        m = re.match(r"^Item:\s*(.*)$", lines[1].strip() if len(lines) > 1 else "")
+        if not m or not m.group(1).strip():
+            raise ValueError("second line is not 'Item: <text>'")
+        kind, item, rest = "new", m.group(1).strip(), lines[2:]
+    elif (m := re.match(r"^Backlog: update\s+(\S.*)$", head)):
+        kind, item, rest = "update", m.group(1).strip(), lines[1:]
+    else:
+        raise ValueError("first line is not 'Backlog: new' or 'Backlog: update <text>'")
+    body = "\n".join(rest).strip("\n")
+    if not body.strip():
+        raise ValueError("spec body is empty")
+    return kind, item, body + "\n"
+
+
+def cmd_backlog_spec(root, job_id):
+    """Ingest jobs/<id>/followups/*.md under the lock: each file adds an item (or matches an open one by exact text)
+    and stores its spec at spec_path. Appends lines itself: backlog_op would flock .board.lock again and deadlock."""
+    folder = Path(root) / "jobs" / check_id(job_id) / "followups"
+    out = {"added": [], "updated": [], "skipped": []}
+    with locked_board(root):
+        lines, items = read_backlog(root)
+        specs = {}
+        for f in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+            try:
+                kind, text, body = parse_followup(f.read_text(encoding="utf-8", errors="replace"))
+            except ValueError as e:
+                print(f"backlog-spec: skipped {f.name}: {e}", file=sys.stderr)
+                out["skipped"].append(f.name)
+                continue
+            if kind == "update" and any(not i["done"] and i["text"] == text for i in items):
+                out["updated"].append(text)
+            else:
+                text = clean(text + f" (from {job_id})", ITEM_MAX)
+                lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+                out["added"].append(text)
+            specs[text] = body
+        if not specs:
+            raise SystemExit(f"backlog-spec {job_id}: no usable followups/*.md; backlog.md was not touched")
+        if out["added"]:
+            write_backlog(root, lines)
+        for text, body in specs.items():
+            path = spec_path(root, text)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(body)
+    return out
 
 
 def job_files(d):
@@ -701,6 +768,7 @@ def cmd_runall_start(root):
         for item in todo:
             t = {"ticket": None, "title": item["text"][:60], "text": item["text"], "parallel": True}
             kids.append(add_child(root, board, parent, t, [], "", plain=True))
+            take_spec(root, item["text"], kids[-1])
             claim_item(lines, item, kids[-1])
         write_backlog(root, lines)
         parent.update(lane="runall", stage="running", children=kids, updatedAt=now())
@@ -1053,6 +1121,7 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("backlog-spec").add_argument("id")
     sub.add_parser("register").add_argument("repo", type=Path)
     ab = sub.add_parser("abort")
     ab.add_argument("id")
@@ -1119,12 +1188,20 @@ def main(argv=None):
         print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
     elif a.cmd == "chain-unlock":
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
+    elif a.cmd == "backlog-spec":
+        out = cmd_backlog_spec(a.dir, a.id)
+        print(json.dumps(out))
+        spawn_estimates(a.dir, out["added"])
     else:
-        # The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing.
-        for text in cmd_backlog_add(a.dir, a.items):
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
-                              "--dir", str(a.dir.resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items))
+
+
+def spawn_estimates(root, texts):
+    """The same Sonnet estimate a dashboard add gets, detached so this returns at once. Library callers spawn nothing."""
+    for text in texts:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
+                          "--dir", str(Path(root).resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 if __name__ == "__main__":

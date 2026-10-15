@@ -1,4 +1,4 @@
-import io, json, os, subprocess, sys, tempfile, unittest
+import hashlib, io, json, os, subprocess, sys, tempfile, unittest
 from contextlib import redirect_stdout
 from unittest import mock
 from pathlib import Path
@@ -95,6 +95,13 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.jobs()[0]["waiting"], "a b " + "c" * 196)
         board.cmd_set(self.root, job_id, ["waiting="])
         self.assertIsNone(self.jobs()[0]["waiting"])
+
+    def test_set_specwriter_field(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["specwriter=abc123"])
+        self.assertEqual(self.jobs()[0]["specwriter"], "abc123")
+        board.cmd_set(self.root, job_id, ["specwriter="])
+        self.assertIsNone(self.jobs()[0]["specwriter"])
 
     def test_set_rejects_bad_tty(self):
         job_id = board.cmd_new(self.root, "x")
@@ -579,6 +586,19 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] [3] Add CSV export → 002-add-csv-export <!-- small -->\n"
                          "- [x] Old thing → 009-old\n- [x] Dark mode → 003-dark-mode\n")
+
+    def test_runall_start_moves_prewritten_specs(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add CSV export\n- [ ] Dark mode\n")
+        specs = self.root / "backlog-specs"
+        specs.mkdir()
+        spec = specs / (hashlib.sha1(b"Dark mode").hexdigest()[:12] + ".md")
+        spec.write_text("# Dark mode\nbody\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out["children"], ["002-add-csv-export", "003-dark-mode"])
+        self.assertEqual((self.root / "jobs" / "003-dark-mode" / "spec.md").read_text(), "# Dark mode\nbody\n")
+        self.assertFalse(spec.exists())
+        self.assertFalse((self.root / "jobs" / "002-add-csv-export" / "spec.md").exists())
 
     def runall(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
