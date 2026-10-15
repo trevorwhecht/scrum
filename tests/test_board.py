@@ -15,6 +15,9 @@ class BoardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "scrum"
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1093,6 +1096,9 @@ class HookTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)})
         env.start()
         self.addCleanup(env.stop)
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
         self.old = board.cmd_new(self.root, "older job")  # same tty, older: never the one picked
         board.cmd_set(self.root, self.old, ["stage=review", "tty=ttys004"])
         self.patch(self.old, updatedAt="2000-01-01T00:00:00+00:00")

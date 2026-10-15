@@ -1,4 +1,5 @@
 import json, os, shutil, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,9 @@ class SmallFixesTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
 
     def tearDown(self):
         self.tmp.cleanup()

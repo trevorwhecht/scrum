@@ -97,6 +97,15 @@ def first_word(path, allowed):
     return "INVALID"
 
 
+def read_board(root):
+    """board.json as a dict (empty board when missing). Needs no lock: writers replace the file atomically."""
+    path = Path(root) / "board.json"
+    try:
+        return json.loads(path.read_text()) if path.exists() else {"jobs": []}
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"board.json is not valid JSON ({e}); fix or move it aside, it was not touched")
+
+
 @contextmanager
 def locked_board(root):
     """Exclusive lock across processes; writes only if the body didn't raise; atomic replace."""
@@ -105,10 +114,7 @@ def locked_board(root):
     with open(root / ".board.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = root / "board.json"
-        try:
-            board = json.loads(path.read_text()) if path.exists() else {"jobs": []}
-        except json.JSONDecodeError as e:
-            raise SystemExit(f"board.json is not valid JSON ({e}); fix or move it aside, it was not touched")
+        board = read_board(root)
         yield board
         tmp = path.with_name("board.json.tmp")
         tmp.write_text(json.dumps(board, indent=2) + "\n")
@@ -801,9 +807,40 @@ def cmd_chain_unlock(root, parent_id, holder):
     return {"released": False}
 
 
+def merge_refusal(job: dict) -> str | None:
+    """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
+    (bigboy/runall) or lilguy lane."""
+    pr = job.get("pr")
+    if not pr:
+        return None if job.get("lane") in ("bigboy", "runall", "lilguy") else "not done: no PR recorded"
+    try:
+        r = subprocess.run(["gh", "pr", "view", pr, "--json", "state", "--jq", ".state"],
+                           capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        why = "timed out"
+    except OSError as e:  # FileNotFoundError names the missing executable
+        why = str(e)
+    else:
+        if r.returncode == 0:
+            state = r.stdout.strip()
+            return None if state == "MERGED" else f"not done: PR {pr} is {state}, not merged"
+        why = next((l.strip() for l in r.stderr.splitlines() if l.strip()), f"gh exited {r.returncode}")
+    return f"not done: could not confirm PR {pr} is merged: {why}"
+
+
 def cmd_set(root, job_id, pairs):
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
+    given = dict(pair.partition("=")[::2] for pair in pairs)
+    if given.get("stage") == "done":
+        # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
+        # so the read-then-write race is accepted.
+        job = dict(live(read_board(root), job_id))
+        if job["stage"] != "done":
+            job.update({k: given[k] or None for k in ("pr", "lane") if k in given})
+            msg = merge_refusal(job)
+            if msg:
+                raise SystemExit(msg)
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         was = job["stage"]
