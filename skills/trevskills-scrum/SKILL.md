@@ -66,6 +66,8 @@ If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
 - `command -v gh && gh auth status` succeeds. If not, stop and tell the user to run `brew install gh && gh auth login`.
 
+**Roadmap resume (the commands in the Prerequisites list, plus `roadmap`; never bare `/trevskills-scrum`).** Run `B roadmap-show`. If it prints a roadmap with a `running` step whose `job` is `done` on `$F/board.json` (its hook was missed), run `B roadmap-next <that job>` first and, when it prints a step, do **Roadmap lane** **Starting a step** with it, before the requested command.
+
 If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to the command.
 
 **Record your terminal** (New job, `start`, `approve`, `rework`, `discuss`, `resume`, `lilguy`; once you know the job id `$ID`). This is what the dashboard's Open terminal button brings to the front. Each field is skipped, never an error, when it isn't usable:
@@ -118,6 +120,8 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 - **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum bigboy <feature text>`**: run **New job** steps 1-2, then `B set $ID lane=bigboy` and go straight to the **BigBoy lane**. No spec writer runs for the parent.
 - **`/trevskills-scrum lilguy <feature text>`**: run the **Lilguy lane**. No agent is spawned.
+- **`/trevskills-scrum roadmap <brief>`**: draft `$F/roadmap.md` from the brief and, on Trevor's yes, start P1 S1 (**Roadmap lane**).
+- **`/trevskills-scrum roadmap`** (no brief): print the roadmap status block (**Roadmap lane**). It starts nothing.
 - **`/trevskills-scrum start <id>`**: the dashboard's Run now button already claimed a backlog item as job `<id>` and wrote its `feature.md`. Load the job and run **New job** from step 2. For a BigBoy child (the job has a `parent`; started as `/trevskills-scrum start <child>` by **BigBoy lane** step 3 or by the dashboard's Setup done), run **BigBoy lane** step 4 (Spec refresh) after step 2: it skips step 3 when `spec.md` exists and no refresh is needed.
 - **`/trevskills-scrum start <id> askme <1-3>`**: the same, but the dashboard's Run now had Askme set, so it opened this session in a new Terminal window. Load the job and run **New job** from step 1c (Askme) at that level; a missing or bad level means level 2.
 - **`/trevskills-scrum approve <id>`**: the job must be `needs-human`. **refuse** (and suggest `/trevskills-scrum rework <id> "<feedback>"` instead) if the job has no `worktree`, has no commits beyond `BASE` (`git -C "$WT" log --oneline "$BASE"..HEAD` is empty), or its reason starts `blocked`, `spec writer`, `obsolete` or `stalled`; there is nothing approved to merge (for `stalled`, suggest `/trevskills-scrum resume <id>` instead). Also run Merge step 1's **main checkout guard**; while it fails, **refuse** with the same message it would write as the reason (`Uncommitted change in <repo name>: <first files>. Fix: commit + push it (or undo it), then click Approve & merge.` or `<repo name> main checkout is on <branch>, not <default>. Fix: switch it back to <default>, then click Approve & merge.`) and don't write `human-approval.md`. Once it passes, continue. If the reason contains `Hard stop: schema`, Trevor's approve is the go-ahead to migrate: `cd "$WT"` and invoke `/trevskills-migrate` there with args `base=$BASE`, following it exactly. If it stops or any check fails, run `B set <id> stage=needs-human reason='migrate stopped: <one line why>. Fix: fix that cause, then click Approve & merge to run it again.'` and stop; never work around it. On success, commit what it generated (`git -C "$WT" add prisma/migrations && git -C "$WT" commit -m "Add migration"`) and `cd "$REPO"`. Skip the migrate step when the prompt says `Trevor confirms /trevskills-migrate has already been run` (sent by the dashboard when he ticks that box). Then **record your terminal** with `ID=<id>`, write `$F/jobs/<id>/human-approval.md` containing `Approved by Trevor <ISO date>` and run **Merge**.
@@ -134,7 +138,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 ## New job
 
-Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double quotes or backticks. For a BigBoy child (the job has a `parent`), every time this run sets the child `stage=needs-human`, also run **BigBoy lane** step 6, so independent children still start.
+Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double quotes or backticks. For a BigBoy child (the job has a `parent`), every time this run sets the child `stage=needs-human`, also run **BigBoy lane** step 6, so independent children still start. Every time this run sets a job `stage=needs-human`, also apply the **Roadmap lane** stop rule (`B roadmap-stop` only when that job, or its `parent`, is a roadmap step's `job`).
 
 1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
    1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
@@ -282,9 +286,42 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
    Review the whole BigBoy on main. Write bigboy-review.md.
    ```
    If the first line of `bigboy-review.md` is neither `BIGBOY: PASS` nor `BIGBOY: GAPS`, delete it and spawn the reviewer once more; if it is still unreadable, treat it as GAPS with no fix ticket.
-   - `BIGBOY: PASS`: run `B set $P stage=done reason=`. If plan.md has a `## Phase 2` section, run `B backlog-add "<its line> (Phase 2 of $P)"`.
+   - `BIGBOY: PASS`: run `B set $P stage=done reason=`. If plan.md has a `## Phase 2` section and `B roadmap-show` lists `$P` as a step's `job`, run `B roadmap-insert <that p> <that s> bigboy '<its line, every ' removed>'` instead of `backlog-add`; otherwise, with a `## Phase 2` section, run `B backlog-add "<its line> (Phase 2 of $P)"`. Either way, then run `B roadmap-next $P` and, when it prints a step, do **Roadmap lane** **Starting a step** with it.
    - `BIGBOY: GAPS` the first time: run `B plan-apply $P --fix`. It adds one child, ticket `FIX`, from the `## Fix ticket` text, with no dependencies, and moves the parent back to `running`. Run step 2 for it, then `B ready $P` and **start** it. When it merges, step 5 brings the parent back here and the reviewer runs once more.
    - `BIGBOY: GAPS` again, or `plan-apply --fix` exits non-zero (no `## Fix ticket`, or the FIX child already exists): run `B set $P stage=needs-human reason='bigboy review: gaps remain — <line 2 of bigboy-review.md>. Fix: read bigboy-review.md, add a backlog item for each gap, then click Abort job.'` and stop.
+
+## Roadmap lane
+
+A roadmap strings bigboy and standard jobs into ordered phases in `$F/roadmap.md`, and chains each step into the next with no prompt. `roadmap.md` is the single source of truth and the resume doc. Only ever change it through `B` (`roadmap-link`, `roadmap-next`, `roadmap-insert`, `roadmap-stop`), except when drafting it below. Each step stops only where its job or bigboy already stops.
+
+1. **Draft** (`/trevskills-scrum roadmap <brief>`; Setup and Prerequisites apply). If `$F/roadmap.md` already exists, say so, change nothing and stop. Otherwise draft it from the brief in this exact format, which `board.py` parses:
+   ```
+   ROADMAP: <name>
+   Goal: <one line>
+
+   ## Constraints
+   - <rule every step must keep>
+
+   ## P1 <phase title>
+   - [ ] S1 <bigboy|standard>: <request>
+   - [ ] S2 <bigboy|standard>: <request>
+   ## P2 <phase title>
+   - [ ] S1 <bigboy|standard>: <request>
+
+   ## Log
+   ```
+   Show the draft to Trevor once. On his yes, write it to `$F/roadmap.md`, run `B roadmap-show`, and do **Starting a step** with its `next` (P1 S1). On anything else, write nothing and stop.
+2. **Status** (bare `/trevskills-scrum roadmap`). Run `B roadmap-show`. If it prints `null`, say there is no roadmap. Otherwise print:
+   ```
+   <name>
+   P<p>/<phases> <phase title> · S<s>/<steps in that phase>
+   next: S<n> <request>      (or: next: none)
+   blocker: <job> <reason>   (or: blocker: none)
+   ```
+   `p` and `s` come from `current`. It starts nothing.
+3. **Starting a step** `<P> <S> <kind> <request>`, run in this session. The feature text is the request, a blank line, then every `- ` line under `## Constraints` in `roadmap.md`, copied verbatim. A `bigboy` step runs exactly as `/trevskills-scrum bigboy <feature text>`; a `standard` step runs **New job** with that feature text. Right after `B new` gives `$ID`, run `B roadmap-link <P> <S> $ID`.
+4. **Stop rule.** Whenever this session sets a job `stage=needs-human`, the step job is that job, or its `parent` for a BigBoy child. If `B roadmap-show` lists that id as a step's `job`, run `B roadmap-stop <that id> '<reason>'`, with the reason quoted under the **Untrusted reason text** rule. With no roadmap, or with the id in no step, skip the call: `board.py` exits non-zero for a job in no step.
+5. **Resume.** Setup's **Roadmap resume** finishes a `running` step whose job is already `done` (`B roadmap-next`) and starts what it prints before the requested command.
 
 ## Lilguy lane
 
@@ -424,6 +461,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
         - With no verify string (behavioural): it passes only when the PID from `lsof -ti tcp:<port> -sTCP:LISTEN` after the start differs from the one recorded before the kill, and `curl -sfL localhost:<port>/<path>` exits 0. Either failing is `verify failed`; passing is reported as `restarted + verified (behavioural)`.
    - **Mark done, only now.** If the guard, the fast-forward, the restart or the verify failed, run `B set $ID stage=done reason='merged, not live: <why>'`, where `<why>` is `not on <default>`, `uncommitted changes`, `fast-forward failed`, `restart failed`, `restart command not allowed` or `verify failed`. Otherwise (including `Restart: none` after a successful fast-forward) run `B set $ID stage=done reason=`. The dashboard card shows the `merged, not live` reason as a warning; Trevor clears it with `B set <id> reason=` once he has made the change live.
    - If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.
+   - **Roadmap chaining.** If the job has no `parent`, after `stage=done` run `B roadmap-next $ID`. When it prints a step, do **Roadmap lane** **Starting a step** with it after the Digest check. A job in no roadmap prints `null`: nothing more happens.
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 

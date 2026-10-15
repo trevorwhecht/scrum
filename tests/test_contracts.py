@@ -1136,6 +1136,42 @@ class ContractTest(unittest.TestCase):
         self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" '
                       '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', text)
 
+    def h2(self, text, heading):
+        start = text.index(f"\n{heading}\n")
+        end = text.find("\n## ", start + 1)
+        return text[start:end if end != -1 else len(text)]
+
+    def test_skill_documents_roadmap_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        lane = self.h2(text, "## Roadmap lane")
+        for phrase in ("roadmap.md", "## Constraints", "roadmap-show", "roadmap-link", "roadmap-insert",
+                       "roadmap-next", "roadmap-stop"):
+            self.assertIn(phrase, text, phrase)
+        self.assertIn("roadmap-link", lane)
+        self.assertIn("roadmap-stop", lane)
+        self.assertIn("roadmap-stop", self.h2(text, "## New job"))
+        self.assertIn("/trevskills-scrum roadmap", self.h2(text, "## Commands"))
+        setup = self.h2(text, "## Setup (start of every invocation)")
+        self.assertIn("roadmap-show", setup)
+        self.assertIn("roadmap-next", setup)
+        self.assertLess(text.index("\n## BigBoy lane\n"), text.index("\n## Roadmap lane\n"))
+        self.assertLess(text.index("\n## Roadmap lane\n"), text.index("\n## Lilguy lane\n"))
+
+    def test_skill_bigboy_pass_chains_roadmap(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        start = text.index("   - `BIGBOY: PASS`")
+        bullet = text[start:text.index("\n", start)]
+        for phrase in ("roadmap-insert", "backlog-add", "roadmap-next $P"):
+            self.assertIn(phrase, bullet, phrase)
+
+    def test_skill_merge_chains_roadmap(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
+        clean = merge[merge.index("7. **Clean up:**"):]
+        self.assertIn("roadmap-next $ID", clean)
+        self.assertLess(clean.index("**Mark done"), clean.index("roadmap-next $ID"))
+        self.assertLess(clean.index("roadmap-next $ID"), clean.index("**Digest check"))
+
     def test_no_sound_clip_committed(self):
         out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
         self.assertEqual(out, "")
