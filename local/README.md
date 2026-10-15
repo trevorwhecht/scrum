@@ -100,6 +100,47 @@ To return to the original cloud pipeline, stop the local dashboard and start
 running dashboard is not reconfigured by opening another launcher. This switch
 does not change the backend of an existing Codex desktop conversation.
 
+## Benchmark
+
+Measure the routed models on the three bounded local tasks before trusting a role:
+
+```sh
+python3 local/bench.py --runs 3
+python3 local/bench.py --model qwen3.5:4b --task estimate --runs 5
+```
+
+Defaults: both models named in `routing.json` `models`, three runs, all three tasks. Requests
+go one at a time to `$SCRUM_OLLAMA_URL` (`POST /api/chat`, 16K context). Each run prints one
+JSON line (`model`, `task`, `run`, `pass`, `why`, `duration_s`, and `ps`: `size`, `size_vram`,
+`context_length` from `/api/ps`), then one `passed/total` line per model and task. Exit 0 when
+every run passed, 1 when any failed, 2 when Ollama is down or a model is missing or cloud-tagged.
+
+- **estimate** passes when the reply holds a JSON object with `points` in 1, 2, 3, 5, 8, 13
+  and a non-empty `why`.
+- **summary** passes when the reply has 2–5 `- ` bullets and every bullet cites one of the two
+  supplied paths (`[jobs/a/feature.md]`, `[jobs/b/spec.md]`) and no other.
+- **edit** passes when the reply is `{"path": "calc.py", "content": …}`, `test_calc.py` is
+  unchanged afterwards, and `python3 -m unittest test_calc` exits 0 in a temp dir. Any other
+  path fails without writing anything.
+
+Duration is recorded, never a pass rule. Run with nothing else loaded, and check `ollama ps`
+for CPU offload (a `size_vram` below `size` means part of the model is on the CPU).
+
+## Recovery
+
+When a local run fails partway through a job:
+
+1. Read the job's `routing.log` (`scrum/jobs/<id>/routing.log`) to see which step ran local
+   and its `outcome`.
+2. Force cloud and resume: start the dashboard or session with `SCRUM_ROUTE=cloud`, then press
+   Resume on the job (or resume it from `/trevskills-scrum`).
+3. Leave a full-local session: stop the `local/run.py dashboard` server the same way as in
+   "Switch the dashboard", then restart `python3 skills/trevskills-scrum/serve.py`.
+4. Free memory with `ollama stop <model>` (`ollama ps` lists what is loaded).
+
+`.agents/skills/trevskills-scrum` is the committed symlink that lets Codex discover the scrum
+skill from this repo.
+
 Scope: model inference is local. Existing hooks, MCP integrations, web tools, and
 project commands may still use external services; web research is not provided
 by the local model itself. No cloud-tagged Ollama models are used by default.
