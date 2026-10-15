@@ -35,7 +35,7 @@ class ServeTest(unittest.TestCase):
         cls.stub = stub
         # SCRUM_ROUTE=cloud keeps every estimate on the stub cloud path whatever the local Ollama state.
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
-                          SCRUM_ROUTE="cloud")
+                          SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
         serve.CLAUDE = str(stub)  # another test class may have imported serve first
         cls.serve = serve
@@ -57,6 +57,7 @@ class ServeTest(unittest.TestCase):
         cls.server.shutdown()
         os.environ.pop("SCRUM_REGISTRY", None)
         os.environ.pop("SCRUM_ROUTE", None)
+        os.environ.pop("SCRUM_USAGE", None)
         cls.tmp.cleanup()
 
     def req(self, method, path, body=None, headers=None):

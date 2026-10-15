@@ -1,4 +1,4 @@
-import os, subprocess, tempfile, unittest
+import json, os, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +56,32 @@ class InstallTest(unittest.TestCase):
             self.assertEqual((real / "marker").read_text(), "mine")
             self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
             self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
+
+    def test_install_sets_status_line_only_when_absent(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            settings = home / "settings.json"
+            want = {"type": "command", "command": f"python3 {home}/skills/trevskills-scrum/board.py statusline",
+                    "refreshInterval": 60}
+            # no settings.json: created holding only statusLine; a second run changes nothing
+            for _ in range(2):
+                self.assertEqual(self.run_install(home).returncode, 0)
+                self.assertEqual(json.loads(settings.read_text()), {"statusLine": want})
+            # other keys and no statusLine: added, every other key kept
+            settings.write_text(json.dumps({"model": "opus", "hooks": {"Stop": [{"x": 1}]}}))
+            for _ in range(2):
+                self.assertEqual(self.run_install(home).returncode, 0)
+                self.assertEqual(json.loads(settings.read_text()),
+                                 {"model": "opus", "hooks": {"Stop": [{"x": 1}]}, "statusLine": want})
+            # an existing statusLine, or invalid JSON: byte-for-byte unchanged
+            for text in ('{"statusLine": {"type": "command", "command": "mine"},  "a": 1}\n', "{not json"):
+                settings.write_text(text)
+                result = self.run_install(home)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(settings.read_text(), text)
+                if text == "{not json":
+                    self.assertIn("settings.json", result.stderr)
+            self.assertEqual(sorted(p.name for p in home.iterdir() if p.name.startswith("settings")), ["settings.json"])
 
 
 if __name__ == "__main__":
