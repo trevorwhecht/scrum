@@ -594,6 +594,26 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`Dev command:`", detect)
         self.assertIn("`dev` package script", detect)
 
+    def test_base_branch_line_drives_base(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step2 = self.section(text, "2. **Base:**", "3. **Spec:**")
+        for phrase in ("Base branch:", "sed -n 's/^- Base branch: *//p' \"$F/project.md\" | head -1",
+                       "refs/remotes/origin/HEAD", "git remote set-head origin -a", "B set $ID base=$BASE",
+                       "[A-Za-z0-9._/-]", "Base branch line in scrum/project.md is malformed",
+                       "rev-parse --verify", "not found on origin"):
+            self.assertIn(phrase, step2, phrase)
+        lilguy = self.section(text, "## Lilguy lane", "## Check gate")
+        refuse = self.section(lilguy, "1. **Refuse", "2. **Job.**")
+        self.assertIn("Base branch", refuse)
+        self.assertIn("Fix: switch to <base branch>, then run lilguy again.", refuse)
+        self.assertIn("same rule as **New job** step 2", self.section(lilguy, "5. **Land.**", "6. End"))
+        rules = text[:text.index("## Setup")]
+        self.assertIn("Base branch:", rules)
+        self.assertIn("never squash", rules)
+        detect = self.section(text, "4. Detect the project", "5. Tell the user")
+        self.assertIn("- Base branch: <branch>", detect)
+        self.assertNotIn("Base branch", self.section(detect, "```markdown", "\n```\n"))
+
     def test_restart_commands_are_allow_listed(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")

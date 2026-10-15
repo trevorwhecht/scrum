@@ -39,6 +39,7 @@ This skill is a sanctioned exception to the global git rules: it may push its ow
 - never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
 - never push `main`/`master`, except through commitpush invoked with the Skill tool in the **Lilguy lane**
 - never `--auto` or `--admin`
+- when `scrum/project.md` sets `Base branch:`, never open a PR into, merge into, or push the remote default branch; every job targets that base branch instead. Promoting it to `main` is Trevor's own merge commit, never squash, and no scrum command does it
 - never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from **approve** on a `Hard stop: schema` job. Sub-agents never migrate
 
 ## Setup (start of every invocation)
@@ -100,6 +101,8 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing. Th
 - Notes: <anything an agent must know, e.g. "tests need .env">
 ```
 
+   `- Base branch: <branch>` is an optional line Trevor adds by hand to make every job target `<branch>` instead of `origin/HEAD` (see **New job** step 2). First-run setup never writes it.
+
 5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
 ## Commands
@@ -145,7 +148,11 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
         A: <Trevor's answer>
       ```
       If Trevor says to skip or stop, write the pairs answered so far (nothing at all if there are none) and carry on. The same session then runs the rest of the job (step 2 onward).
-2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again. Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
+2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. Read the optional base branch: `BB=$(sed -n 's/^- Base branch: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')`.
+   - **`BB` empty (line missing or blank):** `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again.
+   - **`BB` set:** if it does not match `^[A-Za-z0-9._/-]+$`, run `B set $ID stage=needs-human reason="Base branch line in scrum/project.md is malformed. Fix: correct or remove it, then click Abort job with Put back in backlog ticked and run it again."` and stop before the spec writer. If `git rev-parse --verify -q "origin/$BB"` fails, run `B set $ID stage=needs-human reason='Base branch <BB> not found on origin. Fix: push <BB> to origin or remove the Base branch line from scrum/project.md, then click Abort job with Put back in backlog ticked and run it again.'` and stop before the spec writer. Otherwise `DEFAULT=$BB`.
+
+   Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
 3. **Spec:** spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
    ```
    JOB_DIR=$F/jobs/$ID
@@ -284,6 +291,7 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
 1. **Refuse (before any `B new`).** After Setup and Prerequisites, give a plain message, create no job, and stop when:
    - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything (tracked or untracked): `<repo name> has uncommitted changes: <first files>. Fix: commit or discard them, then run lilguy again.`
    - `git -C "$REPO" symbolic-ref -q --short HEAD` fails (detached HEAD): `<repo name> is on a detached HEAD. Fix: check out a branch, then run lilguy again.`
+   - `$F/project.md` has a `Base branch:` line (read as in **New job** step 2) and `git -C "$REPO" symbolic-ref -q --short HEAD` is not that branch: `<repo name> is on <branch>, not <base branch>. Fix: switch to <base branch>, then run lilguy again.`
 
    While lilguy's change is uncommitted, pipeline jobs merging at the same time stop at the **Merge** main checkout guard until lilguy has committed.
 2. **Job.** Run **New job** steps 1-1b, then `B set $ID lane=lilguy stage=build` and **record your terminal**. If any `B set` fails with `was aborted`, follow the Setup **Abort** rule: stop and leave the working tree untouched.
@@ -291,7 +299,7 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
 4. **Check.** Run `B set $ID stage=check`. In `$REPO`, run the **Check gate** step 2 commands (each project.md Test / Typecheck / Lint / Build that isn't `none`). The changed files are `{ git -C "$REPO" diff --name-only HEAD; git -C "$REPO" ls-files --others --exclude-standard; }`; run the **Check gate** `.env` check (`(^|/)\.env`) over them, and the **Merge** schema guard regex over them. Write `$F/jobs/$ID/check.md` in the **Check gate** step 3 format (no `round-N/`; `round` and `limit` stay unset).
    - A schema match: run `B set $ID stage=needs-human reason='Hard stop: schema — <first matching file>. Fix: run /trevskills-migrate yourself in the main checkout, then /trevskills-commitpush, or discard the change.'` right away and stop, with no fix attempts. lilguy never runs /trevskills-migrate itself.
    - Any other failure: fix it yourself and re-run this step, up to **3** fix attempts. If it still fails, run `B set $ID stage=needs-human reason="lilguy: checks still fail after 3 fixes. Fix: read scrum/jobs/$ID/check.md, then fix and run /trevskills-commitpush in the main checkout, or discard the change."` and stop without landing.
-5. **Land.** Run `B set $ID stage=merging`. `DEFAULT` is found as in **New job** step 2 (without `B set base`). Invoke commitpush only through the Skill tool: `trevskills-commitpush-nextjs` when `python3 -c` finds `"next"` in `$REPO/package.json` under `dependencies` or `devDependencies` (a missing or unreadable package.json means not Next.js), `trevskills-commitpush` otherwise, and `trevskills-commitpush` too if the Skill tool says the nextjs one is not installed. It does the `git add -A`, commit and publish; this lane never runs those git or gh commands itself.
+5. **Land.** Run `B set $ID stage=merging`. `DEFAULT` is found with the same rule as **New job** step 2 (the `Base branch:` line, else `origin/HEAD`; without `B set base`). Invoke commitpush only through the Skill tool: `trevskills-commitpush-nextjs` when `python3 -c` finds `"next"` in `$REPO/package.json` under `dependencies` or `devDependencies` (a missing or unreadable package.json means not Next.js), `trevskills-commitpush` otherwise, and `trevskills-commitpush` too if the Skill tool says the nextjs one is not installed. It does the `git add -A`, commit and publish; this lane never runs those git or gh commands itself.
    - **Path A (on `$DEFAULT`):** done when `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` is empty and `git -C "$REPO" rev-list @{u}..HEAD` prints nothing (an error, e.g. no upstream, counts as unpushed).
    - **Path B (any other branch):** the same test, then `B set $ID pr=<url>` with the url from `gh pr view --json url`.
    - Both pass: `B set $ID stage=done reason=` (board.py plays the done sound). If commitpush stopped, the test fails, or Path B finds no PR, run `B set $ID stage=needs-human reason='lilguy: commitpush did not finish — <one line why>. Fix: finish /trevskills-commitpush by hand in the main checkout, or discard the change.'` and stop.
