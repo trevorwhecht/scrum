@@ -153,10 +153,12 @@ RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
 
 def limit_reset(root, job):
     """(limit hit?, reset epoch or None) from the tail of the job's run log: the line Claude Code prints when the
-    account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm")."""
+    account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm"). A clock time
+    is the next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever."""
     log = root / (job.get("runlog") or "")
     try:
         tail = log.read_bytes()[-8192:].decode("utf-8", "replace") if job.get("runlog") else ""
+        written = datetime.fromtimestamp(log.stat().st_mtime) if tail else None
     except OSError:
         return False, None
     if not LIMIT_RE.search(tail):
@@ -169,14 +171,13 @@ def limit_reset(root, job):
         return True, None
     mon, day, hour, minute, ampm = m.groups()
     hour = int(hour) % 12 + (12 if ampm.lower() == "pm" else 0)
-    now = datetime.now()
     try:
-        at = now.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
+        at = written.replace(hour=hour, minute=int(minute or 0), second=0, microsecond=0)
         if mon:
             at = at.replace(month=datetime.strptime(mon, "%b").month, day=int(day))
-            if at < now:
+            if at < written:
                 at = at.replace(year=at.year + 1)
-        elif at < now:
+        elif at < written:
             at += timedelta(days=1)
     except ValueError:
         return True, None

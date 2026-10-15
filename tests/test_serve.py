@@ -1,5 +1,5 @@
 import json, os, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 from pathlib import Path
 
@@ -2709,7 +2709,13 @@ class AutoResumeTest(unittest.TestCase):
         self.assertGreater(due, time.time() + 60)
         self.assertLessEqual(due, time.time() + 24 * 3600 + 120)
         self.assertEqual(self.sweep(), [], "nothing due yet")
-        s.AUTO_RESUME["p/limit"][1] = 0.0; (self.root / "runs" / "limit.log").write_text("hit your limit")  # no reset named
+        log = self.root / "runs" / "limit.log"  # the reset passes: written 00:22, swept 02:03 must resume, not wait a day
+        wrote = datetime.now().replace(hour=0, minute=22, second=0, microsecond=0) - timedelta(days=1)
+        os.utime(log, (wrote.timestamp(),) * 2)
+        s.AUTO_RESUME["p/limit"][1] = 0.0
+        with mock.patch.object(s.time, "time", return_value=(wrote + timedelta(hours=1, minutes=41)).timestamp()):
+            self.assertEqual(self.sweep(), ["limit"])
+        s.AUTO_RESUME["p/limit"] = [0, 0.0]; (self.root / "runs" / "limit.log").write_text("hit your limit")  # no reset named
         self.assertEqual(self.sweep(), ["limit"])
         self.assertEqual(self.sweep(), [], "30 min backoff")
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
