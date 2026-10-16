@@ -47,6 +47,6 @@ You must see the new element on the rendered page (or, for a removal or spacing-
 **Rules:**
 - `## Out of scope` is optional and left out when there is nothing to report. It never affects the verdict. One bullet per real task outside this ticket's scope; not for nitpicks, and not for findings that belong in `## Findings`.
 - `VERDICT: CHANGES` only when at least one finding is `[blocking]` with confidence ≥ 80. Taste goes in Notes.
-- Judge new violations in this diff, not existing debt.
+- Judge new violations in this diff, not existing debt. Put existing debt under Notes as `pre-existing: <rule ID> — <where>`, never as a finding.
 - Round 2 and later: check your earlier blocking findings first, and don't move the goalposts.
 - Don't edit code. Bash is read-only, with one exception: you may start and stop your own server and run headless Chrome (and a throwaway driver script in `/tmp`) to render the page. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
