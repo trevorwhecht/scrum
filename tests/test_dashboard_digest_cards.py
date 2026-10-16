@@ -33,7 +33,10 @@ class DigestCards(unittest.TestCase):
     def test_board_posts_decision_to_digest_endpoint(self):
         text = DASHBOARD.read_text()
         self.assertIn("post(`api/p/${enc(c.dataset.project)}/digests/${enc(c.dataset.digest)}/${enc(c.dataset.pid)}`, {decision: b.dataset.decide})", text)
-        self.assertIn("api/p/${enc(p)}/digests`", text[text.index("async function poll()"):])
+        poll = text[text.index("async function poll()"):]
+        self.assertIn("getJson(`api/p/${enc(p)}/digests?brief=1`, null)", poll[:poll.index("\n}\n")])
+        load = text[text.index("async function loadDigests()"):]
+        self.assertIn("getJson(`api/p/${enc(p)}/digests`, null, STALE)", load[:load.index("\n}\n")])
 
 
 if __name__ == "__main__":

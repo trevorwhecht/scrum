@@ -448,7 +448,7 @@ async function poll() {
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
       getJson("api/runs", []),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests`, null))),
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests?brief=1`, null))),  // the cards need no old/new
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
     digests = Object.fromEntries(projects.map((p, i) => [p, digestList[i]]));
     roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));

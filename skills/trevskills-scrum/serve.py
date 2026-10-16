@@ -6,6 +6,7 @@ pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on ev
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
   python3 serve.py --digest-auto <NNN> --dir <scrum>      → auto-approve a digest's obvious proposals, print JSON, exit
+  python3 serve.py --digest-skill-check <NNN> <PID> --dir <scrum> → re-check a queued skill proposal, print JSON, exit 1 if stale
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
@@ -1519,13 +1520,15 @@ def read_proposals(path):
     return data, raw if isinstance(raw, list) else []
 
 
-def digests(project, root):
+def digests(project, root, brief=False):
+    """Every digest with its valid proposals; brief leaves out each proposal's old and new (the board poll needs neither)."""
     d, out = root / "digests", []
     for p in sorted((x for x in d.iterdir() if x.is_dir() and board.DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
         jobs = (p / "jobs.txt").read_text().split() if (p / "jobs.txt").is_file() else []
         error = (p / "error.md").read_text(errors="replace").strip().splitlines() if (p / "error.md").is_file() else []
         out.append({"id": p.name, "jobs": jobs, "error": error[0] if error else None, "trimmed": (p / "trimmed").exists(),
-                    "proposals": [v for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
+                    "proposals": [{k: v[k] for k in v if not brief or k not in ("old", "new")}
+                                  for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
     return {"running": running(project, "digest"), "undigested": board.cmd_digest_due(root)["undigested"], "digests": out}
 
 
@@ -1546,8 +1549,10 @@ def repo_of(target):
 
 
 def digest_denied(target):
-    """True when target, or the file it really is, is a Claude settings file or sits under a hooks folder."""
-    return any(Path(t).name in DIGEST_DENIED_NAMES or "hooks" in Path(t).parts for t in (target, os.path.realpath(target)))
+    """True when target, or the file it really is, is a Claude settings file or sits under a hooks folder, in any case
+    (macOS's filesystem is case-insensitive, so Settings.JSON is settings.json)."""
+    return any(Path(t).name.lower() in DIGEST_DENIED_NAMES or "hooks" in (x.lower() for x in Path(t).parts)
+               for t in (target, os.path.realpath(target)))
 
 
 def digest_skill_target(target):
@@ -1596,7 +1601,9 @@ def digest_decide(root, digest_id, pid, decision):
                 return 403, {"error": "target is not editable"}
             if os.path.lexists(prop["target"]):
                 return 409, {"error": "skill already exists"}
-            board.backlog_op(repo_of(prop["target"])[0] / "scrum", "add", text=f"Create digest {digest_id} {pid} skill at {rel}: see {path}")
+            check = f"python3 ~/.claude/skills/trevskills-scrum/serve.py --digest-skill-check {digest_id} {pid} --dir {root}"
+            board.backlog_op(repo_of(prop["target"])[0] / "scrum", "add", text=f"Create digest {digest_id} {pid} skill at {rel}: "
+                             f"first run `{check}`; if it exits non-zero the item is obsolete. See {path}")
             status = "queued"
         elif digest_denied(prop["target"]):
             return 403, {"error": "target is not editable"}
@@ -1626,6 +1633,27 @@ def digest_decide(root, digest_id, pid, decision):
         if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
             board.cmd_digest_trim(root, digest_id)
     return 200, prop | {"status": status}
+
+
+def digest_skill_check(root, digest_id, pid):
+    """Re-check a queued skill proposal before its backlog item creates the file: {"ok": True, "target": rel} only while
+    it is still a queued, valid skill proposal whose target is creatable and absent; else {"ok": False, "error": why}.
+    Reads only."""
+    entry = None
+    if board.DIGEST_RE.fullmatch(digest_id):
+        raw = read_proposals(root / "digests" / digest_id / "proposals.json")[1]
+        entry = next((v for p in raw if (v := valid_proposal(p)) and v["id"] == pid), None)
+    if entry is None:
+        return {"ok": False, "error": "no such proposal"}
+    if entry["kind"] != "skill":
+        return {"ok": False, "error": "not a skill proposal"}
+    if entry["status"] != "queued":
+        return {"ok": False, "error": f"proposal is {entry['status']}, not queued"}
+    if not (rel := digest_skill_target(entry["target"])):
+        return {"ok": False, "error": "target is not editable"}
+    if os.path.lexists(entry["target"]):
+        return {"ok": False, "error": "skill already exists"}
+    return {"ok": True, "target": rel}
 
 
 def digest_target_auto_ok(target):
@@ -1735,7 +1763,8 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/digests", path):
             project = unquote(m.group(1))
             root = scrum_dir(project)
-            return self.send_json(200, digests(project, root)) if root else self.send_json(404, {"error": "no such project"})
+            brief = parse_qs(urlparse(self.path).query).get("brief", [""])[0] == "1"
+            return self.send_json(200, digests(project, root, brief)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/api/p/(.+)/roadmap", path):
             if not (root := scrum_dir(unquote(m.group(1)))):
                 return self.send_json(404, {"error": "no such project"})
@@ -1892,8 +1921,15 @@ def main():
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
     p.add_argument("--digest-auto", metavar="NNN", help="auto-approve this digest's obvious proposals, print JSON and exit")
-    p.add_argument("--dir", type=Path, default=Path("scrum"), help="the project's scrum/ folder, for --estimate and --digest-auto")
+    p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
+                   help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
+    p.add_argument("--dir", type=Path, default=Path("scrum"),
+                   help="the project's scrum/ folder, for --estimate, --digest-auto and --digest-skill-check")
     a = p.parse_args()
+    if a.digest_skill_check is not None:
+        res = digest_skill_check(a.dir.resolve(), *a.digest_skill_check)
+        print(json.dumps(res))
+        sys.exit(0 if res["ok"] else 1)
     if a.digest_auto is not None:
         return print(json.dumps(digest_auto(a.dir.resolve(), a.digest_auto)))
     if a.estimate is not None:
