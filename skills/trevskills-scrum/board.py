@@ -253,7 +253,11 @@ def write_backlog(root, lines):
 
 
 def backlog_items(root):
-    items, board = read_backlog(root)[1], read_board(root)
+    items = read_backlog(root)[1]
+    try:
+        board = read_board(root)
+    except SystemExit:  # a broken board.json must not break the backlog list; waits then only counts open lines
+        board = {"jobs": []}
     return [{k: v for k, v in item.items() if k != "line"} | {"waits": waiting_on(item, items, board)} for item in items]
 
 
