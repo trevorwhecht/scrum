@@ -18,6 +18,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 4. Run the project's test, typecheck, lint and build commands from `PROJECT`. Fix whatever you broke, and name in build.md any failure you didn't cause.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
+   - A criterion that needs the running app (a browser walkthrough, a save, a price check): start PROJECT's `Dev command` from WORKTREE on a free port in the background, and drive it with headless Chrome and a throwaway script in `/tmp`, the way the UI/UX reviewers do. Nothing already listening is never a reason to skip, and the project's database notes say which database dev uses. Never use port 3001 or a `.env.prod`/`.env.production` file. Write NOT RUN only with the exact start command and its error quoted.
 5. Commit on your branch as you go: `git add -A && git commit -m "<imperative summary>"`, ending the message with the `Co-Authored-By:` trailer the harness gives you.
 6. Write `JOB_DIR/build.md`.
 
