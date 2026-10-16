@@ -500,7 +500,7 @@ class ContractTest(unittest.TestCase):
         for phrase in ("stage=plan", "B plan-apply", "planner output unreadable", "OBSOLETE:", "B abort", "B ready",
                        "runlog=runs/", "--permission-mode acceptEdits", "track-", "TRACK: ADJUST", "TRACK: OFF TRACK",
                        "bigboy off track", "gh pr diff", "Refresh spec.md: dependencies", "all_merged", "BIGBOY: GAPS",
-                       "--fix", "bigboy review: gaps remain", "Phase 2 of", "no worktree",
+                       "--fix", "merged + gaps:", "Phase 2 of", "no worktree",
                        "chain-lock", "chain-unlock"):
             self.assertIn(phrase, bigboy, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
@@ -570,7 +570,7 @@ class ContractTest(unittest.TestCase):
         self.assertLess(text.index("## Debug lane"), text.index("## Check gate"))
         debug = self.section(text, "## Debug lane", "## Check gate")
         for phrase in ("scrum-debugger", "assessment.md", "ASSESSMENT: NO_REPRO", "debugger output unreadable",
-                       "repro-before.md", "REPRO: FAIL", "repro does not fail", "## Allowed files"):
+                       "repro-before.md", "REPRO: FAIL", "repro passes on", "## Allowed files"):
             self.assertIn(phrase, debug, phrase)
         check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
         self.assertTrue("lane=debug" in check or "`lane` is `debug`" in check)
@@ -1065,7 +1065,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_every_needs_human_reason_has_fix(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
-        self.assertGreaterEqual(len(reasons), 17)
+        self.assertGreaterEqual(len(reasons), 32)  # every needs-human reason left after the Abort-only ones went
         self.assertEqual(len(reasons), text.count('stage=needs-human reason="') + text.count("stage=needs-human reason='"))
         for reason in reasons:
             self.assertIn(" Fix: ", reason, reason)
@@ -1075,6 +1075,86 @@ class ContractTest(unittest.TestCase):
                        "approver output unreadable. Fix: click Discuss first.",
                        "Every needs-human reason is"):
             self.assertIn(phrase, text, phrase)
+
+    def test_no_abort_only_needs_human_reason(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
+        self.assertEqual([r for r in reasons if "Abort" in r], [])
+        self.assertIn("Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double quotes or "
+                      "backticks. A job goes needs-human only when its card offers Approve, Resume or Send back; a stop "
+                      "whose only fix is Abort is handled by the agents instead.", text)
+        # Every string literal in board.py (adjacent literals and f-strings joined, as Python joins them).
+        import ast
+        tree = ast.parse((ROOT / "skills" / "trevskills-scrum" / "board.py").read_text())
+        joined = lambda n: "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in n.values)
+        literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)] \
+            + [joined(n) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)]
+        fixes = [s.split("Fix:", 1)[1] for s in literals if "Fix:" in s]
+        self.assertGreaterEqual(len(fixes), 3)
+        self.assertEqual([f for f in fixes if "Abort" in f], [])
+
+    def test_auto_requeue_stops(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
+        for phrase in ("spec writer produced nothing", "planner output unreadable: <error line>",
+                       "debugger output unreadable", "digest proposal <NNN> <PID> not found in proposals.json",
+                       "claude --cloud did not start: <last line of OUT>", "cloud PR closed without merging"):
+            self.assertIn(f"B abort $ID --requeue --reason 'requeue: {phrase}'", text, phrase)
+            self.assertEqual([r for r in reasons if phrase in r], [], phrase)
+        rule = self.section(text, "Every needs-human reason is", "\n1. ")
+        for phrase in ("without `--requeue`", "**BigBoy lane** step 6", "`B roadmap-stop`"):
+            self.assertIn(phrase, rule, phrase)
+        cloud = self.h2(text, "## Cloud lane")
+        job = self.section(cloud, "2. **Cloud job**", "3. **Sync**")
+        self.assertIn("`requeue: ...` auto-abort or `looks already fixed: ...` close", job)
+        sync = cloud[cloud.index("3. **Sync**"):]
+        for phrase in ("`requeue:` becomes `B abort $ID --requeue --reason '<line>'`",
+                       "`obsolete:` or `looks already fixed:` becomes `B abort $ID --reason '<line>'`",
+                       "gh pr close <number>"):
+            self.assertIn(phrase, sync, phrase)
+
+    def test_debug_no_repro_auto_closes(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        debug = self.section(text, "## Debug lane", "## BigBoy lane")
+        self.assertIn("B abort $ID --reason 'looks already fixed: no repro — <line 2>'", debug)
+        self.assertIn("B abort $ID --reason 'looks already fixed: repro passes on <short HEAD> — see repro-before.md'", debug)
+        self.assertIn("auto-closed as looks already fixed", debug)
+        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
+        for gone in ("debug: no repro", "debug: repro does not fail"):
+            self.assertEqual([r for r in reasons if r.startswith(gone)], [], gone)
+        self.assertIn("reason='debug: blocked — <line 2>. Fix: click Discuss first.'", debug)
+
+    def test_bigboy_gaps_filed_not_stopped(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step7 = self.section(text, "7. **Final BigBoy review.**", "## Roadmap lane")
+        gaps = step7[step7.index("- `BIGBOY: GAPS` again"):]
+        for phrase in ("B set $P stage=done reason='merged + gaps: <line 2 of bigboy-review.md>'", "`— gap —`",
+                       "B roadmap-insert <p> <s> standard '<item>'", 'B backlog-add "<item> (gap of $P)"',
+                       "B roadmap-next $P", "no `## Fix ticket`"):
+            self.assertIn(phrase, gaps, phrase)
+        self.assertNotIn("bigboy review: gaps remain", text)
+        reviewer = (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text()
+        self.assertNotIn("stops the BigBoy for Trevor", reviewer)
+        self.assertIn("each gap line is filed as its own backlog item, so write each one self-contained", reviewer)
+
+    def test_resume_reentry_per_reason(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        for prefix in ("stalled in <stage>", "`bigboy off track`", "`bigboy review: main not updated`",
+                       "`bigboy blocked`", "`Base branch `"):
+            self.assertIn(prefix, resume, prefix)
+        for phrase in ("BigBoy lane** step 5 sub-steps 2-3", "merge-base --is-ancestor HEAD origin/$DEFAULT",
+                       "without its `main not updated` check", "B abort <c> --reason 'skipped: depends on aborted <ids>'",
+                       "B set <id> stage=spec reason=", "**New job** from step 2"):
+            self.assertIn(phrase, resume, phrase)
+        rework = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum rework <id> <feedback>`**"))
+        for phrase in ("`children`", "`bigboy off track`", "B chain-lock", "scrum-tracker",
+                       "Trevor's decision is in PARENT_DIR/rework.md: read it first and follow it.",
+                       "sub-step 1", "sub-steps 2-3"):
+            self.assertIn(phrase, rework, phrase)
+        tracker = (ROOT / "agents" / "scrum-tracker.md").read_text()
+        self.assertIn("`PARENT_DIR/rework.md`", tracker)
+        self.assertIn("Trevor's decision there is authoritative", tracker)
 
     def test_dashboard_split_reason(self):
         node = shutil.which("node")
@@ -1325,7 +1405,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, text, phrase)
         self.assertRegex(text, r"\.btn\.tall\{min-height:44px\}")
         actions = text[text.index("function renderActions"):text.index('$("actions").addEventListener')]
-        self.assertIn("noRework = /^obsolete/.test(reason) || !!job.children?.length", actions)
+        self.assertIn("noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason))", actions)
         self.assertIn('(noRework ? "" : `<form data-act="rework">', actions)
 
     def test_dashboard_viewer_shows_job_title(self):
@@ -1375,7 +1455,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         step3 = self.section(text, "3. **No repro or blocked.**", "\n4. ")
         for ch in ("`` ` ``", "`$`", '`"`', "`'`"):
             self.assertIn(ch, step3, ch)
-        self.assertIn("reason='debug: no repro — <line 2>.", step3)
+        self.assertIn("--reason 'looks already fixed: no repro — <line 2>'", step3)
 
     def test_debug_repro_prefix_checked(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1505,7 +1585,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         cloud = self.h2((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Cloud lane")
         for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", '$F/jobs/$ID/spec.md',
                        "$F/digests/<NNN>/proposals.json", "--digest-skill-check", "not found in proposals.json",
-                       "B set $ID stage=needs-human reason='digest proposal <NNN> <PID> not found in proposals.json."):
+                       "B abort $ID --requeue --reason 'requeue: digest proposal <NNN> <PID> not found in proposals.json'"):
             self.assertIn(phrase, cloud, phrase)
         feat = cloud.index('FEAT=$(cat')
         for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", "not found in proposals.json"):

@@ -1282,6 +1282,19 @@ def resume_blocker(root, job_id):
     return Blocker(*hit) if hit else None
 
 
+def stuck_on(kids, aborted):
+    """True when some waiting child depends on an aborted id, directly or through other waiting children."""
+    deps = {k["id"]: k.get("depends_on") or [] for k in kids if k["stage"] == "waiting"}
+    stuck, grew = set(), True
+    while grew:
+        grew = False
+        for kid, on in deps.items():
+            if kid not in stuck and any(d in aborted or d in stuck for d in on):
+                stuck.add(kid)
+                grew = True
+    return bool(stuck)
+
+
 def cmd_ready(root, parent_id):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
     jobs_dir = Path(root) / "jobs"
@@ -1314,24 +1327,23 @@ def cmd_ready(root, parent_id):
             busy.append(k)
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
-        finished = sum(k["stage"] in (("done", "aborted") if runall else ("done",)) for k in kids)
+        finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
         if blocked and (ready or busy or finished == len(kids)):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
             human = [k["id"] for k in kids if k["stage"] == "needs-human"]
-            if not runall and any(k["stage"] == "aborted" for k in kids):  # only Abort on the parent fixes this
-                stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")]  # Run-all: aborted = finished
-                new = "needs-human", f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve " \
-                    "& merge, Send back to builder or Setup done); if one was aborted, click Abort job on this BigBoy."
-            else:  # every action is on a child, so the parent keeps running and names them
-                waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
-                if waits:
-                    new = "running", WAITING_ON + ", ".join(waits)
-                else:  # nothing on a child is actionable (e.g. a depends_on that is not a finished sibling)
-                    left = [k["id"] for k in kids if k["stage"] not in (("done", "aborted") if runall else ("done",))]
-                    new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
-                        "then click Run now on a waiting child."
+            waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
+            aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
+            if waits:  # every action is on a child, so the parent keeps running and names them
+                new = "running", WAITING_ON + ", ".join(waits)
+            elif not runall and aborted and stuck_on(kids, set(aborted)):  # Resume skips the dependents
+                new = "needs-human", f"{BLOCKED}: {', '.join(aborted)}. Fix: click Resume to skip the children " \
+                    "that depend on them and run the final review."
+            else:  # nothing on a child is actionable (e.g. a depends_on that is not a finished sibling)
+                left = [k["id"] for k in kids if k["stage"] not in ("done", "aborted")]
+                new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
+                    "then click Run now on a waiting child."
         if new != (parent["stage"], parent.get("reason")):
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
@@ -1557,6 +1569,8 @@ def cmd_hook(event, tty):
 WATCHED = ("spec", "build", "check", "review", "approve")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+# Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
+RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"

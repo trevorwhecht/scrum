@@ -66,6 +66,7 @@ body:has(dialog[open]){overflow:hidden}
 .card.dcard{cursor:default}.dcard .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.tall{min-height:44px}
+.btn.more{width:100%}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
 #filter,#laneFilter,#blProject,#blAskme,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
@@ -423,6 +424,12 @@ function digestCard(project, digestId, p) {
 const digestCards = () => projects.filter(p => !filter || p === filter).flatMap(p => (digests[p]?.digests || [])
   .flatMap(g => g.proposals.filter(x => x.status === "pending").map(x => digestCard(p, g.id, x))));
 
+// The Done column shows this many cards; Load more adds DONE_STEP. Kept outside the DOM so a poll re-render keeps it.
+const DONE_STEP = 10;
+let doneShown = DONE_STEP;
+// Newest first: the job whose board entry changed last leads its column.
+const newestFirst = (a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
+
 function render() {
   const list = shown(), dcards = digestCards();
   const cols = [...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
@@ -431,11 +438,15 @@ function render() {
   $("roadmaps").innerHTML = projects.filter(p => !filter || p === filter).map(roadmapBanner).join("");
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
   $("board").innerHTML = cols.map(stage => {
-    const inCol = list.filter(j => colOf(j) === stage), extra = stage === "needs-human" ? dcards.join("") : "";
-    return `<section class="col${stage === "needs-human" ? " human" : ""}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
-      ${inCol.map(card).join("") + extra || '<p class="empty">—</p>'}</section>`;
+    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : "";
+    const inCol = stage === "done" ? all.slice(0, doneShown) : all;
+    const more = inCol.length < all.length ? `<button class="btn tall more" type="button" data-more>Load more</button>` : "";
+    return `<section class="col${stage === "needs-human" ? " human" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
+      ${inCol.map(card).join("") + extra + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
+  if (moreFocused) $("board").querySelector("[data-more]")?.focus();
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
   $("status").textContent = projects.length
@@ -560,9 +571,10 @@ const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form d
 // Pause stops the job's session and parks it as a stalled job (board.py PAUSABLE); Play is the resume form below.
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
-// A stalled job (board.py watchdog) resumes; one Trevor paused (board.py PAUSED_RE) shows the same form as Play.
+// A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
+const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
-const resumeForm = reason => !/^stalled in /.test(reason) ? ""
+const resumeForm = reason => !RESUMABLE.some(p => (reason || "").startsWith(p)) ? ""
   : `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
@@ -621,9 +633,10 @@ function renderActions(job) {
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
   if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + termForm(job) + pauseForm(job) + abortForm(job) + err;
-  // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work).
+  // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
+  // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
-  const noRework = /^obsolete/.test(reason) || !!job.children?.length, canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
+  const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
   el.innerHTML = banner + kids + last + resumeForm(reason)
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
@@ -1297,6 +1310,14 @@ $("board").addEventListener("click", async e => {
     c.querySelector(".error").textContent = err.message;
     btns.forEach(x => { x.disabled = false; });
   }
+});
+$("board").addEventListener("click", e => {
+  if (!e.target.closest("[data-more]")) return;
+  const doneCards = () => $("board").querySelectorAll('[data-col="done"] .card'), before = doneCards().length;
+  doneShown += DONE_STEP;
+  render();
+  // Keep keyboard focus: on the button while more remain, else on the first card it just revealed.
+  if (!$("board").querySelector("[data-more]")) doneCards()[before]?.focus();
 });
 $("board").addEventListener("click", e => {
   const el = e.target.closest(".card");
