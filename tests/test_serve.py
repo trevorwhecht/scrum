@@ -376,6 +376,32 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
         self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
 
+    def test_resume_accepts_resumable_reasons(self):
+        b = self.serve.board
+        for reason in ("stalled in build: no board update for 30 min and no live session. Fix: click Resume.",
+                       "bigboy off track: x. Fix: read the latest track file, then click Resume to carry on with the plan "
+                       "or Send back with your decision to replan.",
+                       "bigboy review: main not updated. Fix: make the main checkout fast-forward, then click Resume to "
+                       "re-run the review.",
+                       "bigboy blocked: 003-a. Fix: click Resume to skip the children that depend on them and run the "
+                       "final review.",
+                       "Base branch line in scrum/project.md is malformed. Fix: correct or remove it, then click Resume.",
+                       "Base branch dev not found on origin. Fix: push dev to origin or remove the Base branch line from "
+                       "scrum/project.md, then click Resume."):
+            with self.subTest(reason=reason):
+                job_id = b.cmd_new(self.root, "Resumable")
+                self.edit_job(job_id, stage="needs-human", reason=reason)
+                with mock.patch.object(self.serve, "spawn") as spawn:
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}),
+                                     (202, {"id": job_id, "action": "resume"}))
+                self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                                 [(job_id, "resume", f"/trevskills-scrum resume {job_id}")])
+        job_id = b.cmd_new(self.root, "Not resumable")
+        self.edit_job(job_id, stage="needs-human", reason="debug: blocked — x. Fix: click Discuss first.")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {})[0], 409)
+        spawn.assert_not_called()
+
     def raw_post(self, path, body):
         """(status, parsed JSON body) for error responses too; req() drops the body of a non-2xx."""
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", data=json.dumps(body).encode(),
