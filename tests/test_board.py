@@ -1343,6 +1343,82 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual(self.get(cloud)["stage"], "cloud")
 
+    def test_watchdog_never_flags_lilguy_jobs(self):
+        lil = self.aged("Lil change", 45, stage="build", lane="lilguy")
+        std = self.aged("Std build", 45, stage="build", lane="standard")
+        old = self.get(lil)["updatedAt"]
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [std])
+        self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
+        self.assertEqual(self.get(std)["stage"], "needs-human")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
+
+    def test_resume_blocker_matches_ready_rules(self):
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        # No parent: never blocked.
+        solo = board.cmd_new(self.root, "Solo")
+        board.cmd_set(self.root, solo, stalled)
+        self.assertIsNone(board.resume_blocker(self.root, solo))
+        # BigBoy, no cap: a, b, c parallel; d parallel=no.
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4, parallel="no — big"),
+                           self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
+        a, b, c, d, e = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(a, "src/a.py", "src/shared.py")
+        self.spec(b, "src/b.py")
+        self.spec(c, "src/c.py", "src/shared.py")
+        self.spec(d, "src/d.py")
+        board.cmd_set(self.root, a, stalled)
+        # No sibling in progress (all waiting/needs-human).
+        self.assertIsNone(board.resume_blocker(self.root, a))
+        # Disjoint parallel sibling in progress.
+        board.cmd_set(self.root, b, ["stage=build"])
+        self.assertIsNone(board.resume_blocker(self.root, a))
+        # (a) shared Likely file.
+        board.cmd_set(self.root, c, ["stage=review"])
+        text = board.resume_blocker(self.root, a)
+        self.assertEqual(text, f"sibling {c} shares src/shared.py")
+        self.assertEqual(text.ids, [c])
+        board.cmd_set(self.root, c, ["stage=done"])
+        self.assertIsNone(board.resume_blocker(self.root, a))
+        # (b) an in-progress sibling with parallel=no runs alone.
+        board.cmd_set(self.root, d, ["stage=check"])
+        text = board.resume_blocker(self.root, a)
+        self.assertEqual((text, text.ids), (f"sibling {d} runs alone", [d]))
+        board.cmd_set(self.root, d, ["stage=done"])
+        # (b) the job itself has no readable Likely files: it runs alone beside any in-progress sibling.
+        (self.root / "jobs" / a / "spec.md").unlink()
+        text = board.resume_blocker(self.root, a)
+        self.assertEqual((text, text.ids), ("this job runs alone", [b]))
+        self.spec(a, "src/a.py")
+        # The job itself never counts as a sibling, even when it is in progress.
+        board.cmd_set(self.root, b, ["stage=done"])
+        board.cmd_set(self.root, a, ["stage=build"])
+        self.assertIsNone(board.resume_blocker(self.root, a))
+        # (c) Run-all cap: RUNALL_MAX_IN_PROGRESS (3) with no pacing.
+        _, kids = self.runall(5)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/r{i}.py")
+        board.cmd_set(self.root, kids[0], stalled)
+        for k in kids[1:4]:
+            board.cmd_set(self.root, k, ["stage=build"])
+        text = board.resume_blocker(self.root, kids[0])
+        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
+        board.cmd_set(self.root, kids[3], ["stage=done"])
+        self.assertIsNone(board.resume_blocker(self.root, kids[0]))
+        # (c) a fresh usage.json with projected use >= 125% paces the cap down to 1 for Run-all and BigBoy alike.
+        now = int(__import__("time").time())
+        usage = Path(self.tmp.name) / "usage.json"
+        usage.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": now + 9000}},
+                                     "written_at": now}))
+        with mock.patch.dict(os.environ, {"SCRUM_USAGE": str(usage)}):
+            text = board.resume_blocker(self.root, kids[0])
+            self.assertEqual((text, text.ids), ("2 siblings in progress (cap 1)", kids[1:3]))
+            board.cmd_set(self.root, b, ["stage=build"])
+            board.cmd_set(self.root, a, stalled)
+            text = board.resume_blocker(self.root, a)
+            self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
+        self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
+
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):
         self.assertEqual(board.cmd_new(self.root, "From the Mac", "042-from-the-mac"), "042-from-the-mac")

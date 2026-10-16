@@ -1114,6 +1114,60 @@ def cmd_runall_start(root):
         return {"id": parent_id, "children": kids}
 
 
+def slot_cap(runall):
+    """The in-progress cap for a parent's children, or None (no cap). Usage pacing only gates new claims (and
+    resumes); it is always >= 1, so with nothing in progress one child still starts."""
+    cap = pace_cap(read_usage(), time.time(), RUNALL_MAX_IN_PROGRESS if runall else None)
+    return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
+
+
+def slot_conflict(k, busy, files, cap):
+    """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
+    child id to its Likely files. The rules `ready` and `resume_blocker` share: the in-progress cap; parallel=no, or
+    no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file."""
+    busy = [o for o in busy if o["id"] != k["id"]]
+    if cap is not None and len(busy) >= cap:
+        return f"{len(busy)} siblings in progress (cap {cap})", [o["id"] for o in busy]
+    if not busy:
+        return None
+    alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
+    if alone(k):
+        return "this job runs alone", [o["id"] for o in busy]
+    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(files[k['id']] & files[o['id']])}")
+             for o in busy if alone(o) or files[k["id"]] & files[o["id"]]]
+    return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
+
+
+class Blocker(str):
+    """resume_blocker's text; .ids names the siblings it waits on."""
+    def __new__(cls, text, ids):
+        self = super().__new__(cls, text)
+        self.ids = ids
+        return self
+
+
+def resume_blocker(root, job_id):
+    """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s cap and overlap rules
+    (slot_conflict) against its in-progress siblings. Reads the board without writing or claiming anything."""
+    jobs_dir = Path(root) / "jobs"
+    jobs = {j["id"]: j for j in read_board(root)["jobs"]}
+    job = jobs.get(job_id)
+    parent = jobs.get(job.get("parent")) if job else None
+    if not parent:
+        return None
+    kids = [jobs[k] for k in parent.get("children") or [] if k in jobs]
+    if job not in kids:
+        kids.append(job)
+    spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
+        if (jobs_dir / k["id"] / "spec.md").is_file() else ""
+    files = {k["id"]: likely_files(spec(k)) for k in kids}
+    busy = [k for k in kids if k["stage"] not in IDLE and k["id"] != job_id]
+    if not busy:
+        return None
+    hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
+    return Blocker(*hit) if hit else None
+
+
 def cmd_ready(root, parent_id):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
     jobs_dir = Path(root) / "jobs"
@@ -1134,21 +1188,13 @@ def cmd_ready(root, parent_id):
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if k["stage"] not in IDLE]
-        alone = lambda k: not k.get("parallel") or not files[k["id"]]  # unknown Likely files = may touch anything
-        # Usage pacing only gates new claims; it is always >= 1, so with nothing in progress one child still starts.
-        cap = pace_cap(read_usage(), time.time(), RUNALL_MAX_IN_PROGRESS if runall else None)
-        if runall and cap is None:
-            cap = RUNALL_MAX_IN_PROGRESS
+        cap = slot_cap(runall)
         ready = []
         for k in kids if parent["stage"] == "running" or legacy else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
-            if cap is not None and len(busy) >= cap:
-                continue
-            # parallel=no, or no readable Likely files, runs alone; anything else never beside such a sibling
-            # or one sharing a Likely file.
-            if busy and (alone(k) or any(alone(o) or files[k["id"]] & files[o["id"]] for o in busy)):
+            if slot_conflict(k, busy, files, cap):
                 continue
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
@@ -1454,8 +1500,9 @@ def cmd_watchdog(root, alive=None):
     flagged = []
     try:
         with locked_board(root) as board:
+            # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and stalled_since(j, cutoff)]
+                     and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
                 if not alive(job):

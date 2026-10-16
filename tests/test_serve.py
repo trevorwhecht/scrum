@@ -376,6 +376,50 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
         self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
 
+    def raw_post(self, path, body):
+        """(status, parsed JSON body) for error responses too; req() drops the body of a non-2xx."""
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", data=json.dumps(body).encode(),
+                                   headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r) as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read())
+
+    def test_resume_refuses_lilguy_job(self):
+        b = self.serve.board
+        refusal = {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "
+                            "checkout and run /trevskills-commitpush, or discard it, then click Abort."}
+        for reason in ("stalled in build: no board update for 30 min and no live session. Fix: click Resume.",
+                       "stalled in build: paused by Trevor"):
+            lil = b.cmd_new(self.root, "Lil fix")
+            self.edit_job(lil, lane="lilguy", stage="needs-human", reason=reason)
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {}), (409, refusal), reason)
+            spawn.assert_not_called()
+            self.assertEqual((self.stage_of(lil)["stage"], self.stage_of(lil)["reason"]), ("needs-human", reason))
+
+    def test_resume_child_waits_for_overlapping_sibling(self):
+        b = self.serve.board
+        reason = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+        parent, kid, sib = (b.cmd_new(self.root, t) for t in ("Resume parent", "Stalled kid", "Busy sib"))
+        self.edit_job(parent, lane="runall", stage="running", children=[kid, sib])
+        self.edit_job(kid, parent=parent, parallel=True, stage="needs-human", reason=reason)
+        self.edit_job(sib, parent=parent, parallel=True, stage="build")
+        for k, extra in ((kid, "src/kid.py"), (sib, "src/sib.py")):
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `{extra}`: why\n")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {})
+        self.assertEqual((code, out), (409, {"error": f"can't resume yet: sibling {sib} shares src/shared.py. "
+                                                      f"Fix: click Resume when {sib} finish."}))
+        spawn.assert_not_called()
+        self.assertEqual((self.stage_of(kid)["stage"], self.stage_of(kid)["reason"]), ("needs-human", reason))
+        self.edit_job(sib, stage="done")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (202, {"id": kid, "action": "resume"}))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+
     def test_dashboard_has_bigboy_lane_option(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         self.assertIn("<option>bigboy</option>", text)
@@ -3131,3 +3175,29 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), [], "30 min backoff")
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(self.sweep(), [], "capped")
+
+    def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
+        s = self.serve
+        stalled = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+        for jid in ("lil", "kid"):
+            (self.root / "runs" / f"{jid}.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
+            (self.root / "jobs" / jid).mkdir(parents=True)
+        (self.root / "jobs" / "sib").mkdir(parents=True)
+        for jid in ("kid", "sib"):
+            (self.root / "jobs" / jid / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `src/{jid}.py`: why\n")
+        self.jobs = [{"id": "par", "stage": "running", "lane": "runall", "reason": None, "children": ["kid", "sib"]},
+                     {"id": "lil", "stage": "needs-human", "lane": "lilguy", "reason": stalled, "runlog": "runs/lil.log"},
+                     {"id": "kid", "stage": "needs-human", "parent": "par", "parallel": True, "reason": stalled,
+                      "runlog": "runs/kid.log"},
+                     {"id": "sib", "stage": "build", "parent": "par", "parallel": True, "reason": None}]
+        write = lambda: (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        write()
+        self.assertEqual(self.sweep(), [], "lilguy never; kid waits on sib, which shares src/shared.py")
+        self.assertEqual(self.sweep(), [], "still blocked on a later tick")
+        self.assertNotIn("p/lil", s.AUTO_RESUME)
+        self.assertNotIn("p/kid", s.AUTO_RESUME, "a blocked child uses none of its tries")
+        self.jobs[3]["stage"] = "done"
+        write()
+        self.assertEqual(self.sweep(), ["kid"])
+        self.assertEqual(s.AUTO_RESUME["p/kid"][0], 1)
+        self.assertNotIn("p/lil", s.AUTO_RESUME)
