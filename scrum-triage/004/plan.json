@@ -1,0 +1,233 @@
+{
+ "merge": [
+  {
+   "items": [
+    "Add a test that term=ghostty survives a headless spawn. (from 054-when-spawn-starts-a-headless-run-clear-t)",
+    "test_serve.test_spawn_silences_notifier fails when CLAUDE_NOTIFIER_DISABLE is set in the environment; make the test unset it itself. (from 082-add-lilguy-mode-no-subagents-then-commit)",
+    "Make test_spawn_silences_notifier hermetic: it fails when CLAUDE_NOTIFIER_DISABLE=1 is already set, as in every headless scrum session (from 092-ollama-small-task-workers-and-quota-fall)"
+   ],
+   "text": "tests/test_serve.py spawn tests: make test_spawn_silences_notifier hermetic by unsetting CLAUDE_NOTIFIER_DISABLE itself (it fails when CLAUDE_NOTIFIER_DISABLE=1 is already set, as in every headless scrum session), and add a test that term=ghostty survives a headless spawn. (merged: notifier test unsets env, notifier test hermetic, term=ghostty spawn test)",
+   "points": 2,
+   "why": "Two are the same notifier-test fix and the third adds a sibling spawn test in the same tests/test_serve.py block."
+  },
+  {
+   "items": [
+    "Make fence tracking in board.py diverged() and dashboard.html divergedBullets() close only on a matching delimiter char and length (nested 4-backtick fences). (from 065-diverged-follow-ups-call-renderdiverged)",
+    "Add a request-generation guard to renderDiverged so superseded fetches cannot overwrite a newer render. (from 065-diverged-follow-ups-call-renderdiverged)"
+   ],
+   "text": "Diverged follow-ups: make fence tracking in board.py diverged() and dashboard.html divergedBullets() close only on a matching delimiter char and length (nested 4-backtick fences); add a request-generation guard to renderDiverged so superseded fetches cannot overwrite a newer render. (merged: matching fence delimiter, renderDiverged generation guard)",
+   "points": 2,
+   "why": "Both fix the Diverged section code in dashboard.html (divergedBullets/renderDiverged) from job 065."
+  },
+  {
+   "items": [
+    "Confirm in a real Chrome session that Escape with a dirty AI-Settings editor warns once, then closes (from 051-ai-settings-editor-dirty-state-in-dashbo)",
+    "Category nav and scope select in AI-Settings can still discard unsaved text silently (from 051-ai-settings-editor-dirty-state-in-dashbo)"
+   ],
+   "text": "AI-Settings editor dirty state: category nav and scope select can still discard unsaved text silently, so route them through the same unsaved-changes warning; then confirm in a real Chrome session that Escape with a dirty editor warns once, then closes. (merged: category/scope discard guard, Chrome Escape check)",
+   "points": 2,
+   "why": "Both are follow-ups to the same AI-Settings dirty-state guard from job 051 in dashboard.html."
+  },
+  {
+   "items": [
+    "Add a target is None -> 403 guard in the Audit Disable/Enable toggle path in serve.py. (from 056-ai-settings-audit-plugin-disable-target)",
+    "Extend the AI-Settings confirm gate to otelHeadersHelper, awsAuthRefresh, awsCredentialExport and MCP type/url changes. (from 069-consider-extending-the-confirm-gate-to-m)",
+    "MCP token check: skip file-path style flags such as --token-file and handle split values starting with - (from 052-security-scan-mcp-token-check-ignore-var)"
+   ],
+   "text": "AI-Settings guards in serve.py: add a target is None -> 403 guard in the Audit Disable/Enable toggle path; extend the confirm gate (ai_guarded) to otelHeadersHelper, awsAuthRefresh, awsCredentialExport and MCP type/url changes; in the security scan MCP token check, skip file-path style flags such as --token-file and handle split values starting with -. (merged: Audit toggle None guard, confirm gate extension, MCP token-file flags)",
+   "points": 3,
+   "why": "All three are small AI-Settings hardening fixes in serve.py with tests, so separate jobs would conflict."
+  },
+  {
+   "items": [
+    "Header toolbar clips horizontally at 390 px (pre-existing, noted by UI review). (from 058-ai-settings-research-follow-ups-re-rende)",
+    "Header second select overflows at 390 px on the dashboard (pre-existing). (from 082-add-lilguy-mode-no-subagents-then-commit)",
+    "Viewer #tabs: remove right padding behind the sticky ✕ and raise the viewer ✕ to 44x44 at <640px (UB-15). (from 064-dashboard-at-390-px-ub-8-keep-the-backlo)",
+    "Raise dashboard modal buttons to 44px touch targets (UB-15). (from 077-stuck-job-watchdog-a-job-that-sits-in-an)"
+   ],
+   "text": "Dashboard at 390 px / UB-15 in dashboard.html: the header toolbar clips horizontally at 390 px and its second select overflows (pre-existing); in viewer #tabs remove the right padding behind the sticky ✕ and raise the viewer ✕ to 44x44 at <640px; raise dashboard modal buttons to 44px touch targets. (merged: header toolbar clip, header select overflow, viewer tabs ✕, modal buttons 44px)",
+   "points": 3,
+   "why": "All four edit the same mobile/touch-target CSS in dashboard.html and need one UI review."
+  },
+  {
+   "items": [
+    "Manually check Pipelines loop alignment in Safari at chart zoom 50/80/100/150% and page zoom 125%; fix alignLoop() only if misaligned. (from 072-pipelines-formerly-agents-modal-follow-u)",
+    "Tighten the width of the Fast pipeline row in the Pipelines modal (Check gate and the dashed to-Standard box stretch to ~660 px at 1440). (from 049-rename-agents-modal-to-pipelines-with-a)"
+   ],
+   "text": "Pipelines modal: tighten the width of the Fast pipeline row (Check gate and the dashed to-Standard box stretch to ~660 px at 1440); manually check Pipelines loop alignment in Safari at chart zoom 50/80/100/150% and page zoom 125%, and fix alignLoop() only if misaligned. (merged: Fast row width, Safari loop alignment)",
+   "points": 2,
+   "why": "Both touch the Pipelines modal layout in dashboard.html."
+  },
+  {
+   "items": [
+    "Make serve.digest_denied case-insensitive (compare lowercased basename and path parts) so Settings.JSON and Hooks/ don't bypass it on macOS. (from 063-digester-hardening-in-serve-py-board-py)",
+    "Re-validate the skill target path when the queued Create digest skill backlog item is executed. (from 100-digest-proposes-new-skills-when-a-repeat)",
+    "Trim /digests poll payload (omit old/new text) for the dashboard cards. (from 083-digest-auto-approve-the-digester-marks-e)",
+    "Check digest cards on a real 390 px device and exercise the failed-POST error path. (from 083-digest-auto-approve-the-digester-marks-e)"
+   ],
+   "text": "Digest follow-ups: make serve.digest_denied case-insensitive (compare lowercased basename and path parts) so Settings.JSON and Hooks/ don't bypass it on macOS; re-validate the skill target path when the queued Create digest skill backlog item is executed; trim the /digests poll payload (omit old/new text) for the dashboard cards; check digest cards on a real 390 px device and exercise the failed-POST error path. (merged: digest_denied case, skill target re-validate, trim digests payload, digest cards 390 px check)",
+   "points": 5,
+   "why": "All four work on the digest apply path and digest cards in serve.py and dashboard.html."
+  },
+  {
+   "items": [
+    "Exclude lilguy-lane jobs from the stalled watchdog, or give them a lane-appropriate resume. (from 077-stuck-job-watchdog-a-job-that-sits-in-an)",
+    "Make Resume run the same slot/overlap checks as cmd_ready. (from 077-stuck-job-watchdog-a-job-that-sits-in-an)"
+   ],
+   "text": "Stuck-job watchdog follow-ups: exclude lilguy-lane jobs from the stalled watchdog, or give them a lane-appropriate resume; make Resume run the same slot/overlap checks as cmd_ready. (merged: lilguy watchdog exclusion, Resume slot checks)",
+   "points": 3,
+   "why": "Both change the watchdog Resume path from job 077."
+  },
+  {
+   "items": [
+    "Scope kill_session's ps fallback to the job's project repo path so same-id jobs in other projects are not signalled. (from 094-pause-and-play-buttons-on-every-running)",
+    "Add an explicit resume marker so a surviving session's B set reason= cannot silently clear a pause. (from 094-pause-and-play-buttons-on-every-running)",
+    "Merge the stacked comments on the runlog cmd_set line in serve.py spawn. (from 094-pause-and-play-buttons-on-every-running)"
+   ],
+   "text": "Pause/Play follow-ups: add an explicit resume marker so a surviving session's B set reason= cannot silently clear a pause; scope kill_session's ps fallback in serve.py to the job's project repo path so same-id jobs in other projects are not signalled; merge the stacked comments on the runlog cmd_set line in serve.py spawn. (merged: resume marker, kill_session scope, runlog comments)",
+   "points": 5,
+   "why": "All three are follow-ups to the Pause/Play feature from job 094 in board.py and serve.py."
+  },
+  {
+   "items": [
+    "Make cmd_ready resume a needs-human parent whose reason is the chain-lock failure (or reword it to start with \"bigboy blocked\"). (from 070-bigboy-scheduler-safety-treat-a-parallel)",
+    "Guard board.py cmd_ready against an empty waiting on you in: reason when a blocker has no needs-human or setup-pending child. (from 091-dashboard-a-bigboy-parent-blocked-on-chi)",
+    "Harden board.py merge_refusal: pass -- before the PR url in the gh pr view argv. (from 090-never-mark-a-job-done-unless-its-pr-is-m)",
+    "Pass encoding=\"utf-8\" to path.write_text in board.cmd_backlog_spec (from 097-board-stores-pre-written-backlog-specs)",
+    "Simplify format_step status-box lookup in board.py: use a reverse ROADMAP_BOX dict instead of a linear search (from 104-board-py-roadmap-commands-tests-and-desi)"
+   ],
+   "text": "board.py fixes: make cmd_ready resume a needs-human parent whose reason is the chain-lock failure (or reword it to start with \"bigboy blocked\"); guard cmd_ready against an empty waiting on you in: reason when a blocker has no needs-human or setup-pending child; harden merge_refusal by passing -- before the PR url in the gh pr view argv; pass encoding=\"utf-8\" to path.write_text in cmd_backlog_spec; simplify the format_step status-box lookup with a reverse ROADMAP_BOX dict instead of a linear search. (merged: cmd_ready chain-lock resume, cmd_ready empty waiting guard, merge_refusal --, backlog spec utf-8, format_step reverse dict)",
+   "points": 5,
+   "why": "All five edit board.py, two of them the same cmd_ready function, so one job avoids conflicting branches."
+  },
+  {
+   "items": [
+    "Make the reviewer's Codex command block shell-agnostic (inline $RUNNER instead of relying on word-splitting) so it works under zsh (from 085-router-routing-config-and-routing-log)",
+    "Run the live non-fast review round to confirm the router, Codex step and routing.log entry end to end (from 085-router-routing-config-and-routing-log)",
+    "Run the preflight tests under a sandbox that allows local sockets. Codex could not bind them, though check.md shows them passing. (from 086-orchestrator-and-code-review-route-throu)"
+   ],
+   "text": "Codex review follow-ups: make the reviewer's Codex command block shell-agnostic (inline $RUNNER instead of relying on word-splitting) so it works under zsh; run the preflight tests under a sandbox that allows local sockets (Codex could not bind them, though check.md shows them passing); then run the live non-fast review round to confirm the router, Codex step and routing.log entry end to end. (merged: shell-agnostic Codex block, preflight sandbox sockets, live review round check)",
+   "points": 3,
+   "why": "All three concern the Codex step of the code review in agents/scrum-review-code.md and its routing."
+  },
+  {
+   "items": [
+    "bench.py: re-check test_calc.py bytes after the subprocess run so generated code cannot alter the fixture and still pass (from 092-ollama-small-task-workers-and-quota-fall)",
+    "local/README.md: move the Scope: paragraph back under Switch the dashboard, ahead of Recovery (from 092-ollama-small-task-workers-and-quota-fall)",
+    "Verify qwen3.5:4b honours num_ctx 16384/32K on the MLX runner and consider a think-off option before trusting estimator/digest roles (from 092-ollama-small-task-workers-and-quota-fall)"
+   ],
+   "text": "Local Ollama follow-ups from job 092: in bench.py re-check test_calc.py bytes after the subprocess run so generated code cannot alter the fixture and still pass; in local/README.md move the Scope: paragraph back under Switch the dashboard, ahead of Recovery; verify qwen3.5:4b honours num_ctx 16384/32K on the MLX runner and consider a think-off option before trusting estimator/digest roles. (merged: bench fixture re-check, README Scope paragraph, qwen num_ctx check)",
+   "points": 3,
+   "why": "All three are follow-ups to the local Ollama work under local/ from job 092."
+  },
+  {
+   "items": [
+    "Apply digest 003 p1 to agents/scrum-review-code.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/003/proposals.json",
+    "Apply digest 001 p2 to agents/scrum-review-code.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json",
+    "Apply digest 005 p1 to agents/scrum-review-code.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/005/proposals.json",
+    "Apply digest 006 p2 to agents/scrum-review-code.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/006/proposals.json"
+   ],
+   "text": "Apply digest proposals to agents/scrum-review-code.md: digest 003 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/003/proposals.json), digest 001 p2 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json), digest 005 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/005/proposals.json), digest 006 p2 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/006/proposals.json). (merged: digest 003 p1, digest 001 p2, digest 005 p1, digest 006 p2)",
+   "points": 3,
+   "why": "All four apply old/new text proposals to the same agents/scrum-review-code.md."
+  },
+  {
+   "items": [
+    "Apply digest 002 p4 to agents/scrum-builder.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json",
+    "Apply digest 001 p5 to agents/scrum-builder.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json",
+    "Apply digest 007 p2 to agents/scrum-builder.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/007/proposals.json",
+    "Apply digest 008 p2 to agents/scrum-builder.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/008/proposals.json",
+    "Apply digest 003 p4 to agents/scrum-builder.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/003/proposals.json"
+   ],
+   "text": "Apply digest proposals to agents/scrum-builder.md: trevskills-scrum digest 002 p4 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json), digest 001 p5 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json), digest 007 p2 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/007/proposals.json), digest 008 p2 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/008/proposals.json), and onewitharts digest 003 p4 (see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/003/proposals.json). (merged: digest 002 p4, digest 001 p5, digest 007 p2, digest 008 p2, onewitharts digest 003 p4)",
+   "points": 5,
+   "why": "All five apply text proposals to the same agents/scrum-builder.md and would conflict as separate jobs."
+  },
+  {
+   "items": [
+    "Apply digest 002 p1 to agents/scrum-approver.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json",
+    "Apply digest 006 p1 to agents/scrum-approver.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/006/proposals.json",
+    "Apply digest 001 p1 to agents/scrum-approver.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/001/proposals.json"
+   ],
+   "text": "Apply digest proposals to agents/scrum-approver.md: trevskills-scrum digest 002 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json), digest 006 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/006/proposals.json), and onewitharts digest 001 p1 (see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/001/proposals.json). (merged: digest 002 p1, digest 006 p1, onewitharts digest 001 p1)",
+   "points": 3,
+   "why": "All three apply text proposals to the same agents/scrum-approver.md."
+  },
+  {
+   "items": [
+    "Apply digest 002 p2 to agents/scrum-review-ux.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json",
+    "Apply digest 001 p2 to agents/scrum-review-ux.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/001/proposals.json",
+    "Apply digest 001 p3 to agents/scrum-review-ux.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/001/proposals.json",
+    "Apply digest 002 p3 to agents/scrum-review-ui.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json"
+   ],
+   "text": "Apply digest proposals to the UX/UI reviewer agents: agents/scrum-review-ux.md gets trevskills-scrum digest 002 p2 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json), onewitharts digest 001 p2 and onewitharts digest 001 p3 (see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/001/proposals.json); agents/scrum-review-ui.md gets trevskills-scrum digest 002 p3 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/002/proposals.json). (merged: digest 002 p2, onewitharts digest 001 p2, onewitharts digest 001 p3, digest 002 p3)",
+   "points": 3,
+   "why": "Three target agents/scrum-review-ux.md and the fourth its sibling UI reviewer, whose contract tests are shared."
+  },
+  {
+   "items": [
+    "Apply digest 001 p1 to skills/trevskills-scrum/SKILL.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json",
+    "Apply digest 002 p1 to skills/trevskills-scrum/SKILL.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/002/proposals.json",
+    "Apply digest 003 p1 to skills/trevskills-scrum/SKILL.md: see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/003/proposals.json"
+   ],
+   "text": "Apply digest proposals to skills/trevskills-scrum/SKILL.md: trevskills-scrum digest 001 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json), onewitharts digest 002 p1 (see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/002/proposals.json), onewitharts digest 003 p1 (see /Users/trevorhecht/Developer/repos/onewitharts/scrum/digests/003/proposals.json). (merged: digest 001 p1, onewitharts digest 002 p1, onewitharts digest 003 p1)",
+   "points": 3,
+   "why": "All three apply text proposals to the same SKILL.md."
+  },
+  {
+   "items": [
+    "Apply digest 001 p3 to agents/scrum-spec-writer.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json",
+    "Apply digest 001 p4 to agents/scrum-spec-writer.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json"
+   ],
+   "text": "Apply digest 001 p3 and p4 to agents/scrum-spec-writer.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/001/proposals.json (merged: digest 001 p3, digest 001 p4)",
+   "points": 2,
+   "why": "Both apply proposals from the same digest to the same agents/scrum-spec-writer.md."
+  },
+  {
+   "items": [
+    "Apply digest 007 p1 to scrum/project.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/007/proposals.json",
+    "Apply digest 008 p1 to scrum/project.md: see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/008/proposals.json"
+   ],
+   "text": "Apply digest proposals to scrum/project.md: digest 007 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/007/proposals.json) and digest 008 p1 (see /Users/trevorhecht/Developer/repos/trevskills-scrum/scrum/digests/008/proposals.json). (merged: digest 007 p1, digest 008 p1)",
+   "points": 1,
+   "why": "Both apply text proposals to the same scrum/project.md."
+  },
+  {
+   "items": [
+    "Consider widening the Sonnet-security trigger to also treat api/ or route\\.[jt]s paths as sensitive. (from 089-token-cuts-bigboy-re-research-lazy-child)",
+    "Tighten Repro validation when project Test: is none: require an interpreter prefix before the Repro test path. (from 062-skill-md-debug-lane-and-needs-human-reas)",
+    "Make jobs that edit agents/scrum-*.md or SKILL.md always stop for a human before merge. (from 083-digest-auto-approve-the-digester-marks-e)"
+   ],
+   "text": "SKILL.md rule follow-ups: consider widening the Sonnet-security trigger to also treat api/ or route\\.[jt]s paths as sensitive; tighten Repro validation when project Test: is none by requiring an interpreter prefix before the Repro test path; make jobs that edit agents/scrum-*.md or SKILL.md always stop for a human before merge. Update the contract tests. (merged: Sonnet-security trigger paths, Repro interpreter prefix, agent/SKILL.md edits stop for human)",
+   "points": 5,
+   "why": "All three are rule changes in SKILL.md checked by tests/test_contracts.py, so separate jobs would conflict."
+  }
+ ],
+ "retire": [
+  {
+   "item": "Validate Fibonacci points inside the local estimate attempt so a bad local value triggers the cloud retry. (from 088-dashboard-shows-runners-codex-quota-and)",
+   "reason": "Already done: serve.py local_estimate() returns points_in(), which only accepts points in (1, 2, 3, 5, 8, 13), so a bad local value yields None and estimate() falls through to the cloud attempt."
+  },
+  {
+   "item": "BigBoy GAPS-remaining reason says click Abort job even when every child merged; offer a Close as done button (parent done, gaps to backlog) so finished work is never aborted. Seen on onewitharts 017, 2026-10-15.",
+   "reason": "Superseded by the open item \"No Abort-only needs-human stops, newest-first columns, Done load more\", which says it replaces the Close as done item and covers the GAPS-remaining case (1)."
+  }
+ ],
+ "estimate": [
+  {
+   "item": "AI-Settings manual checks: verify Plugins badges and counts at 1440 px and 390 px for the boisepartyco scope and Global, and live-click Disable/Undo in the Audit tab to confirm focus lands on the new toggle (only unit-tested so far). (merged: Plugins badge check, Audit focus live-click)",
+   "points": 1,
+   "why": "Manual browser checks of the AI-Settings page with no code change expected."
+  },
+  {
+   "item": "Ask Claude button in every job modal: opens a NEW Claude session in Ghostty (fall back to Terminal if Ghostty is missing) in the job's worktree, preloaded with a prompt that points at the job's feature.md, spec.md, build.md, every round's check/review files, decision.md and the board.json entry, so I can ask questions about the job even after its session has died.",
+   "points": 5,
+   "why": "A new job-modal button plus a serve.py endpoint that builds the prompt and launches Ghostty or Terminal; serve.py has no such endpoint yet."
+  },
+  {
+   "item": "Agent test servers never touch real settings: any serve.py that a scrum agent (builder or reviewer) starts to render the dashboard must run on a fresh free port (never 8765) with HOME and CLAUDE_HOME pointed at a throwaway temp dir, enforced in the agent prompts/SKILL.md and checked before Save/Undo clicks. The real dashboard on 8765 keeps full permission to edit the real ~/.claude, with no new confirms. Came from job 044, where a UX reviewer reached a stale serve.py on port 8791 and replaced ~/.claude/rules/performance.md with 'new rule 1440'.",
+   "points": 5,
+   "why": "Needs HOME/CLAUDE_HOME isolation in the builder and UI/UX reviewer prompts and SKILL.md plus a serve.py guard and contract tests; agents only pick a spare port today."
+  }
+ ]
+}
