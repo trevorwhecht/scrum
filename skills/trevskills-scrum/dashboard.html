@@ -98,6 +98,10 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #blList{list-style:none;margin:0;padding:0}
 #blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
 #blList li input{flex:1;min-width:0}
+#blManual h3{margin:0;font-size:13px;color:var(--muted);font-weight:600}
+#blManualList{list-style:none;margin:0;padding:0}
+#blManualList label{display:flex;gap:8px;align-items:center;min-height:44px;padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer;overflow-wrap:anywhere;min-width:0}
+#blManualList input{width:20px;height:20px;flex:none;margin:0}
 .pts{font:600 12px ui-monospace,monospace;width:46px;min-height:32px;border:0;border-radius:6px;color:#fff;background:var(--pending);text-align:center;cursor:pointer}
 .pts.p1{background:var(--p1)}.pts.p2{background:var(--p2)}.pts.p3{background:var(--p3)}.pts.p5{background:var(--p5);color:#1c1b19}
 .pts.p8{background:var(--p8)}.pts.p13{background:var(--p13)}
@@ -201,6 +205,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
     <form id="blAdd"><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
+    <section id="blManual" hidden aria-labelledby="blManualTitle"><h3 id="blManualTitle">Manual checks</h3><ul id="blManualList"></ul></section>
     <details id="blTriage" hidden><summary>Last triage</summary><div id="blTriageBody"></div></details>
   </article>
 </dialog>
@@ -260,7 +265,7 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, digests = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, digests = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || laneOf(j) === laneFilter));
@@ -453,9 +458,10 @@ async function poll() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     projects = (await res.json()).map(p => p.name);
     if (filter && !projects.includes(filter)) filter = "";
-    const [boards, items, runList, digestList, roadmapList] = await Promise.all([
+    const [boards, items, checks, runList, digestList, roadmapList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
+      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
       getJson("api/runs", []),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests?brief=1`, null))),  // the cards need no old/new
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
@@ -471,8 +477,10 @@ async function poll() {
         .then(r => r.ok ? r.text() : "").catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); })));
     auditRunsChanged();
     const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
-    const backlogChanged = JSON.stringify(nextBacklogs) !== JSON.stringify(backlogs);
+    const nextManuals = Object.fromEntries(projects.map((p, i) => [p, checks[i]]));
+    const backlogChanged = JSON.stringify([nextBacklogs, nextManuals]) !== JSON.stringify([backlogs, manuals]);
     backlogs = nextBacklogs;
+    manuals = nextManuals;
     renderSelect($("filter"), filter, true);
     const text = JSON.stringify([all, runs, backlogs, digests, roadmaps, filter, routes]);
     if (text !== lastText) {
@@ -654,7 +662,15 @@ $("actions").addEventListener("submit", async e => {
 const blProject = () => $("blProject").value;
 const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("blList").contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName));
 
+// Open manual checks (scrum/manual-checks.md): human-only follow-ups that never run as jobs. Ticking one is final.
+function renderManual() {
+  const open = (manuals[blProject()] || []).filter(i => !i.done);
+  $("blManual").hidden = !open.length;
+  $("blManualList").innerHTML = open.map(it => `<li><label><input type="checkbox" data-i="${it.index}"><span>${esc(it.text)}</span></label></li>`).join("");
+}
+
 function renderBacklog() {
+  renderManual();
   $("blAdd").hidden = !projects.length;
   $("blRunAll").disabled = !projects.length;
   if (!projects.length) return $("blList").innerHTML = '<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>';
@@ -739,6 +755,14 @@ $("blList").addEventListener("change", e => {
     ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
 });
 $("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
+$("blManualList").addEventListener("change", async e => {
+  const p = blProject(), box = e.target;
+  box.disabled = true;
+  $("blError").textContent = "";
+  try { manuals[p] = await post(`api/p/${enc(p)}/manual-checks`, {index: +box.dataset.i}); }
+  catch (err) { $("blError").textContent = err.message; box.checked = false; box.disabled = false; return; }
+  renderBacklog();
+});
 
 // Digest: proposals from scrum/digests/<NNN>/proposals.json. Approve applies a global edit (backed up) or queues a repo
 // edit on that repo's backlog; serve.py decides which. The last decision in a digest trims its job folders.

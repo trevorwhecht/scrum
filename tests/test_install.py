@@ -19,6 +19,31 @@ class InstallTest(unittest.TestCase):
                 self.assertEqual((home / "agents" / agent.name).resolve(), agent)
             self.assertEqual((home / "codex" / "AGENTS.md").resolve(), ROOT / "codex" / "AGENTS.md")
 
+    def test_cloud_setup_pulls_an_existing_clone_then_installs_idempotently(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            git = lambda *a, cwd=None: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                                      check=True, capture_output=True, text=True).stdout.strip()
+            git("clone", "-q", "--bare", str(ROOT), str(t / "origin.git"))
+            git("clone", "-q", str(t / "origin.git"), str(t / "src"))
+            env = {**os.environ, "HOME": str(t / "home"), "SCRUM_SRC": str(t / "src"),
+                   "CLAUDE_HOME": str(t / "home" / ".claude"), "CODEX_HOME": str(t / "home" / ".codex")}
+            setup = lambda: subprocess.run(["bash", str(ROOT / "cloud" / "setup.sh")], env=env, capture_output=True, text=True)
+            first = setup()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            # A new commit upstream: the second run must fast-forward to it, then reinstall with the same links.
+            git("clone", "-q", str(t / "origin.git"), str(t / "other"))
+            git("commit", "-q", "--allow-empty", "-m", "upstream", cwd=t / "other")
+            git("push", "-q", "origin", "HEAD", cwd=t / "other")
+            new = git("rev-parse", "HEAD", cwd=t / "other")
+            second = setup()
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(git("rev-parse", "HEAD", cwd=t / "src"), new)
+            claude = t / "home" / ".claude"
+            self.assertEqual((claude / "skills" / "trevskills-scrum").resolve(), (t / "src" / "skills" / "trevskills-scrum").resolve())
+            self.assertEqual((claude / "agents" / "scrum-builder.md").resolve(), (t / "src" / "agents" / "scrum-builder.md").resolve())
+            self.assertEqual((t / "home" / ".codex" / "AGENTS.md").resolve(), (t / "src" / "codex" / "AGENTS.md").resolve())
+
     def test_install_refuses_to_clobber_a_real_file(self):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)

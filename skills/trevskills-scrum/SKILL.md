@@ -54,6 +54,8 @@ B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; 
 
 Shell variables and functions don't survive between Bash calls, so re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call. `B` is a function, not a string variable, so it works in both bash and zsh.
 
+**Agent-written text in a shell command** (a reason, title, verify string or prompt): never put it inside double quotes or backticks. Strip single quotes from it and wrap it in single quotes, or write it to a file and pass the file.
+
 **Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `B set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
 
 **Pause:** Trevor can pause a job in progress from the dashboard. Its session is killed at once and the job becomes `needs-human` with reason `stalled in <stage>: paused by Trevor`. If a session survives, every `B set` or `sync` for it fails with `was paused by Trevor`. When you see that, stop quietly as for abort: spawn nothing more, push nothing, merge nothing. Play restarts it with `/trevskills-scrum resume <id>`.
@@ -119,7 +121,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 - **`/trevskills-scrum`** (no args): first run **Cloud lane** **Sync** when a job is in stage `cloud`. Then print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
 - **`/trevskills-scrum next`**: first run `B watchdog`. It flags every job stuck 30+ minutes in `spec`, `build`, `check`, `review` or `approve` with no live session as `needs-human` (reason `stalled in <stage>: ...`) and prints `{"flagged"}`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
-- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it.
+- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it. Checks only a human can do live in `manual-checks.md` instead (`- [ ] Text`, added with `B manual-add`); no job ever runs them.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum bigboy <feature text>`**: run **New job** steps 1-2, then `B set $ID lane=bigboy` and go straight to the **BigBoy lane**. No spec writer runs for the parent.
@@ -181,8 +183,9 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"
    git worktree add "$WT" -b "scrum/$ID" "$BASE"
-   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do ln -sfn "$e" "$WT/$(basename "$e")"; done
+   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
+   A tracked `.env*` file (e.g. `.env.example`) is never symlinked: the worktree already has it, and a symlink over it is a typechange every reviewer flags.
    Then `B set $ID worktree=$WT stage=build`.
 5. **Build:** spawn `scrum-builder` (see **Routing**) and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason='blocked: <first reason line>. Fix: type what the builder needs and click Send back to builder.'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.
@@ -200,12 +203,12 @@ Cleans the backlog, then runs every open item as a child job of one Run-all pare
    Write plan.json for this triage.
    ```
    If `$F/triage/<id>/plan.json` is missing afterwards, spawn it once more.
-3. Run `B triage-apply <id>`. It merges, retires and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
+3. Run `B triage-apply <id>`. It merges, retires, moves manual-only items to `$F/manual-checks.md` and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
 4. Run `B watchdog`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B runall-start`. Under the board lock it makes a `lane=runall` parent with every open backlog item as a `waiting` child and prints `{"id", "children"}`. If `id` is null, say the backlog is empty and stop. Otherwise `P` is that id.
 5. Run **BigBoy lane** step 2 for P's children.
 6. Run **BigBoy lane** step 3 for `P`, then give the final report. Never ask questions here; there is no Askme step.
 
-The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired and estimated (counts from `triage-apply`, or the failure line).
+The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired, moved to manual checks and estimated (counts from `triage-apply`, or the failure line).
 
 ## Fast lane
 
@@ -361,17 +364,23 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything, `git -C "$REPO" symbolic-ref -q --short HEAD` is not `$DEFAULT` (found as in **New job** step 2), or after `git fetch origin` `git -C "$REPO" rev-list "origin/$DEFAULT..HEAD"` prints anything: `<repo name> must be clean, on <default> and pushed. Fix: commit and push or discard, then run cloud again.`
    - **Credit check (before every batch).** The credit balance has no API. When the Claude in Chrome tools are available (`mcp__claude-in-chrome__*`; read the chrome-browser skill first), open https://claude.ai/settings/usage in a new tab and read `Cloud session credits ... $X of $250 left`. If X is under $25: `Cloud credit is $X, under $25. Fix: top up, then run cloud again.` If the tools are missing or X can't be read, ask Trevor once with AskUserQuestion whether at least $25 is left; anything but a yes refuses with `Cloud credit unreadable and unconfirmed.`
 
-   Then up to N times: run `B next`; stop when `id` is null. Write the feature text to `$F/jobs/$ID/feature.md` (**New job** step 1b) and start the session (macOS `script` gives `claude --cloud` the TTY it needs; the feature text stays inside a variable so the shell expands nothing in it; the environment goes in through `--settings`, because the environment flag takes only self-hosted `ccpool_` ids, and nothing may sit between `--cloud` and its prompt, or that flag swallows it):
+   Then up to N times: run `B next`; stop when `id` is null. Write the feature text to `$F/jobs/$ID/feature.md` (**New job** step 1b). The cloud session sees neither `jobs/` nor `digests/` (both stay on this Mac), so make `feature.md` self-contained before the session reads it:
+   - **Pre-written spec.** When `$F/jobs/$ID/spec.md` exists (`B next` moved it there from the backlog), append it to `feature.md` under a `## Pre-written spec` heading.
+   - **Digest proposals.** When the feature text names a local `.../digests/<NNN>/proposals.json` path (older digest items), read that digest's proposals from `$F/digests/<NNN>/proposals.json` and, for each proposal id the text names (`digest <NNN> <PID>`), append a `## Digest proposal <NNN> <PID>` section with the target relative to the repo, the why, and the old and new text, each in a backtick fence longer than any backtick run inside it. End the section with: `This section replaces the local proposals.json path: do not open proposals.json or run --digest-skill-check. The item is obsolete when the old text is not found exactly once in the target (edit) or the target already exists (skill, empty old).`
+   - **Missing proposal.** When a proposal the text names is not in that file (or the file is missing), start no session for this job and run `B set $ID stage=needs-human reason='digest proposal <NNN> <PID> not found in proposals.json. Fix: click Abort job with Put back in backlog ticked, then run it locally.'`.
+
+   Then start the session (macOS `script` gives `claude --cloud` the TTY it needs; the feature text stays inside a variable so the shell expands nothing in it; the environment goes in through `--settings`, because the environment flag takes only self-hosted `ccpool_` ids, and nothing may sit between `--cloud` and its prompt, or that flag swallows it):
    ```bash
    CE=$(sed -n 's/^- Cloud environment: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//'); E=()
    printf '%s' "$CE" | grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings "{\"remote\":{\"defaultEnvironmentId\":\"$CE\"}}")
    FEAT=$(cat "$F/jobs/$ID/feature.md")
-   OUT=$(script -q /dev/null claude "${E[@]}" --cloud "/trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
+   OUT=$(script -q /dev/null claude "${E[@]}" --cloud "First run: bash ~/scrum/cloud/setup.sh (the environment caches an old copy of the skill). Then invoke the trevskills-scrum skill fresh and run: /trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
    URL=$(printf '%s' "$OUT" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_-]+' | head -1)
    ```
    With a `URL`, run `B set $ID stage=cloud cloud=$URL`. Without one, run `B set $ID stage=needs-human reason='claude --cloud did not start: <last line of OUT>. Fix: click Abort job with Put back in backlog ticked, then run cloud again.'`. Stage `cloud` is never flagged by `B watchdog`. The final report lists each id with its session URL.
 2. **Cloud job** (`/trevskills-scrum cloud-job <id> <feature text>`, inside the cloud session). The job runs **New job** end to end (spec → build → Check gate → Review → Approve → Merge) with these deltas:
    - **Setup:** the cloned repo is the main checkout, and its `scrum/` is a throwaway board: first-run setup as usual, minus step 5. Prerequisites check `gh api user` instead of `gh auth status` (cloud `gh` is signed in through a proxy that `gh auth status` rejects). Skip Roadmap resume and **Record your terminal**: no dashboard, tty or terminal recording here.
+     When this session's skill copy lacks the **Artifacts** step below, the launch prompt's setup.sh refresh did not take: it stops before New job with needs-human reason `cloud skill copy is stale. Fix: rerun cloud setup.` and reports to GitHub as **Needs-human** does.
    - **Job:** New job step 1 is `B new "<title>" --id <id>`, so the job keeps the id it was given; then step 1b, then step 2 on. A spec that says `Lane: bigboy` counts as `standard`, as for a BigBoy child.
    - **Routing** is always cloud: never call route.py; every routed step spawns with the Agent tool as written.
    - **GitHub:** cloud blocks GitHub GraphQL, so each `gh pr` call in **Merge** becomes its REST twin, with `R='repos/{owner}/{repo}'` (`gh` fills it in from origin). These are the same sanctioned PR create and squash-merge.
@@ -414,7 +423,7 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
        rm -rf "$T"
      fi
      ```
-   - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`; otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. Spawn no spec writer here.
+   - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`; otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. Separately, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet, whatever `## Follow-ups` holds; a failing `manual-add` never blocks the sync. Spawn no spec writer here.
    - **Digest-approved rules edits.** For a `scrum:needs-human` PR whose reason starts `Hard stop: agent rules` and whose worktree add succeeded, after **Artifacts home** and **Follow-ups**, run `B digest-verify $ID` (a cloud session has no digests folder, so it always stops there). When it exits 0, run **Merge** for that job in this session with `ID=$ID`, `WT=$REPO/.claude/worktrees/scrum-$ID` and `BASE=origin/<baseRefName>`; every Merge guard re-runs, including this check. Never start an `approve` for it: that writes `human-approval.md`, which would claim Trevor approved the diff. When it exits non-zero, leave the job `needs-human` for Trevor.
 
    When any job went `done`, run **Merge** step 7's **Fast-forward main** once; if it fails, run `B set <each such id> reason='merged, not live: <why>'`. Then run `B digest-due`, and when it prints `"due": true`, run **Digest**.
@@ -488,7 +497,8 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 1. Run `B set $ID stage=approve`. Spawn `scrum-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
    - **Model:** pass the Agent tool override `model: "sonnet"` to `scrum-approver` only when all of these hold: the latest `round-$N/check.md` is `CHECK: PASS`; all four `round-$N/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count); the Merge schema guard regex matches nothing in the diff; and you know this round was not started by the Merge **Conflicts** step. In every other case (including when you can't tell, e.g. after a session restart) omit the override so the agent's default, Opus, runs.
 2. Copy `decision.md` into `round-$N/decision.md`; that's how the approver later sees whether REWORK has already been used. Run `B sync $ID` and read `decision`.
-3. **Follow-ups.** When `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
+3. **Manual checks and follow-ups.** First, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet. It appends them to `$F/manual-checks.md`, the checklist Trevor ticks off in the dashboard's Backlog dialog, never to the backlog. Do this whether or not `## Follow-ups` is empty; if `manual-add` exits non-zero, name it in the final report only.
+   Then, when `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
    - If the board's `specwriter` is a recorded agent id, use SendMessage to it, the same way **Resuming the builder** does. Spawn a fresh `scrum-spec-writer` (see **Routing**) instead when `specwriter` is `local`, missing or empty, or when SendMessage fails because the agent no longer exists. The message or prompt is:
      ```
      JOB_DIR=$F/jobs/$ID
