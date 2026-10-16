@@ -350,31 +350,11 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, debug, phrase)
         self.assertNotIn("must instead contain the", debug)
 
-    def test_skill_merge_stops_for_agent_rule_edits(self):
+    def test_agent_rule_edits_merge_like_any_job(self):
+        # Trevor 2026-10-15: agent-rule edits no longer stop for a human.
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        merge = self.section(text, "## Merge", "## Routing")
-        regex = r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$"
-        for phrase in (f"grep -E '{regex}'", "human-approval.md", "Hard stop: agent rules", "**Agent rules guard"):
-            self.assertIn(phrase, merge, phrase)
-        self.assertLess(merge.index("**Schema guard"), merge.index("**Agent rules guard"))
-        self.assertLess(merge.index("**Agent rules guard"), merge.index("**Main checkout guard"))
-        step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
-        self.assertIn("agent rules guard", step6)
-        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md"):
-            self.assertIsNotNone(re.search(regex, path), path)
-        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py"):
-            self.assertIsNone(re.search(regex, path), path)
-        commands = self.section(text, "## Commands", "## New job")
-        approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
-        self.assertNotIn("`Hard stop`", approve)
-
-    def test_lilguy_stops_for_agent_rule_edits(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        lilguy = self.h2(text, "## Lilguy lane")
-        check = self.section(lilguy, "4. **Check.**", "5. **Land.**")
-        for phrase in (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$", "Hard stop: agent rules",
-                       "run /trevskills-commitpush yourself"):
-            self.assertIn(phrase, check, phrase)
+        self.assertNotIn("Hard stop: agent rules", text)
+        self.assertNotIn("Agent rules guard", text)
 
     def test_skill_clean_round_skips_approver(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
