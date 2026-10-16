@@ -1183,8 +1183,8 @@ async function aiWrite(route, body, busy, fail) {
   }
 }
 // A save that changes what Claude Code may run (a hook or plugin entry, an MCP server's command/args/type/url, or a
-// settings file's permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport) asks once on the Save button itself, like backlog Run/Delete;
-// serve.py refuses it without confirm too.
+// settings file's permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport)
+// asks once on the Save button itself, like backlog Run/Delete; serve.py refuses it without confirm too.
 const AI_JSON = ["settings", "hooks", "mcp", "plugins"];
 const AI_GUARD_KEYS = {mcp: ["command", "args", "type", "url"],
   settings: ["permissions", "hooks", "statusLine", "apiKeyHelper", "otelHeadersHelper", "awsAuthRefresh", "awsCredentialExport"]};
