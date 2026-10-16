@@ -634,10 +634,12 @@ MISSING = object()
 
 def ai_unredact(new, old, path=()):
     """new with every "[redacted]" swapped for old's value at the same key path: a whole string takes old's value, and
-    one inside a string takes old's SECRET_VALUE matches in order (the counts must agree). A list item holding a
-    "[redacted]" in a list that grew or shrank pairs with the next old item whose redacted form equals it, so inserts
-    and deletes don't shift it; a same-length list (an edit, not an insert) and an item that matches none pair by
-    index, so replacing one secret can't pull it into another's slot."""
+    one inside a string takes old's SECRET_VALUE matches in order (the counts must agree). A same-length list (an edit,
+    not an insert) pairs by index, so replacing one secret can't pull it into another's slot. In a list that grew or
+    shrank, items holding "[redacted]" are grouped by form (an old item's form is its redacted value): when old and new
+    hold the same count of a form, the k-th new one pairs with the k-th old one, so inserts, deletes and reorders keep
+    their values; unequal counts are ambiguous and raise. A form old doesn't hold pairs by index, but only with an old
+    item no other pairing used, so one saved secret is never written twice."""
     p = ".".join(map(str, path)) or "(root)"
     if isinstance(new, str) and "[redacted]" in new:
         if old is MISSING:
@@ -654,13 +656,36 @@ def ai_unredact(new, old, path=()):
         return {k: ai_unredact(v, o.get(k, MISSING), (*path, k)) for k, v in new.items()}
     if isinstance(new, list):
         o = old if isinstance(old, list) else []
-        key, start, out = str(path[-1]) if path else "", 0, []
+        key, out = str(path[-1]) if path else "", []
+        if len(new) == len(o):
+            return [ai_unredact(v, o[i] if i < len(o) else MISSING, (*path, i)) for i, v in enumerate(new)]
+        old_by_form, new_by_form = {}, {}
+        for j, x in enumerate(o):
+            old_by_form.setdefault(json.dumps(redact(x, key), sort_keys=True), []).append(j)
+        for i, v in enumerate(new):
+            if "[redacted]" in json.dumps(v):
+                new_by_form.setdefault(json.dumps(v, sort_keys=True), []).append(i)
+        paired, ambiguous, consumed = {}, set(), set()
+        for form, news in new_by_form.items():
+            olds = old_by_form.get(form)
+            if not olds:
+                continue
+            if len(olds) != len(news):
+                ambiguous.update(news)
+                continue
+            paired.update(zip(news, olds))
+            consumed.update(olds)
         for i, v in enumerate(new):
             pair = o[i] if i < len(o) else MISSING
-            if len(new) != len(o) and "[redacted]" in json.dumps(v):
-                j = next((j for j in range(start, len(o)) if redact(o[j], key) == v), None)
-                if j is not None:
-                    pair, start = o[j], j + 1
+            if "[redacted]" in json.dumps(v):
+                if i in ambiguous:
+                    raise ValueError(f"[redacted] at {'.'.join(map(str, (*path, i)))} is ambiguous; type the value in full")
+                if i in paired:
+                    pair = o[paired[i]]
+                elif i < len(o) and i not in consumed:
+                    consumed.add(i)
+                else:
+                    pair = MISSING
             out.append(ai_unredact(v, pair, (*path, i)))
         return out
     return new
