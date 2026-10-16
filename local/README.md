@@ -149,6 +149,10 @@ To return to the original cloud pipeline, stop the local dashboard and start
 running dashboard is not reconfigured by opening another launcher. This switch
 does not change the backend of an existing Codex desktop conversation.
 
+Scope: model inference is local. Existing hooks, MCP integrations, web tools, and
+project commands may still use external services; web research is not provided
+by the local model itself. No cloud-tagged Ollama models are used by default.
+
 ## Benchmark
 
 Measure the routed models on the three bounded local tasks before trusting a role:
@@ -169,8 +173,9 @@ every run passed, 1 when any failed, 2 when Ollama is down or a model is missing
 - **summary** passes when the reply has 2–5 `- ` bullets and every bullet cites one of the two
   supplied paths (`[jobs/a/feature.md]`, `[jobs/b/spec.md]`) and no other.
 - **edit** passes when the reply is `{"path": "calc.py", "content": …}`, `test_calc.py` is
-  unchanged afterwards, and `python3 -m unittest test_calc` exits 0 in a temp dir. Any other
-  path fails without writing anything.
+  unchanged after writing `calc.py` and unchanged after the test run, and
+  `python3 -m unittest test_calc` exits 0 in a temp dir. Any other path fails without
+  writing anything.
 
 Duration is recorded, never a pass rule. Run with nothing else loaded, and check `ollama ps`
 for CPU offload (a `size_vram` below `size` means part of the model is on the CPU).
@@ -189,10 +194,6 @@ When a local run fails partway through a job:
 
 `.agents/skills/trevskills-scrum` is the committed symlink that lets Codex discover the scrum
 skill from this repo.
-
-Scope: model inference is local. Existing hooks, MCP integrations, web tools, and
-project commands may still use external services; web research is not provided
-by the local model itself. No cloud-tagged Ollama models are used by default.
 
 References: https://docs.ollama.com/integrations/claude-code,
 https://docs.ollama.com/integrations/codex,

@@ -103,6 +103,8 @@ def check_edit(reply, workdir):
         return False, 'test_calc.py changed'
     result = subprocess.run([sys.executable, '-m', 'unittest', 'test_calc'], cwd=workdir,
                             capture_output=True, text=True, timeout=60)
+    if not test.is_file() or test.read_bytes() != before:
+        return False, 'test_calc.py changed'
     return (True, '') if result.returncode == 0 else (False, 'test_calc failed')
 
 
