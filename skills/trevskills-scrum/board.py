@@ -479,18 +479,32 @@ def job_files(d):
     return sorted(str(p.relative_to(d)) for p in d.rglob("*.md")) if d.is_dir() else []
 
 
+def _fence_run(line):
+    """(char, run length, rest of line) if the stripped line starts with 3+ backticks or tildes, else None."""
+    s = line.lstrip()
+    if not s.startswith(("```", "~~~")):
+        return None
+    n = len(s) - len(s.lstrip(s[0]))
+    return s[0], n, s[n:]
+
+
 def diverged(d):
     """True if spec.md, build.md, assessment.md or plan.md has a `## Diverged` section with a bullet that isn't `- none`, outside fenced code."""
     for name in ("spec.md", "build.md", "assessment.md", "plan.md"):
         p = d / name
         if not p.is_file():
             continue
-        inside = fence = False
+        inside, fence = False, None  # fence: (char, length) of the open fence
         for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.lstrip().startswith(("```", "~~~")):  # same fence rule as divergedBullets() in dashboard.html
-                fence = not fence
-            elif fence:
+            # Same fence rule as divergedBullets() in dashboard.html: close only on the same char, a run at least
+            # as long, and nothing but whitespace after it.
+            run = _fence_run(line)
+            if fence:
+                if run and run[0] == fence[0] and run[1] >= fence[1] and not run[2].strip():
+                    fence = None
                 continue
+            if run:
+                fence = run[:2]
             elif line.startswith("## "):
                 inside = line == "## Diverged"
             elif inside and line.startswith("- ") and line[2:].strip().lower() != "none":
