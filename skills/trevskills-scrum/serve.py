@@ -26,7 +26,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, fnmatch, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fnmatch, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1671,15 +1671,35 @@ def scrum_dir(project):
     return repo / "scrum" if repo else None
 
 
+def dashboard_csp(html: bytes) -> str:
+    """The Content-Security-Policy for the dashboard: its inline <script> blocks run by hash, never 'unsafe-inline',
+    and the only external script is the pinned marked.js on cdnjs. Hashed from the bytes being served, so it never goes stale."""
+    hashes = [f"'sha256-{base64.b64encode(hashlib.sha256(s).digest()).decode()}'"
+              for s in re.findall(rb"<script>(.*?)</script>", html, re.S)]
+    return "; ".join([
+        "default-src 'self'",
+        " ".join(["script-src 'self' https://cdnjs.cloudflare.com", *hashes]),
+        "style-src 'self' 'unsafe-inline'",  # the dashboard builds style="..." attributes through innerHTML
+        "img-src 'self' data: http: https:",  # markdown images may be any http(s) URL; the favicon is data:
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ])
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def send(self, code, body, ctype):
+    def send(self, code, body, ctype, headers=()):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1698,7 +1718,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/dashboard.html")
             return self.end_headers()
         if path == "/dashboard.html":
-            return self.send(200, (HERE / "dashboard.html").read_bytes(), TYPES[".html"])
+            body = (HERE / "dashboard.html").read_bytes()
+            return self.send(200, body, TYPES[".html"], headers=[("Content-Security-Policy", dashboard_csp(body))])
         if path == "/api/agents":
             return self.send_json(200, [read_agent(p) for p in sorted(agents_dir().glob("*.md"))])
         if path == "/api/skills":
