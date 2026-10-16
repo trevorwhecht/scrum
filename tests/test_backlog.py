@@ -142,7 +142,7 @@ class BacklogTest(unittest.TestCase):
              "estimate": [{"item": "Dark mode", "points": 3, "why": "one toggle and a CSS variable set"}]})
         self.assertEqual(out, {"id": "001", "open": 5})
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 1, "retired": 1, "estimated": 1, "skipped": 0})
+        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 0, "estimated": 1, "skipped": 0})
         self.assertEqual(self.text(),
             "# Backlog\n"
             "- [x] Old thing → 001-old-thing\n"
@@ -164,6 +164,8 @@ class BacklogTest(unittest.TestCase):
             "  - replaced: CSV export button\n"
             "\n## Retired\n"
             "- Remove legacy flag — board.py has no legacy flag since 012-cleanup\n"
+            "\n## Manual\n"
+            "None.\n"
             "\n## Estimated\n"
             "- [3] Dark mode — one toggle and a CSS variable set\n"
             "\n## Skipped\n"
@@ -181,7 +183,7 @@ class BacklogTest(unittest.TestCase):
                          {"item": "Delta", "points": 5, "why": "overwrite attempt"},
                          {"item": "Alpha", "points": 1, "why": "consumed"}]})
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 1, "retired": 0, "estimated": 0, "skipped": 7})
+        self.assertEqual(res, {"merged": 1, "retired": 0, "manual": 0, "estimated": 0, "skipped": 7})
         self.assertEqual(self.text(),
             "# Backlog\n- [ ] Alpha and Beta (merged: A, B) <!-- w -->\n- [x] Alpha <!-- merged into triage 001 -->\n"
             "- [x] Beta <!-- merged into triage 001 -->\n- [ ] Gamma\n- [ ] [2] Delta <!-- set by Trevor -->\n"

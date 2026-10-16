@@ -915,6 +915,100 @@ class BoardTest(unittest.TestCase):
         board.cmd_backlog_add(self.root, ["fix A (from 001-x)", "fix B (from 001-x)"])
         self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] fix A (from 001-x)\n- [ ] fix B (from 001-x)\n")
 
+    # --- manual-checks.md: follow-ups only a human can do ---
+    def test_manual_add_appends_unchecked_items(self):
+        items = ["check Safari login (from 001-x)", "check iPhone layout (from 001-x)"]
+        self.assertEqual(board.cmd_manual_add(self.root, items), items)
+        self.assertEqual((self.root / "manual-checks.md").read_text(),
+                         "# Manual checks\n- [ ] check Safari login (from 001-x)\n- [ ] check iPhone layout (from 001-x)\n")
+        (self.root / "manual-checks.md").write_text("# Manual checks\nTrevor's note\n- [x] old check\n")
+        self.assertEqual(board.cmd_manual_add(self.root, items), items)
+        self.assertEqual((self.root / "manual-checks.md").read_text(),
+                         "# Manual checks\nTrevor's note\n- [x] old check\n"
+                         "- [ ] check Safari login (from 001-x)\n- [ ] check iPhone layout (from 001-x)\n")
+        self.assertFalse((self.root / "backlog.md").exists())
+
+    def test_manual_add_skips_empty_and_duplicates(self):
+        self.root.mkdir(parents=True)
+        (self.root / "manual-checks.md").write_text("# Manual checks\n- [ ] open one\n- [x] ticked one\n")
+        self.assertEqual(board.cmd_manual_add(self.root, ["  ", "<!-- -->", "open one", "open  one ", "ticked one",
+                                                          "new", "new"]), ["ticked one", "new"])
+        self.assertEqual((self.root / "manual-checks.md").read_text(),
+                         "# Manual checks\n- [ ] open one\n- [x] ticked one\n- [ ] ticked one\n- [ ] new\n")
+        (self.root / "manual-checks.md").unlink()
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "manual-add", "a", "a"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), ["a"])
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\n- [ ] a\n")
+
+    def test_manual_tick_marks_done(self):
+        self.root.mkdir(parents=True)
+        (self.root / "manual-checks.md").write_text("# Manual checks\nnote\n- [ ] one\n- [x] two\n- [ ] three\n")
+        self.assertEqual(board.manual_tick(self.root, 2), [
+            {"index": 0, "done": False, "text": "one"}, {"index": 1, "done": True, "text": "two"},
+            {"index": 2, "done": True, "text": "three"}])
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\nnote\n- [ ] one\n- [x] two\n- [x] three\n")
+        for bad in (3, -1, True, "0", None):
+            with self.assertRaises(SystemExit):
+                board.manual_tick(self.root, bad)
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\nnote\n- [ ] one\n- [x] two\n- [x] three\n")
+
+    def triage(self, backlog, plan):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text(backlog)
+        tid = board.cmd_triage_start(self.root)["id"]
+        (self.root / "triage" / tid / "plan.json").write_text(plan if isinstance(plan, str) else json.dumps(plan))
+        return tid
+
+    def test_triage_apply_moves_manual_items_to_checklist(self):
+        tid = self.triage("# Backlog\n- [ ] Check Safari login (from 004-auth)\n- [ ] [3] Check iPhone layout <!-- est -->\n"
+                          "- [ ] Dark mode\n",
+                          {"manual": [{"item": "Check Safari login (from 004-auth)", "reason": "needs a real Safari"},
+                                      {"item": "Check iPhone layout", "reason": "needs a device"}],
+                           "estimate": [{"item": "Dark mode", "points": 2, "why": "one toggle"}]})
+        res = board.cmd_triage_apply(self.root, tid)
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 2, "estimated": 1, "skipped": 0})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Check Safari login (from 004-auth) <!-- manual check: needs a real Safari -->\n"
+                         "- [x] Check iPhone layout <!-- manual check: needs a device -->\n"
+                         "- [ ] [2] Dark mode <!-- one toggle -->\n")
+        self.assertEqual((self.root / "manual-checks.md").read_text(),
+                         "# Manual checks\n- [ ] Check Safari login (from 004-auth)\n- [ ] Check iPhone layout\n")
+        report = (self.root / "triage" / tid / "report.md").read_text()
+        self.assertIn("\n## Manual\n- Check Safari login (from 004-auth) — needs a real Safari\n"
+                      "- Check iPhone layout — needs a device\n\n## Estimated\n", report)
+
+    def test_triage_apply_manual_skips_bad_entries(self):
+        backlog = "# Backlog\n- [ ] Alpha\n- [ ] Beta\n- [ ] Gamma\n"
+        tid = self.triage(backlog, {
+            "retire": [{"item": "Alpha", "reason": "done in 009-a"}],
+            "manual": [{"item": "Beta"}, {"item": "Beta", "reason": "  "}, {"item": "Nope", "reason": "r"},
+                       {"item": "Alpha", "reason": "r"}, {"item": "Gamma", "reason": "device only"}],
+            "estimate": [{"item": "Gamma", "points": 3, "why": "w"}]})
+        res = board.cmd_triage_apply(self.root, tid)
+        self.assertEqual(res, {"merged": 0, "retired": 1, "manual": 1, "estimated": 0, "skipped": 5})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Alpha <!-- retired: done in 009-a -->\n- [ ] Beta\n"
+                         "- [x] Gamma <!-- manual check: device only -->\n")
+        self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\n- [ ] Gamma\n")
+        skipped = (self.root / "triage" / tid / "report.md").read_text().split("## Skipped\n", 1)[1]
+        self.assertEqual(skipped,
+                         '- manual "Beta" — no reason given\n'
+                         '- manual "Beta" — no reason given\n'
+                         '- manual "Nope" — no open item has the text "Nope"\n'
+                         '- manual "Alpha" — already used by an earlier entry\n'
+                         '- estimate "Gamma" — already used by an earlier entry\n')
+        before = (self.root / "backlog.md").read_text()
+        (self.root / "manual-checks.md").unlink()
+        tid = board.cmd_triage_start(self.root)["id"]
+        (self.root / "triage" / tid / "plan.json").write_text(json.dumps({"manual": {"item": "Beta", "reason": "r"}}))
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_triage_apply(self.root, tid)
+        self.assertIn("must be an object of", str(e.exception))
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
+        self.assertFalse((self.root / "manual-checks.md").exists())
+
     def test_sync_counts_reworks_used(self):
         job_id = board.cmd_new(self.root, "x")
         self.assertEqual(board.cmd_sync(self.root, job_id)["reworks"], 0)

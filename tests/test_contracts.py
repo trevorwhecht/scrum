@@ -237,6 +237,21 @@ class ContractTest(unittest.TestCase):
                        "a review without one adds nothing"):
             self.assertIn(phrase, text, phrase)
 
+    def test_approver_has_manual_checks_heading(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        template = text[text.index("    APPROVE\n"):text.index("**ESCALATE only")]
+        self.assertIn("\n    ## Manual checks\n", template)
+        self.assertLess(template.index("## Follow-ups"), template.index("## Manual checks"))
+        self.assertLess(template.index("## Manual checks"), template.index("## Merge summary"))
+        for phrase in ("a manual check, a live-site check, a device check or a Safari check",
+                       "goes under `## Manual checks`, never under `## Follow-ups`"):
+            self.assertIn(phrase, text, phrase)
+        self.assertIn('"manual":   [{"item": "<exact text>", "reason":', (ROOT / "agents" / "scrum-triager.md").read_text())
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step3 = self.section(skill, "3. **Manual checks and follow-ups.**", "4. Route:")
+        self.assertIn('B manual-add "<item> (from $ID)" ...', step3)
+        self.assertIn("whether or not `## Follow-ups` is empty", step3)
+
     def test_security_reviewer_has_precedents(self):
         text = (ROOT / "agents" / "scrum-review-security.md").read_text()
         for phrase in ("dangerouslySetInnerHTML", "Environment variables are trusted", "client-side code",

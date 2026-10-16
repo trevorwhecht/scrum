@@ -1806,6 +1806,9 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/manual-checks", path):
+            root = scrum_dir(unquote(m.group(1)))
+            return self.send_json(200, board.manual_items(root)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/api/p/(.+)/digests", path):
             project = unquote(m.group(1))
             root = scrum_dir(project)
@@ -1856,7 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1876,6 +1879,8 @@ class Handler(BaseHTTPRequestHandler):
         return 200, read_agent(target)
 
     def route(self, project, root, rest, body):
+        if rest == "/manual-checks":  # tick only: open -> done
+            return 200, board.manual_tick(root, body.get("index"))
         if rest == "/backlog":
             op = body.get("op")
             if op == "add":

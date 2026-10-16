@@ -95,7 +95,7 @@ class SmallFixesTest(unittest.TestCase):
                           {"items": ["Gamma", "Delta"], "text": exact}]}
         (self.root / "triage" / "001" / "plan.json").write_text(json.dumps(plan))
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 2, "retired": 0, "estimated": 0, "skipped": 1})
+        self.assertEqual(res, {"merged": 2, "retired": 0, "manual": 0, "estimated": 0, "skipped": 1})
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [ ] Alpha and Beta\n- [x] Alpha <!-- merged into triage 001 -->\n"
                          "- [x] Beta <!-- merged into triage 001 -->\n"

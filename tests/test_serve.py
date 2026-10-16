@@ -158,6 +158,38 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(items[0]["text"], "Dark mode")
 
+    # --- /api/p/<project>/manual-checks ---
+    def manual(self, text):
+        path = self.root / "manual-checks.md"
+        path.unlink(missing_ok=True)
+        if text is not None:
+            path.write_text(text)
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        return path
+
+    def test_manual_checks_get_and_tick(self):
+        self.manual(None)
+        self.assertEqual(self.req("GET", "/api/p/repo/manual-checks"), (200, []))
+        self.assertEqual(self.req("GET", "/api/p/nope/manual-checks")[0], 404)
+        path = self.manual("# Manual checks\n- [ ] Check Safari login (from 001-x)\n- [x] old\n- [ ] Check iPhone layout\n")
+        self.assertEqual(self.req("GET", "/api/p/repo/manual-checks"), (200, [
+            {"index": 0, "done": False, "text": "Check Safari login (from 001-x)"},
+            {"index": 1, "done": True, "text": "old"},
+            {"index": 2, "done": False, "text": "Check iPhone layout"}]))
+        self.assertEqual(self.req("POST", "/api/p/repo/manual-checks", {"index": 2}), (200, [
+            {"index": 0, "done": False, "text": "Check Safari login (from 001-x)"},
+            {"index": 1, "done": True, "text": "old"},
+            {"index": 2, "done": True, "text": "Check iPhone layout"}]))
+        self.assertEqual(path.read_text(), "# Manual checks\n- [ ] Check Safari login (from 001-x)\n- [x] old\n- [x] Check iPhone layout\n")
+        self.assertEqual(self.req("POST", "/api/p/nope/manual-checks", {"index": 0})[0], 404)
+
+    def test_manual_checks_tick_bad_index(self):
+        text = "# Manual checks\n- [ ] one\n- [ ] two\n"
+        path = self.manual(text)
+        for bad in ({"index": 2}, {"index": -1}, {"index": True}, {"index": "0"}, {"index": 1.0}, {}):
+            self.assertEqual(self.req("POST", "/api/p/repo/manual-checks", bad)[0], 400, bad)
+        self.assertEqual(path.read_text(), text)
+
     # --- GET /api/p/<project>/roadmap ---
     def roadmap(self, text):
         (self.root / "roadmap.md").write_text(text)
