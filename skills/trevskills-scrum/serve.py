@@ -993,6 +993,37 @@ def open_terminal(project, root, job_id):
     return code, {"id": job_id, **obj} if code == 200 else obj
 
 
+def ask_prompt(root: Path, job_id: str) -> str:
+    """The Ask Claude prompt: the job's artifacts that exist now, as absolute paths (never their contents)."""
+    d = root / "jobs" / job_id
+    rounds = sorted((p for p in d.glob("round-*") if p.is_dir() and re.fullmatch(r"round-\d+", p.name)),
+                    key=lambda p: int(p.name[6:]))
+    paths = [d / "feature.md", d / "spec.md", d / "build.md",
+             *(f for r in rounds for f in sorted(r.glob("*.md"), key=lambda f: f.name)), d / "decision.md"]
+    files = "".join(f"{p}\n" for p in paths if p.is_file())
+    return (f"Answer my questions about scrum job {job_id}. Its session has ended. Read these first:\n{files}"
+            f'Its board entry is the object with "id": "{job_id}" in {root / "board.json"}. '
+            "Don't change any file unless I ask.")
+
+
+def ask_claude(project: str, root: Path, job_id: str) -> tuple[int, dict]:
+    """Open a new interactive claude in the job's worktree (the repo root once it's gone), primed with its artifacts.
+    It isn't recorded as the job's tty or added to RUNS, so the board and the watchdog ignore it."""
+    jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
+    job = next((j for j in jobs if j.get("id") == job_id), None)
+    if not job:
+        return 404, {"error": "no such job"}
+    wt = job.get("worktree")
+    cwd = wt if isinstance(wt, str) and os.path.isdir(wt) else str(root.parent)
+    claude = ["env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, ask_prompt(root, job_id)]
+    if os.path.isdir("/Applications/Ghostty.app"):
+        tries = [(["open", "-na", "Ghostty", "--args", f"--working-directory={cwd}", "-e", *claude], "Claude opened in Ghostty.")]
+    else:
+        tries = [(osa_new_window(cwd, *claude), "Claude opened in a new Terminal window.")]
+    code, obj = run_terminal(tries)
+    return code, {"id": job_id, **obj} if code == 200 else obj
+
+
 # --- AI-Settings security scan: static, read-only. Reads files only; never runs a hook or touches an MCP server. ----
 # A finding never carries a config value (an env value, a token, a command, an allow entry): only a fixed sentence,
 # plus a server name and key for mcp-inline-secret.
@@ -1910,7 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1971,6 +2002,8 @@ class Handler(BaseHTTPRequestHandler):
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
         if action == "terminal":
             return open_terminal(project, root, job_id)
+        if action == "ask":
+            return ask_claude(project, root, job_id)
         if action == "abort":
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))
