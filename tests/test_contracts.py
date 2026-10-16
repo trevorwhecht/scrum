@@ -403,6 +403,9 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Clean round: check gate + reviews", "Conflicts", "schema guard", "Hard stops:", "**Approve**"):
             self.assertIn(phrase, review, phrase)
         self.assertIn("Clean round", self.section(text, "## Merge", "## Routing"))
+        self.assertIn("Rendered: blocked", review)
+        clean = self.section(review, "A clean round is one where every one of these holds", "**Approve**")
+        self.assertIn("Rendered: blocked", clean)
 
     def test_skill_incremental_rereview(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -969,6 +972,19 @@ class ContractTest(unittest.TestCase):
                        f"ls JOB_DIR/round-ROUND/review-{name}.md", "A verdict only in chat does not count"):
             self.assertIn(phrase, text, f"{name}: {phrase}")
 
+    def test_reviewers_rendered_blocked_non_blocking(self):
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            for phrase in ("Rendered: blocked — <env reason>", "Manual smoke:", "non-blocking",
+                           "Rendered: no", "VERDICT: CHANGES",
+                           "Never PASS a UI diff you did not render unless it is Rendered: blocked"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            template = next(l for l in text.splitlines()
+                            if l.strip().startswith("Rendered:") and "Rendered: no — <reason>" in l)
+            self.assertIn("Rendered: blocked — <env reason>", template, name)
+        ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        self.assertLess(ux.index("throwaway harness"), ux.index("Rendered: blocked — <env reason>"))
+
     def test_ux_reviewer_renders_page(self):
         self.assert_reviewer_renders("ux")
 
@@ -1002,7 +1018,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
         self.assertIn("visible", rule)
-        for phrase in ("absent", "expected change"):
+        for phrase in ("absent", "expected change", "Rendered: blocked", "UI not rendered (environment)"):
             self.assertIn(phrase, rule, phrase)
 
     def test_merge_guards_main_checkout_before_merge(self):
