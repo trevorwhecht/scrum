@@ -799,7 +799,15 @@ class BoardTest(unittest.TestCase):
                  "## Diverged\n```\n- a\n```\n": False, "```\n## Diverged\n- a\n": False,
                  "  ```\n## Diverged\n- a\n  ```\n": False,
                  "```\n## Summary\n```\n## Diverged\n- a → b — c\n": True,
-                 "## Diverged\n```\n- example\n```\n- a → b — c\n": True}
+                 "## Diverged\n```\n- example\n```\n- a → b — c\n": True,
+                 "````md\n```\nx\n```\n## Diverged\n- a\n````\n": False,
+                 "````md\n```\nx\n```\n## Diverged\n- a\n````\n## Diverged\n- a → b — c\n": True,
+                 "```\n~~~\n## Diverged\n- a\n```": False,
+                 "```\n~~~\n## Diverged\n- a\n```\n## Diverged\n- b → c — d\n": True,
+                 "~~~\n```\n## Diverged\n- a\n~~~": False,
+                 "~~~\n```\n## Diverged\n- a\n~~~\n## Diverged\n- b → c — d\n": True,
+                 "```\n```python\n## Diverged\n- a\n```\n": False,
+                 "```\n```python\n```\n## Diverged\n- a → b — c\n": True}
         for text, want in cases.items():
             self.write(f"{job_id}/build.md", text)
             board.cmd_set(self.root, job_id, ["stage=build"])

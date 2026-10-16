@@ -269,13 +269,18 @@ function laneLabel(job) {
   return lane === "standard" && (job.files || []).includes("promoted.md") ? "fast→standard" : lane;
 }
 // Bullet texts under a `## Diverged` heading, minus a lone "none", skipping fenced code (same rule as board.py diverged()).
+// A fence opens on 3+ backticks or tildes and closes only on a run of the same char, at least as long, with nothing after it.
 // Pinned by test_dashboard_extracts_diverged_bullets.
 function divergedBullets(md) {
-  let inside = false, fence = false;
+  let inside = false, fence = null;
   const out = [];
   for (const line of md.split(/\r?\n/)) {
-    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
-    else if (fence) continue;
+    const run = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (run && run[1][0] === fence[0] && run[1].length >= fence.length && !run[2].trim()) fence = null;
+      continue;
+    }
+    if (run) fence = run[1];
     else if (line.startsWith("## ")) inside = line === "## Diverged";
     else if (inside && line.startsWith("- ") && line.slice(2).trim().toLowerCase() !== "none") out.push(line.slice(2).trim());
   }
@@ -518,12 +523,17 @@ function open(job) {
 
 // Diverged bullets are read from the served files, not board.json; a file that fails to load is skipped.
 // Writes #diverged once, after the fetches, so a poll refresh doesn't blank the section first.
+// divergedGen: only the latest call may write, so a slow older call (from open() or poll()) can't overwrite a newer render.
+// Pinned by test_dashboard_render_diverged_ignores_stale_fetch.
+let divergedGen = 0;
 async function renderDiverged(job) {
+  const gen = ++divergedGen;
   const el = $("diverged");
   if (!job.diverged) return el.innerHTML = "";
   const files = ["spec.md", "build.md", "assessment.md", "plan.md"].filter(f => (job.files || []).includes(f));
   const found = await Promise.all(files.map(f => fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/${f}`, {cache: "no-store"})
     .then(r => r.ok ? r.text() : "").catch(() => "").then(md => divergedBullets(md).map(b => [f, b]))));
+  if (gen !== divergedGen) return;
   const items = found.flat();
   if ($("viewer").dataset.key !== job.key) return;
   el.innerHTML = !items.length ? "" : `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>

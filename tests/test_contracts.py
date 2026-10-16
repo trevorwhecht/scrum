@@ -952,6 +952,56 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n- a\\n```\\n- b\\n```\\n- c")'), ["a", "c"])
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("```\\n## Diverged\\n- a\\n```")'), [])
         self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("~~~md\\n## Diverged\\n- a\\n")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n- a\\n````\\n```\\n- b\\n```\\n- c\\n````\\n- d")'), ["a", "d"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n```\\n~~~\\n- b\\n```\\n- c")'), ["c"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n~~~\\n```\\n- b\\n~~~\\n- c")'), ["c"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("## Diverged\\n```\\n```python\\n- b\\n```\\n- c")'), ["c"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("````md\\n```\\nx\\n```\\n## Diverged\\n- a\\n````\\n")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("````md\\n```\\nx\\n```\\n## Diverged\\n- a\\n````\\n## Diverged\\n- a → b — c\\n")'), ["a → b — c"])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("```\\n~~~\\n## Diverged\\n- a\\n```")'), [])
+        self.assertEqual(self.node_eval("divergedBullets", 'divergedBullets("```\\n~~~\\n## Diverged\\n- a\\n```\\n## Diverged\\n- b → c — d\\n")'), ["b → c — d"])
+
+    def test_dashboard_render_diverged_ignores_stale_fetch(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index("function divergedBullets(")
+        bullets = text[start:text.index("\n}\n", start) + 3]
+        start = text.index("let divergedGen = ")
+        render = text[start:text.index("\n}\n", start) + 3]
+        esc = re.search(r"^const esc = .*$", text, re.M).group(0)
+        script = esc + "\n" + bullets + "\n" + render + r"""
+const els = {diverged: {innerHTML: "untouched"}, viewer: {dataset: {key: "k"}}};
+const $ = id => els[id];
+const enc = encodeURIComponent;
+let pending = [];
+const fetch = () => new Promise(res => pending.push(text => res({ok: true, text: async () => text})));
+const settle = () => new Promise(r => setTimeout(r, 0));
+const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.md"]});
+(async () => {
+  const out = {};
+  // Scenario 1: two overlapping calls, the older one's fetch resolves last.
+  const a = renderDiverged(job(true)); const b = renderDiverged(job(true));
+  const [fa, fb] = pending; pending = [];
+  fb("## Diverged\n- new"); await b; await settle();
+  fa("## Diverged\n- old"); await a; await settle();
+  out.overlap = els.diverged.innerHTML;
+  // Scenario 2: a newer call with diverged=false clears; the older call's fetch resolves afterwards.
+  els.diverged.innerHTML = "untouched";
+  const c = renderDiverged(job(true)); const [fc] = pending; pending = [];
+  renderDiverged(job(false));
+  out.cleared = els.diverged.innerHTML;
+  fc("## Diverged\n- stale"); await c; await settle();
+  out.after = els.diverged.innerHTML;
+  console.log(JSON.stringify(out));
+})();
+"""
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        self.assertIn("new", out["overlap"])
+        self.assertNotIn("old", out["overlap"])
+        self.assertEqual(out["cleared"], "")
+        self.assertEqual(out["after"], "")
 
     def test_dashboard_poll_refreshes_diverged(self):
         text = DASHBOARD.read_text()
