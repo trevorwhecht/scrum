@@ -141,9 +141,56 @@ class ContractTest(unittest.TestCase):
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
                        "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it",
                        'route.py" codex-review --job', "local/run.py", "SCRUM_LOCAL_MODEL", 'route.py" record',
-                       "codex: skipped — <why>", "exits non-zero", "treat it as cloud", "$RUNNER codex exec review"):
+                       "codex: skipped — <why>", "exits non-zero", "treat it as cloud", "<RUNNER> codex exec review",
+                       'replace `<RUNNER>` with exactly `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"`',
+                       "replace `<RUNNER>` with nothing", "blocks local sockets", "check.md is the authority"):
             self.assertIn(phrase, text, phrase)
+        for phrase in ("$RUNNER", 'RUNNER="', "RUNNER= "):
+            self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
+
+    def test_codex_block_local_runner_is_shell_agnostic(self):
+        import os, tempfile
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.startswith("    ") and "<RUNNER> codex exec review" in l)
+        cmd = [lines[start][4:]]
+        while cmd[-1].endswith("\\"):
+            start += 1
+            cmd.append(lines[start][4:])
+        cmd = "\n".join(cmd)
+        self.assertTrue(cmd.endswith("</dev/null"), cmd)
+        local = 'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"'
+        with tempfile.TemporaryDirectory() as home:
+            home = Path(home)
+            (home / ".claude" / "skills" / "trevskills-scrum").mkdir(parents=True)
+            (home / ".claude" / "local").mkdir()
+            (home / ".claude" / "local" / "run.py").write_text(
+                "import os, sys\nprint('model=' + os.environ['SCRUM_LOCAL_MODEL'])\nprint(*sys.argv[1:], sep='\\n')\n")
+            bindir = home / "bin"
+            bindir.mkdir()
+            stub = bindir / "codex"
+            stub.write_text('#!/bin/sh\necho "model=$SCRUM_LOCAL_MODEL"\necho codex\nfor a in "$@"; do echo "$a"; done\n')
+            stub.chmod(0o755)
+            env = {**os.environ, "HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}",
+                   "WORKTREE": str(home), "BASE": "origin/main", "JOB_DIR": "/job", "ROUND": "1"}
+            expected = ["codex", "exec", "review", "--base", "origin/main", "-m", "gpt-6.1-sol", "-c",
+                        'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "--ephemeral",
+                        "-o", "/job/round-1/codex-review.md"]
+            for name, runner, model in (("local", local, "qwen2.5-coder:7b"), ("cloud", "", "")):
+                line = cmd.replace("<RUNNER>", runner)
+                outputs = {}
+                for shell in ("bash", "zsh"):
+                    with self.subTest(route=name, shell=shell):
+                        if not shutil.which(shell):
+                            self.skipTest(f"{shell} not installed")
+                        out = subprocess.run([shell, "-c", line], env={**env, "MODEL": model},
+                                             capture_output=True, text=True, timeout=30)
+                        self.assertEqual(out.returncode, 0, out.stderr)
+                        outputs[shell] = out.stdout.splitlines()
+                        self.assertEqual(outputs[shell], [f"model={model}", *expected])
+                if len(outputs) == 2:
+                    self.assertEqual(outputs["bash"], outputs["zsh"], name)
 
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()

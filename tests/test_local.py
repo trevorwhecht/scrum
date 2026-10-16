@@ -74,8 +74,20 @@ class OllamaStub(BaseHTTPRequestHandler):
         self.reply(OllamaStub.ps)
 
 
+def _sockets_allowed() -> bool:
+    """False when the environment (e.g. Codex's read-only sandbox) refuses to bind a local socket."""
+    try:
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0))
+        return True
+    except OSError:
+        return False
+
+
 class PreflightTests(unittest.TestCase):
     def setUp(self):
+        if not _sockets_allowed():
+            self.skipTest('local sockets blocked (sandbox)')
         OllamaStub.requests = []
         self.server = HTTPServer(('127.0.0.1', 0), OllamaStub)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -148,3 +160,18 @@ class PreflightTests(unittest.TestCase):
             self.assertIsNone(code, args)
             execute.assert_called_once()
         self.assertEqual(OllamaStub.requests, [])
+
+
+class PreflightSandboxSkipTests(unittest.TestCase):
+    def test_skips_when_socket_bind_refused(self):
+        refuse = PermissionError(1, 'Operation not permitted')
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(PreflightTests)
+        with patch.object(socket.socket, 'bind', side_effect=refuse), \
+                patch.object(HTTPServer, 'server_bind', side_effect=refuse):
+            result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.failures, [])
+        self.assertEqual(result.testsRun, 6)
+        self.assertEqual(len(result.skipped), 6)
+        for _, reason in result.skipped:
+            self.assertEqual(reason, 'local sockets blocked (sandbox)')
