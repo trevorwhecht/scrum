@@ -1,0 +1,9 @@
+- The Backlog header's Askme dropdown is gone; ▶ Run now always starts the job headless.
+- The first click on Run all shows an Askme picker (Off / 1 / 2 / 3), and the button reads Cancel. Picking an option starts the run; Off posts `{}`, a level posts `{askme: n}`.
+- `POST /backlog/run-all` accepts an optional `askme` of 1, 2 or 3 (validated like `/backlog/run`) and opens `/trevskills-scrum run-all askme <n>`; bad values get a 400.
+- SKILL.md: Run all gains an Askme step after `B runall-start`. One session asks each child's questions up front and appends them to its `feature.md` under `## Q&A`, deleting a pre-written `spec.md` once it has answers. Then the children run as before.
+- Tests: new serve tests for the askme level and the bad values; contract tests updated.
+
+Clean round: check gate + reviews. Spec and reviews: scrum/jobs/153-askme-only-in-run-all-remove-the-backlog/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

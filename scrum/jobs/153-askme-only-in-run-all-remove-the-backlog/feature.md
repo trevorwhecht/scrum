@@ -1,0 +1,1 @@
+Askme only in Run all: remove the Backlog header Askme dropdown (▶ always runs plain). Clicking Run all shows an Askme picker (Off/1/2/3) for that batch; with a level, one Terminal session asks the questions for all triaged items up front, saves each to its feature.md, then runs them.
