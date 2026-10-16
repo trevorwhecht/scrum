@@ -24,6 +24,8 @@ else:
 '''
 
 BUILDER = "---\nname: scrum-builder\ndescription: Builds: the spec.\ntools: Read, Bash\nmodel: opus\n---\n\nBody <b>here</b>.\n"
+A_HASH = "qVpDBgj7bpq5hMAcGp3AOc79J3Y1Z4HvySTwKrWDoy4="  # base64(sha256(b"a()"))
+B_HASH = "cf242PFc/kb7xD0Qzhsmd9vvRkc+cWFmbi+k+YvtdKc="  # base64(sha256(b"b()"))
 REVIEWER = "---\nname: scrum-review-ui\nmodel: sonnet\nskills:\n    - frontend-design:frontend-design\n---\nReview.\n"
 
 
@@ -95,6 +97,61 @@ class ServeTest(unittest.TestCase):
         for bad in ("/p/repo/../../calls.jsonl", "/p/repo/%2e%2e/%2e%2e/calls.jsonl", "/p/nope/board.json", "/../../etc/passwd"):
             self.assertEqual(self.req("GET", bad)[0], 404, bad)
         self.assertEqual(self.req("GET", "/api/p/nope/backlog")[0], 404)
+
+    # --- Content-Security-Policy on GET /dashboard.html ---
+    def headers_of(self, path):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as res:
+                return res.headers
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.headers
+
+    @staticmethod
+    def directives(csp):
+        return {d.split()[0]: d.split()[1:] for d in (p.strip() for p in csp.split(";")) if d}
+
+    def test_dashboard_has_csp_header(self):
+        d = self.directives(self.headers_of("/dashboard.html")["Content-Security-Policy"])
+        self.assertEqual(set(d), {"default-src", "script-src", "style-src", "img-src", "connect-src", "object-src",
+                                  "base-uri", "form-action", "frame-ancestors"})
+        self.assertEqual(d["default-src"], ["'self'"])
+        self.assertEqual(d["script-src"][:2], ["'self'", "https://cdnjs.cloudflare.com"])
+        self.assertEqual(d["style-src"], ["'self'", "'unsafe-inline'"])
+        self.assertEqual(d["img-src"], ["'self'", "data:", "http:", "https:"])
+        self.assertEqual(d["connect-src"], ["'self'"])
+        self.assertEqual(d["object-src"], ["'none'"])
+        self.assertEqual(d["base-uri"], ["'none'"])
+        self.assertEqual(d["form-action"], ["'self'"])
+        self.assertEqual(d["frame-ancestors"], ["'none'"])
+
+    def test_csp_hash_matches_inline_script(self):
+        import base64, hashlib
+        html = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_bytes()
+        start = html.index(b"<script>") + len(b"<script>")
+        inline = html[start:html.index(b"</script>", start)]
+        want = "'sha256-" + base64.b64encode(hashlib.sha256(inline).digest()).decode() + "'"
+        d = self.directives(self.headers_of("/dashboard.html")["Content-Security-Policy"])
+        self.assertEqual(d["script-src"], ["'self'", "https://cdnjs.cloudflare.com", want])
+        self.assertFalse(any("unsafe-" in s for s in d["script-src"]), d["script-src"])
+
+    def test_csp_hash_tracks_html(self):
+        d = self.directives(self.serve.dashboard_csp(b'<script>a()</script><script src="x"></script><script>b()</script>'))
+        # sha256("a()") and sha256("b()"), base64, worked out by hand with `printf 'a()' | openssl dgst -sha256 -binary | base64`
+        self.assertEqual(d["script-src"], ["'self'", "https://cdnjs.cloudflare.com",
+                                           "'sha256-" + A_HASH + "'", "'sha256-" + B_HASH + "'"])
+
+    def test_csp_without_inline_script(self):
+        csp = self.serve.dashboard_csp(b"<p>x</p>")
+        self.assertIn("script-src 'self' https://cdnjs.cloudflare.com;", csp)
+        self.assertEqual(self.directives(csp)["script-src"], ["'self'", "https://cdnjs.cloudflare.com"])
+        self.assertNotIn("sha256-", csp)
+        self.assertNotIn(";;", csp.replace(" ", ""))
+
+    def test_csp_only_on_dashboard(self):
+        self.serve.board.cmd_new(self.root, "csp-visible")
+        for path in ("/api/projects", "/p/repo/board.json", "/p/nope/board.json"):
+            self.assertIsNone(self.headers_of(path)["Content-Security-Policy"], path)
 
     def test_get_backlog(self):
         code, items = self.req("GET", "/api/p/repo/backlog")
