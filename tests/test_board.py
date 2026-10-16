@@ -920,6 +920,41 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((status["verdict"], status["invalid"]), ("INVALID", ["ux"]))
         self.assertEqual(status["missing"], [])
 
+    def test_sync_e2e_changes_overrides_pass(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-1/review-e2e.md", "VERDICT: CHANGES\n## Findings\n1. real bug")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertTrue(status["complete"])
+        self.assertEqual(status["verdict"], "CHANGES")
+        self.assertEqual(status["invalid"], [])
+        self.assertEqual(status["e2e"], "CHANGES")
+        self.write(f"{job_id}/round-1/review-e2e.md", "VERDICT: PASS")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["verdict"], "PASS")
+        self.assertEqual(self.jobs()[0]["reviews"], {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"})
+
+    def test_sync_e2e_absent_is_not_missing(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["complete"], status["verdict"], status["missing"], status["invalid"]),
+                         (True, "PASS", [], []))
+        self.assertIsNone(status["e2e"])
+        (self.root / "jobs" / job_id / "round-1" / "review-ui.md").unlink()
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["complete"], status["verdict"], status["missing"]), (False, None, ["review-ui.md"]))
+
+    def test_sync_e2e_invalid(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-1/review-e2e.md", "Looks fine to me")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["verdict"], status["invalid"], status["e2e"]), ("INVALID", ["e2e"], "INVALID"))
+        self.assertEqual(status["missing"], [])
+
     def test_sync_no_rounds_lists_all_missing(self):
         job_id = board.cmd_new(self.root, "x")
         status = board.cmd_sync(self.root, job_id)
