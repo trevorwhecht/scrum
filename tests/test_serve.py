@@ -496,10 +496,11 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])  # stays claimed for a manual start
 
-    def run_all(self, headers=None):
+    def run_all(self, headers=None, body=None):
         with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve, "spawn") as spawn:
             run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
-            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog/run-all", method="POST", data=b"{}",
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog/run-all", method="POST",
+                                       data=json.dumps(body if body is not None else {}).encode(),
                                        headers={"Content-Type": "application/json", **(headers or {})})
             try:
                 with urllib.request.urlopen(r) as res:
@@ -521,6 +522,32 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(), before)  # claims nothing; the session does
         code, _, run = self.run_all({"Origin": "https://evil.example"})
         self.assertEqual(code, 403)
+        run.assert_not_called()
+
+    def test_backlog_run_all_askme_opens_terminal(self):
+        before = (self.root / "backlog.md").read_text()
+        code, out, run = self.run_all(body={"askme": 3})
+        self.assertEqual((code, out), (200, {"message": "Run all opened in a new Terminal window."}))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, "/trevskills-scrum run-all askme 3"])
+        for off in ({}, {"askme": None}):
+            code, out, run = self.run_all(body=off)
+            self.assertEqual(code, 200, off)
+            self.assertEqual(run.call_args.args[0][-1], "/trevskills-scrum run-all", off)
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
+
+    def test_backlog_run_all_rejects_bad_askme(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        for bad in (0, 4, "x", "2", True, 2.0):
+            code, out, run = self.run_all(body={"askme": bad})
+            self.assertEqual((code, out), (400, {"error": "askme must be 1, 2, 3 or null"}), bad)
+            run.assert_not_called()
+        self.assertEqual(path.read_text(), before)
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [x] Finished → 001-finished\n")
+        code, out, run = self.run_all(body={"askme": 2})
+        self.assertEqual((code, out), (409, {"error": "backlog is empty"}))
         run.assert_not_called()
 
     def test_backlog_run_all_empty_backlog_409(self):

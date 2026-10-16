@@ -1944,10 +1944,11 @@ class Handler(BaseHTTPRequestHandler):
             if op == "move":
                 kwargs["delta"] = body.get("delta")
             return 200, board.backlog_op(root, op, **kwargs)
-        if rest == "/backlog/run":
+        if rest in ("/backlog/run", "/backlog/run-all"):
             askme = body.get("askme")
             if askme is not None and (type(askme) is not int or askme not in (1, 2, 3)):  # bool is an int subclass; reject it
                 raise SystemExit("askme must be 1, 2, 3 or null")
+        if rest == "/backlog/run":
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
@@ -1960,8 +1961,9 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "/backlog/run-all":  # interactive, like askme: triage, then every open item as a job
             if all(i["done"] for i in board.backlog_items(root)):
                 return 409, {"error": "backlog is empty"}
-            # ponytail: Terminal.app only, like discuss and askme
-            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, "/trevskills-scrum run-all"),
+            # ponytail: Terminal.app only, like discuss and askme. With askme the session asks for every child before any starts.
+            cmd = "/trevskills-scrum run-all" + (f" askme {askme}" if askme else "")
+            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, cmd),
                                   "Run all opened in a new Terminal window.")])
         if rest == "/digest":
             return digest_now(project, root)

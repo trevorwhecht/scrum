@@ -762,8 +762,16 @@ class ContractTest(unittest.TestCase):
                        "**BigBoy lane** step 2", "**BigBoy lane** step 3",
                        "final report", "parent", "started", "triage"):
             self.assertIn(phrase, run_all, phrase)
-        for phrase in ("B next", "one after another", "nohup", "scrum-spec-writer"):
+        for phrase in ("B next", "one after another", "nohup", "scrum-spec-writer", "there is no Askme step"):
             self.assertNotIn(phrase, run_all, phrase)
+        self.assertIn("run-all askme <1-3>", description)
+        self.assertTrue(any(l.startswith("- **`/trevskills-scrum run-all askme <1-3>`**") for l in text.splitlines()))
+        for phrase in ("run-all askme", "## Q&A", "- Q: ", "  A: ", "$F/jobs/<child>/feature.md", "spec.md",
+                       "children", "level 2", "step 1c", "skip"):
+            self.assertIn(phrase, run_all, phrase)
+        askme = run_all.index("**Askme**")
+        self.assertLess(run_all.index("B runall-start"), askme)
+        self.assertLess(askme, run_all.index("**BigBoy lane** step 2"))
 
     def test_triager_contract(self):
         self.assertEqual(frontmatter(ROOT / "agents" / "scrum-triager.md").get("tools"), "Read, Grep, Glob, Write")
@@ -789,7 +797,7 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_run_all_and_last_triage(self):
         text = DASHBOARD.read_text()
-        for phrase in ('id="blRunAll"', "/run-all`", "Run all?", 'id="blTriage"', "Last triage", "triage/latest.md",
+        for phrase in ('id="blRunAll"', "/run-all`", 'id="blRunAllAskme"', 'id="blTriage"', "Last triage", "triage/latest.md",
                        'maxlength="2000" required placeholder="Add a backlog item"', 'maxlength="2000" aria-label="Item text"'):
             self.assertIn(phrase, text, phrase)
         button = re.search(r'<button[^>]*id="blRunAll"[^>]*>', text).group(0)
@@ -820,16 +828,25 @@ class ContractTest(unittest.TestCase):
         self.assertIn("never contradict", text.lower())
         self.assertRegex(text, r"followups/[^\n]*nothing else")
 
-    def test_dashboard_has_askme_select(self):
+    def test_dashboard_run_now_has_no_askme(self):
         text = DASHBOARD.read_text()
-        m = re.search(r'<select id="blAskme"[^>]*>(.*?)</select>', text)
+        for phrase in ('id="blAskme"', "blAskmeLabel", '"scrum.askme"', "#blAskme"):
+            self.assertNotIn(phrase, text, phrase)
+        self.assertIn("post(`${url}/run`, {index})", text)
+
+    def test_dashboard_run_all_askme_picker(self):
+        text = DASHBOARD.read_text()
+        m = re.search(r'<div id="blRunAllAskme" role="group" aria-label="Askme for this run"[^>]*>(.*?)</div>', text)
         self.assertIsNotNone(m)
-        self.assertIn('aria-label="Askme"', m.group(0))
         self.assertIn("data-agent-hint=", m.group(0))
-        self.assertEqual(re.findall(r'<option value="(\d?)"[^>]*>([^<]*)</option>', m.group(1)),
+        self.assertIn("hidden", re.match(r"<div[^>]*>", m.group(0)).group(0))
+        self.assertEqual(re.findall(r'<button type="button" data-askme="(\d?)">([^<]*)</button>', m.group(1)),
                          [("", "Off"), ("1", "1"), ("2", "2"), ("3", "3")])
-        self.assertIn('"scrum.askme"', text)
-        self.assertIn('{index, ...(askme ? {askme: +askme} : {})}', text)
+        self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-height:44px")
+        self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-width:44px")
+        self.assertIn("post(`${url}/run-all`, askme ? {askme} : {})", text)
+        self.assertIn('b.textContent = "Cancel"', text)
+        self.assertNotIn("Run all?", text)
 
     def test_spec_writer_refines_existing_criteria(self):
         path = ROOT / "agents" / "scrum-spec-writer.md"
