@@ -975,6 +975,25 @@ class ContractTest(unittest.TestCase):
     def test_ui_reviewer_renders_page(self):
         self.assert_reviewer_renders("ui")
 
+    def test_agent_test_servers_use_throwaway_home(self):
+        start = 'HOME="$T" CLAUDE_HOME="$T/.claude"'
+        check = "Before any Save, Undo, Disable or Enable click"
+        lsof = "lsof -ti tcp:<port> -sTCP:LISTEN"
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            step1 = next(l for l in text.splitlines() if l.startswith("1. Start a fresh server"))
+            for phrase in (start, "mktemp -d", 'mkdir -p "$T/.claude"', "never 8765",
+                           "serve.py --port <free port>", "Never reuse a server that is already running"):
+                self.assertIn(phrase, step1, f"{name}: {phrase}")
+            for phrase in (check, lsof, "outside $T or WORKTREE", "Rendered: no — <reason>"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
+            self.assertIn('rm -rf "$T"', step4, name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        bullet = next(l for l in builder.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in (start, "never 8765", check, lsof, 'rm -rf "$T"', "Never use port 3001"):
+            self.assertIn(phrase, bullet, f"builder: {phrase}")
+
     def test_review_ux_ui_digest_rules(self):
         ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
         ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
