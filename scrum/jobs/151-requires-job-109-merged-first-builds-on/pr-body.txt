@@ -1,0 +1,9 @@
+- New skill skills/trevskills-e2e/SKILL.md: finds the E2E command, replays saved Playwright specs first, adds role/label/testid specs for UI that nothing covers, and sorts each failure into real bug, stale test or flake (with Jev for yes/no calls).
+- New agent agents/scrum-review-e2e.md: loads that skill and writes round-N/review-e2e.md (VERDICT: PASS or CHANGES).
+- trevskills-scrum SKILL.md: spawns scrum-review-e2e when the Check gate E2E run fails, or in Review when an E2E line is set and the diff touches UI globs.
+- board.py sync counts an optional review-e2e.md; install.sh links the new skill; README and contract/board/install tests updated.
+
+Needs human: Hard stop: secrets (Jev API key read from TYPESAFE_API_KEY or Keychain and sent as a Bearer token), plus the agent rules guard (SKILL.md and agents/scrum-*.md changed).
+
+Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/151-requires-job-109-merged-first-builds-on/
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
