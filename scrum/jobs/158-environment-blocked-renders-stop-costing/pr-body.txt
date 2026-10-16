@@ -1,0 +1,10 @@
+- Both UI and UX reviewers define `Rendered: blocked — <env reason>` (server or DB unreachable, not a diff defect) as non-blocking: VERDICT: PASS plus a `Manual smoke:` line under Out of scope
+- Diff-caused render failures keep `Rendered: no — <reason>` + VERDICT: CHANGES
+- UX reviewer must try the throwaway harness before falling back to `Rendered: blocked`
+- SKILL.md Review step 5: a round with any `Rendered: blocked` is never a clean round, so the approver rules
+- Approver escalates (`Hard stop: blocked — UI not rendered (environment)`) instead of REWORK when the only unrendered reviews are environment-blocked
+- test_contracts covers all of the above; full suite passes
+
+Clean round: check gate + reviews. Spec and reviews: scrum/jobs/158-environment-blocked-renders-stop-costing/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
