@@ -54,6 +54,8 @@ B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; 
 
 Shell variables and functions don't survive between Bash calls, so re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call. `B` is a function, not a string variable, so it works in both bash and zsh.
 
+**Agent-written text in a shell command** (a reason, title, verify string or prompt): never put it inside double quotes or backticks. Strip single quotes from it and wrap it in single quotes, or write it to a file and pass the file.
+
 **Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `B set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
 
 **Pause:** Trevor can pause a job in progress from the dashboard. Its session is killed at once and the job becomes `needs-human` with reason `stalled in <stage>: paused by Trevor`. If a session survives, every `B set` or `sync` for it fails with `was paused by Trevor`. When you see that, stop quietly as for abort: spawn nothing more, push nothing, merge nothing. Play restarts it with `/trevskills-scrum resume <id>`.
@@ -181,8 +183,9 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    ```bash
    WT="$REPO/.claude/worktrees/scrum-$ID"
    git worktree add "$WT" -b "scrum/$ID" "$BASE"
-   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do ln -sfn "$e" "$WT/$(basename "$e")"; done
+   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
+   A tracked `.env*` file (e.g. `.env.example`) is never symlinked: the worktree already has it, and a symlink over it is a typechange every reviewer flags.
    Then `B set $ID worktree=$WT stage=build`.
 5. **Build:** spawn `scrum-builder` (see **Routing**) and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B set $ID stage=needs-human reason='blocked: <first reason line>. Fix: type what the builder needs and click Send back to builder.'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.
