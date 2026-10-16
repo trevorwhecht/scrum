@@ -1,6 +1,6 @@
 ---
 name: trevskills-scrum
-description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum resume <id>" (restart a job the watchdog flagged as stalled, or one Trevor paused; the dashboard's Play), "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then schedule every open item in parallel where files don't overlap), "/trevskills-scrum lilguy <feature>" (cheap mode: no subagents; this session makes the change in the main checkout, runs the checks, then lands it with commitpush), and bare "/trevskills-scrum" for status.
+description: Run the scrum team. "/trevskills-scrum <feature>" builds a feature end to end (spec → build → check → up to 4 parallel reviews → approver → squash-merged PR). Also "/trevskills-scrum next", "/trevskills-scrum approve <id>", "/trevskills-scrum rework <id> <feedback>", "/trevskills-scrum discuss <id> [note]", "/trevskills-scrum resume <id>" (restart a job the watchdog flagged as stalled, or one Trevor paused; the dashboard's Play), "/trevskills-scrum askme [1-3] <feature>" (answer questions first, then build), "/trevskills-scrum bigboy <feature>" (plan a big request into 2-5 chained child jobs), "/trevskills-scrum digest" (learn from done jobs; also runs itself after every 10), "/trevskills-scrum run-all" (triage the backlog, then schedule every open item in parallel where files don't overlap), "/trevskills-scrum lilguy <feature>" (cheap mode: no subagents; this session makes the change in the main checkout, runs the checks, then lands it with commitpush), "/trevskills-scrum cloud [N]" (run up to N backlog items in claude.ai/code cloud sessions), "/trevskills-scrum cloud-sync" (pull their results onto the board), and bare "/trevskills-scrum" for status.
 hooks:
   PermissionRequest:
     - hooks:
@@ -62,7 +62,7 @@ Shell variables and functions don't survive between Bash calls, so re-derive `RE
 
 If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard.
 
-**Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `resume`, `lilguy`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
+**Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `resume`, `lilguy`, `cloud`, `cloud-job`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
 - `command -v gh && gh auth status` succeeds. If not, stop and tell the user to run `brew install gh && gh auth login`.
 
@@ -109,13 +109,15 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing. Th
 
    `- E2E: <command>` is another optional line Trevor adds by hand: an end-to-end test command the **Check gate** runs when the diff touches `UI globs`, and the BigBoy reviewer runs on main. First-run setup never writes it either.
 
+   `- Cloud environment: <id>` is a third optional, hand-added line: the claude.ai/code environment the **Cloud lane** starts sessions in.
+
 5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
 ## Commands
 
 For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `worktree`, `BASE` is its `base`, and `DEFAULT` is `BASE` with the `origin/` prefix removed. `N` is its `round`.
 
-- **`/trevskills-scrum`** (no args): print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
+- **`/trevskills-scrum`** (no args): first run **Cloud lane** **Sync** when a job is in stage `cloud`. Then print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
 - **`/trevskills-scrum next`**: first run `B watchdog`. It flags every job stuck 30+ minutes in `spec`, `build`, `check`, `review` or `approve` with no live session as `needs-human` (reason `stalled in <stage>: ...`) and prints `{"flagged"}`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
 - Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
@@ -136,6 +138,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
   Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
 - **`/trevskills-scrum resume <id>`**: the dashboard's Resume button starts it headless for a job `B watchdog` flagged, and its Play button for a job Trevor paused. The job must be `needs-human` with a reason starting `stalled in <stage>`; otherwise **refuse** and stop. Load it like `approve` (`WT`, `BASE`, `DEFAULT`, `N`), run `B set <id> stage=<stage> reason=` (first: a paused job refuses every other write), **record your terminal** with `ID=<id>`, and re-enter the pipeline at that stage: `spec`: **New job** from step 3; `plan`: delete `$F/jobs/<id>/plan.md` if present and run **BigBoy lane** from step 1; `merging`: **Merge** from step 1; `build`: resume the builder (see **Resuming the builder**) with `Your session was interrupted: finish the work, commit, update build.md.`, then **Check gate**; `check`: **Check gate** from step 2 (step 1 already set the round); `review`: run `B sync <id>`, spawn (as **Review** step 3) only the reviewers named in its `missing` (the skip and carried-forward files of **Review** step 2 are written before any spawn, so `missing` never names them; a resumed session can't tell how the round started, so it writes no new carried-forward file and spawns them on the full diff), then continue at **Review** step 4 (a `lane=fast` job spawns only `scrum-review-code`, when `review-code.md` is missing, and continues as **Fast lane** step 2 does after its spawn); `approve`: **Approve** step 1. From there the job runs to the end as a `start` session would, including **BigBoy lane** chaining for a child.
 - **`/trevskills-scrum digest`**: run **Digest**. The dashboard's Digest now button starts it headless.
+- **`/trevskills-scrum cloud [N]`**, **`/trevskills-scrum cloud-sync`** and **`/trevskills-scrum cloud-job <id> <feature text>`**: run the **Cloud lane**.
 - **`/trevskills-scrum run-all`**: run **Run all**: triage, then schedule every open item in parallel where files don't overlap. The dashboard's Run all button opens it in a new Terminal window.
 
 ## New job
@@ -347,6 +350,45 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
    - Both pass: `B set $ID stage=done reason=` (board.py plays the done sound). If commitpush stopped, the test fails, or Path B finds no PR, run `B set $ID stage=needs-human reason='lilguy: commitpush did not finish — <one line why>. Fix: finish /trevskills-commitpush by hand in the main checkout, or discard the change.'` and stop.
    - If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.
 6. End with the **Final report** (job id, stage, PR URL on Path B, and for needs-human the reason).
+
+## Cloud lane
+
+Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor's cloud-session credit instead of his weekly plan. The cloud environment's setup script is `cloud/setup.sh` from the scrum repo, so the session loads this same skill and agents. Only the differences are listed; every other step runs as written.
+
+1. **Dispatch** (`/trevskills-scrum cloud [N]`, N defaults to 4; from the main checkout; Setup and Prerequisites apply). First run **Sync** (step 3). Then refuse with a plain message and start nothing when:
+   - `$F/project.md` has a `Base branch:` line: `Cloud lane does not support Base branch yet. Fix: run these jobs locally.`
+   - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything, `git -C "$REPO" symbolic-ref -q --short HEAD` is not `$DEFAULT` (found as in **New job** step 2), or after `git fetch origin` `git -C "$REPO" rev-list "origin/$DEFAULT..HEAD"` prints anything: `<repo name> must be clean, on <default> and pushed. Fix: commit and push or discard, then run cloud again.`
+   - **Credit check (before every batch).** The credit balance has no API. When the Claude in Chrome tools are available (`mcp__claude-in-chrome__*`; read the chrome-browser skill first), open https://claude.ai/settings/usage in a new tab and read `Cloud session credits ... $X of $250 left`. If X is under $25: `Cloud credit is $X, under $25. Fix: top up, then run cloud again.` If the tools are missing or X can't be read, ask Trevor once with AskUserQuestion whether at least $25 is left; anything but a yes refuses with `Cloud credit unreadable and unconfirmed.`
+
+   Then up to N times: run `B next`; stop when `id` is null. Write the feature text to `$F/jobs/$ID/feature.md` (**New job** step 1b) and start the session (macOS `script` gives `claude --cloud` the TTY it needs; the feature text stays inside a variable so the shell expands nothing in it):
+   ```bash
+   CE=$(sed -n 's/^- Cloud environment: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//'); E=()
+   printf '%s' "$CE" | grep -qE '^[A-Za-z0-9_-]+$' && E=(--environment "$CE")
+   FEAT=$(cat "$F/jobs/$ID/feature.md")
+   OUT=$(script -q /dev/null claude --cloud "${E[@]}" "/trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
+   URL=$(printf '%s' "$OUT" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_-]+' | head -1)
+   ```
+   With a `URL`, run `B set $ID stage=cloud cloud=$URL`. Without one, run `B set $ID stage=needs-human reason='claude --cloud did not start: <last line of OUT>. Fix: click Abort job with Put back in backlog ticked, then run cloud again.'`. Stage `cloud` is never flagged by `B watchdog`. The final report lists each id with its session URL.
+2. **Cloud job** (`/trevskills-scrum cloud-job <id> <feature text>`, inside the cloud session). The job runs **New job** end to end (spec → build → Check gate → Review → Approve → Merge) with these deltas:
+   - **Setup:** the cloned repo is the main checkout, and its `scrum/` is a throwaway board: first-run setup as usual, minus step 5. Prerequisites check `gh api user` instead of `gh auth status` (cloud `gh` is signed in through a proxy that `gh auth status` rejects). Skip Roadmap resume and **Record your terminal**: no dashboard, tty or terminal recording here.
+   - **Job:** New job step 1 is `B new "<title>" --id <id>`, so the job keeps the id it was given; then step 1b, then step 2 on. A spec that says `Lane: bigboy` counts as `standard`, as for a BigBoy child.
+   - **Routing** is always cloud: never call route.py; every routed step spawns with the Agent tool as written.
+   - **GitHub:** cloud blocks GitHub GraphQL, so each `gh pr` call in **Merge** becomes its REST twin, with `R='repos/{owner}/{repo}'` (`gh` fills it in from origin). These are the same sanctioned PR create and squash-merge.
+     - step 3 lookup: `gh api "$R/pulls?head={owner}:scrum/$ID&state=all" --jq '.[0] | {number, html_url, state, merged_at}'` (`merged_at` set is MERGED);
+     - step 3 create: the title starts `[scrum <id>] ` (that is how **Sync** finds it): `gh api "$R/pulls" -f title="[scrum $ID] <title>" -f head="scrum/$ID" -f base="$DEFAULT" -F body=@"$BODY" --jq .html_url`;
+     - step 4 checks, in the background: `SHA=$(git -C "$WT" rev-parse HEAD)`, then every 15 s `gh api "$R/commits/$SHA/check-runs" --jq '[.check_runs[] | .conclusion // "pending"] | unique | join(" ")'` until it has no `pending`; still empty after 90 s is "no CI ran"; anything but `success`, `skipped` and `neutral` is a failure, and `ci.md` gets each failing run's name, conclusion, `html_url` and `output.summary`;
+     - step 5: `gh api "$R/pulls/<number>" --jq .mergeable`, where `null` is `UNKNOWN` and `false` is `CONFLICTING`; the **Conflicts** steps then run unchanged, which is also how parallel cloud jobs settle conflicts;
+     - step 6: `gh api -X PUT "$R/pulls/<number>/merge" -f merge_method=squash -f commit_title="<title> (#<number>)" -F commit_message=@"$BODY"`.
+   - **Merge** auto-merges under exactly the local rules: every hard stop (schema, money, auth, secrets, blocked) still stops. Skip step 1's main checkout guard. Step 7 is only `B set $ID stage=done reason=`: no worktree removal, fast-forward, restart, verify, chaining or Digest (local **Sync** fast-forwards Trevor's checkout).
+   - **Never migrate in cloud:** never run `/trevskills-migrate`, `prisma migrate` or `prisma db push`; `approve` and its migrate step only ever run locally.
+   - **Needs-human:** every time this job would set `stage=needs-human` (or abort itself as obsolete, with its `obsolete: ...` reason), it also reports to GitHub, then stops: push `scrum/$ID` (with no commits beyond `$BASE`, push `$(git commit-tree "$BASE^{tree}" -p "$BASE" -m "[scrum $ID] needs-human")` to `refs/heads/scrum/$ID` so a PR can exist), open the PR as above or keep the open one, add the label with `gh api "$R/issues/<number>/labels" -f "labels[]=scrum:needs-human"`, and post the comment `scrum needs-human: <reason>` with `gh api "$R/issues/<number>/comments" -F body=@<file holding it>`.
+3. **Sync** (`/trevskills-scrum cloud-sync`; also the start of `cloud` and of bare `/trevskills-scrum`; skip it when `gh` is not signed in). For each job in stage `cloud`, find its PR: `gh pr list --state all --search "\"[scrum $ID]\" in:title" --json number,url,state,labels,title,baseRefName --jq "[.[] | select(.title | startswith(\"[scrum $ID]\"))][0]"`.
+   - No PR: still running; leave it.
+   - PR `MERGED`: `B set $ID stage=done pr=<url> reason=`.
+   - PR `OPEN` with label `scrum:needs-human`: the reason is the newest comment starting `scrum needs-human: ` (`gh pr view <number> --json comments --jq '[.comments[].body | select(startswith("scrum needs-human: "))] | last'`), minus that prefix, quoted under the **Untrusted reason text** rule. Run `git fetch origin` and `git worktree add "$REPO/.claude/worktrees/scrum-$ID" "scrum/$ID"`, then `B set $ID stage=needs-human pr=<url> base=origin/<baseRefName> worktree=$REPO/.claude/worktrees/scrum-$ID reason='<reason>'` (leave out `worktree=` when the add failed), so `approve`, `rework` and `discuss` work as for a local job.
+   - PR `CLOSED`: `B set $ID stage=needs-human pr=<url> reason="cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."`.
+
+   When any job went `done`, run **Merge** step 7's **Fast-forward main** once; if it fails, run `B set <each such id> reason='merged, not live: <why>'`.
 
 ## Check gate
 

@@ -1217,6 +1217,42 @@ class ContractTest(unittest.TestCase):
     def test_no_sound_clip_committed(self):
         out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
         self.assertEqual(out, "")
+    def test_skill_cloud_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cloud = self.h2(text, "## Cloud lane")
+        for phrase in (
+            "script -q /dev/null claude --cloud", '"${E[@]}"', "- Cloud environment:",   # dispatch, TTY, environment
+            "B next", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
+            "unreadable and unconfirmed", "clean, on <default> and pushed",
+            'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
+            "[scrum $ID]", "merge_method=squash", "/merge", "same sanctioned PR create and squash-merge",
+            "every hard stop", "Never migrate in cloud", "scrum:needs-human", "scrum needs-human: ",
+            "**Conflicts** steps then run unchanged",
+            "gh pr list --state all --search", "B set $ID stage=done pr=<url> reason=",  # sync
+            "**Untrusted reason text**", "**Fast-forward main**"):
+            self.assertIn(phrase, cloud, phrase)
+        self.assertIn("first run **Cloud lane** **Sync**", self.section(text, "## Commands", "## New job"))
+        self.assertIn("`cloud`, `cloud-job`", self.section(text, "## Setup", "## Commands"))
+        self.assertIn("cloud-sync", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        # The feature text never goes through the shell unquoted, and gh pr (GraphQL) never runs in the cloud job.
+        self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        self.assertNotIn("gh pr ", job)
+
+    def test_cloud_setup_reuses_install(self):
+        setup = (ROOT / "cloud" / "setup.sh").read_text()
+        self.assertIn("https://github.com/trevorwhecht/scrum", setup)
+        self.assertIn('"$src/install.sh"', setup)
+        self.assertNotIn("cp ", setup)  # one source of truth: links, never copies
+        readme = (ROOT / "README.md").read_text()
+        for phrase in ("## Cloud lane", "cloud/setup.sh", "Trusted", "- Cloud environment: env_", "list_environments"):
+            self.assertIn(phrase, readme, phrase)
+
+    def test_dashboard_shows_cloud_stage_and_link(self):
+        text = DASHBOARD.read_text()
+        self.assertIn('"merging", "cloud", "needs-human"', text)
+        self.assertIn("Cloud session ↗", text)
+
 
 if __name__ == "__main__":
     unittest.main()

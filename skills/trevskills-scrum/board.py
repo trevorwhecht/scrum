@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
-  board.py new "<title>"           create jobs/<id>/ and a board entry, print the id
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter (empty = null)
+  board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
@@ -46,16 +46,17 @@ from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
-          "aborted")
+          "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
-          "waiting", "specwriter")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "term": re.compile("^(?:" + "|".join(map(re.escape, TERMS)) + ")$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
-          "setup": re.compile(r"^(?:pending|done)$")}  # a bigboy child's Human setup wait
+          "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
+          "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 # Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
@@ -159,13 +160,16 @@ def slug(title):
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].strip("-") or "job"
 
 
-def add_job(root, board, title):
-    """Caller must hold the board lock."""
+def add_job(root, board, title, job_id=None):
+    """Caller must hold the board lock. job_id keeps an id given elsewhere (a cloud job keeps its local board's id)."""
     jobs_dir = Path(root) / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     names = [p.name for p in jobs_dir.iterdir()] + [j.get("id", "") for j in board["jobs"]]
-    nums = [int(m.group(1)) for name in names if (m := re.match(r"(\d+)-", name))]
-    job_id = f"{max(nums, default=0) + 1:03d}-{slug(title)}"
+    if job_id is None:
+        nums = [int(m.group(1)) for name in names if (m := re.match(r"(\d+)-", name))]
+        job_id = f"{max(nums, default=0) + 1:03d}-{slug(title)}"
+    elif check_id(job_id) in names:
+        raise SystemExit(f"job {job_id!r} already exists")
     (jobs_dir / job_id).mkdir()
     board["jobs"].append({
         "id": job_id, "title": title, "branch": f"scrum/{job_id}", "stage": "spec", "round": 0, "limit": 2,
@@ -175,9 +179,9 @@ def add_job(root, board, title):
     return job_id
 
 
-def cmd_new(root, title):
+def cmd_new(root, title, job_id=None):
     with locked_board(root) as board:
-        return add_job(root, board, title)
+        return add_job(root, board, title, job_id)
 
 
 # --- backlog.md: "- [ ] [5] Text → 003-id <!-- why -->"; points and the estimate's reason are optional ---
@@ -965,8 +969,12 @@ def merge_refusal(job: dict) -> str | None:
     pr = job.get("pr")
     if not pr:
         return None if job.get("lane") in ("bigboy", "runall", "lilguy") else "not done: no PR recorded"
-    try:
-        r = subprocess.run(["gh", "pr", "view", pr, "--json", "state", "--jq", ".state"],
+    m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
+    if not m:
+        return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
+    try:  # REST, not `gh pr view`: cloud sessions block GitHub GraphQL (SKILL.md Cloud lane)
+        r = subprocess.run(["gh", "api", f"repos/{m[1]}/{m[2]}/pulls/{m[3]}", "--jq",
+                            'if .merged then "MERGED" else (.state | ascii_upcase) end'],
                            capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
         why = "timed out"
@@ -1378,7 +1386,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", type=Path, default=Path("scrum"))
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("new").add_argument("title")
+    n = sub.add_parser("new")
+    n.add_argument("title")
+    n.add_argument("--id")
     s = sub.add_parser("set")
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
@@ -1442,7 +1452,7 @@ def main(argv=None):
         print(line)
         return 0
     if a.cmd == "new":
-        print(cmd_new(a.dir, a.title))
+        print(cmd_new(a.dir, a.title, a.id))
     elif a.cmd == "set":
         cmd_set(a.dir, a.id, a.pairs)
     elif a.cmd == "sync":

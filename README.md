@@ -37,6 +37,7 @@ brew install gh && gh auth login   # needed to open and merge PRs
 | `/trevskills-scrum approve <id>` | merges a needs-human job |
 | `/trevskills-scrum rework <id> "<feedback>"` | sends a job back to the builder with 2 more rounds |
 | `/trevskills-scrum discuss <id> ["<note>"]` | talks a stopped job through with you first, then runs the approve or rework you agree on (dashboard: Discuss first) |
+| `/trevskills-scrum cloud [N]` | runs up to N backlog items in cloud sessions (see Cloud lane) |
 | `/trevskills-scrum` | shows the board |
 
 ## Dashboard
@@ -67,6 +68,17 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - The loop: `skills/trevskills-scrum/SKILL.md`
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
+
+## Cloud lane
+
+`/trevskills-scrum cloud [N]` runs up to N (default 4) backlog items in Claude Code cloud sessions (claude.ai/code), paid by cloud-session credit instead of the weekly plan. Each session runs the normal pipeline and squash-merges its own `[scrum <id>]` PR, or labels it `scrum:needs-human` with a comment saying why. `/trevskills-scrum cloud-sync` (also run by `cloud` and bare `/trevskills-scrum`) moves those results onto the board. Before each batch the orchestrator reads the credit at https://claude.ai/settings/usage through Claude in Chrome and refuses under $25. The rules are in SKILL.md **Cloud lane**.
+
+Set up the cloud environment once:
+
+1. At claude.ai/code, open the environment menu and add an environment named `scrum`, with network access **Trusted**.
+2. Setup script: `curl -fsSL https://raw.githubusercontent.com/trevorwhecht/scrum/main/cloud/setup.sh | bash` (or paste [cloud/setup.sh](cloud/setup.sh)). It clones this repo to `~/scrum` and runs `install.sh`, so the session loads the same skill and agents through symlinks, never a copy. Add the project's own setup after it, such as `service postgresql start` when its tests need Postgres.
+3. Environment variables: whatever the project's tests need from `.env` (cloud sessions have no `.env`).
+4. Copy the environment's id (`env_...`). If the settings page doesn't show it, ask any cloud session to run its `list_environments` tool. Add `- Cloud environment: env_...` to the project's `scrum/project.md`. Without that line, `claude --cloud` uses your default environment.
 
 ## Local routing
 

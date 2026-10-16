@@ -1206,6 +1206,35 @@ class BoardTest(unittest.TestCase):
                          "stalled in spec: no board update for 30 min and no live session. Fix: click Resume.")
         self.assertEqual(self.get(fresh)["stage"], "spec")
 
+    def test_watchdog_never_flags_cloud_jobs(self):
+        cloud = self.aged("In cloud", 120, stage="cloud")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.get(cloud)["stage"], "cloud")
+
+    # --- cloud lane ---
+    def test_new_with_id_keeps_the_given_id(self):
+        self.assertEqual(board.cmd_new(self.root, "From the Mac", "042-from-the-mac"), "042-from-the-mac")
+        self.assertTrue((self.root / "jobs" / "042-from-the-mac").is_dir())
+        self.assertEqual(board.cmd_new(self.root, "Next one"), "043-next-one")
+        with self.assertRaises(SystemExit):
+            board.cmd_new(self.root, "Again", "042-from-the-mac")
+        with self.assertRaises(SystemExit):
+            board.cmd_new(self.root, "Bad", "../evil")
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "new", "CLI", "--id", "007-cli"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(out, "007-cli")
+
+    def test_cloud_stage_and_session_url(self):
+        job_id = board.cmd_new(self.root, "Cloud job")
+        url = "https://claude.ai/code/session_015Ay7Jys6es4B7j1mVWLisy"
+        board.cmd_set(self.root, job_id, ["stage=cloud", f"cloud={url}"])
+        self.assertEqual((self.get(job_id)["stage"], self.get(job_id)["cloud"]), ("cloud", url))
+        self.assertNotIn("cloud", board.WATCHED)
+        for bad in ("javascript:alert(1)", "https://evil.example/code/session_x", f"{url}\"x"):
+            with self.assertRaises(SystemExit):
+                board.cmd_set(self.root, job_id, [f"cloud={bad}"])
+        self.assertEqual(self.get(job_id)["cloud"], url)
+
     def test_session_alive_ignores_claude_dir_paths(self):
         lines = ("??      node /Users/t/onewitharts/.claude/worktrees/scrum-024-x/node_modules/.bin/next dev -p 3024\n"
                  "ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
