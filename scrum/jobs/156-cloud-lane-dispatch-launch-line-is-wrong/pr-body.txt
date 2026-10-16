@@ -1,0 +1,9 @@
+Obsolete: Cloud lane launch line already uses E=(--settings ...) before --cloud, and test_contracts already guards it.
+
+No change needed: skills/trevskills-scrum/SKILL.md already passes the environment through `--settings` placed before `--cloud`, and `test_skill_cloud_lane` in tests/test_contracts.py already rejects `--environment` and any flag between `--cloud` and its prompt. Contract tests pass (144 tests OK).
+
+Spec: scrum/jobs/156-cloud-lane-dispatch-launch-line-is-wrong/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+https://claude.ai/code/session_018D9SBzqL3ALHyPnnQgbpu2
