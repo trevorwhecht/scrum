@@ -162,6 +162,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 #digest{overscroll-behavior:contain}
 #digest article{display:grid;gap:10px;padding-top:14px}
 #digest .btn,#digest .tabs button,#dgProject{min-height:44px;min-width:44px}
+#viewer .btn{min-height:44px}
 #dgNow{justify-self:start}
 .dg{display:grid;gap:8px}.dg h3{font-size:13px;margin:6px 0 0}
 .prop{display:grid;gap:6px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--card)}
@@ -171,6 +172,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .prop .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 @media (max-width:640px){#agents,#aiSettings,#digest,#backlog,#viewer{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article{padding-inline:12px}
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
+  #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
+  header>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
