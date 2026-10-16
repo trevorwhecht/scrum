@@ -113,6 +113,8 @@ skip.
 
 Each attempt appends one JSON line (`ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
 to the job's `routing.log`; estimates and the digest reader log to `scrum/routing.log`.
+The digest reader counts that file in `## Local routing` too (cited as `scrum-level`), so the
+digester can judge the estimator's and the digest reader's trust from it.
 `outcome` is `ok`, `invalid-artifact`, `fallback` (the cloud retry), `check-pass` or
 `check-fail` (a local build at the check gate) or `skipped`. The dashboard shows one tag per
 line on the job's card, and its header shows Codex 5h and weekly use and whether Ollama is up

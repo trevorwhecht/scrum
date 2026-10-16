@@ -669,7 +669,8 @@ class ContractTest(unittest.TestCase):
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
                        "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
                        "(fallback: <n>)", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
-                       "## Assumptions", "## Likely files"):
+                       "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
+                       "`scrum-level`"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
