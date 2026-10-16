@@ -9,7 +9,8 @@
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
-                                   backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"}
+                                   backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"};
+                                   a backlog edit of the text, a delete or a triage merge/retire/manual drops the item's spec
   board.py roadmap-show            print roadmap.md as {"name","phases","current","next","blocker"} (null = no roadmap)
   board.py roadmap-link <P> <S> <id>  write the job id into step P/S and mark it [~] (also resumes a [!] step)
   board.py roadmap-next <id>       mark the step holding <id> [x], print the next [ ] step {"p","s","kind","request"}
@@ -254,6 +255,7 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
                                       "text": clean(text, ITEM_MAX), "job": None, "why": None}))
         elif op == "edit":
             item = pick(items, index)
+            old = item["text"]
             if text is not None:
                 if not clean(text):
                     raise SystemExit("backlog item text is empty")
@@ -262,8 +264,12 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
                 check_points(points)
                 item["points"] = points
             lines[item["line"]] = format_item(item)
+            if item["text"] != old:
+                drop_spec(root, old, items)
         elif op == "delete":
-            del lines[pick(items, index)["line"]]
+            item = pick(items, index)
+            del lines[item["line"]]
+            drop_spec(root, item["text"], [i for i in items if i is not item])
         elif op == "move":
             a = pick(items, index)
             # Swap with the nearest open item that way; finished items are hidden in the dashboard.
@@ -294,6 +300,13 @@ def backlog_set_estimate(root, text, points, why):
 def spec_path(root, text):
     """Where a backlog item's pre-written spec waits, keyed by its stored text."""
     return Path(root) / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+
+
+def drop_spec(root, text, items):
+    """Delete the item's pre-written spec unless an open item in `items` (the list after the change) still has this
+    text. A missing file or folder is a no-op. Caller holds the lock."""
+    if not any(not i["done"] and i["text"] == text for i in items):
+        spec_path(root, text).unlink(missing_ok=True)
 
 
 def take_spec(root, text, job_id):
@@ -818,6 +831,7 @@ def cmd_triage_apply(root, triage_id):
         raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/manual/estimate lists; backlog.md was not touched")
     report = {"Merged": [], "Retired": [], "Manual": [], "Estimated": [], "Skipped": []}
     manual = []  # texts moved to manual-checks.md
+    consumed, merged = [], []  # items merged, retired or moved to manual; texts of the new merged items
     gone = lambda text: format_item({"done": True, "points": None, "text": text, "job": None, "why": None})
     with locked_board(root):
         lines, items = read_backlog(root)
@@ -857,9 +871,12 @@ def cmd_triage_apply(root, triage_id):
                     report["Skipped"].append(f"- {label} — {cause}\n")
                     continue
                 used.update(i["index"] for i in got)
+                if kind != "estimate":
+                    consumed.extend(got)
                 why = clean(e.get("why") or "") or None
                 if kind == "merge":
                     text = clean(e["text"], ITEM_MAX)
+                    merged.append(text)
                     for i in got:
                         lines[i["line"]] = gone(i["text"]) + f" <!-- merged into triage {triage_id} -->"
                     before.setdefault(min(i["line"] for i in got), []).append(
@@ -880,6 +897,10 @@ def cmd_triage_apply(root, triage_id):
                     report["Estimated"].append(f"- [{pts}] {item['text']}" + (f" — {why}" if why else "") + "\n")
         write_backlog(root, [x for n, line in enumerate(lines) for x in (*before.get(n, []), line)])
         _append_manual(root, manual)
+        gone_idx = {i["index"] for i in consumed}
+        after = [i for i in items if i["index"] not in gone_idx] + [{"done": False, "text": t} for t in merged]
+        for i in consumed:
+            drop_spec(root, i["text"], after)
         text = f"# Triage {triage_id} — {now()}\n" + "".join(
             f"\n## {title}\n" + ("".join(rows) or "None.\n") for title, rows in report.items())
         (d / "report.md").write_text(text)
