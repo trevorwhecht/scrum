@@ -147,6 +147,19 @@ def resume_job(project, root, job, jobs):
     spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
 
+LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
+                 "/trevskills-commitpush, or discard it, then click Abort.")
+
+
+def resume_refusal(root, job):
+    """Why the Resume button / auto-resume must not restart this stalled job, or None. lilguy has no worktree or
+    builder to resume; a Run-all/BigBoy child waits for the same cap and overlap rules `ready` applies to new claims."""
+    if job.get("lane") == "lilguy":
+        return LILGUY_RESUME
+    blocker = job.get("parent") and board.resume_blocker(root, job["id"])
+    return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
+
+
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
@@ -195,7 +208,7 @@ def auto_resume(project, root, jobs):
     for job in jobs:
         reason = job.get("reason") or ""
         if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
-                or running(project, job["id"]):
+                or job.get("lane") == "lilguy" or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
@@ -206,6 +219,8 @@ def auto_resume(project, root, jobs):
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
+            continue
+        if resume_refusal(root, job):  # a sibling holds its slot: retry next tick without spending a try
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
@@ -1977,6 +1992,8 @@ class Handler(BaseHTTPRequestHandler):
             if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
+            if refusal := resume_refusal(root, job):
+                return 409, {"error": refusal}
             resume_job(project, root, job, jobs)
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
