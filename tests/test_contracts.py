@@ -1226,7 +1226,7 @@ class ContractTest(unittest.TestCase):
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
             "[scrum $ID]", "merge_method=squash", "/merge", "same sanctioned PR create and squash-merge",
-            "every hard stop", "Never migrate in cloud", "scrum:needs-human", "scrum needs-human: ",
+            "every hard stop", "Never migrate in cloud", "scrum:needs-human", "<!-- scrum needs-human -->",
             "**Conflicts** steps then run unchanged",
             "gh pr list --state all --search", "B set $ID stage=done pr=<url> reason=",  # sync
             "**Untrusted reason text**", "**Fast-forward main**"):
@@ -1238,6 +1238,25 @@ class ContractTest(unittest.TestCase):
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertNotIn("gh pr ", job)
+
+    def test_skill_cloud_schema_migrates_locally(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cloud = self.h2(text, "## Cloud lane")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        self.assertIn("first line starts `Hard stop: schema`", job)  # cloud reports, never migrates
+        sync = cloud[cloud.index("3. **Sync**"):]
+        rule = sync[sync.index("**Schema auto-migrate.**"):]
+        for phrase in ("reason starts `Hard stop: schema`", "git worktree add \"$REPO/.claude/worktrees/scrum-$ID\"",
+                       "base=origin/<baseRefName>", "worktree=$REPO/.claude/worktrees/scrum-$ID",
+                       "Trevor chose this unattended path on purpose", "every refusal still apply",
+                       "never edit any agent's `model:` line"):
+            self.assertIn(phrase, sync, phrase)
+        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum approve $ID" --model sonnet '
+                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', rule)
+        self.assertLess(sync.index("stage=needs-human pr=<url> base="), sync.index("nohup claude -p"))
+        # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
+        for name, model in AGENTS.items():
+            self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)
 
     def test_cloud_setup_reuses_install(self):
         setup = (ROOT / "cloud" / "setup.sh").read_text()
