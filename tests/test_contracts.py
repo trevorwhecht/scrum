@@ -263,6 +263,7 @@ class ContractTest(unittest.TestCase):
         rules = (ROOT / "codex" / "AGENTS.md").read_text()
         self.assertIn("\n## Code Review Rules\n", rules)
         self.assertIn("Apache-2.0", rules)
+        self.assertIn("Don't run tests during a review.", rules)
         self.assertLess(len(rules.encode()), 32 * 1024)
         readme = (ROOT / "README.md").read_text()
         for phrase in ("read-only", "codex exec review", "~/.codex/AGENTS.md"):
