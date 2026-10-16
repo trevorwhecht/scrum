@@ -236,6 +236,13 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(self.text(), before + "- [ ] Add retry to fetch (from 095-bigboy)\n")
         self.assertEqual(self.spec_file("Add retry to fetch (from 095-bigboy)").read_text(), "# Retry\nDo it.\n")
 
+    def test_backlog_spec_writes_utf8(self):
+        d = self.root / "jobs" / self.JOB / "followups"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a.md").write_text("Backlog: new\nItem: Cafe sign\n\ncafé — ✓\n", encoding="utf-8")
+        board.cmd_backlog_spec(self.root, self.JOB)
+        self.assertEqual(self.spec_file("Cafe sign (from 095-bigboy)").read_text(encoding="utf-8"), "café — ✓\n")
+
     def test_backlog_spec_update_replaces_spec_keeps_line(self):
         before = self.text()
         self.followup("a.md", "Backlog: update Dark mode\n\nFirst body\n")
