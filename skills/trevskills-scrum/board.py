@@ -6,6 +6,8 @@
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
+  board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
+                                   and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
                                    backlog-specs/ (moved to the job's spec.md when claimed), print {"added","updated","skipped"}
   board.py roadmap-show            print roadmap.md as {"name","phases","current","next","blocker"} (null = no roadmap)
@@ -22,7 +24,8 @@
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
-  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/estimate) to backlog.md, write report.md
+  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate) to backlog.md (manual items
+                                   move to manual-checks.md), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
@@ -422,6 +425,59 @@ def cmd_backlog_add(root, items):
     return added
 
 
+# --- manual-checks.md: "- [ ] text" follow-ups only a human can do; Trevor ticks them on the dashboard ---
+MANUAL_HEADER = "# Manual checks"
+MANUAL_RE = re.compile(r"^- \[( |x)\] (.*?)\s*$")
+
+
+def read_manual(root):
+    """(lines, items) of manual-checks.md; items remember their line so a tick leaves headings and notes alone."""
+    path = Path(root) / "manual-checks.md"
+    lines = path.read_text().splitlines() if path.exists() else [MANUAL_HEADER]
+    items = []
+    for n, line in enumerate(lines):
+        if m := MANUAL_RE.match(line):
+            items.append({"index": len(items), "line": n, "done": m.group(1) == "x", "text": m.group(2)})
+    return lines, items
+
+
+def manual_items(root):
+    return [{k: v for k, v in item.items() if k != "line"} for item in read_manual(root)[1]]
+
+
+def _append_manual(root, texts):
+    """Append "- [ ] <text>" for each text that is non-empty and not already open. Caller holds the board lock.
+    Returns the texts as stored."""
+    lines, items = read_manual(root)
+    open_texts, added = {i["text"] for i in items if not i["done"]}, []
+    for t in texts:
+        t = clean(t, ITEM_MAX)
+        if t and t not in open_texts:
+            open_texts.add(t)
+            added.append(t)
+            lines.append(f"- [ ] {t}")
+    if added:
+        (Path(root) / "manual-checks.md").write_text("\n".join(lines) + "\n")
+    return added
+
+
+def cmd_manual_add(root, items):
+    """Append each non-empty item that isn't already an open check; returns the texts added."""
+    with locked_board(root):
+        return _append_manual(root, items)
+
+
+def manual_tick(root, index):
+    """Mark one manual check [x] under the board lock. Returns the new item list."""
+    with locked_board(root):
+        lines, items = read_manual(root)
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(items):
+            raise SystemExit(f"no manual check {index!r}")
+        lines[items[index]["line"]] = f"- [x] {items[index]['text']}"
+        (Path(root) / "manual-checks.md").write_text("\n".join(lines) + "\n")
+    return manual_items(root)
+
+
 def parse_followup(text):
     """(kind, item text, body) for one followups/*.md file; raises ValueError with the reason when malformed."""
     lines = text.splitlines()
@@ -640,7 +696,8 @@ def cmd_triage_start(root):
 
 
 def cmd_triage_apply(root, triage_id):
-    """Merge, retire and estimate open items by exact text. Stale, reused or bad entries are skipped and reported."""
+    """Merge, retire, move to manual-checks.md and estimate open items by exact text. Stale, reused or bad entries are
+    skipped and reported."""
     d = Path(root) / "triage" / str(triage_id)
     if not TRIAGE_RE.fullmatch(str(triage_id)) or not d.is_dir():
         raise SystemExit(f"no triage {triage_id!r}")
@@ -648,9 +705,10 @@ def cmd_triage_apply(root, triage_id):
         plan = json.loads((d / "plan.json").read_text())
     except (OSError, ValueError) as e:
         raise SystemExit(f"triage {triage_id}: plan.json is missing or not JSON ({e}); backlog.md was not touched")
-    if not isinstance(plan, dict) or any(not isinstance(plan.get(k) or [], list) for k in ("merge", "retire", "estimate")):
-        raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/estimate lists; backlog.md was not touched")
-    report = {"Merged": [], "Retired": [], "Estimated": [], "Skipped": []}
+    if not isinstance(plan, dict) or any(not isinstance(plan.get(k) or [], list) for k in ("merge", "retire", "manual", "estimate")):
+        raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/manual/estimate lists; backlog.md was not touched")
+    report = {"Merged": [], "Retired": [], "Manual": [], "Estimated": [], "Skipped": []}
+    manual = []  # texts moved to manual-checks.md
     gone = lambda text: format_item({"done": True, "points": None, "text": text, "job": None, "why": None})
     with locked_board(root):
         lines, items = read_backlog(root)
@@ -667,7 +725,7 @@ def cmd_triage_apply(root, triage_id):
                 got.append(free[0])
             return got, None
 
-        for kind in ("merge", "retire", "estimate"):
+        for kind in ("merge", "retire", "manual", "estimate"):
             for e in plan.get(kind) or []:
                 e = e if isinstance(e, dict) else {}
                 texts = e.get("items") if kind == "merge" else [e.get("item")]
@@ -680,7 +738,7 @@ def cmd_triage_apply(root, triage_id):
                     cause = "merged text is empty"
                 elif got and kind == "merge" and len(clean(e["text"], None)) > ITEM_MAX:
                     cause = "merged text is over 2000 characters"
-                elif got and kind == "retire" and not clean(e.get("reason") or ""):
+                elif got and kind in ("retire", "manual") and not clean(e.get("reason") or ""):
                     cause = "no reason given"
                 elif got and kind == "estimate" and got[0]["points"] is not None:
                     cause = "already pointed"
@@ -702,16 +760,22 @@ def cmd_triage_apply(root, triage_id):
                     reason = clean(e["reason"])
                     lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- retired: {reason} -->"
                     report["Retired"].append(f"- {got[0]['text']} — {reason}\n")
+                elif kind == "manual":
+                    reason = clean(e["reason"])
+                    lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- manual check: {reason} -->"
+                    manual.append(got[0]["text"])
+                    report["Manual"].append(f"- {got[0]['text']} — {reason}\n")
                 else:
                     item = got[0] | {"points": pts, "why": why}
                     lines[item["line"]] = format_item(item)
                     report["Estimated"].append(f"- [{pts}] {item['text']}" + (f" — {why}" if why else "") + "\n")
         write_backlog(root, [x for n, line in enumerate(lines) for x in (*before.get(n, []), line)])
+        _append_manual(root, manual)
         text = f"# Triage {triage_id} — {now()}\n" + "".join(
             f"\n## {title}\n" + ("".join(rows) or "None.\n") for title, rows in report.items())
         (d / "report.md").write_text(text)
         (Path(root) / "triage" / "latest.md").write_text(text)
-    return {"merged": len(report["Merged"]), "retired": len(report["Retired"]),
+    return {"merged": len(report["Merged"]), "retired": len(report["Retired"]), "manual": len(report["Manual"]),
             "estimated": len(report["Estimated"]), "skipped": len(report["Skipped"])}
 
 
@@ -1471,6 +1535,7 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
     rl.add_argument("p", type=int)
@@ -1562,6 +1627,8 @@ def main(argv=None):
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
         print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
+    elif a.cmd == "manual-add":
+        print(json.dumps(cmd_manual_add(a.dir, a.items)))
     elif a.cmd == "plan-apply":
         print(json.dumps(cmd_plan_apply(a.dir, a.id, a.fix)))
     elif a.cmd == "ready":

@@ -20,6 +20,8 @@ A concern or review note you accept as environmental or pre-existing also gets a
     - <reviewer> finding K: fixed | defer | override — reason
     ## Follow-ups
     - <one-line backlog item>      ← deferred work; the orchestrator appends these to backlog.md
+    ## Manual checks
+    - <one-line check only a human can do>      ← the orchestrator appends these to manual-checks.md
     ## Merge summary
     Title: <imperative, high-level, ≤ 70 chars>
     - <high-level change 1>
@@ -45,6 +47,8 @@ Judge hard stops from the actual diff (`--name-only` and content), not from the 
 - **`check.md` is FAIL.** Approve only if the same failures already happen on `BASE`. To check, run `git -C WORKTREE worktree add --detach /tmp/scrum-base-<id> BASE`, run the failing command there, then `git -C WORKTREE worktree remove --force /tmp/scrum-base-<id>`. Otherwise use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — checks fail`.
 - **Waived failures.** When `check.md` waives or you approve over failures that also fail on `BASE`, add one Follow-up per failing test or lint rule to fix it on the default branch, unless the `backlog.md` next to `PROJECT` already lists it.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, a failing repro, `outside allowed files` or `repro test changed` in `check.md` is never treated as already failing on `BASE`; never APPROVE it. Use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — repro still fails`.
+
+**Manual checks.** A follow-up only a human can do (a manual check, a live-site check, a device check or a Safari check) goes under `## Manual checks`, never under `## Follow-ups`: backlog items run as unattended jobs, which can't do them. The section is optional; leave it out or write `- none` when there are none.
 
 **Out-of-scope follow-ups.** On every decision (APPROVE, REWORK or ESCALATE), read the `## Out of scope` bullets of every `review-*.md` in the latest round (the highest-numbered `round-*/`). Drop duplicates, vague items, and anything already covered by this ticket (on REWORK, that includes what the next round will fix). Add each real one to `## Follow-ups` as a one-line bullet. The section is optional: a review without one adds nothing (orchestrator skip files and `No UI surface.` reviews included), and that is not an error.
 

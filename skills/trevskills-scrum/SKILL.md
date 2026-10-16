@@ -119,7 +119,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
 
 - **`/trevskills-scrum`** (no args): first run **Cloud lane** **Sync** when a job is in stage `cloud`. Then print each job's `id stage round reason pr` from `$F/board.json`, and the dashboard command.
 - **`/trevskills-scrum next`**: first run `B watchdog`. It flags every job stuck 30+ minutes in `spec`, `build`, `check`, `review` or `approve` with no live session as `needs-human` (reason `stalled in <stage>: ...`) and prints `{"flagged"}`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B next`. It claims the first `- [ ]` line in `$F/backlog.md` under the board lock, creates the job, and prints `{"id", "feature"}`; two sessions never get the same item. If `id` is null, say the backlog is empty and stop. Otherwise run **New job** from step 1b with `ID=<id>` and that feature text (step 2 records your terminal).
-- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it.
+- Backlog lines look like `- [ ] [5] Text <!-- estimate reason -->`; the `[5]` is Fibonacci difficulty points. Only ever change `backlog.md` through `B` (`next`, `backlog-add`, `triage-apply`), never by hand-editing it. Checks only a human can do live in `manual-checks.md` instead (`- [ ] Text`, added with `B manual-add`); no job ever runs them.
 - **`/trevskills-scrum <feature text>`**: run **New job**.
 - **`/trevskills-scrum askme [1-3] <feature text>`**: run **New job** with the **Askme** step (1c) at that level. With no level, or a level that is not 1, 2 or 3, use level 2 and treat the whole rest as the feature text.
 - **`/trevskills-scrum bigboy <feature text>`**: run **New job** steps 1-2, then `B set $ID lane=bigboy` and go straight to the **BigBoy lane**. No spec writer runs for the parent.
@@ -200,12 +200,12 @@ Cleans the backlog, then runs every open item as a child job of one Run-all pare
    Write plan.json for this triage.
    ```
    If `$F/triage/<id>/plan.json` is missing afterwards, spawn it once more.
-3. Run `B triage-apply <id>`. It merges, retires and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
+3. Run `B triage-apply <id>`. It merges, retires, moves manual-only items to `$F/manual-checks.md` and estimates under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
 4. Run `B watchdog`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B runall-start`. Under the board lock it makes a `lane=runall` parent with every open backlog item as a `waiting` child and prints `{"id", "children"}`. If `id` is null, say the backlog is empty and stop. Otherwise `P` is that id.
 5. Run **BigBoy lane** step 2 for P's children.
 6. Run **BigBoy lane** step 3 for `P`, then give the final report. Never ask questions here; there is no Askme step.
 
-The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired and estimated (counts from `triage-apply`, or the failure line).
+The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired, moved to manual checks and estimated (counts from `triage-apply`, or the failure line).
 
 ## Fast lane
 
@@ -414,7 +414,7 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
        rm -rf "$T"
      fi
      ```
-   - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`; otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. Spawn no spec writer here.
+   - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`; otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. Separately, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet, whatever `## Follow-ups` holds; a failing `manual-add` never blocks the sync. Spawn no spec writer here.
 
    When any job went `done`, run **Merge** step 7's **Fast-forward main** once; if it fails, run `B set <each such id> reason='merged, not live: <why>'`. Then run `B digest-due`, and when it prints `"due": true`, run **Digest**.
 
@@ -487,7 +487,8 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 1. Run `B set $ID stage=approve`. Spawn `scrum-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
    - **Model:** pass the Agent tool override `model: "sonnet"` to `scrum-approver` only when all of these hold: the latest `round-$N/check.md` is `CHECK: PASS`; all four `round-$N/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count); the Merge schema guard regex matches nothing in the diff; and you know this round was not started by the Merge **Conflicts** step. In every other case (including when you can't tell, e.g. after a session restart) omit the override so the agent's default, Opus, runs.
 2. Copy `decision.md` into `round-$N/decision.md`; that's how the approver later sees whether REWORK has already been used. Run `B sync $ID` and read `decision`.
-3. **Follow-ups.** When `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
+3. **Manual checks and follow-ups.** First, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet. It appends them to `$F/manual-checks.md`, the checklist Trevor ticks off in the dashboard's Backlog dialog, never to the backlog. Do this whether or not `## Follow-ups` is empty; if `manual-add` exits non-zero, name it in the final report only.
+   Then, when `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
    - If the board's `specwriter` is a recorded agent id, use SendMessage to it, the same way **Resuming the builder** does. Spawn a fresh `scrum-spec-writer` (see **Routing**) instead when `specwriter` is `local`, missing or empty, or when SendMessage fails because the agent no longer exists. The message or prompt is:
      ```
      JOB_DIR=$F/jobs/$ID
