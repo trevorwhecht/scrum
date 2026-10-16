@@ -555,6 +555,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[-1], os.path.realpath(self.root / rel))
         self.assertNotIn("/dev/ttys004", argv)
 
+    def test_spawn_keeps_ghostty_term(self):
+        job_id = self.job("was ghostty", "tty=ttys006", "term=ghostty")
+        with mock.patch.object(self.serve.subprocess, "Popen"):
+            rel = self.serve.spawn("repo", self.root, job_id, "start", "x")
+        self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
+        job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertEqual(job["term"], "ghostty")
+        self.assertIsNone(job.get("tty"))
+        self.assertEqual(job["runlog"], rel)
+
     def test_terminal_apple_terminal_passes_tty_as_argv(self):
         code, out, run, popen = self.terminal(self.job("tab", "tty=ttys004", "term=Apple_Terminal"))
         self.assertEqual(code, 200, out)
@@ -617,12 +627,14 @@ class ServeTest(unittest.TestCase):
 
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
-        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+        # Headless scrum sessions export CLAUDE_NOTIFIER_DISABLE=1; unset it here so the parent-env check is hermetic.
+        with mock.patch.dict(os.environ), mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            os.environ.pop("CLAUDE_NOTIFIER_DISABLE", None)
             self.serve.spawn("repo", self.root, job_id, "start", "x")
-        env = popen.call_args.kwargs["env"]
-        self.assertEqual(env["CLAUDE_NOTIFIER_DISABLE"], "1")
-        self.assertEqual(env["PATH"], os.environ["PATH"])
-        self.assertNotIn("CLAUDE_NOTIFIER_DISABLE", os.environ)
+            env = popen.call_args.kwargs["env"]
+            self.assertEqual(env["CLAUDE_NOTIFIER_DISABLE"], "1")
+            self.assertEqual(env["PATH"], os.environ["PATH"])
+            self.assertNotIn("CLAUDE_NOTIFIER_DISABLE", os.environ)
         with self.serve.RUNS_LOCK:
             self.serve.RUNS.pop(f"repo/{job_id}", None)
 
