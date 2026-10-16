@@ -835,6 +835,27 @@ class ContractTest(unittest.TestCase):
     def test_ui_reviewer_renders_page(self):
         self.assert_reviewer_renders("ui")
 
+    def test_review_ux_ui_digest_rules(self):
+        ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        debt = ("- Judge new violations in this diff, not existing debt. Put existing debt under Notes as "
+                "`pre-existing: <rule ID> — <where>`, never as a finding.")
+        blocking = ("- A new violation of a numbered rule in the UI behaviour file (for example a new link "
+                    "under 44 px, UB-15) is `[blocking]` with confidence ≥ 80, never `[minor]`.")
+        self.assertIn(debt + "\n" + blocking + "\n", ux)
+        harness = ("When the page needs a signed-in session or a database you cannot reach, render the new "
+                   "component in a throwaway harness in `/tmp` with mock data at 390 px and 1440 px, and say so "
+                   "in the `Rendered:` line. If you could not render or exercise the page, write "
+                   "`Rendered: no — <reason>`;")
+        self.assertIn(harness, ux)
+        self.assertIn(debt + "\n", ui)
+        self.assertNotIn("UB-15", ui)
+        self.assertNotIn("throwaway harness", ui)
+        for name, text in (("ux", ux), ("ui", ui)):
+            self.assertEqual(text.count("pre-existing: <rule ID> — <where>"), 1, name)
+            self.assertNotIn("- Judge new violations in this diff, not existing debt.\n", text, name)
+        self.assertEqual(ux.count("throwaway harness"), 1)
+
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Rendered: yes", "UI not rendered"):
