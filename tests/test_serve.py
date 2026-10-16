@@ -280,6 +280,30 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {job_id}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 400)  # already claimed
 
+    def test_backlog_run_refuses_waiting_item(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [ ] Base work {#base}\n- [ ] Needs base {needs #base}\n")
+        code, items = self.req("GET", "/api/p/repo/backlog")
+        self.assertEqual(code, 200)
+        self.assertEqual([(i["id"], i["needs"], i["waits"]) for i in items],
+                         [("base", [], []), (None, ["base"], ["base"])])
+        jobs_before = sorted(p.name for p in (self.root / "jobs").iterdir())
+        board_before = (self.root / "board.json").read_bytes() if (self.root / "board.json").exists() else None
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog/run", method="POST",
+                                       data=json.dumps({"index": 1}).encode(), headers={"Content-Type": "application/json"})
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(r)
+            with e.exception as err:
+                self.assertEqual((err.code, json.loads(err.read())), (400, {"error": "backlog item 1 waits on #base"}))
+        spawn.assert_not_called()
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Base work {#base}\n- [ ] Needs base {needs #base}\n")
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), jobs_before)
+        if board_before is not None:
+            self.assertEqual((self.root / "board.json").read_bytes(), board_before)
+
     def test_reopen_endpoint_starts_new_job(self):
         old = self.serve.board.cmd_new(self.root, "Reopen source")
         self.serve.board.cmd_set(self.root, old, ["stage=done"])

@@ -633,6 +633,57 @@ class BoardTest(unittest.TestCase):
         self.assertFalse(spec.exists())
         self.assertFalse((self.root / "jobs" / "002-add-csv-export" / "spec.md").exists())
 
+    def test_runall_start_maps_needs_to_depends_on(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Add UI {needs #api1 #sch2}\n- [ ] Add API {#api1} {needs #sch2}\n- [ ] Add schema {#sch2}\n"
+            "- [ ] Docs {needs #zzzz}\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all",
+                               "children": ["002-add-ui", "003-add-api", "004-add-schema", "005-docs"]})
+        self.assertEqual(self.child("002-add-ui")["depends_on"], ["003-add-api", "004-add-schema"])
+        self.assertEqual(self.child("003-add-api")["depends_on"], ["004-add-schema"])
+        self.assertEqual(self.child("004-add-schema")["depends_on"], [])
+        self.assertEqual(self.child("005-docs")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Add UI {needs #api1 #sch2} → 002-add-ui\n"
+                         "- [x] Add API {#api1} {needs #sch2} → 003-add-api\n- [x] Add schema {#sch2} → 004-add-schema\n"
+                         "- [x] Docs {needs #zzzz} → 005-docs\n")
+
+    def test_runall_start_leaves_items_waiting_on_outside_job_open(self):
+        self.root.mkdir(parents=True)
+        outside = board.cmd_new(self.root, "Outside")  # 001-outside, stage spec
+        finished = board.cmd_new(self.root, "Finished")  # 002-finished
+        board.cmd_set(self.root, finished, ["stage=done"])
+        backlog = (f"# Backlog\n- [x] Outside {{#out1}} → {outside}\n- [x] Finished {{#fin2}} → {finished}\n"
+                   "- [ ] Blocked {#blk3} {needs #out1}\n- [ ] Chained {needs #blk3}\n- [ ] Free {needs #fin2}\n")
+        (self.root / "backlog.md").write_text(backlog)
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "003-run-all", "children": ["004-free"]})
+        self.assertEqual(self.child("004-free")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         f"# Backlog\n- [x] Outside {{#out1}} → {outside}\n- [x] Finished {{#fin2}} → {finished}\n"
+                         "- [ ] Blocked {#blk3} {needs #out1}\n- [ ] Chained {needs #blk3}\n"
+                         "- [x] Free {needs #fin2} → 004-free\n")
+        # every open item held back: no parent
+        jobs = len(self.jobs())
+        self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+        self.assertEqual(len(self.jobs()), jobs)
+
+    def test_ready_holds_dependent_runall_child(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Second {needs #aaaa}\n- [ ] First {#aaaa}\n")
+        out = board.cmd_runall_start(self.root)
+        parent, (second, first) = out["id"], out["children"]
+        self.spec(second, "src/second.py")
+        self.spec(first, "src/first.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [first])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, first, ["stage=review"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, first, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [second])
+
     def runall(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {chr(97 + i)}\n" for i in range(n)))
@@ -968,7 +1019,7 @@ class BoardTest(unittest.TestCase):
                                       {"item": "Check iPhone layout", "reason": "needs a device"}],
                            "estimate": [{"item": "Dark mode", "points": 2, "why": "one toggle"}]})
         res = board.cmd_triage_apply(self.root, tid)
-        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 2, "estimated": 1, "skipped": 0})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 2, "estimated": 1, "depends": 0, "skipped": 0})
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] Check Safari login (from 004-auth) <!-- manual check: needs a real Safari -->\n"
                          "- [x] Check iPhone layout <!-- manual check: needs a device -->\n"
@@ -987,7 +1038,7 @@ class BoardTest(unittest.TestCase):
                        {"item": "Alpha", "reason": "r"}, {"item": "Gamma", "reason": "device only"}],
             "estimate": [{"item": "Gamma", "points": 3, "why": "w"}]})
         res = board.cmd_triage_apply(self.root, tid)
-        self.assertEqual(res, {"merged": 0, "retired": 1, "manual": 1, "estimated": 0, "skipped": 5})
+        self.assertEqual(res, {"merged": 0, "retired": 1, "manual": 1, "estimated": 0, "depends": 0, "skipped": 5})
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] Alpha <!-- retired: done in 009-a -->\n- [ ] Beta\n"
                          "- [x] Gamma <!-- manual check: device only -->\n")
