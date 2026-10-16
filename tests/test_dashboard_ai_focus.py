@@ -53,7 +53,8 @@ const enc = encodeURIComponent, STALE = "stale", runs = {};
 const focusLog = [];
 const pending = [];
 const deferred = () => { let res, rej; const p = new Promise((a, b) => { res = a; rej = b; }); pending.push({res, rej}); return p; };
-const getJson = () => deferred(), post = () => deferred();
+const urls = [];  // every getJson url, in order
+const getJson = url => { urls.push(url); return deferred(); }, post = () => deferred();
 const tick = () => new Promise(r => setTimeout(r, 0));
 const frame = () => { const a = doc.activeElement; if (a && a !== body && (a.hidden || a.disabled)) doc.activeElement = body; };
 const click = async (target) => { doc.activeElement = target; for (const f of $("aiList").listeners.click || []) f({target}); };

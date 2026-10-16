@@ -31,6 +31,14 @@ const state = () => ({open: dlg.open, editing: !!$("aiEdit").isConnected, error:
 const EDIT = {id: ID, name: "alpha", scope: "user", path: "~/a", content: "x", editable: true, version: 1, category: "skills"};
 const JSONITEM = {...EDIT, content: '{"a": 1}', category: "settings"};
 const openItem = async it => { dlg.open = true; renderAi(); click(listBtn("button[data-id]")); pending.shift().res({...it}); await tick(); frame(); };
+// A category button click, and a scope pick (a <select> has its new value when `change` fires).
+const cat = key => { const b = {dataset: {cat: key}}; for (const f of $("aiCats").listeners.click) f({target: {closest: s => s === "button[data-cat]" ? b : null}}); };
+const pick = sid => { $("aiScope").value = sid; for (const f of $("aiScope").listeners.change) f({target: $("aiScope")}); };
+const scopeUrls = () => urls.filter(u => u.startsWith("api/ai-settings?scope="));
+const DATA = () => ({categories: [{key: "skills", label: "Skills", count: 2, items: ITEMS}, {key: "agents", label: "Agents", count: 0, items: []}]});
+// Loads scope sid as on screen, then opens it on Skills with no request left pending.
+const loadScope = async sid => { $("aiScope").value = sid; aiLoadScope(); pending.shift().res(DATA()); await tick(); aiCat = "skills"; pending.length = 0; urls.length = 0; };
+const openFresh = async it => { await loadScope("global"); await openItem(it); urls.length = 0; };
 """
 
 WARN = "Unsaved changes. Press again to discard."
@@ -152,6 +160,89 @@ console.log(JSON.stringify(out));
 """)
         for k in ["409", "400", "network"]:
             self.assertEqual(got[k], {"open": True, "editing": True, "error": WARN, "text": "dirty"}, k)
+
+    def test_category_click_with_unsaved_changes_warns_then_switches(self):
+        got = run("""
+const out = {};
+for (const key of ["agents", "skills", "security", "audit"]) {
+  await openFresh(EDIT); type("x edited");
+  cat(key); const first = {...state(), cat: aiCat};
+  cat(key); out[key] = {first, second: {editing: !!$("aiEdit").isConnected, cat: aiCat, error: $("aiError").textContent}};
+}
+console.log(JSON.stringify(out));
+""")
+        for key in ["agents", "skills", "security", "audit"]:
+            self.assertEqual(got[key]["first"], {"open": True, "editing": True, "error": WARN, "text": "x edited", "cat": "skills"}, key)
+            self.assertEqual(got[key]["second"], {"editing": False, "cat": key, "error": ""}, key)
+
+    def test_scope_change_with_unsaved_changes_warns_then_loads(self):
+        got = run("""
+const out = {};
+await openFresh(EDIT); type("x edited");
+pick("project:/tmp/p"); out.first = {...state(), scope: $("aiScope").value, urls: scopeUrls()};
+pick("project:/tmp/p"); out.second = {editing: !!$("aiEdit").isConnected, scope: $("aiScope").value, urls: scopeUrls(), error: $("aiError").textContent};
+pending.shift().res(DATA()); await tick(); out.loaded = {editing: !!$("aiEdit").isConnected, list: !!listBtn("button[data-id]")};
+console.log(JSON.stringify(out));
+""")
+        self.assertEqual(got["first"], {"open": True, "editing": True, "error": WARN, "text": "x edited", "scope": "global", "urls": []})
+        self.assertEqual(got["second"], {"editing": False, "scope": "project:/tmp/p", "urls": ["api/ai-settings?scope=project%3A%2Ftmp%2Fp"], "error": ""})
+        self.assertEqual(got["loaded"], {"editing": False, "list": True})
+
+    def test_category_and_scope_share_leave_guard(self):
+        got = run("""
+const out = {};
+const left = how => how === "back" ? !$("aiEdit").isConnected : !dlg.open;
+for (const how of EXITS) {
+  await openFresh(EDIT); type("dirty"); cat("agents"); leave(how); out[`cat>${how}`] = left(how);
+  await openFresh(EDIT); type("dirty"); pick("p"); leave(how); out[`scope>${how}`] = left(how);
+}
+for (const how of ["back", "escape"]) {
+  await openFresh(EDIT); type("dirty"); leave(how); cat("agents"); out[`${how}>cat`] = [!$("aiEdit").isConnected, aiCat];
+  await openFresh(EDIT); type("dirty"); leave(how); pick("p"); out[`${how}>scope`] = [!$("aiEdit").isConnected, scopeUrls()];
+}
+await openFresh(EDIT); type("dirty"); cat("agents"); type("dirtier"); out.rearmCat = [$("aiError").textContent];
+cat("agents"); out.rearmCat.push({...state(), cat: aiCat});
+await openFresh(EDIT); type("dirty"); pick("p"); type("dirtier"); out.rearmScope = [$("aiError").textContent];
+pick("p"); out.rearmScope.push({...state(), scope: $("aiScope").value, urls: scopeUrls()});
+console.log(JSON.stringify(out));
+""")
+        for how in ["back", "x", "backdrop", "escape"]:
+            self.assertEqual(got[f"cat>{how}"], True, how)
+            self.assertEqual(got[f"scope>{how}"], True, how)
+        for how in ["back", "escape"]:
+            self.assertEqual(got[f"{how}>cat"], [True, "agents"], how)
+            self.assertEqual(got[f"{how}>scope"], [True, ["api/ai-settings?scope=p"]], how)
+        self.assertEqual(got["rearmCat"], ["", {"open": True, "editing": True, "error": WARN, "text": "dirtier", "cat": "skills"}])
+        self.assertEqual(got["rearmScope"], ["", {"open": True, "editing": True, "error": WARN, "text": "dirtier", "scope": "global", "urls": []}])
+
+    def test_clean_editor_category_and_scope_switch_without_warning(self):
+        got = run("""
+const out = {};
+for (const how of ["cat", "scope"]) {
+  const r = out[how] = {};
+  const check = name => {
+    urls.length = 0;
+    if (how === "cat") { cat("agents"); r[name] = [!$("aiEdit").isConnected, aiCat, $("aiError").textContent]; }
+    else { pick("p"); r[name] = [!$("aiEdit").isConnected, scopeUrls(), $("aiError").textContent]; }
+  };
+  // the list, Security and Audit views (with a stale editable aiItem left from a dirty editor that was discarded)
+  await openFresh(EDIT); type("dirty"); back(); back();
+  renderAi(); $("aiError").textContent = ""; check("list");
+  await loadScope("global"); aiCat = "security"; aiFindings = []; renderAi(); check("security");
+  await loadScope("global"); aiCat = "audit"; aiAudit = {rows: auditRows()}; renderAi(); check("audit");
+  await openFresh(ITEM); check("readOnly");
+  await openFresh(EDIT); check("untouched");
+  await openFresh(EDIT); type("xy"); type("x"); check("typedBack");
+  await openFresh(EDIT); type("saved"); submit(); pending.shift().res({...EDIT, content: "saved", version: 2}); await tick();
+  $("aiError").textContent = ""; check("afterSave");
+  await openFresh(EDIT); type("saved"); submit(); pending.shift().res({...EDIT, content: "saved", version: 2}); await tick();
+  click($("aiUndo")); pending.shift().res({...EDIT, version: 3}); await tick(); check("afterUndo");
+}
+console.log(JSON.stringify(out));
+""")
+        names = ["list", "security", "audit", "readOnly", "untouched", "typedBack", "afterSave", "afterUndo"]
+        self.assertEqual(got["cat"], {k: [True, "agents", ""] for k in names})
+        self.assertEqual(got["scope"], {k: [True, ["api/ai-settings?scope=p"], ""] for k in names})
 
 
 if __name__ == "__main__":
