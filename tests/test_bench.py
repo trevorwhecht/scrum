@@ -154,6 +154,23 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(bench.check_edit(FIX, work), (True, ''))
             self.assertEqual((work / 'test_calc.py').read_bytes(), test_before)
 
+    def test_edit_fails_when_generated_code_rewrites_fixture(self):
+        hostile = {
+            'rewrite': "import pathlib\npathlib.Path(__file__).with_name('test_calc.py').write_text("
+                       "'import unittest\\n\\n\\nclass T(unittest.TestCase):\\n    def test_ok(self):\\n        pass\\n')\n"
+                       "def add(a, b):\n    return a + b\n",
+            'delete': "import pathlib\npathlib.Path(__file__).with_name('test_calc.py').unlink()\n"
+                      "def add(a, b):\n    return a + b\n",
+            'rewrite and fail': "import pathlib\npathlib.Path(__file__).with_name('test_calc.py').write_text('x = 1\\n')\n"
+                                "def add(a, b):\n    return 0\n",
+        }
+        for name, content in hostile.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                bench.setup_edit(work)
+                self.assertEqual(bench.check_edit(json.dumps({'path': 'calc.py', 'content': content}), work),
+                                 (False, 'test_calc.py changed'))
+
 
 class ReadmeTests(unittest.TestCase):
     def test_readme_has_benchmark_and_recovery(self):
@@ -161,6 +178,18 @@ class ReadmeTests(unittest.TestCase):
         for needle in ('## Benchmark', 'python3 local/bench.py', '## Recovery', 'SCRUM_ROUTE=cloud', 'ollama stop',
                        '.agents/skills/trevskills-scrum'):
             self.assertIn(needle, text)
+
+    def test_scope_paragraph_sits_in_switch_the_dashboard(self):
+        text = (ROOT / 'local/README.md').read_text()
+        scope = 'Scope: model inference is local.'
+        self.assertEqual(text.count(scope), 1)
+        switch, bench_at, recovery = (text.index(h) for h in ('## Switch the dashboard', '## Benchmark', '## Recovery'))
+        self.assertLess(switch, text.index(scope))
+        self.assertLess(text.index(scope), bench_at)
+        self.assertLess(text.index(scope), recovery)
+        self.assertLess(recovery, text.index('.agents/skills/trevskills-scrum'))
+        edit = text[text.index('- **edit**', bench_at):recovery]
+        self.assertIn('unchanged after the test run', edit)
 
 
 if __name__ == '__main__':
