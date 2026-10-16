@@ -969,6 +969,110 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(code, 403)
             run.assert_not_called(); popen.assert_not_called()
 
+    # --- Ask Claude ---
+    def ask(self, job_id, ghostty, headers=None, result=None):
+        real = os.path.isdir
+        isdir = lambda p: ghostty if p == "/Applications/Ghostty.app" else real(p)
+        with mock.patch.object(self.serve.os.path, "isdir", side_effect=isdir), \
+                mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            run.return_value = result or mock.Mock(returncode=0, stdout="", stderr="")
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/ask", {}, headers)
+        return code, out, run, popen
+
+    def test_ask_opens_ghostty_in_worktree(self):
+        wt = Path(self.tmp.name) / "wt-ask-ghostty"
+        wt.mkdir(exist_ok=True)
+        job_id = self.job("ask ghostty")
+        self.patch_board(job_id, worktree=str(wt))
+        code, out, run, popen = self.ask(job_id, ghostty=True)
+        self.assertEqual((code, out), (200, {"id": job_id, "message": "Claude opened in Ghostty."}))
+        run.assert_called_once(); popen.assert_not_called()
+        prompt = run.call_args.args[0][-1]
+        self.assertTrue(prompt.startswith(f"Answer my questions about scrum job {job_id}."))
+        self.assertEqual(run.call_args.args[0], ["open", "-na", "Ghostty", "--args", f"--working-directory={wt}", "-e", "env",
+                                                 "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, prompt])
+
+    def test_ask_falls_back_to_terminal(self):
+        wt = Path(self.tmp.name) / "wt-ask-terminal"
+        wt.mkdir(exist_ok=True)
+        job_id = self.job("ask terminal")
+        self.patch_board(job_id, worktree=str(wt))
+        code, out, run, _ = self.ask(job_id, ghostty=False)
+        self.assertEqual((code, out), (200, {"id": job_id, "message": "Claude opened in a new Terminal window."}))
+        run.assert_called_once()
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        self.assertEqual(argv[3], str(wt))
+        self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE])
+        self.assertEqual(len(argv), 8)
+        self.assertIn(f"scrum job {job_id}", argv[7])
+
+    def test_ask_uses_repo_root_when_worktree_missing(self):
+        gone = self.job("ask gone worktree")
+        self.patch_board(gone, worktree="/nonexistent/path", stage="done")
+        none = self.job("ask no worktree")
+        for job_id in (gone, none):
+            code, out, run, _ = self.ask(job_id, ghostty=True)
+            self.assertEqual(code, 200, job_id)
+            repo = os.path.realpath(self.root.parent)  # the registry holds the resolved path
+            self.assertEqual(run.call_args.args[0][4], f"--working-directory={repo}")
+            code, out, run, _ = self.ask(job_id, ghostty=False)
+            self.assertEqual(code, 200, job_id)
+            self.assertEqual(run.call_args.args[0][3], repo)
+
+    def test_ask_prompt_lists_existing_artifacts(self):
+        job_id = self.job("ask artifacts")
+        d = self.root / "jobs" / job_id
+        for rel in ("feature.md", "round-2/check.md", "round-1/review-code.md", "round-1/check.md", "decision.md",
+                    "round-10/check.md"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text("x")
+        _, _, run, _ = self.ask(job_id, ghostty=True)
+        prompt = run.call_args.args[0][-1]
+        root = os.path.realpath(self.root)  # the registry holds the resolved path
+        self.assertEqual(prompt, f"Answer my questions about scrum job {job_id}. Its session has ended. Read these first:\n"
+                         f"{root}/jobs/{job_id}/feature.md\n"
+                         f"{root}/jobs/{job_id}/round-1/check.md\n"
+                         f"{root}/jobs/{job_id}/round-1/review-code.md\n"
+                         f"{root}/jobs/{job_id}/round-2/check.md\n"
+                         f"{root}/jobs/{job_id}/round-10/check.md\n"
+                         f"{root}/jobs/{job_id}/decision.md\n"
+                         f'Its board entry is the object with "id": "{job_id}" in {root}/board.json. '
+                         "Don't change any file unless I ask.")
+        self.assertNotIn("spec.md", prompt)
+        self.assertNotIn("build.md", prompt)
+
+    def test_ask_rejects_unknown_and_bad_id(self):
+        for bad, want in (("999-missing", 404), ("..%2F..%2Fx", 400), ("BAD", 400)):
+            code, _, run, popen = self.ask(bad, ghostty=True)
+            self.assertEqual(code, want, bad)
+            run.assert_not_called(); popen.assert_not_called()
+        with mock.patch.object(self.serve.subprocess, "run") as run:
+            self.assertEqual(self.serve.ask_claude("repo", self.root, "999-missing"), (404, {"error": "no such job"}))
+            run.assert_not_called()
+
+    def test_ask_launcher_failure_returns_500(self):
+        job_id = self.job("ask fails")
+        fail = mock.Mock(returncode=1, stdout="", stderr="first line\nUnable to find application named 'Ghostty'\n")
+        code, _, run, _ = self.ask(job_id, ghostty=True, result=fail)
+        self.assertEqual(code, 500)
+        run.assert_called_once()
+        with mock.patch.object(self.serve.os.path, "isdir", return_value=True), \
+                mock.patch.object(self.serve.subprocess, "run", return_value=fail):
+            self.assertEqual(self.serve.ask_claude("repo", self.root, job_id),
+                             (500, {"error": "Unable to find application named 'Ghostty'"}))
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=OSError("no osascript")):
+            code, out = self.serve.ask_claude("repo", self.root, job_id)
+        self.assertEqual(code, 500)
+        self.assertIn("no osascript", out["error"])
+
+    def test_ask_rejects_foreign_origin(self):
+        job_id = self.job("ask origin")
+        for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}):
+            code, _, run, popen = self.ask(job_id, True, headers)
+            self.assertEqual(code, 403)
+            run.assert_not_called(); popen.assert_not_called()
+
     def activity_of(self, job_id):
         code, data = self.req("GET", "/p/repo/board.json")
         self.assertEqual(code, 200)

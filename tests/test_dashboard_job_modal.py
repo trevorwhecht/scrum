@@ -80,6 +80,34 @@ class JobModal(unittest.TestCase):
         submit = text[text.index('$("actions").addEventListener("submit"'):]
         self.assertIn('act === "resume" || act === "pause" || act === "setup-done" ? {}', submit)
 
+    def test_ask_button_in_every_modal_branch(self):
+        text = DASHBOARD.read_text()
+        body = text[text.index("function renderActions(job)"):text.index('$("actions").addEventListener("submit"')]
+        branches = re.findall(r"el\.innerHTML = (.*?)(?:;\n|;$)", body, re.S)
+        self.assertEqual(len(branches), 3)  # run alive, not needs-human, needs-human
+        for branch in branches:
+            self.assertIn("askForm(job)", branch)
+        submit = text[text.index('$("actions").addEventListener("submit"'):]
+        self.assertIn('if (act === "ask") return askClaude(key);', submit)
+        self.assertIn('post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/ask`, {})', text)
+        self.assertIn("if (!askState[job.key]?.pending) delete askState[job.key];", text[text.index("function open(job)"):])
+        form = text[text.index("const askState = "):text.index("const redrawAsk = ")]
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
+        def ask(state):
+            script = f"{esc}\n{form}\naskState.k = {json.dumps(state)};\nconsole.log(JSON.stringify(askForm({{key: 'k'}})));"
+            return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        idle = ask({})
+        self.assertTrue(idle.startswith('<form data-act="ask"><button class="btn" type="submit" data-agent-hint="'), idle)
+        self.assertTrue(idle.endswith('">Ask Claude</button></form>'), idle)
+        self.assertIn(" disabled>Ask Claude</button>", ask({"pending": True}))
+        self.assertTrue(ask({"msg": "Claude opened in Ghostty."}).endswith(
+            '</button><span class="note" role="status">Claude opened in Ghostty.</span></form>'))
+        self.assertTrue(ask({"err": "no <Ghostty>"}).endswith(
+            '</button><span class="error" role="alert">no &lt;Ghostty&gt;</span></form>'))
+
     def test_stale_uses_newest_activity(self):
         # 2026-01-01T00:00:00Z is 1767225600 s
         self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: {at: 1767229200}})'), 1767229200000)
