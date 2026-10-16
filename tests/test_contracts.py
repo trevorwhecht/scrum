@@ -1478,6 +1478,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertRegex(cloud, r'--cloud "First run: bash ~/scrum/cloud/setup\.sh .*/trevskills-scrum cloud-job \$ID \$FEAT"')
         self.assertNotRegex(cloud, r"--cloud +(-|\"\$)")  # no flag or "${E[@]}" between --cloud and its prompt
 
+    def test_skill_cloud_lane_inlines_digest_proposals(self):
+        # jobs/ and digests/ stay on the Mac, so Dispatch inlines a pre-written spec and every digest proposal the item
+        # points at into feature.md before the session reads it.
+        cloud = self.h2((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Cloud lane")
+        for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", '$F/jobs/$ID/spec.md',
+                       "$F/digests/<NNN>/proposals.json", "--digest-skill-check", "not found in proposals.json",
+                       "B set $ID stage=needs-human reason='digest proposal <NNN> <PID> not found in proposals.json."):
+            self.assertIn(phrase, cloud, phrase)
+        feat = cloud.index('FEAT=$(cat')
+        for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", "not found in proposals.json"):
+            self.assertLess(cloud.index(phrase), feat, phrase)
+
     def test_skill_cloud_artifacts_come_home(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cloud = self.h2(text, "## Cloud lane")

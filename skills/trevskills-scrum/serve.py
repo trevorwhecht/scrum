@@ -1606,6 +1606,42 @@ def editable_path(target):
     return None
 
 
+def fence(text: str) -> str:
+    """text between two backtick fences longer than its longest backtick run, so it reads back byte for byte."""
+    tick = "`" * max(3, 1 + max(map(len, re.findall(r"`+", text)), default=0))
+    return f"{tick}\n{text}\n{tick}"
+
+
+def digest_item_spec(digest_id: str, prop: dict, rel: str) -> str:
+    """The pre-written spec.md for a queued proposal: self-contained (no local path), so a cloud session can build it."""
+    why = prop["why"].strip()
+    if prop["kind"] == "skill":
+        return (f"# Create digest {digest_id} {prop['id']} skill at {rel}\nUI surface: no\nHard stops: none\nLane: standard\n\n"
+                f"## Problem\nDigest {digest_id} proposal {prop['id']} (approved by Trevor) adds a new skill at `{rel}`. Why:\n\n"
+                f"{why}\n\n## Scope\nIn:\n- Create `{rel}` with the new content below.\n\nOut:\n- Any other file.\n\n"
+                f"New content:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
+                f"1. create `{rel}` with exactly the new content (the fenced block above, byte for byte); "
+                f"if `{rel}` already exists, the job is obsolete: change nothing and say so in build.md. "
+                f"(verify: compare the file to the fenced block)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
+                f"- The content is the digest proposal as approved; do not reword it.\n")
+    return (f"# Apply digest {digest_id} {prop['id']} to {rel}\nUI surface: no\nHard stops: none\nLane: fast\n\n"
+            f"## Problem\nDigest {digest_id} proposal {prop['id']} (approved by Trevor) changes `{rel}`. Why:\n\n{why}\n\n"
+            f"## Scope\nIn:\n- `{rel}`: swap the old text below for the new text, once.\n\nOut:\n- Any other change.\n\n"
+            f"Old text:\n{fence(prop['old'])}\n\nNew text:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
+            f"1. replace the one occurrence of the old text in `{rel}` with the new text (the fenced blocks above, byte for byte); "
+            f"if the old text does not occur exactly once, the job is obsolete: change nothing and say so in build.md. "
+            f"(verify: diff `{rel}`)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
+            f"- The old and new text are the digest proposal as approved; do not reword them.\n")
+
+
+def queue_digest_item(scrum, text, spec):
+    """Add a backlog item with its pre-written spec, written first so a concurrent `B next` never claims it without one."""
+    path = board.spec_path(scrum, board.clean(text, board.ITEM_MAX))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(spec, encoding="utf-8")
+    board.backlog_op(scrum, "add", text=text)
+
+
 def digest_decide(root, digest_id, pid, decision):
     """Approve or reject one pending proposal. The last decision in a digest trims its job folders."""
     if decision not in ("approve", "reject"):
@@ -1626,14 +1662,14 @@ def digest_decide(root, digest_id, pid, decision):
                 return 403, {"error": "target is not editable"}
             if os.path.lexists(prop["target"]):
                 return 409, {"error": "skill already exists"}
-            check = f"python3 ~/.claude/skills/trevskills-scrum/serve.py --digest-skill-check {digest_id} {pid} --dir {root}"
-            board.backlog_op(repo_of(prop["target"])[0] / "scrum", "add", text=f"Create digest {digest_id} {pid} skill at {rel}: "
-                             f"first run `{check}`; if it exits non-zero the item is obsolete. See {path}")
+            queue_digest_item(repo_of(prop["target"])[0] / "scrum", f"Create digest {digest_id} {pid} skill at {rel}: {prop['why']}",
+                              digest_item_spec(digest_id, prop, rel))
             status = "queued"
         elif digest_denied(prop["target"]):
             return 403, {"error": "target is not editable"}
         elif repo := repo_of(prop["target"]):
-            board.backlog_op(repo[0] / "scrum", "add", text=f"Apply digest {digest_id} {pid} to {repo[1]}: see {path}")
+            queue_digest_item(repo[0] / "scrum", f"Apply digest {digest_id} {pid} to {repo[1]}: {prop['why']}",
+                              digest_item_spec(digest_id, prop, repo[1]))
             status = "queued"
         else:
             target = editable_path(prop["target"]) if os.path.isabs(prop["target"]) else None
