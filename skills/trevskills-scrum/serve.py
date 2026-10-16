@@ -13,8 +13,8 @@ origin or a localhost origin; a cross-site page can't send that without a CORS p
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
 and a change to what runs (a hook or plugin entry, an MCP server's command/args/type/url, a settings file's
-permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport) only with confirm. The Audit tab's Disable/Enable also flips
-skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for
+permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport) only with confirm.
+The Audit tab's Disable/Enable also flips skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for
 project/local rows and whenever a project settings file decides the key; it refuses keys managed settings pin, and
 rolls the file back (409) if the effective value didn't change. Every write is backed up to
 <CLAUDE_HOME>/backups/ai-settings/ first.
