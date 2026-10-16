@@ -107,6 +107,8 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing. Th
 
    `- Base branch: <branch>` is an optional line Trevor adds by hand to make every job target `<branch>` instead of `origin/HEAD` (see **New job** step 2). First-run setup never writes it.
 
+   `- E2E: <command>` is another optional line Trevor adds by hand: an end-to-end test command the **Check gate** runs when the diff touches `UI globs`, and the BigBoy reviewer runs on main. First-run setup never writes it either.
+
 5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
 ## Commands
@@ -132,7 +134,7 @@ For `approve` and `rework`, load the job from `$F/board.json`: `WT` is its `work
   3. What his note would actually do: change code (rework), give the go-ahead (approve), or neither.
 
   Discuss until you agree. Spawn nothing, edit nothing and run no command until Trevor picks one. Then carry it out in this session exactly as that command: `approve <id>`, or `rework <id> "<the agreed feedback, written so the builder can act on it>"`. If he picks neither, stop.
-- **`/trevskills-scrum resume <id>`**: the dashboard's Resume button starts it headless for a job `B watchdog` flagged, and its Play button for a job Trevor paused. The job must be `needs-human` with a reason starting `stalled in <stage>`; otherwise **refuse** and stop. Load it like `approve` (`WT`, `BASE`, `DEFAULT`, `N`), run `B set <id> stage=<stage> reason=` (first: a paused job refuses every other write), **record your terminal** with `ID=<id>`, and re-enter the pipeline at that stage: `spec`: **New job** from step 3; `plan`: delete `$F/jobs/<id>/plan.md` if present and run **BigBoy lane** from step 1; `merging`: **Merge** from step 1; `build`: resume the builder (see **Resuming the builder**) with `Your session was interrupted: finish the work, commit, update build.md.`, then **Check gate**; `check`: **Check gate** from step 2 (step 1 already set the round); `review`: run `B sync <id>`, spawn (as **Review** step 3) only the reviewers named in its `missing`, then continue at **Review** step 4 (a `lane=fast` job spawns only `scrum-review-code`, when `review-code.md` is missing, and continues as **Fast lane** step 2 does after its spawn); `approve`: **Approve** step 1. From there the job runs to the end as a `start` session would, including **BigBoy lane** chaining for a child.
+- **`/trevskills-scrum resume <id>`**: the dashboard's Resume button starts it headless for a job `B watchdog` flagged, and its Play button for a job Trevor paused. The job must be `needs-human` with a reason starting `stalled in <stage>`; otherwise **refuse** and stop. Load it like `approve` (`WT`, `BASE`, `DEFAULT`, `N`), run `B set <id> stage=<stage> reason=` (first: a paused job refuses every other write), **record your terminal** with `ID=<id>`, and re-enter the pipeline at that stage: `spec`: **New job** from step 3; `plan`: delete `$F/jobs/<id>/plan.md` if present and run **BigBoy lane** from step 1; `merging`: **Merge** from step 1; `build`: resume the builder (see **Resuming the builder**) with `Your session was interrupted: finish the work, commit, update build.md.`, then **Check gate**; `check`: **Check gate** from step 2 (step 1 already set the round); `review`: run `B sync <id>`, spawn (as **Review** step 3) only the reviewers named in its `missing` (the skip and carried-forward files of **Review** step 2 are written before any spawn, so `missing` never names them; a resumed session can't tell how the round started, so it writes no new carried-forward file and spawns them on the full diff), then continue at **Review** step 4 (a `lane=fast` job spawns only `scrum-review-code`, when `review-code.md` is missing, and continues as **Fast lane** step 2 does after its spawn); `approve`: **Approve** step 1. From there the job runs to the end as a `start` session would, including **BigBoy lane** chaining for a child.
 - **`/trevskills-scrum digest`**: run **Digest**. The dashboard's Digest now button starts it headless.
 - **`/trevskills-scrum run-all`**: run **Run all**: triage, then schedule every open item in parallel where files don't overlap. The dashboard's Run all button opens it in a new Terminal window.
 
@@ -168,6 +170,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
    PROJECT=$F/project.md
    Write spec.md for this job.
    ```
+   **Model:** pass the Agent tool override `model: "sonnet"` to every cloud `scrum-spec-writer` spawn of this step (first spawn, respawn, cloud retry and the `Refresh spec.md:` spawn) when `feature.md` already has either a `## Acceptance criteria` or `## Done when` heading followed, before the next `## ` heading, by at least one line starting `- `, or a `## Q&A` heading. Otherwise omit the override so the agent's default, Opus, runs.
    If `spec.md` is missing afterwards, spawn it once more. If it's still missing, set `stage=needs-human reason="spec writer produced nothing. Fix: click Abort job with Put back in backlog ticked, then run it again."` and stop. After each spawn, record it: `B set $ID specwriter=<id>` for a cloud spawn (the returned agent id), or `B set $ID specwriter=local` when **Routing** ran it locally. When the cloud retry replaces a local run, record the cloud agent's id instead.
    3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
    3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard|debug|bigboy>`. Set `lane=debug` when it says exactly `Lane: debug`, whatever the `Hard stops:` and `UI surface:` lines say. Set `lane=bigboy` when it says exactly `Lane: bigboy`, whatever the other header lines say; the job then goes to the **BigBoy lane** and gets no worktree (skip steps 4-6). A BigBoy child (the job has a `parent`) never gets `bigboy`: for it, `Lane: bigboy` counts as `standard`. Set `fast` only when it says exactly `Lane: fast`, the `Hard stops:` line is `none`, and the `UI surface:` line is `no`. Set `standard` in every other case: the line is missing or malformed, or it says `fast` but `Hard stops:` is anything but `none` or `UI surface:` is `yes`.
@@ -350,7 +353,7 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
 If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review). If the job's `lane` is `debug`, step 2 adds the debug checks and step 4 ends differently.
 
 1. `N = round + 1` (round as stored on the board). Run `mkdir -p $F/jobs/$ID/round-$N`, then `B set $ID round=$N stage=check`.
-2. In `$WT`, run each of Test / Typecheck / Lint / Build from `project.md` that isn't `none`. Also run `git -C "$WT" diff --name-only "$BASE"...HEAD | grep -E '(^|/)\.env'`; any output is a failure ("committed .env file").
+2. In `$WT`, run each of Test / Typecheck / Lint / Build from `project.md` that isn't `none`. When `project.md` has an `E2E:` line that isn't `none` and any file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches `UI globs`, also run that E2E command in `$WT`; it is reported like the others, and a non-zero exit is `CHECK: FAIL`. Also run `git -C "$WT" diff --name-only "$BASE"...HEAD | grep -E '(^|/)\.env'`; any output is a failure ("committed .env file").
    For `lane=debug`, also run these; each failure makes `CHECK: FAIL` and gets its own entry in check.md:
    - **Repro:** the `Repro:` command from `assessment.md`, in `$WT`. It must exit 0.
    - **Allowed files:** every path in `git -C "$WT" diff --name-only "$BASE"...HEAD` must be listed under `## Allowed files` or be the `Repro test:` path. Otherwise it fails with `outside allowed files: <path>`.
@@ -363,20 +366,49 @@ If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, 
 
 If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 
-1. Run `B set $ID stage=review`.
-2. **UI/UX skip (decided from the diff, never from the spec's `UI surface:` line).** If `project.md` has `UI globs` set to something other than `none`, and no file from `git -C "$WT" diff --name-only "$BASE"...HEAD` matches any of them (matching rules are in First-run setup), write `round-$N/review-ui.md` and `round-$N/review-ux.md` yourself, each containing exactly:
-   ```
-   VERDICT: PASS
-   Skipped by orchestrator: no UI files in diff.
-   ```
-   Then spawn only `scrum-review-security` and `scrum-review-code`. Otherwise (`UI globs` missing or `none`, or any file matches), spawn all four.
-3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code` (minus the two skipped in step 2). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.` Pass the Agent tool override `model: "sonnet"` to `scrum-review-security` only when no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Fast lane** sensitive-path regex, the **Merge** schema guard regex, or `(^|/)\.env`; re-check every round. Otherwise (a match, or the diff can't be read) omit the override so the agent's default, Opus, runs.
+1. Run `B set $ID stage=review`. Write `git -C "$WT" rev-parse HEAD` to `round-$N/head.txt` (the HEAD this round reviews).
+2. **Which reviewers run.** First decide incremental or full review, then apply the skips. Every file written here is written before any spawn.
+   - **Incremental re-review** (only on a round `N >= 2` that this session started through step 5's `CHANGES` route). `SINCE` is the content of `round-(N-1)/head.txt`. For each of `security`, `ux`, `ui`, `code`: when `round-(N-1)/review-<role>.md` starts `VERDICT: PASS`, spawn nothing for it and write `round-$N/review-<role>.md` yourself, containing exactly:
+     ```
+     VERDICT: PASS
+     Carried forward from round <N-1>: no blocking findings.
+     ```
+     When it starts `VERDICT: CHANGES`, that reviewer is spawned in step 3 with two extra prompt lines: `SINCE=<SINCE>` and `Re-review: verify each blocking finding in JOB_DIR/round-<N-1>/review-<role>.md against git diff SINCE..HEAD.` The skips and the Jev gate below are not applied on an incremental round.
+   - **Full review fallback.** Skip the incremental rule, and run every reviewer on the full diff with the normal skips below, when any of these holds: `round-(N-1)/head.txt` is missing or unreadable; any path in `git -C "$WT" diff --name-only <SINCE> HEAD` is not in `git -C "$WT" diff --name-only "$BASE"...<SINCE>` (the fix touched a file the earlier reviews never saw); or the round was started by the Approve `REWORK` route, by the Merge **Conflicts** step, or by a resumed session that can't tell how it started.
+   - **UI/UX skip (decided from the diff, never from the spec's `UI surface:` line).** If `project.md` has `UI globs` set to something other than `none`, and no file from `git -C "$WT" diff --name-only "$BASE"...HEAD` matches any of them (matching rules are in First-run setup), write `round-$N/review-ui.md` and `round-$N/review-ux.md` yourself, each containing exactly:
+     ```
+     VERDICT: PASS
+     Skipped by orchestrator: no UI files in diff.
+     ```
+     Otherwise (`UI globs` missing or `none`, or any file matches), ui and ux run.
+   - **Security skip.** When the diff can be read and no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Fast lane** sensitive-path regex, the **Merge** schema guard regex, `(^|/)\.env`, or the manifest regex `(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|go\.mod|Cargo\.toml)$`, write `round-$N/review-security.md` yourself, containing exactly:
+     ```
+     VERDICT: PASS
+     Skipped by orchestrator: no sensitive files in diff.
+     ```
+     Otherwise (a match, or the diff can't be read) security runs. Re-check every round.
+   - **Jev gate (additive only).** On a full-review round, only when at least one of the two skips above was taken and `~/.claude/scripts/jev-rank.py` exists, ask it about each skipped kind. The questions are `This diff needs a security review` and `This diff needs a UI review`. Run each with Bash timeout 90000:
+     ```bash
+     { git -C "$WT" diff --stat "$BASE"...HEAD | tail -1; git -C "$WT" diff --name-only "$BASE"...HEAD; } | tr '\n' ' ' | python3 ~/.claude/scripts/jev-rank.py "<question>" --top 1
+     ```
+     The score is the first tab-separated field of its output. A score `>= 0.7` deletes that skip file and the reviewer runs: security for the security question, both ui and ux for the UI question. A non-zero exit, a timeout, empty output or an unparseable score leaves the skips as they are. Jev never removes a reviewer, and is never consulted in the fast lane or for carried-forward reviewers.
+3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code`, minus every one whose `round-$N/review-*.md` step 2 wrote. Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`, and the two re-review lines from step 2 on an incremental round. No `model:` override is passed to any reviewer.
 4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`. If the board says `builder=local`, log `review-pass` or `review-changes` (see **Routing** step 5).
    - `complete` must be `true`. If it isn't, `missing` lists the absent files (e.g. `review-ui.md`): re-spawn only the reviewers named in `missing`, once. If a file is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
    - **Never resume the builder mid-round.**
 5. Route:
-   - `verdict` is `PASS`: go to **Approve**.
+   - `verdict` is `PASS` on a **clean round**: go straight to **Merge**. Spawn no approver; there is no decision.md. A clean round is one where every one of these holds:
+     - the job's `lane` is `standard`;
+     - `N` is 1;
+     - `round-1/check.md` is `CHECK: PASS`;
+     - all four `round-1/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count);
+     - no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Merge** schema guard regex, the **Fast lane** sensitive-path regex, or `(^|/)\.env`;
+     - the spec's `Hard stops:` line is exactly `none`;
+     - this session knows the round was not started by the Merge **Conflicts** step.
+
+     The PR uses the no-Merge-summary fallback in Merge step 3 (job title, spec acceptance criteria as bullets), and the body line `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` is replaced by `Clean round: check gate + reviews. Spec and reviews: scrum/jobs/$ID/`. The schema guard still runs unchanged. With no decision.md, the `Restart:` line counts as `none`.
+   - `verdict` is `PASS` otherwise, including when you can't tell whether a condition above holds: go to **Approve**.
    - `verdict` is `CHANGES` and `round < limit`: resume the builder with `Review round N has CHANGES: read every review-*.md in JOB_DIR/round-N/, fix blocking findings, commit, update build.md.` Run `B set $ID stage=build`, then go to **Check gate**.
    - `verdict` is `CHANGES` and `round >= limit`: go to **Approve**.
 
@@ -417,7 +449,7 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    - `OPEN`: reuse it.
    - `MERGED`: skip steps 4–6 and go to step 7 (Clean up), so the fast-forward and the live check still run.
    - `CLOSED`: run `stage=needs-human reason="The pull request was closed on GitHub. Fix: reopen it on GitHub, then click Approve & merge."` and stop.
-   - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. Write the body to that file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` (for a fast-lane job, the line in **Fast lane** step 3 instead), then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
+   - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. Write the body to that file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` (for a fast-lane job, the line in **Fast lane** step 3 instead; for a Clean round, the `Clean round:` line in **Review** step 5 instead), then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
 
    Then `B set $ID pr=<url>`.
 4. **Checks.** Run this in the **background**, because foreground `sleep` is blocked:
@@ -502,7 +534,7 @@ If the board's `builder` is `local`, re-run the local builder subprocess instead
 1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `B set $ID builder=<new id>`.
 
-Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for three sanctioned review files: the UI/UX skip files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
+Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for these sanctioned review files: the UI/UX skip files and the security skip file in **Review** step 2, the `Carried forward from round` files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
 
 ## Digest
 
