@@ -1,6 +1,7 @@
 import hashlib, io, json, subprocess, sys, tempfile, unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
@@ -142,7 +143,7 @@ class BacklogTest(unittest.TestCase):
              "estimate": [{"item": "Dark mode", "points": 3, "why": "one toggle and a CSS variable set"}]})
         self.assertEqual(out, {"id": "001", "open": 5})
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 0, "estimated": 1, "skipped": 0})
+        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 0, "estimated": 1, "depends": 0, "skipped": 0})
         self.assertEqual(self.text(),
             "# Backlog\n"
             "- [x] Old thing → 001-old-thing\n"
@@ -168,6 +169,8 @@ class BacklogTest(unittest.TestCase):
             "None.\n"
             "\n## Estimated\n"
             "- [3] Dark mode — one toggle and a CSS variable set\n"
+            "\n## Depends\n"
+            "None.\n"
             "\n## Skipped\n"
             "None.\n")
 
@@ -183,7 +186,7 @@ class BacklogTest(unittest.TestCase):
                          {"item": "Delta", "points": 5, "why": "overwrite attempt"},
                          {"item": "Alpha", "points": 1, "why": "consumed"}]})
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 1, "retired": 0, "manual": 0, "estimated": 0, "skipped": 7})
+        self.assertEqual(res, {"merged": 1, "retired": 0, "manual": 0, "estimated": 0, "depends": 0, "skipped": 7})
         self.assertEqual(self.text(),
             "# Backlog\n- [ ] Alpha and Beta (merged: A, B) <!-- w -->\n- [x] Alpha <!-- merged into triage 001 -->\n"
             "- [x] Beta <!-- merged into triage 001 -->\n- [ ] Gamma\n- [ ] [2] Delta <!-- set by Trevor -->\n"
@@ -200,7 +203,7 @@ class BacklogTest(unittest.TestCase):
 
     def test_triage_bad_plan_leaves_backlog_untouched(self):
         before = self.text()
-        for plan in ("not json {", "[1, 2]", None):
+        for plan in ("not json {", "[1, 2]", '{"depends": {"item": "Dark mode"}}', None):
             out = board.cmd_triage_start(self.root)
             if plan is not None:
                 (self.root / "triage" / out["id"] / "plan.json").write_text(plan)
@@ -212,6 +215,203 @@ class BacklogTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("plan.json", r.stderr)
         self.assertEqual(self.text(), before)
+
+    # --- dependencies: {#id} and {needs #id ...} markers ---
+    def test_id_and_needs_markers_round_trip(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n"
+            "- [ ] [3] Add X {#k3f9} {needs #a1b2 #wx0z} <!-- why -->\n"
+            "- [ ] Base {#a1b2}\n"
+            "- [x] Done one {#wx0z} → 001-done\n"
+            "- [ ] Only needs {needs #a1b2}\n")
+        items = board.backlog_items(self.root)
+        self.assertEqual([(i["text"], i["id"], i["needs"], i["points"], i["job"], i["why"]) for i in items], [
+            ("Add X", "k3f9", ["a1b2", "wx0z"], 3, None, "why"),
+            ("Base", "a1b2", [], None, None, None),
+            ("Done one", "wx0z", [], None, "001-done", None),
+            ("Only needs", None, ["a1b2"], None, None, None),
+        ])
+        lines, parsed = board.read_backlog(self.root)
+        self.assertEqual([board.format_item(i) for i in parsed], lines[1:])
+        board.backlog_op(self.root, "edit", index=0, text="Add Y")
+        self.assertIn("- [ ] [3] Add Y {#k3f9} {needs #a1b2 #wx0z} <!-- why -->\n", self.text())
+        board.backlog_op(self.root, "edit", index=0, points=5)
+        self.assertIn("- [ ] [5] Add Y {#k3f9} {needs #a1b2 #wx0z} <!-- why -->\n", self.text())
+        board.backlog_op(self.root, "move", index=1, delta=-1)
+        self.assertTrue(self.text().startswith("# Backlog\n- [ ] Base {#a1b2}\n- [ ] [5] Add Y {#k3f9} {needs #a1b2 #wx0z}"))
+        self.assertTrue(board.backlog_set_estimate(self.root, "Base", 2, "tiny"))
+        self.assertIn("- [ ] [2] Base {#a1b2} <!-- tiny -->\n", self.text())
+        self.assertTrue(board.backlog_set_estimate(self.root, "Only needs", 1, "one line"))
+        self.assertIn("- [ ] [1] Only needs {needs #a1b2} <!-- one line -->\n", self.text())
+
+    def test_old_lines_parse_unchanged(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n"
+            "- [ ] Plain item\n"
+            "- [ ] [5] Pointed item <!-- reason here -->\n"
+            "- [ ] [?] Unknown points\n"
+            "- [x] Claimed {curly} item → 012-claimed <!-- done -->\n"
+            "- [x] Merged one <!-- merged into triage 001 -->\n"
+            "- [ ] Braces {#TOOLONG} stay text\n")
+        items = board.backlog_items(self.root)
+        self.assertEqual([(i["text"], i["points"], i["job"], i["why"], i["id"], i["needs"]) for i in items], [
+            ("Plain item", None, None, None, None, []),
+            ("Pointed item", 5, None, "reason here", None, []),
+            ("Unknown points", None, None, None, None, []),
+            ("Claimed {curly} item", None, "012-claimed", "done", None, []),
+            ("Merged one", None, None, "merged into triage 001", None, []),
+            ("Braces {#TOOLONG} stay text", None, None, None, None, []),
+        ])
+
+    def test_markers_do_not_change_spec_path(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Ship it {#ab12} {needs #cd34}\n")
+        item = board.backlog_items(self.root)[0]
+        self.assertEqual(board.spec_path(self.root, item["text"]), self.spec_file("Ship it"))
+        self.put_spec("Ship it", "# Ship\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "Ship it")
+        self.assertEqual((self.root / "jobs" / out["id"] / "spec.md").read_text(), "# Ship\n")
+
+    def set_stage(self, job_id, stage):
+        with board.locked_board(self.root) as b:
+            board.find(b, job_id)["stage"] = stage
+
+    def test_next_skips_item_with_open_prerequisite(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Later {needs #aaaa}\n- [ ] First {#aaaa}\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "First")
+        self.assertIn("- [ ] Later {needs #aaaa}\n", self.text())
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], ["aaaa"])
+
+    def test_next_waits_until_prerequisite_job_done(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Later {needs #aaaa}\n- [ ] First {#aaaa}\n")
+        first = board.cmd_next(self.root)["id"]
+        self.assertIn(f"- [x] First {{#aaaa}} → {first}\n", self.text())
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})  # First's job is still in spec
+        for stage in ("build", "review", "needs-human"):
+            self.set_stage(first, stage)
+            self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None}, stage)
+        self.set_stage(first, "done")
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], [])
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Later")
+        # aborted counts as finished too
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] Again {{needs #aaaa}}\n- [x] First {{#aaaa}} → {first}\n")
+        self.set_stage(first, "aborted")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Again")
+
+    def test_next_unknown_prerequisite_does_not_block(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Needy {needs #zzzz #cccc}\n- [x] Closed {#cccc} <!-- retired: gone -->\n")
+        self.assertEqual(board.backlog_items(self.root)[0]["waits"], [])
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Needy")
+
+    def test_next_index_refuses_waiting_item(self):
+        board.cmd_new(self.root, "Something else")  # board.json exists
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] A {#aaaa}\n- [ ] B {#bbbb}\n- [ ] C {needs #aaaa #bbbb #zzzz}\n")
+        before_backlog = self.text()
+        before_board = (self.root / "board.json").read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root, 2)
+        self.assertEqual(str(e.exception), "backlog item 2 waits on #aaaa, #bbbb")
+        self.assertEqual(self.text(), before_backlog)
+        self.assertEqual((self.root / "board.json").read_bytes(), before_board)
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), ["001-something-else"])
+
+    def test_next_all_waiting_returns_null(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] A {#aaaa} {needs #bbbb}\n- [ ] B {#bbbb} {needs #aaaa}\n")
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.assertFalse((self.root / "jobs").exists())
+
+    def test_triage_depends_assigns_ids_and_needs(self):
+        self.triage("# Backlog\n- [ ] Add API\n- [ ] Add UI {needs #qqqq}\n- [ ] Add schema {#s123}\n- [ ] Docs\n",
+                    {"estimate": [{"item": "Add UI", "points": 3, "why": "one page"}],
+                     "depends": [{"item": "Add UI", "needs": ["Add API", "Add schema", "Add API"], "why": "UI calls the API"},
+                                 {"item": "Docs", "needs": ["Add UI"], "why": "documents the UI"}]})
+        with mock.patch.object(board, "new_item_id", side_effect=["api1", "ui22"]):
+            res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 0, "estimated": 1, "depends": 2, "skipped": 0})
+        self.assertEqual(self.text(),
+            "# Backlog\n- [ ] Add API {#api1}\n- [ ] [3] Add UI {#ui22} {needs #qqqq #api1 #s123} <!-- one page -->\n"
+            "- [ ] Add schema {#s123}\n- [ ] Docs {needs #ui22}\n")
+        report = (self.root / "triage" / "001" / "report.md").read_text()
+        self.assertIn("\n## Depends\n- Add UI ← Add API; Add schema\n- Docs ← Add UI\n\n## Skipped\n", report)
+
+    def test_new_item_id_is_four_chars_and_unique(self):
+        items = [{"id": "aaaa"}, {"id": None}]
+        for _ in range(50):
+            new = board.new_item_id(items)
+            self.assertRegex(new, r"^[a-z0-9]{4}$")
+            self.assertNotEqual(new, "aaaa")
+        with mock.patch.object(board.secrets, "choice", side_effect=list("aaaa") + list("bbbb")):
+            self.assertEqual(board.new_item_id(items), "bbbb")
+
+    def test_triage_depends_on_merged_text(self):
+        self.triage("# Backlog\n- [ ] One\n- [ ] Two\n- [ ] Three\n",
+                    {"merge": [{"items": ["One", "Two"], "text": "One and two (merged: one, two)"}],
+                     "depends": [{"item": "Three", "needs": ["One and two (merged: one, two)"], "why": "builds on it"},
+                                 {"item": "One and two (merged: one, two)", "needs": ["Three"], "why": "cycle"}]})
+        with mock.patch.object(board, "new_item_id", side_effect=["m111"]):
+            res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual((res["merged"], res["depends"], res["skipped"]), (1, 1, 1))
+        self.assertEqual(self.text(),
+            "# Backlog\n- [ ] One and two (merged: one, two) {#m111}\n- [x] One <!-- merged into triage 001 -->\n"
+            "- [x] Two <!-- merged into triage 001 -->\n- [ ] Three {needs #m111}\n")
+
+    def test_triage_depends_skips_unknown_self_and_cycle(self):
+        backlog = "# Backlog\n- [ ] A {#aaaa}\n- [ ] B {#bbbb} {needs #aaaa}\n- [ ] C\n- [x] Done {#dddd} → 001-x\n"
+        self.triage(backlog, {"depends": [
+            {"item": "A", "needs": ["Nope"], "why": "x"},
+            {"item": "Nope", "needs": ["A"], "why": "x"},
+            {"item": "C", "needs": ["Done"], "why": "x"},
+            {"item": "A", "needs": ["A"], "why": "x"},
+            {"item": "A", "needs": ["B"], "why": "x"},
+            {"item": "C", "needs": [], "why": "x"},
+            "not an object"]})
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual((res["depends"], res["skipped"]), (0, 7))
+        self.assertEqual(self.text(), backlog)
+        skipped = (self.root / "triage" / "latest.md").read_text().split("## Skipped\n", 1)[1]
+        self.assertEqual(skipped,
+            '- depends "A" ← "Nope" — no open item has the text "Nope"\n'
+            '- depends "Nope" ← "A" — no open item has the text "Nope"\n'
+            '- depends "C" ← "Done" — no open item has the text "Done"\n'
+            '- depends "A" ← "A" — an item cannot depend on itself\n'
+            '- depends "A" ← "B" — would close a dependency cycle\n'
+            '- depends "C" ← nothing — needs no prerequisites\n'
+            '- depends "" ← nothing — needs no prerequisites\n')
+
+    def test_triage_merge_rewrites_needs(self):
+        self.triage("# Backlog\n- [ ] One {#o111} {needs #p999}\n- [ ] Two {#t222} {needs #o111 #q888}\n"
+                    "- [ ] User {needs #o111 #t222 #p999}\n- [ ] Other {needs #t222}\n- [ ] Plain\n"
+                    "- [ ] Pre {#p999}\n",
+                    {"merge": [{"items": ["One", "Two"], "text": "One and two"},
+                               {"items": ["Plain", "Other"], "text": "Plain and other"}]})
+        with mock.patch.object(board, "new_item_id", side_effect=["m111"]):
+            board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(self.text(),
+            "# Backlog\n- [ ] One and two {#m111} {needs #p999 #q888}\n- [x] One <!-- merged into triage 001 -->\n"
+            "- [x] Two <!-- merged into triage 001 -->\n- [ ] User {needs #m111 #p999}\n"
+            "- [ ] Plain and other {needs #m111}\n- [x] Other <!-- merged into triage 001 -->\n"
+            "- [x] Plain <!-- merged into triage 001 -->\n- [ ] Pre {#p999}\n")
+
+    def test_triage_merge_without_references_assigns_no_id(self):
+        self.triage("# Backlog\n- [ ] One {needs #p999}\n- [ ] Two\n- [ ] Pre {#p999}\n",
+                    {"merge": [{"items": ["One", "Two"], "text": "One and two"}]})
+        with mock.patch.object(board, "new_item_id", side_effect=AssertionError("no id needed")):
+            board.cmd_triage_apply(self.root, "001")
+        self.assertIn("- [ ] One and two {needs #p999}\n", self.text())
+
+    def test_triage_retire_and_manual_drop_needs(self):
+        self.triage("# Backlog\n- [ ] Old {#o111}\n- [ ] Phone {#p222}\n- [ ] User {needs #o111}\n"
+                    "- [ ] Both {needs #p222 #o111 #k333}\n- [ ] Keep {#k333}\n",
+                    {"retire": [{"item": "Old", "reason": "done in 010-x"}],
+                     "manual": [{"item": "Phone", "reason": "needs a phone"}]})
+        board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(self.text(),
+            "# Backlog\n- [x] Old <!-- retired: done in 010-x -->\n- [x] Phone <!-- manual check: needs a phone -->\n"
+            "- [ ] User\n- [ ] Both {needs #k333}\n- [ ] Keep {#k333}\n")
 
     def test_abort_requeue_keeps_long_feature_text(self):
         job_id = board.cmd_new(self.root, "Long merged item")
@@ -384,7 +584,7 @@ class BacklogTest(unittest.TestCase):
                           {"item": "Zeta", "points": 4}]})
         specs = {t: self.put_spec(t, f"# {t}\n") for t in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Keep me")}
         res = board.cmd_triage_apply(self.root, "001")
-        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 1, "estimated": 1, "skipped": 3})
+        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 1, "estimated": 1, "depends": 0, "skipped": 3})
         for t in ("Alpha", "Beta", "Gamma", "Delta"):
             self.assertFalse(specs[t].exists(), t)
         for t in ("Epsilon", "Zeta", "Keep me"):
