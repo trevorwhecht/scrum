@@ -1257,7 +1257,8 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(hook, view.replace("https://h.example", "https://other.example"), confirm=True)[0], 200)
         self.assertEqual(json.loads(settings.read_text())["hooks"]["Stop"][0]["hooks"][0]["command"],
                          "curl -H 'X: xoxb-1234567890-abcdef' https://other.example")
-        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace("h.example/mcp", "o.example/mcp"))[0], 200)
+        self.assertEqual(self.save(server, self.item(server["id"])[1]["content"].replace("h.example/mcp", "o.example/mcp"),
+                                   confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["url"], f"https://o.example/mcp?k={self.GHP}")
         settings.write_text(json.dumps(self.SUBTREES))
         s_it = self.json_item("global", "settings", settings)
@@ -1718,6 +1719,45 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(plugin, '{"scope": "user", "installPath": "/b"}', confirm=True)[0], 200)
         self.assertEqual(json.loads(plugins.read_text()), {"plugins": {"p@m": [{"scope": "user", "installPath": "/b"}]}})
 
+    def refused(self, it, f, content):
+        before, backups = f.read_bytes(), len(self.backups())
+        self.assertEqual(self.save(it, content), (428, None), content)
+        self.assertEqual((f.read_bytes(), len(self.backups())), (before, backups), content)
+
+    def test_save_helper_keys_need_confirm(self):
+        settings = self.user / "settings.json"
+        for key in ("otelHeadersHelper", "awsAuthRefresh", "awsCredentialExport"):
+            settings.write_text(json.dumps({"model": "a", key: "/bin/old"}))
+            it = self.json_item("global", "settings", settings)
+            self.refused(it, settings, json.dumps({"model": "a", key: "/bin/evil"}))  # changed
+            self.refused(it, settings, json.dumps({"model": "a"}))  # removed
+            self.assertEqual(self.save(it, json.dumps({"model": "b", key: "/bin/old"}))[0], 200, key)  # unguarded key only
+            self.assertEqual(self.save(it, json.dumps({"model": "b", key: "/bin/new"}), confirm=True)[0], 200, key)
+            self.assertEqual(json.loads(settings.read_text()), {"model": "b", key: "/bin/new"}, key)
+            settings.write_text(json.dumps({"model": "a"}))
+            it = self.json_item("global", "settings", settings)
+            self.refused(it, settings, json.dumps({"model": "a", key: "/bin/evil"}))  # added
+            self.assertEqual(self.save(it, json.dumps({"model": "a", key: "/bin/x"}), confirm=True)[0], 200, key)
+            self.assertEqual(json.loads(settings.read_text()), {"model": "a", key: "/bin/x"}, key)
+
+    def test_save_mcp_type_url_need_confirm(self):
+        mcp = self.reg / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"type": "stdio", "command": "p", "env": {"K": "v"}}}}))
+        server = self.json_item("r:reg", "mcp", mcp, "s")
+        self.refused(server, mcp, '{"type": "http", "command": "p", "env": {"K": "v"}}')  # type changed
+        self.refused(server, mcp, '{"command": "p", "env": {"K": "v"}}')  # type removed
+        self.refused(server, mcp, '{"type": "stdio", "command": "p", "env": {"K": "v"}, "url": "https://evil.example/mcp"}')  # url added
+        self.assertEqual(self.save(server, '{"type": "stdio", "command": "p", "env": {"K": "w"}}')[0], 200)  # env only
+        self.assertEqual(self.save(server, '{"type": "http", "command": "p", "env": {"K": "w"}, "url": "https://a.example/mcp"}',
+                                   confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text()),
+                         {"mcpServers": {"s": {"type": "http", "command": "p", "env": {"K": "w"}, "url": "https://a.example/mcp"}}})
+        line = '"type": "http", "command": "p", "env": {"K": "w"}'
+        self.refused(server, mcp, '{' + line + ', "url": "https://evil.example/mcp"}')  # url changed
+        self.refused(server, mcp, '{' + line + '}')  # url removed
+        self.assertEqual(self.save(server, '{' + line + '}', confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text()), {"mcpServers": {"s": {"type": "http", "command": "p", "env": {"K": "w"}}}})
+
 class AiSecurityTest(unittest.TestCase):
     """Page 3: the Security scan, on the same fake home as AiSettingsTest."""
     setUp, get = AiSettingsTest.setUp, AiSettingsTest.get
@@ -1827,6 +1867,16 @@ class AiSecurityTest(unittest.TestCase):
             "d": {"command": "x", "args": ["--token", ""]},
             "e": {"command": "x", "args": ["--token", 5]}}})
         self.assertEqual(self.scan()[0], [])
+
+    def test_file_path_flags_are_not_mcp_secrets(self):
+        self.write(self.home / ".claude.json", {})  # drop setUp's planted inline env/header secrets
+        servers = {"tf": ["--token-file", "/home/u/.tok"], "akp": ["--api-key-path", "/x/key"], "pwf": ["--password_file", "pw.txt"],
+                   "sd": ["--secret-dir", "/s"], "TF": ["--TOKEN-FILE", "/t"], "dash": ["--token", "-"], "next": ["--token", "--verbose"],
+                   "tok": ["--token", "abc123"], "ak": ["--api-key", "abc123"], "env": ["--token-env", "abc123"]}
+        mcp = self.write(self.reg / ".mcp.json", {"mcpServers": {n: {"command": "x", "args": a} for n, a in servers.items()}})
+        findings, _ = self.scan()
+        self.assertTrue(all(f["file"] == mcp and f["rule"] == "mcp-inline-secret" for f in findings), findings)
+        self.assertEqual(sorted(f["line"] for f in findings), sorted(self.line(mcp, f'"{n}"') for n in ("tok", "ak", "env")))
 
     def test_scan_is_static_read_only_and_covers_all_scopes(self):
         import http.client, socket, subprocess
@@ -2174,6 +2224,20 @@ class AiAuditTest(unittest.TestCase):
                 self.assertEqual(self.toggle(action, row["id"])[0], 409, (action, name))
         self.assertEqual(self.snapshot(set()), before)
         self.assertFalse((self.reg / ".claude" / "settings.local.json").exists())
+        self.assertEqual(self.backups(), [])
+
+    def test_toggle_refuses_when_no_target_file(self):
+        self.plant()
+        self.skill(self.reg / ".claude", "pidle", "Use when idle in the project.")
+        data = self.serve.audit("r:reg")
+        row = next(r for r in data["rows"] if (r["category"], r["scope"], r["name"]) == ("skills", "project", "pidle"))
+        scopes = {"global": ("global", "Global", None), "r:reg": ("registered", "reg", None)}
+        before = self.snapshot(set())
+        with mock.patch.object(self.serve, "audit", lambda sid: data), \
+                mock.patch.object(self.serve, "ai_scopes", lambda with_mac=True: scopes):
+            for enable in (False, True):
+                self.assertEqual(self.serve.ai_toggle(row["id"], enable), (403, {"error": "this scope has no project folder to write to"}))
+        self.assertEqual(self.snapshot(set()), before)
         self.assertEqual(self.backups(), [])
 
     def test_toggle_rolls_back_when_effective_value_unchanged(self):

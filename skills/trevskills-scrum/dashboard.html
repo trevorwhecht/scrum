@@ -1182,11 +1182,12 @@ async function aiWrite(route, body, busy, fail) {
     if (form.isConnected) { $("aiSave").disabled = $("aiText").value === aiItem.baseline; $("aiUndo").disabled = false; }
   }
 }
-// A save that changes what Claude Code may run (a hook or plugin entry, an MCP server's command/args, or a settings
-// file's permissions/hooks/statusLine/apiKeyHelper) asks once on the Save button itself, like backlog Run/Delete;
+// A save that changes what Claude Code may run (a hook or plugin entry, an MCP server's command/args/type/url, or a
+// settings file's permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport) asks once on the Save button itself, like backlog Run/Delete;
 // serve.py refuses it without confirm too.
 const AI_JSON = ["settings", "hooks", "mcp", "plugins"];
-const AI_GUARD_KEYS = {mcp: ["command", "args"], settings: ["permissions", "hooks", "statusLine", "apiKeyHelper"]};
+const AI_GUARD_KEYS = {mcp: ["command", "args", "type", "url"],
+  settings: ["permissions", "hooks", "statusLine", "apiKeyHelper", "otelHeadersHelper", "awsAuthRefresh", "awsCredentialExport"]};
 const aiGuarded = (cat, old, now) => cat === "hooks" || cat === "plugins" ? JSON.stringify(old) !== JSON.stringify(now)
   : (AI_GUARD_KEYS[cat] || []).some(k => JSON.stringify(old?.[k]) !== JSON.stringify(now?.[k]));
 function aiDisarm() {

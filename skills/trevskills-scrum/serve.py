@@ -12,8 +12,8 @@ request must carry a localhost Host header (blocks DNS rebinding), and every wri
 origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
-and a change to what runs (a hook or plugin entry, an MCP server's command/args, a settings file's
-permissions/hooks/statusLine/apiKeyHelper) only with confirm. The Audit tab's Disable/Enable also flips
+and a change to what runs (a hook or plugin entry, an MCP server's command/args/type/url, a settings file's
+permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/awsCredentialExport) only with confirm. The Audit tab's Disable/Enable also flips
 skillOverrides[<skill>] and enabledPlugins[<plugin>], in user settings.json, or in a project's settings.local.json for
 project/local rows and whenever a project settings file decides the key; it refuses keys managed settings pin, and
 rolls the file back (409) if the effective value didn't change. Every write is backed up to
@@ -666,10 +666,13 @@ def ai_unredact(new, old, path=()):
 
 def ai_guarded(cat, new, old):
     """True when saving new over old changes what Claude Code may run: a hook or plugin entry, an MCP server's
-    command/args, or a settings file's permissions/hooks/statusLine/apiKeyHelper. An added or removed key counts."""
+    command/args/type/url, or a settings file's permissions/hooks/statusLine/apiKeyHelper/otelHeadersHelper/awsAuthRefresh/
+    awsCredentialExport. An added or removed key counts."""
     if cat in ("hooks", "plugins"):
         return new != old
-    keys = {"mcp": ("command", "args"), "settings": ("permissions", "hooks", "statusLine", "apiKeyHelper")}.get(cat, ())
+    keys = {"mcp": ("command", "args", "type", "url"),
+            "settings": ("permissions", "hooks", "statusLine", "apiKeyHelper", "otelHeadersHelper", "awsAuthRefresh",
+                         "awsCredentialExport")}.get(cat, ())
     return any(as_dict(new).get(k, MISSING) != as_dict(old).get(k, MISSING) for k in keys)
 
 
@@ -959,6 +962,7 @@ ENTRY = re.compile(r"(\w+)\((.*)\)")
 VAR_REF = re.compile(r"\$\{\w+\}")
 TOKENISH = re.compile(r"(--token=|--api-key=|[?&][\w-]*(token|key)=|Bearer )[^&\s]|sk-|ghp_|github_pat_|xox[bp]-", re.I)
 FLAG = re.compile(r"--?([\w-]+)")
+PATH_FLAG = re.compile(r"[-_](file|path|dir)$", re.I)  # `--token-file /path` names a file, not a secret
 
 
 def mcp_arg_secret(vals: list) -> bool:
@@ -970,8 +974,8 @@ def mcp_arg_secret(vals: list) -> bool:
         if TOKENISH.search(VAR_REF.sub("", v)):
             return True
         n = vals[i + 1] if i + 1 < len(vals) else None
-        if ((m := FLAG.fullmatch(v)) and SECRET_KEY.search(m.group(1)) and isinstance(n, str)
-                and VAR_REF.sub("", n).strip() and not n.startswith("-")):
+        if ((m := FLAG.fullmatch(v)) and SECRET_KEY.search(m.group(1)) and not PATH_FLAG.search(m.group(1))
+                and isinstance(n, str) and VAR_REF.sub("", n).strip() and not n.startswith("-")):
             return True
     return False
 INJECTION = re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions|disregard\b.*\binstructions|do not tell the user"
@@ -1372,6 +1376,8 @@ def ai_toggle(item_id, enable):
         target = local
     else:
         target = claude_home() / "settings.json"
+    if target is None:
+        return 403, {"error": "this scope has no project folder to write to"}
     try:
         settings = json.loads(target.read_text()) if target.exists() else {}
     except (OSError, ValueError):
