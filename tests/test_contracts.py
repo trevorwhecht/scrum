@@ -1363,7 +1363,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "script -q /dev/null claude", "- Cloud environment:",   # dispatch, TTY, environment
             'E=(--settings "{\\"remote\\":{\\"defaultEnvironmentId\\":\\"$CE\\"}}")',
             "grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings",
-            'claude "${E[@]}" --cloud "/trevskills-scrum cloud-job $ID $FEAT"',
+            'claude "${E[@]}" --cloud "First run: bash ~/scrum/cloud/setup.sh (the environment caches an old copy of the '
+            'skill). Then invoke the trevskills-scrum skill fresh and run: /trevskills-scrum cloud-job $ID $FEAT"',
             "B next", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
@@ -1382,7 +1383,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertNotIn("gh pr ", job)
         # --environment takes only self-hosted ccpool_ ids, and a flag after --cloud would swallow its prompt.
         self.assertNotIn("--environment", cloud)
-        self.assertRegex(cloud, r'--cloud "/trevskills-scrum cloud-job')
+        # The launch prompt starts with the setup.sh refresh: cloud environments cache an old copy of the skill.
+        self.assertRegex(cloud, r'--cloud "First run: bash ~/scrum/cloud/setup\.sh .*/trevskills-scrum cloud-job \$ID \$FEAT"')
         self.assertNotRegex(cloud, r"--cloud +(-|\"\$)")  # no flag or "${E[@]}" between --cloud and its prompt
 
     def test_skill_cloud_artifacts_come_home(self):
@@ -1407,6 +1409,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(sync.index("B backlog-spec $ID"), sync.index("B digest-due"))
         readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
         self.assertIn("scrum-artifacts/<id>", readme)
+
+    def test_skill_cloud_stale_skill_stops(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cloud = self.h2(text, "## Cloud lane")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
+        for phrase in ("lacks the **Artifacts** step", "before New job",
+                       "cloud skill copy is stale. Fix: rerun cloud setup.", "reports to GitHub as **Needs-human** does"):
+            self.assertIn(phrase, setup, phrase)
+        readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
+        intro = readme.split("\n\n")[1]  # the first paragraph after the heading
+        self.assertIn("refresh", intro)
+        self.assertIn("setup.sh", intro)
 
     def test_skill_cloud_schema_migrates_locally(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

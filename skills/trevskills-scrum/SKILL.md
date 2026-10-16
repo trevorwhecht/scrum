@@ -366,12 +366,13 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    CE=$(sed -n 's/^- Cloud environment: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//'); E=()
    printf '%s' "$CE" | grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings "{\"remote\":{\"defaultEnvironmentId\":\"$CE\"}}")
    FEAT=$(cat "$F/jobs/$ID/feature.md")
-   OUT=$(script -q /dev/null claude "${E[@]}" --cloud "/trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
+   OUT=$(script -q /dev/null claude "${E[@]}" --cloud "First run: bash ~/scrum/cloud/setup.sh (the environment caches an old copy of the skill). Then invoke the trevskills-scrum skill fresh and run: /trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
    URL=$(printf '%s' "$OUT" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_-]+' | head -1)
    ```
    With a `URL`, run `B set $ID stage=cloud cloud=$URL`. Without one, run `B set $ID stage=needs-human reason='claude --cloud did not start: <last line of OUT>. Fix: click Abort job with Put back in backlog ticked, then run cloud again.'`. Stage `cloud` is never flagged by `B watchdog`. The final report lists each id with its session URL.
 2. **Cloud job** (`/trevskills-scrum cloud-job <id> <feature text>`, inside the cloud session). The job runs **New job** end to end (spec → build → Check gate → Review → Approve → Merge) with these deltas:
    - **Setup:** the cloned repo is the main checkout, and its `scrum/` is a throwaway board: first-run setup as usual, minus step 5. Prerequisites check `gh api user` instead of `gh auth status` (cloud `gh` is signed in through a proxy that `gh auth status` rejects). Skip Roadmap resume and **Record your terminal**: no dashboard, tty or terminal recording here.
+     When this session's skill copy lacks the **Artifacts** step below, the launch prompt's setup.sh refresh did not take: it stops before New job with needs-human reason `cloud skill copy is stale. Fix: rerun cloud setup.` and reports to GitHub as **Needs-human** does.
    - **Job:** New job step 1 is `B new "<title>" --id <id>`, so the job keeps the id it was given; then step 1b, then step 2 on. A spec that says `Lane: bigboy` counts as `standard`, as for a BigBoy child.
    - **Routing** is always cloud: never call route.py; every routed step spawns with the Agent tool as written.
    - **GitHub:** cloud blocks GitHub GraphQL, so each `gh pr` call in **Merge** becomes its REST twin, with `R='repos/{owner}/{repo}'` (`gh` fills it in from origin). These are the same sanctioned PR create and squash-merge.
