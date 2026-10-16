@@ -295,6 +295,11 @@ class ContractTest(unittest.TestCase):
         self.assertLess(merge.index("**Agent rules guard"), merge.index("**Main checkout guard"))
         step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
         self.assertIn("agent rules guard", step6)
+        start = merge.index("**Agent rules guard")
+        guard = merge[start:merge.index("\n", start)]
+        for phrase in ("B digest-verify $ID", f"grep -E '{regex}'", "human-approval.md",
+                       "Hard stop: agent rules — <first matching file>", "Run this guard again right before step 6"):
+            self.assertIn(phrase, guard, phrase)
         for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md"):
             self.assertIsNotNone(re.search(regex, path), path)
         for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py"):
@@ -1408,6 +1413,20 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)
+
+    def test_cloud_sync_reverifies_agent_rules_digest_jobs(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cloud = self.h2(text, "## Cloud lane")
+        sync = cloud[cloud.index("3. **Sync**"):]
+        start = sync.index("**Digest-approved rules edits.**")
+        rule = sync[start:sync.index("\n", start)]
+        for phrase in ("reason starts `Hard stop: agent rules`", "B digest-verify $ID", "exits 0", "run **Merge**",
+                       "WT=$REPO/.claude/worktrees/scrum-$ID", "BASE=origin/<baseRefName>", "needs-human",
+                       "**Artifacts home**", "**Follow-ups**"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertNotIn("approve $ID", rule)  # approve would write human-approval.md, "Approved by Trevor"
+        # It runs after the folder comes home and its follow-ups are queued.
+        self.assertLess(sync.index("**Follow-ups.**"), start)
 
     def test_cloud_setup_reuses_install(self):
         setup = (ROOT / "cloud" / "setup.sh").read_text()
