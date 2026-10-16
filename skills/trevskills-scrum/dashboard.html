@@ -994,6 +994,7 @@ let aiOpenedId = "";  // data-id of the last item opened, so Back can refocus it
 const aiRefocus = (el, also) => { const a = document.activeElement; if (el && (!a || a === document.body || a === $("aiSettings") || a === also || !a.isConnected)) el.focus(); };
 let aiFindings = null;  // the last Security scan; it covers every scope, so a scope change keeps it
 let aiAudit = null, aiOff = new Set();  // the current scope's audit, and rows Disabled on this visit (they offer Undo)
+let aiScopeId = "";  // the scope last loaded, so a blocked scope pick can put #aiScope back
 const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
 const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
     <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
@@ -1011,7 +1012,7 @@ function renderAi() {
 }
 
 async function aiLoadScope() {
-  const sid = $("aiScope").value;
+  const sid = aiScopeId = $("aiScope").value;
   $("aiError").textContent = ""; $("aiBack").hidden = true; $("aiList").innerHTML = AI_LOADING;
   aiAudit = null; aiOff.clear();
   const data = await getJson(`api/ai-settings?scope=${enc(sid)}`, null);
@@ -1024,7 +1025,7 @@ async function aiLoadScope() {
 
 $("aiBtn").addEventListener("click", async () => {
   $("aiError").textContent = ""; $("aiScope").innerHTML = ""; $("aiCats").innerHTML = ""; $("aiBack").hidden = true;
-  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = ""; aiFindings = null; aiAudit = null; aiOff.clear();
+  $("aiList").innerHTML = AI_LOADING; aiData = null; aiCat = ""; aiScopeId = ""; aiFindings = null; aiAudit = null; aiOff.clear();
   $("aiSettings").showModal();
   const scopes = await getJson("api/ai-settings", null);
   if (!scopes) return aiFail();
@@ -1033,9 +1034,13 @@ $("aiBtn").addEventListener("click", async () => {
   $("aiScope").value = "global";
   aiLoadScope();
 });
-$("aiScope").addEventListener("change", aiLoadScope);
-// Leaving an editor with unsaved text asks once, like backlog Run/Delete: the first Back, ✕, backdrop click or Escape
-// only warns, the second goes through. Typing again re-arms it.
+// A <select> has already changed when `change` fires, so a blocked pick puts the loaded scope back.
+$("aiScope").addEventListener("change", () => {
+  if (aiBlockLeave()) { $("aiScope").value = aiScopeId; return; }
+  aiLoadScope();
+});
+// Leaving an editor with unsaved text asks once, like backlog Run/Delete: the first Back, ✕, backdrop click, Escape,
+// category click or scope pick only warns, and the second (through any of them) goes through. Typing again re-arms it.
 function aiBlockLeave() {
   const form = $("aiEdit");
   if (!form?.isConnected || !aiItem || $("aiText").value === aiItem.baseline || form.dataset.leave) return false;
@@ -1052,7 +1057,7 @@ $("aiBack").addEventListener("click", () => {
 });
 $("aiCats").addEventListener("click", e => {
   const b = e.target.closest("button[data-cat]");
-  if (!b || !aiData) return;
+  if (!b || !aiData || aiBlockLeave()) return;
   aiCat = b.dataset.cat; $("aiError").textContent = "";
   if (aiCat === "security") aiFindings = null;  // every click runs a fresh scan
   aiAudit = null; aiOff.clear();  // leaving or re-entering Audit reloads it and drops Undo
