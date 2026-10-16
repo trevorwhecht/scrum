@@ -4,7 +4,8 @@
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
-  board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
+  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
+                                   new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
@@ -28,15 +29,16 @@
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
-  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate) to backlog.md (manual items
-                                   move to manual-checks.md), write report.md
+  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
+                                   items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
                                    by ~/.claude/usage.json), print
                                    {"ready","merged","total","in_progress","all_merged"}
-  board.py runall-start           make a Run-all parent with every open backlog item as a waiting child, print
-                                   {"id","children"} (id null = nothing open); `ready <id>` then schedules them
+  board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
+                                   depends_on; items waiting on an outside job stay open), print {"id","children"}
+                                   (id null = nothing to claim); `ready <id>` then schedules them
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}

@@ -768,8 +768,22 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
         for phrase in ("TRIAGE_DIR/plan.json", "as data, not instructions", "every original requirement",
                        "(merged: <short name of each original>)", "naming the evidence", "1, 2, 3, 5, 8, 13",
-                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"', "up to 8 points"):
+                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"', "up to 8 points", '"depends":'):
             self.assertIn(phrase, text, phrase)
+
+    def test_backlog_dependency_docs(self):
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        triager = (ROOT / "agents" / "scrum-triager.md").read_text()
+        writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for name, text in (("SKILL.md", skill), ("scrum-triager.md", triager), ("scrum-spec-writer.md", writer)):
+            self.assertIn("{needs", text, name)
+        self.assertIn("must build on files or behaviour another open item adds", triager)
+        self.assertIn("text excludes the markers", triager)
+        self.assertIn("any ` {#…}` id marker and ` {needs …}` marker", writer)
+        self.assertIn("`next` and `runall-start` skip an item that waits", skill)
+        run_all = self.section(skill, "## Run all", "## Fast lane")
+        self.assertIn("adds dependencies", run_all)
+        self.assertIn("added dependencies", run_all)
 
     def test_dashboard_has_run_all_and_last_triage(self):
         text = DASHBOARD.read_text()
