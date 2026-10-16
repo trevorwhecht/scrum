@@ -72,9 +72,11 @@ def stop(project, job_id):
             pass
 
 
-def kill_session(project, job_id):
-    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan
-    SIGTERMs the process group of every claude line running /trevskills-scrum <cmd> <id> (nohup child, Terminal)."""
+def kill_session(project, root, job_id):
+    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan finds
+    claude lines running /trevskills-scrum <cmd> <id> (nohup child, Terminal), and one `lsof` call reads their cwds.
+    Only groups with such a line running inside this project's repo (root.parent, worktrees included) get SIGTERM:
+    job ids are per project. No cwd, no signal; the pause is already recorded, so a survivor is refused anyway."""
     with RUNS_LOCK:
         run = RUNS.get(f"{project}/{job_id}")
     if run and run["proc"].poll() is None:
@@ -84,8 +86,23 @@ def kill_session(project, job_id):
     except (OSError, subprocess.SubprocessError):
         return
     match = re.compile(rf"/trevskills-scrum \S+ {re.escape(job_id)}(\s|$)")
-    groups = {int(f[1]) for f in (l.split(None, 2) for l in out.splitlines())
-              if len(f) == 3 and f[1].isdigit() and "claude" in f[2] and match.search(f[2])}
+    lines = [(int(f[0]), int(f[1])) for f in (l.split(None, 2) for l in out.splitlines())
+             if len(f) == 3 and f[0].isdigit() and f[1].isdigit() and "claude" in f[2] and match.search(f[2])]
+    if not lines:
+        return
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(pid) for pid, _ in lines)],
+                             capture_output=True, text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return
+    cwds, pid = {}, None
+    for l in out.splitlines():
+        if l[:1] == "p" and l[1:].isdigit():
+            pid = int(l[1:])
+        elif l[:1] == "n" and pid is not None:
+            cwds[pid] = os.path.realpath(l[1:])
+    repo = os.path.realpath(root.parent)
+    groups = {pgid for pid, pgid in lines if pid in cwds and (cwds[pid] == repo or cwds[pid].startswith(repo + os.sep))}
     for pgid in sorted(groups - {os.getpgrp()}):
         try:
             os.killpg(pgid, signal.SIGTERM)
@@ -106,7 +123,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job  # a stale interactive tty would win over the log tail
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return f"runs/{log.name}"
@@ -137,7 +154,7 @@ def resume_job(project, root, job, jobs):
     resumes its paused children and starts whatever is ready instead."""
     job_id = job["id"]
     if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):
-        board.cmd_set(root, job_id, ["stage=running", "reason="])
+        board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
             kid = next((j for j in jobs if j["id"] == k), None)
             if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
@@ -1978,7 +1995,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
             ids = board.cmd_pause(root, job_id)
             for i in ids:
-                kill_session(project, i)
+                kill_session(project, root, i)
             return 200, {"id": job_id, "paused": ids}
         if action == "setup-done":
             return setup_done(project, root, job_id)
