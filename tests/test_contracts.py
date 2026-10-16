@@ -253,12 +253,54 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Opus", approve)
         self.assertIn("Conflicts", approve)
 
-    def test_skill_uses_sonnet_security_only_when_not_sensitive(self):
+    def test_skill_skips_security_when_not_sensitive(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
-        for phrase in ('model: "sonnet"', "scrum-review-security", "Fast lane", "schema guard", r"(^|/)\.env", "Opus"):
+        for phrase in ("Skipped by orchestrator: no sensitive files in diff.", "pnpm-lock", "Cargo",
+                       "scrum-review-security", "schema guard", r"(^|/)\.env"):
             self.assertIn(phrase, review, phrase)
+        for line in review.splitlines():
+            if "scrum-review-security" in line:
+                self.assertNotIn('model: "sonnet"', line, line)
         self.assertEqual(text.count("permission|payment|billing"), 1)
+
+    def test_skill_clean_round_skips_approver(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("Clean round: check gate + reviews", "Conflicts", "schema guard", "Hard stops:", "**Approve**"):
+            self.assertIn(phrase, review, phrase)
+        self.assertIn("Clean round", self.section(text, "## Merge", "## Routing"))
+
+    def test_skill_incremental_rereview(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("head.txt", "Carried forward from round", "SINCE=", "VERDICT: CHANGES", "REWORK", "Conflicts"):
+            self.assertIn(phrase, review, phrase)
+        line = next(l for l in text.splitlines() if "never edits code or review files" in l)
+        self.assertIn("Carried forward", line)
+
+    def test_review_code_has_security_checklist(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("injection", "secrets", "dangerouslySetInnerHTML"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_spec_writer_sonnet_when_criteria_present(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        new_job = self.section(text, "## New job", "## Run all")
+        for phrase in ("## Acceptance criteria", "## Done when", "## Q&A", 'model: "sonnet"'):
+            self.assertIn(phrase, new_job, phrase)
+
+    def test_skill_jev_gate_additive_only(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("jev-rank.py", "0.7", "never removes", "timeout"):
+            self.assertIn(phrase, review, phrase)
+
+    def test_skill_e2e_hook(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("E2E:", self.section(text, "## Check gate", "## Review (WAIT FOR ALL)"))
+        self.assertIn("E2E:", self.section(text, "### First-run setup", "## Commands"))
+        self.assertIn("E2E", (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text())
 
     def test_spec_writer_exits_early_on_bigboy(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()

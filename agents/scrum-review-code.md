@@ -45,6 +45,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - the repo's conventions: file naming, file size, the Result pattern if used, the TODO format
 - fetching only what is needed: no `SELECT *`, no over-fetching
 - dead code
+- a basic security pass: injection (SQL, command, path), authorization on new routes and actions, secrets in code or logs, and unsafe HTML sinks (`dangerouslySetInnerHTML`, `innerHTML`)
 
 **Output:** write exactly one file, `JOB_DIR/round-ROUND/review-code.md`:
 
