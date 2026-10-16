@@ -25,7 +25,7 @@ for f in "$here"/agents/*.md; do link "$f" "$dest/agents/$(basename "$f")"; done
 link "$here/codex/AGENTS.md" "$codex/AGENTS.md"
 # Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set.
 python3 - "$dest" <<'PY'
-import json, os, sys
+import json, os, shlex, sys
 dest = sys.argv[1]
 path = os.path.join(dest, "settings.json")
 try:
@@ -41,7 +41,7 @@ if settings is not None and not isinstance(settings, dict):
     print(f"warning: {path} is not a JSON object; statusLine not set, add it by hand", file=sys.stderr)
 if settings is not None and "statusLine" not in settings:
     settings["statusLine"] = {"type": "command", "refreshInterval": 60,
-                              "command": f"python3 {dest}/skills/trevskills-scrum/board.py statusline"}
+                              "command": "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/board.py") + " statusline"}
     with open(path + ".tmp", "w") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")

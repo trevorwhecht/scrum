@@ -1,4 +1,4 @@
-import json, os, subprocess, tempfile, unittest
+import json, os, shlex, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +107,29 @@ class InstallTest(unittest.TestCase):
                 if text == "{not json":
                     self.assertIn("settings.json", result.stderr)
             self.assertEqual(sorted(p.name for p in home.iterdir() if p.name.startswith("settings")), ["settings.json"])
+
+    def test_install_quotes_status_line_path_with_spaces(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "my home" / ".claude"
+            home.mkdir(parents=True)
+            result = self.run_install(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            command = json.loads((home / "settings.json").read_text())["statusLine"]["command"]
+            board = f"{t}/my home/.claude/skills/trevskills-scrum/board.py"
+            self.assertEqual(command, "python3 '" + board + "' statusline")
+            self.assertEqual(shlex.split(command), ["python3", board, "statusline"])
+            run = subprocess.run(["sh", "-c", command], input="{}", capture_output=True, text=True,
+                                 env={**os.environ, "SCRUM_USAGE": str(Path(t) / "usage.json")})
+            self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_install_quotes_status_line_path_with_single_quote(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "it's" / ".claude"
+            home.mkdir(parents=True)
+            result = self.run_install(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            command = json.loads((home / "settings.json").read_text())["statusLine"]["command"]
+            self.assertEqual(shlex.split(command)[1], f"{t}/it's/.claude/skills/trevskills-scrum/board.py")
 
 
 if __name__ == "__main__":
