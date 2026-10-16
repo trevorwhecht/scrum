@@ -483,6 +483,36 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy off track: x. Fix: y"))
         self.assertEqual([self.child(k)["stage"] for k in kids], ["waiting"] * 3)
 
+    def test_ready_recovers_chain_lock_parent(self):
+        parent, (c1, c2, c3) = self.three()
+        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy chain lock held by 005-x. Fix: wait, "
+                                          "or clear the lock and click Run now on a waiting child."])
+        with mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], ["002-part-1"])
+        self.assertEqual(self.child(c1)["stage"], "spec")
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        play.assert_not_called()
+
+    def test_ready_never_writes_empty_waiting_list(self):
+        parent, (c1, c2, c3) = self.three()
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_set(self.root, c2, ["stage=done"])
+        data = json.loads((self.root / "board.json").read_text())
+        next(j for j in data["jobs"] if j["id"] == c3)["depends_on"] = ["099-not-a-sibling"]
+        (self.root / "board.json").write_text(json.dumps(data))
+        with mock.patch.object(board, "play"):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertNotEqual(p["reason"], "waiting on you in: ")
+        self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy blocked: 004-part-3. Fix: check each "
+                         "listed child's Depends on, then click Run now on a waiting child."))
+        board.cmd_set(self.root, c3, ["stage=build"])
+        board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
     def test_stage_sounds(self):
         clip = "/clips/needs-human"
         with mock.patch.object(board, "play") as play, mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):

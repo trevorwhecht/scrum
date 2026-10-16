@@ -470,7 +470,7 @@ def cmd_backlog_spec(root, job_id):
         for text, body in specs.items():
             path = spec_path(root, text)
             path.parent.mkdir(exist_ok=True)
-            path.write_text(body)
+            path.write_text(body, encoding="utf-8")
     return out
 
 
@@ -723,6 +723,7 @@ PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
 BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
+CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
 RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
 WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
@@ -931,8 +932,9 @@ def cmd_ready(root, parent_id):
         stage = {k["id"]: k["stage"] for k in kids}
         runall = parent.get("lane") == "runall"  # aborted children count as finished, and a count cap always applies
         reason = parent.get("reason") or ""
-        # A legacy needs-human parent (blocked before WAITING_ON existed) is re-evaluated so existing boards recover.
-        legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED))
+        # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
+        # re-evaluated so existing boards recover.
+        legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
         blocked = legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON))
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
@@ -969,7 +971,13 @@ def cmd_ready(root, parent_id):
                 new = "needs-human", f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve " \
                     "& merge, Send back to builder or Setup done); if one was aborted, click Abort job on this BigBoy."
             else:  # every action is on a child, so the parent keeps running and names them
-                new = "running", WAITING_ON + ", ".join(human or [k["id"] for k in kids if k.get("setup") == "pending"])
+                waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
+                if waits:
+                    new = "running", WAITING_ON + ", ".join(waits)
+                else:  # nothing on a child is actionable (e.g. a depends_on that is not a finished sibling)
+                    left = [k["id"] for k in kids if k["stage"] not in (("done", "aborted") if runall else ("done",))]
+                    new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
+                        "then click Run now on a waiting child."
         if new != (parent["stage"], parent.get("reason")):
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
@@ -1274,6 +1282,7 @@ ROADMAP_STEP_RE = re.compile(r"^- \[(?P<status>[ ~x!])\] S(?P<n>\d+) (?P<kind>bi
                              r"(?: (?P<job>\d{3,}-[a-z0-9-]+))?: (?P<request>.*)$")
 ROADMAP_PHASE_RE = re.compile(r"^## P(\d+) (.+)$")
 ROADMAP_BOX = {" ": "todo", "~": "running", "x": "done", "!": "stopped"}
+ROADMAP_STATUS_BOX = {v: k for k, v in ROADMAP_BOX.items()}
 ROADMAP_KINDS = ("bigboy", "standard")
 
 
@@ -1347,7 +1356,7 @@ def roadmap_show(root):
 
 
 def format_step(st):
-    box = next(k for k, v in ROADMAP_BOX.items() if v == st["status"])
+    box = ROADMAP_STATUS_BOX[st["status"]]
     return f"- [{box}] S{st['n']} {st['kind']}" + (f" {st['job']}" if st["job"] else "") + f": {st['request']}"
 
 
