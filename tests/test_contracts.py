@@ -192,6 +192,24 @@ class ContractTest(unittest.TestCase):
                 if len(outputs) == 2:
                     self.assertEqual(outputs["bash"], outputs["zsh"], name)
 
+    def test_code_reviewer_waits_for_codex(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("**Codex step (once per round).**",
+                       "Before writing your review file, wait for that background run to exit; only a run still "
+                       "going at the 10-minute timeout counts as a skip",
+                       "- Run Codex in every round, round 2 and later included.\n"
+                       "- Before you write `review-code.md`, wait for the background Codex command to exit or reach "
+                       "its 10-minute timeout.",
+                       "Finishing your own review first is never a skip reason",
+                       'and "still running" is never a skip reason',
+                       "ROUTE_RUNNER=local MODEL=<model> LOG_MODEL=<model>",
+                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"',
+                       "does not word-split", "codex: skipped — fast lane"):
+            self.assertIn(phrase, text, phrase)
+        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3'):
+            self.assertNotIn(phrase, text, phrase)
+        self.assertEqual(text.count("wait for the background"), 1)
+
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ('"pre-existing"', "must name that code", "opens with the scenario", '"No findings"',
@@ -881,6 +899,27 @@ class ContractTest(unittest.TestCase):
 
     def test_ui_reviewer_renders_page(self):
         self.assert_reviewer_renders("ui")
+
+    def test_review_ux_ui_digest_rules(self):
+        ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        debt = ("- Judge new violations in this diff, not existing debt. Put existing debt under Notes as "
+                "`pre-existing: <rule ID> — <where>`, never as a finding.")
+        blocking = ("- A new violation of a numbered rule in the UI behaviour file (for example a new link "
+                    "under 44 px, UB-15) is `[blocking]` with confidence ≥ 80, never `[minor]`.")
+        self.assertIn(debt + "\n" + blocking + "\n", ux)
+        harness = ("When the page needs a signed-in session or a database you cannot reach, render the new "
+                   "component in a throwaway harness in `/tmp` with mock data at 390 px and 1440 px, and say so "
+                   "in the `Rendered:` line. If you could not render or exercise the page, write "
+                   "`Rendered: no — <reason>`;")
+        self.assertIn(harness, ux)
+        self.assertIn(debt + "\n", ui)
+        self.assertNotIn("UB-15", ui)
+        self.assertNotIn("throwaway harness", ui)
+        for name, text in (("ux", ux), ("ui", ui)):
+            self.assertEqual(text.count("pre-existing: <rule ID> — <where>"), 1, name)
+            self.assertNotIn("- Judge new violations in this diff, not existing debt.\n", text, name)
+        self.assertEqual(ux.count("throwaway harness"), 1)
 
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()

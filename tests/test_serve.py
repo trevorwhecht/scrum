@@ -1381,6 +1381,44 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(server, json.dumps(view | {"args": ["replacement", "[redacted]"]}), confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["replacement", self.XOX])
 
+    def save_args(self, args):
+        """Write .mcp.json with server s holding args; return (mcp, server item, view, version)."""
+        mcp = self.reg / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"s": {"command": "npx", "args": args}}}))
+        server = self.json_item("r:reg", "mcp", mcp, "s")
+        got = self.item(server["id"])[1]
+        return mcp, server, json.loads(got["content"]), got["version"]
+
+    def test_save_list_ambiguous_redacted_refused(self):
+        self.plant_value_secrets()
+        mcp, server, view, version = self.save_args([self.SK, self.XOX])
+        before, backups = mcp.read_bytes(), len(self.backups())
+        for args, at in ((["replacement", "[redacted]", "--extra"], "args.1"), (["[redacted]"], "args.0")):
+            self.assertEqual(self.serve.ai_settings_save(server["id"], json.dumps(view | {"args": args}), version, confirm=True),
+                             (400, {"error": f"[redacted] at {at} is ambiguous; type the value in full"}), args)
+        self.assertEqual((mcp.read_bytes(), len(self.backups())), (before, backups))
+
+    def test_save_list_consumed_entry_not_reused(self):
+        self.plant_value_secrets()
+        mcp, server, view, version = self.save_args(["--a", "k=" + self.SK])
+        before, backups = mcp.read_bytes(), len(self.backups())
+        self.assertEqual(self.serve.ai_settings_save(server["id"], json.dumps(view | {"args": ["k=[redacted]", "k2=[redacted]", "y"]}),
+                                                     version, confirm=True),
+                         (400, {"error": "[redacted] at args.1 has no saved value"}))
+        self.assertEqual((mcp.read_bytes(), len(self.backups())), (before, backups))
+        mcp, server, view, _ = self.save_args(["k=" + self.SK, "x"])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["key=[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["key=" + self.SK])
+
+    def test_save_list_unambiguous_reorder_keeps_values(self):
+        self.plant_value_secrets()
+        mcp, server, view, _ = self.save_args([self.SK, self.XOX])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["--v", "[redacted]", "[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["--v", self.SK, self.XOX])
+        mcp, server, view, _ = self.save_args(["a=" + self.SK, "b=" + self.GHP])
+        self.assertEqual(self.save(server, json.dumps(view | {"args": ["b=[redacted]", "x", "a=[redacted]"]}), confirm=True)[0], 200)
+        self.assertEqual(json.loads(mcp.read_text())["mcpServers"]["s"]["args"], ["b=" + self.GHP, "x", "a=" + self.SK])
+
     def test_read_only(self):
         snap = lambda: {p: p.stat().st_mtime_ns for p in self.home.rglob("*")}
         before = snap()
