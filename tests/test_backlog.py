@@ -319,6 +319,78 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(list((self.root / "jobs" / "002-dark-mode").iterdir()), [])
         self.assertIn("- [x] Dark mode → 002-dark-mode\n", self.text())
 
+    # --- pre-written specs are dropped when their item is edited, deleted or consumed by triage ---
+    def put_spec(self, text, body):
+        spec = self.spec_file(text)
+        spec.parent.mkdir(exist_ok=True)
+        spec.write_text(body)
+        return spec
+
+    def test_edit_text_drops_prewritten_spec(self):
+        old = self.put_spec("Dark mode", "# Dark\n")
+        other = self.put_spec("Add CSV export", "# CSV\n")
+        board.backlog_op(self.root, "edit", index=2, text="Dark mode toggle")
+        self.assertFalse(old.exists())
+        self.assertFalse(self.spec_file("Dark mode toggle").exists())
+        self.assertEqual(other.read_text(), "# CSV\n")
+        out = board.cmd_next(self.root, 2)
+        self.assertEqual(out, {"id": "001-dark-mode-toggle", "feature": "Dark mode toggle"})
+        self.assertEqual(list((self.root / "jobs" / "001-dark-mode-toggle").iterdir()), [])
+
+    def test_edit_points_or_same_text_keeps_spec(self):
+        spec = self.put_spec("Dark mode", "# Dark\nbody\n")
+        board.backlog_op(self.root, "edit", index=2, points=3)
+        self.assertEqual(spec.read_bytes(), b"# Dark\nbody\n")
+        board.backlog_op(self.root, "edit", index=2, text="  Dark \n mode <!-- -->")  # cleans to "Dark mode"
+        self.assertEqual(spec.read_bytes(), b"# Dark\nbody\n")
+        self.assertIn("- [ ] [3] Dark mode\n", self.text())
+
+    def test_delete_drops_prewritten_spec(self):
+        spec = self.put_spec("Dark mode", "# Dark\n")
+        other = self.put_spec("Add CSV export", "# CSV\n")
+        board.backlog_op(self.root, "delete", index=2)
+        self.assertFalse(spec.exists())
+        self.assertEqual(other.read_text(), "# CSV\n")
+        board.backlog_op(self.root, "delete", index=0)  # a done item, no spec
+        board.backlog_op(self.root, "add", text="No spec here")
+        board.backlog_op(self.root, "delete", index=1)  # open item, no spec
+        self.assertEqual([i["text"] for i in board.backlog_items(self.root)], ["Add CSV export"])
+        self.assertEqual(other.read_text(), "# CSV\n")
+
+    def test_delete_without_specs_folder_does_not_raise(self):
+        board.backlog_op(self.root, "delete", index=2)
+        self.assertFalse((self.root / "backlog-specs").exists())
+
+    def test_spec_kept_while_another_open_item_has_text(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Twin\n- [ ] Twin\n- [x] Gone\n")
+        spec = self.put_spec("Twin", "# Twin\n")
+        board.backlog_op(self.root, "edit", index=0, text="Twin renamed")
+        self.assertEqual(spec.read_text(), "# Twin\n")
+        board.backlog_op(self.root, "add", text="Twin")
+        board.backlog_op(self.root, "delete", index=1)
+        self.assertEqual(spec.read_text(), "# Twin\n")
+        board.backlog_op(self.root, "delete", index=2)  # the last open "Twin"
+        self.assertFalse(spec.exists())
+
+    def test_triage_apply_drops_specs_of_consumed_items(self):
+        self.triage(
+            "# Backlog\n- [ ] Alpha\n- [ ] Beta\n- [ ] Gamma\n- [ ] Delta\n- [ ] Epsilon\n- [ ] Zeta\n- [ ] Keep me\n",
+            {"merge": [{"items": ["Alpha", "Beta"], "text": "Alpha and Beta"},
+                       {"items": ["Zeta", "Nope"], "text": "Zeta and nope"}],
+             "retire": [{"item": "Gamma", "reason": "obsolete"},
+                        {"item": "Zeta", "reason": ""}],
+             "manual": [{"item": "Delta", "reason": "needs a phone"}],
+             "estimate": [{"item": "Epsilon", "points": 3, "why": "small"},
+                          {"item": "Zeta", "points": 4}]})
+        specs = {t: self.put_spec(t, f"# {t}\n") for t in ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Keep me")}
+        res = board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(res, {"merged": 1, "retired": 1, "manual": 1, "estimated": 1, "skipped": 3})
+        for t in ("Alpha", "Beta", "Gamma", "Delta"):
+            self.assertFalse(specs[t].exists(), t)
+        for t in ("Epsilon", "Zeta", "Keep me"):
+            self.assertEqual(specs[t].read_text(), f"# {t}\n")
+        self.assertFalse(self.spec_file("Alpha and Beta").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
