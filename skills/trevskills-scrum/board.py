@@ -21,6 +21,9 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
+  board.py digest-verify <id>      exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
+                                   (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
+                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/estimate) to backlog.md, write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
@@ -44,6 +47,7 @@ from the files. --dir points at the project's scrum/ folder (default ./scrum).
 import argparse, fcntl, hashlib, json, os, re, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from itertools import permutations
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
@@ -576,6 +580,111 @@ def cmd_digest_trim(root, digest_id):
             trimmed.append(job["id"])
         (d / "trimmed").write_text(now() + "\n")
     return trimmed
+
+
+# --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
+# the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
+CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
+RULES_RE = re.compile(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$")
+DIGEST_ORDERS_MAX = 6  # up to this many proposals in one file, every application order is tried
+
+
+def digest_citations(root: Path, text: str) -> list[tuple[Path, str, str]]:
+    """(scrum dir, digest id, pid) per unique `[<project>] digest NNN pid` citation in text, in order. A registered
+    project name before `digest` means that repo's scrum/ folder; anything else means root."""
+    names, out = projects(), []
+    for m in CITATION_RE.finditer(text):
+        scrum = names[m[1]] / "scrum" if m[1] in names else Path(root)
+        cite = (scrum, m[2], m[3])
+        if cite not in out:
+            out.append(cite)
+    return out
+
+
+def _git(worktree, *args):
+    r = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, timeout=60)
+    if r.returncode:
+        raise ValueError(f"git {' '.join(args[:2])} failed: {r.stderr.decode(errors='replace').strip()[:200]}")
+    return r.stdout
+
+
+def _cited_proposal(root, scrum, digest_id, pid):
+    """(repo-relative file, proposal) for one citation; ValueError says why it doesn't count."""
+    path = Path(scrum) / "digests" / digest_id / "proposals.json"
+    try:
+        raw = json.loads(path.read_text()).get("proposals")
+    except (OSError, ValueError, AttributeError):
+        raise ValueError(f"digest {digest_id} {pid}: no readable {path}")
+    p = next((x for x in raw if isinstance(x, dict) and x.get("id") == pid), None) if isinstance(raw, list) else None
+    if p is None:
+        raise ValueError(f"digest {digest_id} {pid}: no such proposal in {path}")
+    if not all(isinstance(p.get(k), str) for k in ("id", "target", "old", "new")) or p["old"] == p["new"] \
+            or not p["old"] or p.get("kind", "edit") != "edit":
+        raise ValueError(f"digest {digest_id} {pid}: not a valid edit proposal")
+    if p.get("status") != "queued":
+        raise ValueError(f"digest {digest_id} {pid}: status is {p.get('status')!r}, not queued")
+    rel = os.path.relpath(os.path.realpath(p["target"]), os.path.realpath(Path(root).resolve().parent))
+    if rel == ".." or rel.startswith(".." + os.sep):
+        raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is outside this repo")
+    return Path(rel).as_posix(), p
+
+
+def _applies(base_text, props, head_text):
+    """True when replacing the first occurrence of each old with its new, in citation order or (at most
+    DIGEST_ORDERS_MAX proposals) any order, turns base_text into head_text. Each old must occur once in base_text."""
+    if any(base_text.count(p["old"]) != 1 for p in props):
+        return False
+    orders = permutations(props) if len(props) <= DIGEST_ORDERS_MAX else [props]
+    for order in orders:
+        text = base_text
+        for p in order:
+            if p["old"] not in text:
+                break
+            text = text.replace(p["old"], p["new"], 1)
+        else:
+            if text == head_text:
+                return True
+    return False
+
+
+def cmd_digest_verify(root: Path, job_id: str) -> dict:
+    """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
+    and every cited proposal's file changed; else {"ok": False, "error"}."""
+    try:
+        job = find(read_board(root), check_id(job_id))
+        feature = Path(root) / "jobs" / job_id / "feature.md"
+        cites = digest_citations(root, feature.read_text(errors="replace") if feature.is_file() else "")
+        if not cites:
+            raise ValueError("feature.md cites no digest proposal")
+        wt, base = job.get("worktree"), job.get("base")
+        if not wt or not base:
+            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+        if base.startswith("-"):
+            raise ValueError(f"bad base {base!r}")
+        by_file, labels = {}, []
+        for scrum, digest_id, pid in cites:
+            rel, p = _cited_proposal(root, scrum, digest_id, pid)
+            by_file.setdefault(rel, []).append(p)
+            labels.append(f"{Path(scrum).resolve().parent.name} digest {digest_id} {pid}")
+        changed = [f for f in _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines() if RULES_RE.search(f)]
+        if not changed:
+            raise ValueError("the diff changes no rules file")
+        if extra := next((f for f in changed if f not in by_file), None):
+            raise ValueError(f"{extra} changed but no cited proposal targets it")
+        if missing := next((f for f in by_file if f not in changed), None):
+            raise ValueError(f"{missing} is a cited proposal's target but is not changed")
+        mb = _git(wt, "merge-base", base, "HEAD").decode().strip()
+        for f in changed:
+            try:
+                before = _git(wt, "show", f"{mb}:{f}").decode()
+                after = _git(wt, "show", f"HEAD:{f}").decode()
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError(f"{f}: missing or unreadable at the merge-base or HEAD")
+            if not _applies(before, by_file[f], after):
+                raise ValueError(f"{f}: HEAD is not exactly the merge-base with its cited proposals applied")
+        return {"ok": True, "files": changed, "proposals": labels}
+    except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": str(e)}
 
 
 # --- artifacts: what a cloud job may push to scrum-artifacts/<id> (SKILL.md Cloud lane); files are left out whole ---
@@ -1495,6 +1604,7 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
+    sub.add_parser("digest-verify").add_argument("id")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -1558,6 +1668,10 @@ def main(argv=None):
         print(json.dumps(cmd_digest_start(a.dir)))
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
+    elif a.cmd == "digest-verify":
+        out = cmd_digest_verify(a.dir, a.id)
+        print(json.dumps(out))
+        return 0 if out["ok"] else 1
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
