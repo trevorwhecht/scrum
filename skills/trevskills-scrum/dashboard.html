@@ -99,6 +99,9 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
 #blList li input{flex:1;min-width:0}
 #blList .needs{flex:0 1 auto;min-width:0;max-width:40%;font-size:12px;color:var(--changes);overflow-wrap:anywhere}#blList .needs.met{color:var(--muted)}
+#blList li.setup{flex-wrap:wrap;border-left:3px solid var(--changes);padding-left:8px;background:color-mix(in srgb,var(--changes) 8%,transparent)}
+#blList .setup-box{flex-basis:100%;order:1;min-width:0;font-size:12px;color:var(--changes);overflow-wrap:anywhere}
+#blList .setup-list{margin:2px 0 0;padding-left:18px;color:var(--ink)}#blList .setup-list li{display:list-item;padding:0;border:0}
 #blManual h3{margin:0;font-size:13px;color:var(--muted);font-weight:600}
 #blManualList{list-style:none;margin:0;padding:0}
 #blManualList label{display:flex;gap:8px;align-items:center;min-height:44px;padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer;overflow-wrap:anywhere;min-width:0}
@@ -679,6 +682,12 @@ function needsTag(it, all) {
   return `<span class="needs${it.waits?.length ? "" : " met"}" title="${esc(names.join("; "))}">waits on: ${esc(names.map(cut).join(", "))}</span>`;
 }
 
+// A Human setup item (" {setup: …}" in backlog.md): its checklist under the row. next and Run all skip it until Setup done.
+function setupTag(it) {
+  if (!it.setup?.length) return "";
+  return `<div class="setup-box">waiting on you:<ul class="setup-list">${it.setup.map(s => `<li>${esc(s)}</li>`).join("")}</ul></div>`;
+}
+
 function renderBacklog() {
   renderManual();
   $("blAdd").hidden = !projects.length;
@@ -686,14 +695,15 @@ function renderBacklog() {
   if (!projects.length) return $("blList").innerHTML = '<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>';
   const all = backlogs[blProject()] || [], open = all.filter(i => !i.done);
   $("blRunAll").disabled = !open.length;
-  $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}">
+  $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}"${it.setup?.length ? ' class="setup"' : ""}>
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
         ${PTS.map(p => `<option value="${p ?? ""}"${p === it.points ? " selected" : ""}>${p ?? "?"}</option>`).join("")}</select>
       <input type="text" value="${esc(it.text)}" maxlength="2000" aria-label="Item text">${needsTag(it, all)}
       <button class="btn icon" type="button" data-do="up" aria-label="Move up"${n === 0 ? " disabled" : ""}>↑</button>
       <button class="btn icon" type="button" data-do="down" aria-label="Move down"${n === open.length - 1 ? " disabled" : ""}>↓</button>
-      <button class="btn icon" type="button" data-do="run" aria-label="Run now">▶</button>
-      <button class="btn icon" type="button" data-do="delete" aria-label="Delete">✕</button>
+      ${it.setup?.length ? '<button class="btn" type="button" data-do="setup-done">Setup done</button>'
+        : '<button class="btn icon" type="button" data-do="run" aria-label="Run now">▶</button>'}
+      <button class="btn icon" type="button" data-do="delete" aria-label="Delete">✕</button>${setupTag(it)}
     </li>`).join("") || '<li class="note">Backlog is empty.</li>';
 }
 
@@ -749,15 +759,17 @@ $("blList").addEventListener("click", e => {
   const b = e.target.closest("button[data-do]");
   if (!b) return;
   const index = +b.closest("li").dataset.i, act = b.dataset.do;
-  // Run and Delete ask once on the button itself; no native confirm().
-  if ((act === "run" || act === "delete") && !b.dataset.armed) {
-    b.dataset.armed = "1"; b.textContent = act === "run" ? "Run?" : "Delete?"; b.classList.add(act === "run" ? "primary" : "danger");
+  // Run, Setup done and Delete ask once on the button itself; no native confirm().
+  if ((act === "run" || act === "setup-done" || act === "delete") && !b.dataset.armed) {
+    b.dataset.armed = "1"; b.textContent = {run: "Run?", "setup-done": "Setup done?", delete: "Delete?"}[act];
+    b.classList.add(act === "delete" ? "danger" : "primary");
     return;
   }
   b.disabled = true;
   const askme = $("blAskme").value;
   backlogCall(url => act === "run" ? post(`${url}/run`, {index, ...(askme ? {askme: +askme} : {})}).then(() => $("backlog").close())
-    : post(url, act === "delete" ? {op: "delete", index} : {op: "move", index, delta: act === "up" ? -1 : 1}));
+    : post(url, act === "delete" ? {op: "delete", index} : act === "setup-done" ? {op: "setup-done", index}
+      : {op: "move", index, delta: act === "up" ? -1 : 1}));
 });
 $("blList").addEventListener("change", e => {
   const index = +e.target.closest("li").dataset.i;
