@@ -1,0 +1,1 @@
+Ask Claude button in every job modal: opens a NEW Claude session in Ghostty (fall back to Terminal if Ghostty is missing) in the job's worktree, preloaded with a prompt that points at the job's feature.md, spec.md, build.md, every round's check/review files, decision.md and the board.json entry, so I can ask questions about the job even after its session has died.

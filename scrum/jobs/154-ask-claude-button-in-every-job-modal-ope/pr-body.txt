@@ -1,0 +1,7 @@
+- New POST /api/p/<project>/jobs/<id>/ask endpoint opens claude in Ghostty or Terminal with a prompt listing the job artifacts.
+- Dashboard job modal shows an Ask Claude button in every state, with pending, status and error feedback.
+- Tests and README updated.
+
+Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/154-ask-claude-button-in-every-job-modal-ope/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
