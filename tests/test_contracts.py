@@ -1604,6 +1604,32 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('"merging", "cloud", "needs-human"', text)
         self.assertIn("Cloud session ↗", text)
 
+    # --- Human setup for any lane ---
+    def test_spec_writer_human_setup(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        self.assertIn("Human setup: none | <step>; <step>", text)
+        self.assertIn("## Waiting on setup", text)
+        self.assertLess(text.index("Hard stops: none |"), text.index("Human setup: none |"))
+        self.assertLess(text.index("Human setup: none |"), text.index("Lane: fast|standard|debug|bigboy"))
+        self.assertIn("cover only the part that works without the setup", text)
+        exit_rule = self.section(text, "**BigBoy parent: exit early.**", "**BigBoy child:")
+        self.assertIn("always writes `Human setup: none`", exit_rule)
+
+    def test_skill_routes_human_setup_to_backlog(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step = self.section(text, "3c. **Lane:**", "4. **Worktree:**")
+        for phrase in ("backlog-add --setup", "## Waiting on setup", "Human setup:", "(from $ID)", "no `parent`",
+                       "never stops the job", "Human setup not parked"):
+            self.assertIn(phrase, step, phrase)
+        fmt = next(line for line in text.splitlines() if line.startswith("- Backlog lines look like"))
+        for phrase in ("{setup:", "waits on Human setup", "runall-start", "Setup done"):
+            self.assertIn(phrase, fmt, phrase)
+
+    def test_dashboard_backlog_setup_done(self):
+        text = DASHBOARD.read_text()
+        for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
+            self.assertIn(phrase, text, phrase)
+
 
 if __name__ == "__main__":
     unittest.main()

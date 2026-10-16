@@ -591,6 +591,115 @@ class BacklogTest(unittest.TestCase):
             self.assertEqual(specs[t].read_text(), f"# {t}\n")
         self.assertFalse(self.spec_file("Alpha and Beta").exists())
 
+    # --- Human setup: a " {setup: step; step}" marker parks an item until Trevor clicks Setup done ---
+    SETUP_LINE = ("- [ ] [3] Send SMS alerts {#k3f9} {needs #a1b2} {setup: Buy a Twilio number; Add TWILIO_TOKEN to .env}"
+                  " → 003-x <!-- why -->")
+
+    def test_setup_marker_round_trip(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n" + self.SETUP_LINE + "\n"
+            "- [ ] Park me {setup: Add a DNS record}\n"
+            "- [ ] Plain item\n")
+        items = board.backlog_items(self.root)
+        self.assertEqual([(i["text"], i["setup"]) for i in items], [
+            ("Send SMS alerts", ["Buy a Twilio number", "Add TWILIO_TOKEN to .env"]),
+            ("Park me", ["Add a DNS record"]),
+            ("Plain item", []),
+        ])
+        first = items[0]
+        self.assertEqual((first["id"], first["needs"], first["points"], first["job"], first["why"]),
+                         ("k3f9", ["a1b2"], 3, "003-x", "why"))
+        lines, parsed = board.read_backlog(self.root)
+        self.assertEqual([board.format_item(i) for i in parsed], lines[1:])
+        board.backlog_op(self.root, "edit", index=1, text="Park me now")
+        self.assertIn("- [ ] Park me now {setup: Add a DNS record}\n", self.text())
+        board.backlog_op(self.root, "edit", index=1, points=2)
+        self.assertIn("- [ ] [2] Park me now {setup: Add a DNS record}\n", self.text())
+        board.backlog_op(self.root, "move", index=2, delta=-1)
+        self.assertTrue(self.text().endswith("- [ ] Plain item\n- [ ] [2] Park me now {setup: Add a DNS record}\n"))
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Park me {setup: Add a DNS record}\n")
+        self.assertTrue(board.backlog_set_estimate(self.root, "Park me", 5, "two files"))
+        self.assertEqual(self.text(), "# Backlog\n- [ ] [5] Park me {setup: Add a DNS record} <!-- two files -->\n")
+
+    def test_backlog_add_setup(self):
+        with mock.patch.object(board, "spawn_estimates") as spawn:
+            board.main(["--dir", str(self.root), "backlog-add", "--setup",
+                        "Buy a Twilio number; Add TWILIO_TOKEN to .env", "Send SMS alerts (from 152-x)"])
+        spawn.assert_called_once_with(self.root, ["Send SMS alerts (from 152-x)"])
+        self.assertTrue(self.text().endswith(
+            "some note the user wrote\n"
+            "- [ ] Send SMS alerts (from 152-x) {setup: Buy a Twilio number; Add TWILIO_TOKEN to .env}\n"))
+        # split on ";", trimmed, empty steps dropped, braces removed
+        board.cmd_backlog_add(self.root, ["Messy"], setup=" ;  Get {a} key ;; Set }DNS{ ;  ")
+        self.assertTrue(self.text().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n"))
+        self.assertEqual(board.backlog_items(self.root)[-1]["setup"], ["Get a key", "Set DNS"])
+        # without --setup nothing changes
+        board.cmd_backlog_add(self.root, ["No setup here"])
+        self.assertTrue(self.text().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n- [ ] No setup here\n"))
+
+    def test_backlog_add_setup_empty_checklist(self):
+        before = self.text()
+        r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "board.py"), "--dir", str(self.root),
+                            "backlog-add", "--setup", " ; {} ;", "Send SMS alerts"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("setup checklist is empty", r.stderr)
+        self.assertEqual(self.text(), before)
+        with self.assertRaises(SystemExit) as e:
+            board.backlog_op(self.root, "add", text="Send SMS alerts", setup="  ")
+        self.assertEqual(str(e.exception), "setup checklist is empty")
+        self.assertEqual(self.text(), before)
+
+    def test_next_skips_setup_item(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Parked {#park} {setup: Buy a number}\n- [ ] Needs parked {needs #park}\n- [ ] Free one\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "Free one")
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Parked {#park} {setup: Buy a number}\n- [ ] Needs parked {needs #park}\n"
+                                      f"- [x] Free one → {out['id']}\n")
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), [out["id"]])
+
+    def test_next_index_refuses_setup_item(self):
+        board.cmd_new(self.root, "Something else")  # board.json exists
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Free\n- [ ] Parked {setup: Buy a number; Set the key}\n")
+        before_backlog = self.text()
+        before_board = (self.root / "board.json").read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root, 1)
+        self.assertEqual(str(e.exception), "backlog item 1 waits on Human setup")
+        self.assertEqual(self.text(), before_backlog)
+        self.assertEqual((self.root / "board.json").read_bytes(), before_board)
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), ["001-something-else"])
+
+    def test_runall_start_skips_setup_items(self):
+        backlog = ("# Backlog\n- [ ] Parked {#park} {setup: Buy a number}\n- [ ] Needs parked {needs #park}\n"
+                   "- [ ] Free one\n")
+        (self.root / "backlog.md").write_text(backlog)
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-free-one"]})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Parked {#park} {setup: Buy a number}\n"
+                                      "- [ ] Needs parked {needs #park}\n- [x] Free one → 002-free-one\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Parked {setup: Buy a number}\n")
+        self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Parked {setup: Buy a number}\n")
+
+    def test_setup_done_op(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] [?] Parked {#park} {setup: Buy a number; Set the key} <!-- why -->\n"
+            "- [ ] Needs parked {needs #park}\n- [x] Done parked {setup: Old step} → 001-old\n- [ ] Plain\n")
+        items = board.backlog_op(self.root, "setup-done", index=0)
+        self.assertEqual(items[0]["setup"], [])
+        self.assertEqual(self.text(), "# Backlog\n- [ ] [?] Parked {#park} <!-- why -->\n"
+                                      "- [ ] Needs parked {needs #park}\n- [x] Done parked {setup: Old step} → 001-old\n"
+                                      "- [ ] Plain\n")
+        for index in (0, 2, 3):
+            before = self.text()
+            with self.assertRaises(SystemExit) as e:
+                board.backlog_op(self.root, "setup-done", index=index)
+            self.assertEqual(str(e.exception), f"backlog item {index} has no Human setup")
+            self.assertEqual(self.text(), before)
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Parked")
+
 
 if __name__ == "__main__":
     unittest.main()
