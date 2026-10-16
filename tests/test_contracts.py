@@ -836,6 +836,16 @@ class ContractTest(unittest.TestCase):
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
 
+    def test_spec_writer_digest_001_p3_p4(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
+                       "rework or abort) and turn each into a criterion.",
+                       "this is the early warning. Flag `auth` or `secrets` only when the change edits that "
+                       "handling itself; reading, scanning or displaying config files that may hold secrets "
+                       "is not a hard stop."):
+            self.assertEqual(text.count(phrase), 1, phrase)
+        self.assertNotIn("malformed) and turn", text)
+
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F", "on port <N>", "on port 8765",
