@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import json, os, re, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta
 from unittest import mock
 from pathlib import Path
@@ -2782,14 +2782,55 @@ class DigestTest(unittest.TestCase):
         agent.write_text("old line\n")
         (self.user / "agents").mkdir()
         (self.user / "agents" / "scrum-x.md").symlink_to(agent)  # how install.sh links agents into ~/.claude
-        d = self.digest([self.prop("p1", claude_md), self.prop("p2", self.user / "agents" / "scrum-x.md")])
+        self.digest([self.prop("p1", claude_md), self.prop("p2", self.user / "agents" / "scrum-x.md")])
         self.assertEqual(self.decide("p1", "approve"), (200, {**self.prop("p1", claude_md), "status": "queued", "kind": "edit"}))
         self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
         self.assertEqual((claude_md.read_text(), agent.read_text()), ("old line\n", "old line\n"))
         self.assertEqual(self.backups(), [])
         items = [i["text"] for i in self.board.backlog_items(self.scrum)]
-        self.assertEqual(items, [f"Apply digest 001 p1 to CLAUDE.md: see {d / 'proposals.json'}",
-                                 f"Apply digest 001 p2 to agents/scrum-x.md: see {d / 'proposals.json'}"])
+        self.assertEqual(items, ["Apply digest 001 p1 to CLAUDE.md: Seen in 001-a and 002-b (p1).",
+                                 "Apply digest 001 p2 to agents/scrum-x.md: Seen in 001-a and 002-b (p2)."])
+
+    def test_queued_proposal_backlog_item_is_self_contained(self):
+        target = self.reg / "docs" / "guide.md"
+        target.parent.mkdir()
+        target.write_text("intro\n```\nold block\n```\n")
+        old, new = "```\nold block\n```\n", "````md\n```\nnew block\n```\n````\n"
+        why = "Two jobs\n  hit   this."
+        d = self.digest([self.prop("p1", target, old=old, new=new, why=why), self.prop("p2", target), self.prop("p3", target)])
+        specs = self.scrum / "backlog-specs"
+        self.assertEqual(self.decide("p2", "reject")[1]["status"], "rejected")
+        self.assertFalse(specs.exists())
+        self.assertEqual(self.decide("p1", "approve")[1]["status"], "queued")
+        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertEqual(items, ["Apply digest 001 p1 to docs/guide.md: Two jobs hit this."])
+        for bad in ("proposals.json", str(self.scrum), str(d), str(self.home), "/Users/", "/tmp"):
+            self.assertNotIn(bad, items[0])
+        spec_file = self.board.spec_path(self.scrum, items[0])
+        self.assertEqual(list(specs.iterdir()), [spec_file])
+        spec = spec_file.read_text(encoding="utf-8")
+        self.assertTrue(spec.startswith("# Apply digest 001 p1 to docs/guide.md\nUI surface: no\nHard stops: none\nLane: fast\n"), spec)
+        for heading in ("## Problem", "## Scope", "## Acceptance criteria", "## Likely files", "## Assumptions"):
+            self.assertIn(f"\n{heading}\n", spec)
+        self.assertIn("`docs/guide.md`", spec)
+        self.assertIn(why, spec)
+        self.assertIn("replace the one occurrence of the old text in `docs/guide.md` with the new text", spec)
+        self.assertIn("if the old text does not occur exactly once, the job is obsolete", spec)
+        for bad in ("proposals.json", str(self.scrum), str(self.home), "/Users/", "/tmp"):
+            self.assertNotIn(bad, spec)
+        # Each block is quoted with a fence longer than its longest backtick run, so it comes back byte for byte.
+        self.assertIn("Old text:\n````\n```\nold block\n```\n\n````\n", spec)
+        self.assertIn("New text:\n`````\n````md\n```\nnew block\n```\n````\n\n`````\n", spec)
+        blocks = re.findall(r"^(`{3,})\n(.*?)\n\1$", spec, re.M | re.S)
+        self.assertEqual([b[1] for b in blocks], [old, new])
+        job = self.board.cmd_next(self.scrum)
+        self.assertFalse(spec_file.exists())
+        moved = (self.scrum / "jobs" / job["id"] / "spec.md").read_text(encoding="utf-8")
+        self.assertEqual(moved, spec)
+        self.assertIn(old, moved)
+        self.assertIn(new, moved)
+        self.assertEqual(self.decide("p1", "approve")[0], 409)  # already queued: no second item, no new spec
+        self.assertFalse(specs.exists() and any(specs.iterdir()))
 
     def test_last_decision_trims(self):
         job_id = self.done_job()
@@ -2819,7 +2860,7 @@ class DigestTest(unittest.TestCase):
         agent, skill = self.repo_file("agents/scrum-x.md"), self.repo_file("skills/s/SKILL.md")
         (self.user / "agents").mkdir()
         (self.user / "agents" / "scrum-y.md").symlink_to(self.repo_file("agents/scrum-y.md"))  # install.sh's link
-        d = self.digest([self.prop("p1", agent, obvious=True, obvious_reason="3 jobs, sharper rule"),
+        self.digest([self.prop("p1", agent, obvious=True, obvious_reason="3 jobs, sharper rule"),
                          self.prop("p2", skill, obvious=True, obvious_reason="2 jobs"),
                          self.prop("p3", self.user / "agents" / "scrum-y.md", obvious=True, obvious_reason="linked"),
                          self.prop("p4", agent, obvious_reason="loosens a hard stop")])
@@ -2831,9 +2872,10 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.statuses(), ["queued", "queued", "queued", "pending"])
         self.assertEqual(agent.read_text(), "old line\n")
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
-                         [f"Apply digest 001 p1 to agents/scrum-x.md: see {d / 'proposals.json'}",
-                          f"Apply digest 001 p2 to skills/s/SKILL.md: see {d / 'proposals.json'}",
-                          f"Apply digest 001 p3 to agents/scrum-y.md: see {d / 'proposals.json'}"])
+                         ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
+                          "Apply digest 001 p2 to skills/s/SKILL.md: Seen in 001-a and 002-b (p2).",
+                          "Apply digest 001 p3 to agents/scrum-y.md: Seen in 001-a and 002-b (p3)."])
+        self.assertEqual(len(list((self.scrum / "backlog-specs").iterdir())), 3)  # digest_auto pre-writes each spec too
         self.assertEqual(self.serve.digest_auto(self.scrum, "001"), {"approved": [], "human": [{"id": "p4", "reason": "loosens a hard stop"}]})
 
     def test_digest_auto_rechecks_target_whatever_digester_says(self):
@@ -2930,11 +2972,26 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.decide("p1", "approve")[:2], (200, {**self.skill("p1", target), "status": "queued"}))
         self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
         self.assertEqual(self.statuses(), ["queued", "queued"])
-        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
-                         [f"Create digest 001 p1 skill at skills/k/SKILL.md: first run `python3 ~/.claude/skills/trevskills-scrum/serve.py"
-                          f" --digest-skill-check 001 p1 --dir {self.scrum}`; if it exits non-zero the item is obsolete. See {d / 'proposals.json'}",
-                          f"Create digest 001 p2 skill at .claude/skills/my-skill-2/SKILL.md: first run `python3 ~/.claude/skills/trevskills-scrum/serve.py"
-                          f" --digest-skill-check 001 p2 --dir {self.scrum}`; if it exits non-zero the item is obsolete. See {d / 'proposals.json'}"])
+        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertEqual(items, ["Create digest 001 p1 skill at skills/k/SKILL.md: Seen in 001-a and 002-b (p1).",
+                                 "Create digest 001 p2 skill at .claude/skills/my-skill-2/SKILL.md: Seen in 001-a and 002-b (p2)."])
+        for item in items:
+            for bad in ("--digest-skill-check", "proposals.json", str(self.scrum), str(d), "/Users/"):
+                self.assertNotIn(bad, item)
+        spec = self.board.spec_path(self.scrum, items[0]).read_text(encoding="utf-8")
+        self.assertTrue(spec.startswith("# Create digest 001 p1 skill at skills/k/SKILL.md\nUI surface: no\nHard stops: none\n"
+                                        "Lane: standard\n"), spec)
+        for heading in ("## Problem", "## Scope", "## Acceptance criteria", "## Likely files", "## Assumptions"):
+            self.assertIn(f"\n{heading}\n", spec)
+        self.assertIn("Seen in 001-a and 002-b (p1).", spec)
+        self.assertIn("create `skills/k/SKILL.md` with exactly the new content", spec)
+        self.assertIn("if `skills/k/SKILL.md` already exists, the job is obsolete", spec)
+        self.assertNotIn("Old text:", spec)
+        self.assertEqual(re.findall(r"^(`{3,})\n(.*?)\n\1$", spec, re.M | re.S),
+                         [("```", "---\nname: k\ndescription: Load when k.\n---\nFacts.\n")])
+        for bad in ("--digest-skill-check", "proposals.json", str(self.scrum), str(self.home), "/Users/"):
+            self.assertNotIn(bad, spec)
+        self.assertTrue(self.board.spec_path(self.scrum, items[1]).is_file())
         self.assertFalse(target.exists() or target.parent.exists())
         self.assertFalse(dot.exists())
 
@@ -2988,11 +3045,13 @@ class DigestTest(unittest.TestCase):
         snap = lambda: sorted(p for p in [*self.home.rglob("*"), *self.reg.rglob("*")] if "digests" not in p.parts)
         before = snap()
         self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p0", "approve"), (409, {"error": "skill already exists"}))
+        self.assertFalse((self.scrum / "backlog-specs").exists())
         for i in range(len(bad)):
             self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i + 1}", "approve"),
                              (403, {"error": "target is not editable"}), bad[i])
         self.assertEqual(self.statuses(), ["pending"] * (len(bad) + 1))
         self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertFalse((self.scrum / "backlog-specs").exists())
         self.assertEqual(existing.read_text(), "old line\n")
         self.assertEqual(snap(), before)
 
