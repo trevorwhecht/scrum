@@ -756,7 +756,7 @@ def ai_settings_undo(item_id, version):
 
 STAGE_TEXT = {"spec": "spec writer working", "build": "builder working", "check": "check running",
               "review": "reviewers working", "approve": "approver deciding", "merging": "merging",
-              "needs-human": "waiting on you"}
+              "needs-human": "waiting on you", "cloud": "running in a cloud session"}
 
 
 WT_MTIME = {}  # worktree path -> (checked_at, newest file mtime or None); the 2 s poll re-walks at most every 10 s

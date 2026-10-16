@@ -118,6 +118,22 @@ class DoneGuardTest(unittest.TestCase):
         self.assertEqual(self.stage(job_id), "done")
         self.assertFalse(self.marker.exists())
 
+    def test_done_check_uses_rest_not_graphql(self):
+        self.fake_gh('echo "$@" > "%s.args"\necho MERGED' % self.marker)
+        job_id = self.job_with_pr()
+        board.cmd_set(self.root, job_id, ["stage=done"])
+        args = Path(f"{self.marker}.args").read_text()
+        self.assertTrue(args.startswith("api repos/x/y/pulls/35 --jq"), args)
+
+    def test_done_with_non_github_pr_refused(self):
+        self.fake_gh("echo MERGED")
+        job_id = board.cmd_new(self.root, "odd pr")
+        board.cmd_set(self.root, job_id, ["stage=merging", "pr=https://x/1"])
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_set(self.root, job_id, ["stage=done"])
+        self.assertIn("not a GitHub pull request URL", str(e.exception))
+        self.assertFalse(self.marker.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

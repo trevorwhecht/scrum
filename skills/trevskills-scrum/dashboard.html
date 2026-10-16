@@ -227,7 +227,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div id="aiBody"><nav id="aiCats" aria-label="Categories"></nav><article id="aiList"></article></div>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "needs-human", "done"];
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "cloud", "needs-human", "done"];
 // Aborted jobs are finished too: they sit, dimmed, in the done column rather than a ninth column.
 const colOf = job => job.stage === "aborted" ? "done" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
@@ -373,8 +373,8 @@ function roadmapBanner(p) {
 
 function card(job) {
   const human = job.stage === "needs-human" || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
-  // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), so they never go stale.
-  const stale = !human && !["done", "needs-human", "aborted", "waiting", "plan", "running"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
+  // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
+  const stale = !human && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
@@ -502,7 +502,8 @@ function open(job) {
   $("viewer").dataset.key = job.key;
   $("viewerTitle").innerHTML = jobTitle(job);
   const files = job.files || [];
-  const pr = job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "";
+  const pr = (job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "")
+    + (job.cloud ? `<a href="${esc(job.cloud)}" target="_blank" rel="noopener">Cloud session ↗</a>` : "");
   $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
