@@ -360,12 +360,12 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything, `git -C "$REPO" symbolic-ref -q --short HEAD` is not `$DEFAULT` (found as in **New job** step 2), or after `git fetch origin` `git -C "$REPO" rev-list "origin/$DEFAULT..HEAD"` prints anything: `<repo name> must be clean, on <default> and pushed. Fix: commit and push or discard, then run cloud again.`
    - **Credit check (before every batch).** The credit balance has no API. When the Claude in Chrome tools are available (`mcp__claude-in-chrome__*`; read the chrome-browser skill first), open https://claude.ai/settings/usage in a new tab and read `Cloud session credits ... $X of $250 left`. If X is under $25: `Cloud credit is $X, under $25. Fix: top up, then run cloud again.` If the tools are missing or X can't be read, ask Trevor once with AskUserQuestion whether at least $25 is left; anything but a yes refuses with `Cloud credit unreadable and unconfirmed.`
 
-   Then up to N times: run `B next`; stop when `id` is null. Write the feature text to `$F/jobs/$ID/feature.md` (**New job** step 1b) and start the session (macOS `script` gives `claude --cloud` the TTY it needs; the feature text stays inside a variable so the shell expands nothing in it):
+   Then up to N times: run `B next`; stop when `id` is null. Write the feature text to `$F/jobs/$ID/feature.md` (**New job** step 1b) and start the session (macOS `script` gives `claude --cloud` the TTY it needs; the feature text stays inside a variable so the shell expands nothing in it; the environment goes in through `--settings`, because the environment flag takes only self-hosted `ccpool_` ids, and nothing may sit between `--cloud` and its prompt, or that flag swallows it):
    ```bash
    CE=$(sed -n 's/^- Cloud environment: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//'); E=()
-   printf '%s' "$CE" | grep -qE '^[A-Za-z0-9_-]+$' && E=(--environment "$CE")
+   printf '%s' "$CE" | grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings "{\"remote\":{\"defaultEnvironmentId\":\"$CE\"}}")
    FEAT=$(cat "$F/jobs/$ID/feature.md")
-   OUT=$(script -q /dev/null claude --cloud "${E[@]}" "/trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
+   OUT=$(script -q /dev/null claude "${E[@]}" --cloud "/trevskills-scrum cloud-job $ID $FEAT" < /dev/null 2>&1)
    URL=$(printf '%s' "$OUT" | grep -oE 'https://claude\.ai/code/session_[A-Za-z0-9_-]+' | head -1)
    ```
    With a `URL`, run `B set $ID stage=cloud cloud=$URL`. Without one, run `B set $ID stage=needs-human reason='claude --cloud did not start: <last line of OUT>. Fix: click Abort job with Put back in backlog ticked, then run cloud again.'`. Stage `cloud` is never flagged by `B watchdog`. The final report lists each id with its session URL.
@@ -382,6 +382,14 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    - **Merge** auto-merges under exactly the local rules: every hard stop (schema, money, auth, secrets, blocked) still stops. Skip step 1's main checkout guard. Step 7 is only `B set $ID stage=done reason=`: no worktree removal, fast-forward, restart, verify, chaining or Digest (local **Sync** fast-forwards Trevor's checkout).
    - **Never migrate in cloud:** never run `/trevskills-migrate`, `prisma migrate` or `prisma db push`; `approve` and its migrate step only ever run locally. A `Hard stop: schema` (from the approver or the Merge schema guard) is reported as **Needs-human** below, so its comment's first line starts `Hard stop: schema`, and **Sync** migrates it locally.
    - **Needs-human:** every time this job would set `stage=needs-human` (or abort itself as obsolete, with its `obsolete: ...` reason), it also reports to GitHub, then stops: push `scrum/$ID` (with no commits beyond `$BASE`, push `$(git commit-tree "$BASE^{tree}" -p "$BASE" -m "[scrum $ID] needs-human")` to `refs/heads/scrum/$ID` so a PR can exist), open the PR as above or keep the open one, add the label with `gh api "$R/issues/<number>/labels" -f "labels[]=scrum:needs-human"`, and post a comment whose first line is the reason and whose second line is `<!-- scrum needs-human -->`, with `gh api "$R/issues/<number>/comments" -F body=@<file holding it>`.
+   - **Artifacts:** every time the job ends (merged, needs-human or obsolete abort), as its last action before it stops (after Merge step 7's `B set`, or after the **Needs-human** PR, label and comment), push the job folder to `scrum-artifacts/<id>` without touching the checkout or its index, so local **Sync** can bring it home:
+     ```bash
+     I=$(mktemp -u); cd "$F"
+     B artifacts $ID | tr '\n' '\0' | GIT_INDEX_FILE=$I xargs -0 git add -f --
+     T=$(GIT_INDEX_FILE=$I git write-tree); C=$(git commit-tree "$T" -m "[scrum $ID] artifacts")
+     git push origin "$C:refs/heads/scrum-artifacts/$ID"; rm -f "$I"; cd "$REPO"
+     ```
+     `B artifacts` prints only the files that are safe to push and names the rest in `skipped-secrets.txt`. The branch is never merged and never has a PR. A failed push is reported in the final report but does not change the job's outcome.
 3. **Sync** (`/trevskills-scrum cloud-sync`; also the start of `cloud` and of bare `/trevskills-scrum`; skip it when `gh` is not signed in). For each job in stage `cloud`, find its PR: `gh pr list --state all --search "\"[scrum $ID]\" in:title" --json number,url,state,labels,title,baseRefName --jq "[.[] | select(.title | startswith(\"[scrum $ID]\"))][0]"`.
    - No PR: still running; leave it.
    - PR `MERGED`: `B set $ID stage=done pr=<url> reason=`.
@@ -394,8 +402,20 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
      ```
      `approve` then runs `/trevskills-migrate` and **Merge** exactly as it already does: its main checkout guard and every refusal still apply, and a refusal or a stopped migrate leaves the job `needs-human`. `--model sonnet` on that session is the only model override; never edit any agent's `model:` line.
    - PR `CLOSED`: `B set $ID stage=needs-human pr=<url> reason="cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."`.
+   - **Artifacts home.** For a `MERGED`, `scrum:needs-human` or `CLOSED` PR, right after its `B set` (and before **Schema auto-migrate** starts the detached approve), bring the job folder home. A missing branch means the fetch fails: extract nothing, report no error, and go on. The copy never overwrites the local `feature.md`: it copies all but `feature.md`. The branch is deleted only after the copy succeeds, and never force:
+     ```bash
+     cd "$REPO"
+     if git fetch origin scrum-artifacts/$ID 2>/dev/null; then
+       T=$(mktemp -d)
+       git archive FETCH_HEAD scrum/jobs/$ID | tar -x -C "$T" && rm -f "$T/scrum/jobs/$ID/feature.md" &&
+         mkdir -p "$F/jobs/$ID" && cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" &&
+         git push origin --delete scrum-artifacts/$ID
+       rm -rf "$T"
+     fi
+     ```
+   - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`; otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run `B backlog-add "<item> (from $ID)" ...`, one argument per bullet. Spawn no spec writer here.
 
-   When any job went `done`, run **Merge** step 7's **Fast-forward main** once; if it fails, run `B set <each such id> reason='merged, not live: <why>'`.
+   When any job went `done`, run **Merge** step 7's **Fast-forward main** once; if it fails, run `B set <each such id> reason='merged, not live: <why>'`. Then run `B digest-due`, and when it prints `"due": true`, run **Digest**.
 
 ## Check gate
 

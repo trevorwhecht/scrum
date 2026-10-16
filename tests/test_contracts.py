@@ -396,7 +396,7 @@ class ContractTest(unittest.TestCase):
         entry = next(l for l in commands.splitlines() if "/trevskills-scrum lilguy <feature text>" in l)
         self.assertIn("**Lilguy lane**", entry)
         self.assertLess(text.index("## BigBoy lane"), text.index("## Lilguy lane"))
-        lilguy = self.section(text, "## Lilguy lane", "## Check gate")
+        lilguy = self.h2(text, "## Lilguy lane")
         for phrase in ("lane=lilguy", "Skill tool", "trevskills-commitpush-nextjs", "trevskills-commitpush", '"next"',
                        "detached HEAD", "git add -A", "3", "**Merge**", "schema guard", "**Check gate**", ".env",
                        "no agent", ":(exclude)scrum", "symbolic-ref", "main checkout guard", "check.md",
@@ -691,7 +691,7 @@ class ContractTest(unittest.TestCase):
                        "[A-Za-z0-9._/-]", "Base branch line in scrum/project.md is malformed",
                        "rev-parse --verify", "not found on origin"):
             self.assertIn(phrase, step2, phrase)
-        lilguy = self.section(text, "## Lilguy lane", "## Check gate")
+        lilguy = self.h2(text, "## Lilguy lane")
         refuse = self.section(lilguy, "1. **Refuse", "2. **Job.**")
         self.assertIn("Base branch", refuse)
         self.assertIn("Fix: switch to <base branch>, then run lilguy again.", refuse)
@@ -1221,7 +1221,10 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cloud = self.h2(text, "## Cloud lane")
         for phrase in (
-            "script -q /dev/null claude --cloud", '"${E[@]}"', "- Cloud environment:",   # dispatch, TTY, environment
+            "script -q /dev/null claude", "- Cloud environment:",   # dispatch, TTY, environment
+            'E=(--settings "{\\"remote\\":{\\"defaultEnvironmentId\\":\\"$CE\\"}}")',
+            "grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings",
+            'claude "${E[@]}" --cloud "/trevskills-scrum cloud-job $ID $FEAT"',
             "B next", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
@@ -1238,6 +1241,33 @@ class ContractTest(unittest.TestCase):
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertNotIn("gh pr ", job)
+        # --environment takes only self-hosted ccpool_ ids, and a flag after --cloud would swallow its prompt.
+        self.assertNotIn("--environment", cloud)
+        self.assertRegex(cloud, r'--cloud "/trevskills-scrum cloud-job')
+        self.assertNotRegex(cloud, r"--cloud +(-|\"\$)")  # no flag or "${E[@]}" between --cloud and its prompt
+
+    def test_skill_cloud_artifacts_come_home(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        cloud = self.h2(text, "## Cloud lane")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "B artifacts $ID", "git write-tree",
+                       "commit-tree", "refs/heads/scrum-artifacts/$ID", "never merged", "never has a PR",
+                       "does not change the job's outcome", "merged, needs-human or obsolete abort"):
+            self.assertIn(phrase, job, phrase)
+        sync = cloud[cloud.index("3. **Sync**"):]
+        for phrase in ("git fetch origin scrum-artifacts/$ID", "missing branch", "git archive FETCH_HEAD",
+                       "scrum/jobs/$ID", "all but `feature.md`", "never overwrites the local `feature.md`",
+                       "git push origin --delete scrum-artifacts/$ID", "never force",
+                       "B backlog-spec $ID", "B backlog-add", "(from $ID)", "**Approve** step 3", "Fallback",
+                       "B digest-due", '"due": true', "**Digest**"):
+            self.assertIn(phrase, sync, phrase)
+        self.assertNotIn("--force", sync)
+        # Artifacts come home after the B set, follow-ups after extracting, and the digest check last.
+        self.assertLess(sync.index("B set $ID stage=done pr=<url> reason="), sync.index("git fetch origin scrum-artifacts/$ID"))
+        self.assertLess(sync.index("git fetch origin scrum-artifacts/$ID"), sync.index("B backlog-spec $ID"))
+        self.assertLess(sync.index("B backlog-spec $ID"), sync.index("B digest-due"))
+        readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
+        self.assertIn("scrum-artifacts/<id>", readme)
 
     def test_skill_cloud_schema_migrates_locally(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

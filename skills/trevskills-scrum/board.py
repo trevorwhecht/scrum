@@ -16,6 +16,8 @@
   board.py roadmap-stop <id> <reason>  mark the step holding <id> [!] and log the reason
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
   board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
+  board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
+                                   rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
@@ -560,6 +562,57 @@ def cmd_digest_trim(root, digest_id):
             trimmed.append(job["id"])
         (d / "trimmed").write_text(now() + "\n")
     return trimmed
+
+
+# --- artifacts: what a cloud job may push to scrum-artifacts/<id> (SKILL.md Cloud lane); files are left out whole ---
+ARTIFACT_MAX = 1024 * 1024
+SKIPPED = "skipped-secrets.txt"
+SECRET_RES = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"(?<![A-Za-z0-9_-])(?:sk-|ghp_|gho_|ghs_|github_pat_|xox[abprs]-)[A-Za-z0-9_-]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),
+    re.compile(r"postgres(?:ql)?://[^\s:/@]+:[^\s/@]+@"),
+    re.compile(r"^[ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|KEY)[A-Z0-9_]*[ \t]*=[ \t]*\S", re.M),
+)
+
+
+def secret_filter(text):
+    """True when text holds something that looks like a credential (private key, API token, DB URL, NAME=secret line)."""
+    return any(r.search(text) for r in SECRET_RES)
+
+
+def cmd_artifacts(root, job_id):
+    """Paths (relative to root) of the job's files that are safe to push; every other file is named in skipped-secrets.txt."""
+    folder = Path(root) / "jobs" / check_id(job_id)
+    if not folder.is_dir():
+        raise SystemExit(f"no job folder {folder}")
+    ok, skipped = [], []
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames.sort()
+        for name in sorted(filenames) + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]:
+            p = Path(dirpath) / name
+            rel = p.relative_to(folder).as_posix()
+            if rel == SKIPPED:
+                continue
+            try:
+                if p.is_symlink() or not p.is_file() or p.stat().st_size >= ARTIFACT_MAX:
+                    raise ValueError
+                text = p.read_bytes().decode("utf-8")
+            except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+                skipped.append(rel)
+                continue
+            (skipped if secret_filter(text) else ok).append(rel)
+    listing = folder / SKIPPED
+    if listing.is_symlink():  # never write through a link out of the job folder
+        listing.unlink()
+    if skipped:
+        body = "".join(f"{r}\n" for r in skipped)
+        listing.write_text(body, encoding="utf-8")
+        if not secret_filter(body):
+            ok.append(SKIPPED)
+    elif listing.exists():
+        listing.unlink()
+    return [f"jobs/{job_id}/{r}" for r in ok]
 
 
 # --- triage: scrum-triager writes triage/<NNN>/plan.json; triage-apply turns it into backlog edits under the lock ---
@@ -1415,6 +1468,7 @@ def main(argv=None):
     ab.add_argument("id")
     ab.add_argument("--requeue", action="store_true")
     ab.add_argument("--reason")
+    sub.add_parser("artifacts").add_argument("id")
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
@@ -1473,6 +1527,8 @@ def main(argv=None):
         cmd_register(a.repo)
     elif a.cmd == "abort":
         cmd_abort(a.dir, a.id, a.requeue, a.reason)
+    elif a.cmd == "artifacts":
+        print("".join(f"{line}\n" for line in cmd_artifacts(a.dir, a.id)), end="")
     elif a.cmd == "digest-due":
         print(json.dumps(cmd_digest_due(a.dir)))
     elif a.cmd == "digest-start":

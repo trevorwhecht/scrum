@@ -1479,6 +1479,60 @@ class BoardTest(unittest.TestCase):
                 self.assertIn(f"roadmap.md line {n}", str(e.exception.code))
                 self.assertEqual(self.rm_text(), text)
 
+    # --- artifacts (Cloud lane: the job folder a cloud session pushes to scrum-artifacts/<id>) ---
+    def artifacts(self, job_id):
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "artifacts", job_id],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return sorted(out.stdout.splitlines())
+
+    def test_artifacts_lists_clean_files(self):
+        self.write("001-x/spec.md", "# Spec\nthe token flow\n")
+        self.write("001-x/round-1/review-code.md", "VERDICT: PASS\n")
+        self.write("001-x/followups/a.md", "# A\n")
+        stale = self.write("001-x/skipped-secrets.txt", "old.md\n")
+        self.assertEqual(self.artifacts("001-x"),
+                         ["jobs/001-x/followups/a.md", "jobs/001-x/round-1/review-code.md", "jobs/001-x/spec.md"])
+        self.assertFalse(stale.exists())  # nothing skipped: no list, and a stale one is removed
+
+    def test_artifacts_skips_secrets_and_writes_list(self):
+        self.write("001-x/build.md", "STATUS: READY\n")
+        self.write("001-x/round-1/check.md", "CHECK: PASS\nexport API_TOKEN=abc123\n")
+        self.write("001-x/notes.md", "key: " + "ghp_" + "A1b2C3d4E5f6G7h8I9j0" + "\n")
+        self.assertEqual(self.artifacts("001-x"), ["jobs/001-x/build.md", "jobs/001-x/skipped-secrets.txt"])
+        listed = (self.root / "jobs" / "001-x" / "skipped-secrets.txt").read_text().splitlines()
+        self.assertEqual(sorted(listed), ["notes.md", "round-1/check.md"])
+
+    def test_artifacts_skips_oversize_and_binary(self):
+        self.write("001-x/decision.md", "VERDICT: APPROVE\n")
+        big = self.root / "jobs" / "001-x" / "big.log"
+        big.write_text("a" * (1024 * 1024))
+        (self.root / "jobs" / "001-x" / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00")
+        self.assertEqual(self.artifacts("001-x"), ["jobs/001-x/decision.md", "jobs/001-x/skipped-secrets.txt"])
+        listed = (self.root / "jobs" / "001-x" / "skipped-secrets.txt").read_text().splitlines()
+        self.assertEqual(sorted(listed), ["big.log", "shot.png"])
+
+    def test_secret_filter_matches(self):
+        for text in ("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n", "-----BEGIN OPENSSH PRIVATE KEY-----",
+                     "-----BEGIN PRIVATE KEY-----",
+                     "use " + "sk-" + "abcdefghijklmnop1234", "sk-" + "proj-abcdefghijklmnopqr",
+                     "ghp_" + "abcdefghijklmnop1234", "gho_" + "abcdefghijklmnop1234", "ghs_" + "abcdefghijklmnop1234",
+                     "github_pat_" + "11ABCDEFG0123456789_x", "xoxb-" + "1234567890-abcdefgh",
+                     "xoxp-" + "1234567890abcdefgh", "AKIA" + "ABCDEFGHIJKLMNOP",
+                     "DATABASE_URL=postgres://" + "admin:hunter2@db:5432/app",
+                     "url postgresql://" + "u:p@localhost/x",
+                     "STRIPE_SECRET_KEY=sk_live_1", "export GITHUB_TOKEN=abc", "DB_PASSWORD=pw",
+                     "  OPENAI_API_KEY = 'x'", "SECRET=1"):
+            with self.subTest(text=text):
+                self.assertTrue(board.secret_filter(text))
+
+    def test_secret_filter_ignores_prose(self):
+        for text in ("the token flow", "KEY=", "export API_KEY=", "sk-", "sk-short", "ghp_short",
+                     "AKIAshort", "postgres://localhost/app", "postgresql://user@host/db",
+                     "the password field is required", "api_token=abc", "MONKEY_PATH is unrelated",
+                     "Set PRIVATE KEY in the vault", "TOKEN: see docs", ""):
+            with self.subTest(text=text):
+                self.assertFalse(board.secret_filter(text))
 
 
 class HookTest(unittest.TestCase):
