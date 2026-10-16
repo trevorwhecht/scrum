@@ -1,0 +1,10 @@
+- Review step 2 starts one shared dev server per round (only when ui/ux run, the diff matches UI globs and Dev command is set), on a free port, from $WT, logging to round-$N/dev.log
+- It probes the server (HTTP 200 on / plus one /api/ GET within 60s) and writes round-$N/dev-url.txt with the URL or `unreachable: <why>`
+- Review step 3 passes DEV_URL=<url> only to scrum-review-ui and scrum-review-ux (re-spawns included)
+- Review step 4 stops the server after WAIT FOR ALL, before routing
+- scrum-review-ui.md and scrum-review-ux.md open DEV_URL when given and start their own server only when it is absent or does not answer
+- tests/test_contracts.py: test_skill_review_shares_one_dev_server and test_ui_reviewers_use_dev_url; full suite passes (668 tests)
+
+Clean round: check gate + reviews. Spec and reviews: scrum/jobs/157-one-shared-dev-server-per-review-round-i/
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
