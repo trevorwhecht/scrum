@@ -2642,6 +2642,56 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(memory.read_bytes(), b"remember: new line\r\n")
         self.assertEqual(self.statuses(), ["applied", "applied"])
 
+    def test_digest_denied_is_case_insensitive(self):
+        targets = []
+        for f in (self.user / "Settings.JSON", self.reg / ".claude" / "SETTINGS.LOCAL.json", self.user / "Hooks" / "x.md",
+                  self.reg / ".claude" / "HOOKS" / "guard.sh"):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("old line\n")
+            targets.append(f)
+        (self.user / "rules").mkdir(exist_ok=True)
+        link = self.user / "rules" / "link.md"
+        link.symlink_to(self.user / "Hooks" / "x.md")
+        targets.append(link)
+        for t in targets:
+            self.assertTrue(self.serve.digest_denied(str(t)), t)
+        for t in (self.rule(), self.user / "prehooks" / "x.md", self.user / "hooks.md", self.reg / ".claude" / "Hooks.md"):
+            self.assertFalse(self.serve.digest_denied(str(t)), t)
+        self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)])
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "digests" not in p.parts}
+        before = snap()
+        for i in range(len(targets)):
+            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i}", "approve"),
+                             (403, {"error": "target is not editable"}), targets[i])
+        self.assertEqual(self.statuses(), ["pending"] * len(targets))
+        self.assertEqual(snap(), before)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_digests_brief_omits_old_and_new(self):
+        rule = self.rule()
+        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep A", new="kept A", status="applied", obvious=True,
+                                                       obvious_reason="2 jobs")])
+        self.digest([], "002")
+        full = {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line",
+                "status": "pending", "obvious": False, "obvious_reason": "", "kind": "edit"}
+        code, data, _ = self.get("/api/p/reg/digests?brief=1")
+        self.assertEqual(code, 200)
+        self.assertEqual((data["running"], data["undigested"]), (False, 0))
+        self.assertEqual([(d["id"], d["jobs"], d["error"], d["trimmed"]) for d in data["digests"]],
+                         [("002", [], None, False), ("001", [], None, False)])
+        self.assertEqual(data["digests"][0]["proposals"], [])
+        self.assertEqual(data["digests"][1]["proposals"], [
+            {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "status": "pending",
+             "obvious": False, "obvious_reason": "", "kind": "edit"},
+            {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "status": "applied",
+             "obvious": True, "obvious_reason": "2 jobs", "kind": "edit"}])
+        for query in ("", "?brief=0", "?brief=true", "?brief="):
+            props = self.get(f"/api/p/reg/digests{query}")[1]["digests"][1]["proposals"]
+            self.assertEqual(props[0], full, query)
+            self.assertEqual((props[1]["old"], props[1]["new"]), ("keep A", "kept A"), query)
+        self.assertEqual(self.get("/api/p/nope/digests?brief=1")[0], 404)
+
     def test_approve_refuses_non_editable_and_stale(self):
         agent = self.home / ".claude.json"  # an editable JSON item (MCP servers): digest approve still refuses it
         agent.write_text(json.dumps({"mcpServers": {"x": {"command": "old line"}}}))
@@ -2843,10 +2893,53 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
         self.assertEqual(self.statuses(), ["queued", "queued"])
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
-                         [f"Create digest 001 p1 skill at skills/k/SKILL.md: see {d / 'proposals.json'}",
-                          f"Create digest 001 p2 skill at .claude/skills/my-skill-2/SKILL.md: see {d / 'proposals.json'}"])
+                         [f"Create digest 001 p1 skill at skills/k/SKILL.md: first run `python3 ~/.claude/skills/trevskills-scrum/serve.py"
+                          f" --digest-skill-check 001 p1 --dir {self.scrum}`; if it exits non-zero the item is obsolete. See {d / 'proposals.json'}",
+                          f"Create digest 001 p2 skill at .claude/skills/my-skill-2/SKILL.md: first run `python3 ~/.claude/skills/trevskills-scrum/serve.py"
+                          f" --digest-skill-check 001 p2 --dir {self.scrum}`; if it exits non-zero the item is obsolete. See {d / 'proposals.json'}"])
         self.assertFalse(target.exists() or target.parent.exists())
         self.assertFalse(dot.exists())
+
+    def test_digest_skill_check_revalidates_target(self):
+        def check(digest_id, pid):
+            env = {**os.environ, "CLAUDE_HOME": str(self.user), "SCRUM_REGISTRY": os.environ["SCRUM_REGISTRY"]}
+            r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"), "--digest-skill-check",
+                                digest_id, pid, "--dir", str(self.scrum)], capture_output=True, text=True, timeout=10, env=env)
+            self.assertEqual(r.stdout.count("\n"), 1, r.stdout + r.stderr)
+            return r.returncode, json.loads(r.stdout)
+        target, hooks = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "h" / "SKILL.md"
+        other = self.reg / "skills" / "o" / "SKILL.md"
+        self.digest([self.skill("p1", target), self.skill("p2", other), self.skill("p3", hooks), self.skill("p4", target),
+                     self.prop("p5", self.repo_file("agents/scrum-x.md"), status="queued"), self.skill("p6", target, status="rejected")])
+        for pid in ("p1", "p2", "p3"):
+            self.assertEqual(self.decide(pid, "approve")[1]["status"], "queued")
+        self.assertEqual(check("001", "p1"), (0, {"ok": True, "target": "skills/k/SKILL.md"}))
+        self.assertEqual(check("001", "p3"), (0, {"ok": True, "target": ".claude/skills/h/SKILL.md"}))
+        target.parent.mkdir(parents=True)
+        target.write_text("someone made it\n")
+        self.assertEqual(check("001", "p1"), (1, {"ok": False, "error": "skill already exists"}))
+        (self.reg / "skills" / "o").mkdir()
+        (self.reg / "skills" / "o" / "SKILL.md").symlink_to(self.reg / "skills" / "gone" / "SKILL.md")  # a dangling link is still in the way
+        self.assertEqual(check("001", "p2"), (1, {"ok": False, "error": "skill already exists"}))
+        (self.reg / ".claude" / "skills").mkdir(parents=True)
+        (self.reg / ".claude" / "Hooks").mkdir()
+        (self.reg / ".claude" / "skills" / "h").symlink_to(self.reg / ".claude" / "Hooks")  # now really under a Hooks folder
+        self.assertEqual(check("001", "p3"), (1, {"ok": False, "error": "target is not editable"}))
+        self.assertEqual(check("001", "p4"), (1, {"ok": False, "error": "proposal is pending, not queued"}))
+        self.assertEqual(check("001", "p5"), (1, {"ok": False, "error": "not a skill proposal"}))
+        self.assertEqual(check("001", "p6"), (1, {"ok": False, "error": "proposal is rejected, not queued"}))
+        for digest_id, pid in (("001", "nope"), ("009", "p1"), ("1", "p1"), ("../001", "p1")):
+            self.assertEqual(check(digest_id, pid), (1, {"ok": False, "error": "no such proposal"}), (digest_id, pid))
+        self.digest("{not json", "002")
+        self.assertEqual(check("002", "p1"), (1, {"ok": False, "error": "no such proposal"}))
+        self.digest([{**self.skill("p1", other), "old": "x", "status": "queued"}], "003")  # fails valid_proposal
+        self.assertEqual(check("003", "p1"), (1, {"ok": False, "error": "no such proposal"}))
+        target.unlink()
+        before = (self.scrum / "digests" / "001" / "proposals.json").read_text()
+        Path(os.environ["SCRUM_REGISTRY"]).write_text("[]")  # the repo was unregistered
+        self.assertEqual(check("001", "p1"), (1, {"ok": False, "error": "target is not editable"}))
+        self.assertEqual((self.scrum / "digests" / "001" / "proposals.json").read_text(), before)
+        self.assertFalse(target.exists())
 
     def test_approve_skill_refuses_bad_targets(self):
         existing = self.repo_file("skills/e/SKILL.md")
