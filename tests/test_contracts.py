@@ -497,6 +497,35 @@ class ContractTest(unittest.TestCase):
         for phrase in ("assessment.md", "## Allowed files", "Repro test:"):
             self.assertIn(phrase, text, phrase)
 
+    def test_builder_digest_rules_applied(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        step2 = ("2. Implement the spec. Follow the repo's conventions exactly; reuse existing components "
+                 "and helpers before writing new ones.")
+        step3 = "3. For each acceptance criterion:"
+        must_fail = ("   - Every test must fail if the behaviour breaks: hand-written literal expectations "
+                     "(never values computed by the code under test), and never an assertion on a mock.")
+        handoff = ("   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, "
+                   "existing patterns reused.")
+        running_app = "   - A criterion that needs the running app"
+        b1 = ("   - UI that can change while shown (an open modal, a polled list, a field being edited) "
+              "refreshes on every re-render, never overwrites what the user is typing, and tolerates a "
+              "missing element.")
+        b2 = ("   - Never cut user text silently to fit a length cap: match the cap to the input's own limit, "
+              "or reject with an error.")
+        b3 = ("   - A value passed to a CLI (`git`, `gh`, a subprocess argv) that could start with `-` goes "
+              "after `--`, or is rejected when it starts with `-`.")
+        b4 = ("   - A phrase assert on prose uses a phrase found only in the new rule, never a word that "
+              "already appears elsewhere in the asserted section.")
+        b5 = ("   - A UI re-render keeps keyboard focus and in-flight state (a pending label, an open editor, "
+              "unsaved edits).")
+        b6 = ("   - When you move code to another file, grep the tests for the old file path; retarget any "
+              "test that reads that source file to the new path and change no `expect`.")
+        for line in (b1, b2, b3, b4, b5, b6, step2, must_fail, handoff):
+            self.assertEqual(text.count(line + "\n"), 1, line)
+        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n" + step3, text)
+        self.assertIn(must_fail + "\n" + b4 + "\n", text)
+        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n" + running_app, text)
+
     def test_approver_debug_repro_never_preexisting(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("assessment.md", "repro still fails"):
