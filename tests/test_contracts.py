@@ -145,6 +145,24 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
 
+    def test_code_reviewer_waits_for_codex(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("**Codex step (once per round).**",
+                       "Before writing your review file, wait for that background run to exit; only a run still "
+                       "going at the 10-minute timeout counts as a skip",
+                       "- Run Codex in every round, round 2 and later included.\n"
+                       "- Before you write `review-code.md`, wait for the background Codex command to exit or reach "
+                       "its 10-minute timeout.",
+                       "Finishing your own review first is never a skip reason",
+                       'and "still running" is never a skip reason',
+                       "ROUTE_RUNNER=local RUNNER= MODEL=<model> LOG_MODEL=<model>",
+                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"',
+                       "does not word-split", "codex: skipped — fast lane"):
+            self.assertIn(phrase, text, phrase)
+        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3'):
+            self.assertNotIn(phrase, text, phrase)
+        self.assertEqual(text.count("wait for the background"), 1)
+
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ('"pre-existing"', "must name that code", "opens with the scenario", '"No findings"',
