@@ -80,6 +80,34 @@ class JobModal(unittest.TestCase):
         submit = text[text.index('$("actions").addEventListener("submit"'):]
         self.assertIn('act === "resume" || act === "pause" || act === "setup-done" ? {}', submit)
 
+    def actions_html(self, job):
+        """renderActions(job) evaluated in node with a stub #actions element; returns the HTML it wrote."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
+        helpers = text[text.index("const paused = "):text.index("function bigboyLines(")] \
+            + text[text.index("const abortForm = "):text.index('$("actions").addEventListener("submit"')]
+        script = (f"{esc}\nconst enc = encodeURIComponent;\nlet runs = {{}};\nlet jobs = {json.dumps(JOBS)};\n"
+                  "const el = {innerHTML: ''};\nconst $ = id => el;\n"
+                  f"{helpers}\nrenderActions({json.dumps(job)});\nconsole.log(JSON.stringify(el.innerHTML));")
+        return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+
+    def test_off_track_parent_shows_send_back(self):
+        parent = {"key": "p/005-big", "project": "p", "id": "005-big", "title": "Big", "stage": "needs-human",
+                  "children": ["006-a", "007-b"]}
+        off = self.actions_html({**parent, "reason": "bigboy off track: x. Fix: read the latest track file, then click "
+                                 "Resume to carry on with the plan or Send back with your decision to replan."})
+        self.assertIn('<form data-act="rework"><textarea name="feedback"', off)
+        self.assertIn('Send back to builder</button>', off)
+        self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', off)
+        blocked = self.actions_html({**parent, "reason": "bigboy blocked: y. Fix: click Resume to skip the children "
+                                     "that depend on them and run the final review."})
+        self.assertNotIn('data-act="rework"', blocked)
+        self.assertNotIn('Send back to builder', blocked)
+        self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', blocked)
+
     def test_stale_uses_newest_activity(self):
         # 2026-01-01T00:00:00Z is 1767225600 s
         self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: {at: 1767229200}})'), 1767229200000)
