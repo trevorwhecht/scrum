@@ -522,6 +522,19 @@ class ContractTest(unittest.TestCase):
         runall = self.section(text, "## Run all", "## Fast lane")
         self.assertIn("B watchdog", runall)
 
+    def test_skill_headless_sessions_block(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("**Headless sessions block.**", text)
+        para = self.section(text, "**Headless sessions block.**", "\n\n")
+        self.assertLess(text.index("The session running this skill **is the orchestrator**"), text.index(para),
+                        "the rule follows the opening paragraph")
+        self.assertLess(text.index(para), text.index("This skill is a sanctioned exception"))
+        for phrase in ("claude -p", "ScheduleWakeup", "never ends its turn", "SendMessage reply"):
+            self.assertIn(phrase, para, phrase)
+        resuming = self.section(text, "## Resuming the builder", "## Digest")
+        self.assertIn("headless", resuming)
+        self.assertIn("skip SendMessage", resuming)
+
     def test_skill_documents_lilguy_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("lilguy", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
