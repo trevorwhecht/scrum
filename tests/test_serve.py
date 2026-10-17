@@ -532,6 +532,26 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (409, {"error": "backlog is empty"}))
         run.assert_not_called()
 
+    def test_backlog_setup_done(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [ ] Plain\n- [ ] Send SMS {setup: Buy a number; Add TWILIO_TOKEN to .env}\n")
+        code, items = self.req("GET", "/api/p/repo/backlog")
+        self.assertEqual((code, [i["setup"] for i in items]), (200, [[], ["Buy a number", "Add TWILIO_TOKEN to .env"]]))
+        code, items = self.req("POST", "/api/p/repo/backlog", {"op": "setup-done", "index": 1})
+        self.assertEqual(code, 200)
+        self.assertEqual([(i["text"], i["setup"]) for i in items], [("Plain", []), ("Send SMS", [])])
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Plain\n- [ ] Send SMS\n")
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog", method="POST",
+                                   data=json.dumps({"op": "setup-done", "index": 0}).encode(),
+                                   headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(r)
+        with e.exception as err:
+            self.assertEqual((err.code, json.loads(err.read())), (400, {"error": "backlog item 0 has no Human setup"}))
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Plain\n- [ ] Send SMS\n")
+
     def test_backlog_add_cli_triggers_estimate(self):
         scrum = Path(self.tmp.name) / "cli-repo" / "scrum"
         scrum.mkdir(parents=True)
