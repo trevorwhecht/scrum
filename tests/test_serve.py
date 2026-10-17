@@ -597,17 +597,44 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {})[0], 400)  # not in progress any more
 
     def test_kill_session_falls_back_to_ps_match(self):
+        repo = os.path.realpath(self.root.parent)
         ps = ("  101   101 /usr/local/bin/claude -p /trevskills-scrum resume 090-ps --permission-mode acceptEdits\n"
               "  102   500 claude /trevskills-scrum start 090-ps\n"  # serve.py's own group: never signalled
               "  103   103 claude /trevskills-scrum start 090-ps-two\n"  # another job whose id starts the same
               "  104   104 tail -f /trevskills-scrum resume 090-ps\n"  # no claude on the line
-              "  105   105 claude /trevskills-scrum start 090-ps\n")
-        with mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=ps)) as run, \
+              "  105   105 claude /trevskills-scrum start 090-ps\n"
+              "  106   106 claude /trevskills-scrum start 090-ps\n"  # same id, another project's repo
+              "  107   107 claude /trevskills-scrum start 090-ps\n"  # same id, lsof reports no cwd
+              "  108   108 claude /trevskills-scrum start 090-ps\n")  # a sibling repo whose path starts the same
+        lsof = (f"p101\nfcwd\nn{repo}\n"
+                f"p102\nfcwd\nn{repo}\n"
+                f"p105\nfcwd\nn{repo}/.claude/worktrees/scrum-090-ps\n"
+                "p106\nfcwd\nn/elsewhere/other-repo\n"
+                f"p108\nfcwd\nn{repo}-two/.claude/worktrees/scrum-090-ps\n")
+        outs = {"ps": mock.Mock(returncode=0, stdout=ps), "lsof": mock.Mock(returncode=0, stdout=lsof)}
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=lambda cmd, **kw: outs[cmd[0]]) as run, \
                 mock.patch.object(self.serve.os, "getpgrp", return_value=500), \
                 mock.patch.object(self.serve.os, "killpg") as killpg:
-            self.serve.kill_session("repo", "090-ps")
-        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "pid=,pgid=,command="])
+            self.serve.kill_session("repo", self.root, "090-ps")
+        self.assertEqual(run.call_args_list[0].args[0], ["ps", "-axo", "pid=,pgid=,command="])
+        self.assertEqual(run.call_args_list[1].args[0], ["lsof", "-a", "-d", "cwd", "-Fpn", "-p", "101,102,105,106,107,108"])
         self.assertEqual(sorted(c.args for c in killpg.call_args_list), [(101, 15), (105, 15)])
+
+    def test_kill_session_signals_nothing_without_cwd(self):
+        ps = "  101   101 claude /trevskills-scrum resume 090-ps\n"
+        for lsof in (OSError("no lsof"), subprocess.TimeoutExpired("lsof", 5), mock.Mock(returncode=1, stdout=""),
+                     mock.Mock(returncode=0, stdout=None)):
+            def run(cmd, **kw):
+                if cmd[0] == "ps":
+                    return mock.Mock(returncode=0, stdout=ps)
+                if isinstance(lsof, Exception):
+                    raise lsof
+                return lsof
+            with mock.patch.object(self.serve.subprocess, "run", side_effect=run), \
+                    mock.patch.object(self.serve.os, "getpgrp", return_value=500), \
+                    mock.patch.object(self.serve.os, "killpg") as killpg:
+                self.serve.kill_session("repo", self.root, "090-ps")
+            killpg.assert_not_called()
 
     def test_play_on_paused_job_calls_resume(self):
         job_id = self.serve.board.cmd_new(self.root, "play me")

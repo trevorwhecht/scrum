@@ -3,6 +3,7 @@
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
+  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
                                    new job, print {"id","feature"}
@@ -1418,12 +1419,11 @@ def merge_refusal(job: dict) -> str | None:
 
 
 def cmd_set(root, job_id, pairs, unpause=False):
-    """unpause (library only: serve.py's spawn bookkeeping) writes to a paused job; so does any set with an empty
-    reason=, which is how resume and rework un-pause it."""
+    """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
+    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses."""
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
-    unpause = unpause or given.get("reason", None) == ""
     if given.get("stage") == "done":
         # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
         # so the read-then-write race is accepted.
@@ -1821,6 +1821,7 @@ def main(argv=None):
     n.add_argument("title")
     n.add_argument("--id")
     s = sub.add_parser("set")
+    s.add_argument("--unpause", action="store_true")
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
@@ -1888,7 +1889,7 @@ def main(argv=None):
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title, a.id))
     elif a.cmd == "set":
-        cmd_set(a.dir, a.id, a.pairs)
+        cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
