@@ -15,6 +15,10 @@ class InstallTest(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
             self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
+            for lane in ("cloud.md", "roadmap.md", "lilguy.md"):
+                linked = home / "skills" / "trevskills-scrum" / "lanes" / lane
+                self.assertTrue(linked.is_file(), lane)
+                self.assertEqual(linked.resolve(), ROOT / "skills" / "trevskills-scrum" / "lanes" / lane)
             for agent in (ROOT / "agents").glob("*.md"):
                 self.assertEqual((home / "agents" / agent.name).resolve(), agent)
             self.assertEqual((home / "codex" / "AGENTS.md").resolve(), ROOT / "codex" / "AGENTS.md")

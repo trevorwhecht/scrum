@@ -369,7 +369,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_merge_stops_for_agent_rule_edits(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
-        regex = r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$"
+        regex = r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
         for phrase in (f"grep -E '{regex}'", "human-approval.md", "Hard stop: agent rules", "**Agent rules guard"):
             self.assertIn(phrase, merge, phrase)
         self.assertLess(merge.index("**Schema guard"), merge.index("**Agent rules guard"))
@@ -381,19 +381,18 @@ class ContractTest(unittest.TestCase):
         for phrase in ("B digest-verify $ID", f"grep -E '{regex}'", "human-approval.md",
                        "Hard stop: agent rules — <first matching file>", "Run this guard again right before step 6"):
             self.assertIn(phrase, guard, phrase)
-        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md"):
+        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md"):
             self.assertIsNotNone(re.search(regex, path), path)
-        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py"):
+        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py", "src/lanes/foo.md"):
             self.assertIsNone(re.search(regex, path), path)
         commands = self.section(text, "## Commands", "## New job")
         approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
         self.assertNotIn("`Hard stop`", approve)
 
     def test_lilguy_stops_for_agent_rule_edits(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        lilguy = self.h2(text, "## Lilguy lane")
+        lilguy = self.lane("lilguy")
         check = self.section(lilguy, "4. **Check.**", "5. **Land.**")
-        for phrase in (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$", "Hard stop: agent rules",
+        for phrase in (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$", "Hard stop: agent rules",
                        "run /trevskills-commitpush yourself"):
             self.assertIn(phrase, check, phrase)
 
@@ -529,7 +528,7 @@ class ContractTest(unittest.TestCase):
         entry = next(l for l in commands.splitlines() if "/trevskills-scrum lilguy <feature text>" in l)
         self.assertIn("**Lilguy lane**", entry)
         self.assertLess(text.index("## BigBoy lane"), text.index("## Lilguy lane"))
-        lilguy = self.h2(text, "## Lilguy lane")
+        lilguy = self.lane("lilguy")
         for phrase in ("lane=lilguy", "Skill tool", "trevskills-commitpush-nextjs", "trevskills-commitpush", '"next"',
                        "detached HEAD", "git add -A", "3", "**Merge**", "schema guard", "**Check gate**", ".env",
                        "no agent", ":(exclude)scrum", "symbolic-ref", "main checkout guard", "check.md",
@@ -881,7 +880,7 @@ class ContractTest(unittest.TestCase):
                        "[A-Za-z0-9._/-]", "Base branch line in scrum/project.md is malformed",
                        "rev-parse --verify", "not found on origin"):
             self.assertIn(phrase, step2, phrase)
-        lilguy = self.h2(text, "## Lilguy lane")
+        lilguy = self.lane("lilguy")
         refuse = self.section(lilguy, "1. **Refuse", "2. **Job.**")
         self.assertIn("Base branch", refuse)
         self.assertIn("Fix: switch to <base branch>, then run lilguy again.", refuse)
@@ -1043,7 +1042,7 @@ class ContractTest(unittest.TestCase):
         line = ("If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. "
                 "Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.")
         self.assertIn(line, self.section(text, "7. **Clean up:**", "## Resuming the builder"))
-        self.assertIn(line, self.section(text, "5. **Land.**", "6. End with the **Final report**"))
+        self.assertIn(line, self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
 
     def test_done_only_when_live(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1463,12 +1462,45 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         end = text.find("\n## ", start + 1)
         return text[start:end if end != -1 else len(text)]
 
+    def lane(self, name: str) -> str:
+        return (ROOT / "skills" / "trevskills-scrum" / "lanes" / f"{name}.md").read_text()
+
+    def test_lane_files_hold_moved_sections(self):
+        steps = {
+            "roadmap": ("Roadmap", ("1. **Draft**", "2. **Status**", "3. **Starting a step**", "4. **Stop rule.**", "5. **Resume.**")),
+            "lilguy": ("Lilguy", ("1. **Refuse", "2. **Job.**", "3. **Build.**", "4. **Check.**", "5. **Land.**", "6. End")),
+            "cloud": ("Cloud", ("1. **Dispatch**", "2. **Cloud job**", "3. **Sync**")),
+        }
+        for name, (title, phrases) in steps.items():
+            path = ROOT / "skills" / "trevskills-scrum" / "lanes" / f"{name}.md"
+            self.assertTrue(path.is_file(), path)
+            lines = path.read_text().split("\n")
+            self.assertEqual(lines[0], f"# {title} lane", name)
+            self.assertEqual(lines[1], "", name)
+            self.assertNotEqual(lines[2], "", name)
+            for phrase in phrases:
+                self.assertIn(phrase, path.read_text(), f"{name}: {phrase}")
+
+    def test_skill_lane_pointers(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for title, name in (("Roadmap", "roadmap"), ("Lilguy", "lilguy"), ("Cloud", "cloud")):
+            body = [l for l in self.h2(text, f"## {title} lane").splitlines()[2:] if l.strip()]
+            self.assertEqual(body, [f"Read `$HOME/.claude/skills/trevskills-scrum/lanes/{name}.md` when this lane runs."], title)
+        order = [text.index(f"\n## {t} lane\n") for t in ("BigBoy", "Roadmap", "Lilguy", "Cloud")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(text.index("\n## ", order[0] + 1), order[1])
+        self.assertEqual(text.index("\n## ", order[1] + 1), order[2])
+        self.assertEqual(text.index("\n## ", order[2] + 1), order[3])
+
+    def test_skill_md_size_budget(self):
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
+
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        lane = self.h2(text, "## Roadmap lane")
+        lane = self.lane("roadmap")
         for phrase in ("roadmap.md", "## Constraints", "roadmap-show", "roadmap-link", "roadmap-insert",
                        "roadmap-next", "roadmap-stop"):
-            self.assertIn(phrase, text, phrase)
+            self.assertIn(phrase, text + lane, phrase)
         self.assertIn("roadmap-link", lane)
         self.assertIn("roadmap-stop", lane)
         self.assertIn("roadmap-stop", self.h2(text, "## New job"))
@@ -1499,7 +1531,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertEqual(out, "")
     def test_skill_cloud_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        cloud = self.h2(text, "## Cloud lane")
+        cloud = self.lane("cloud")
         for phrase in (
             "script -q /dev/null claude", "- Cloud environment:",   # dispatch, TTY, environment
             'E=(--settings "{\\"remote\\":{\\"defaultEnvironmentId\\":\\"$CE\\"}}")',
@@ -1531,7 +1563,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_skill_cloud_lane_inlines_digest_proposals(self):
         # jobs/ and digests/ stay on the Mac, so Dispatch inlines a pre-written spec and every digest proposal the item
         # points at into feature.md before the session reads it.
-        cloud = self.h2((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Cloud lane")
+        cloud = self.lane("cloud")
         for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", '$F/jobs/$ID/spec.md',
                        "$F/digests/<NNN>/proposals.json", "--digest-skill-check", "not found in proposals.json",
                        "B set $ID stage=needs-human reason='digest proposal <NNN> <PID> not found in proposals.json."):
@@ -1542,7 +1574,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_skill_cloud_artifacts_come_home(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        cloud = self.h2(text, "## Cloud lane")
+        cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "B artifacts $ID", "git write-tree",
                        "commit-tree", "refs/heads/scrum-artifacts/$ID", "never merged", "never has a PR",
@@ -1565,7 +1597,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_skill_cloud_stale_skill_stops(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        cloud = self.h2(text, "## Cloud lane")
+        cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
         for phrase in ("lacks the **Artifacts** step", "before New job",
@@ -1578,7 +1610,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_skill_cloud_schema_migrates_locally(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        cloud = self.h2(text, "## Cloud lane")
+        cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertIn("first line starts `Hard stop: schema`", job)  # cloud reports, never migrates
         sync = cloud[cloud.index("3. **Sync**"):]
@@ -1597,7 +1629,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_cloud_sync_reverifies_agent_rules_digest_jobs(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        cloud = self.h2(text, "## Cloud lane")
+        cloud = self.lane("cloud")
         sync = cloud[cloud.index("3. **Sync**"):]
         start = sync.index("**Digest-approved rules edits.**")
         rule = sync[start:sync.index("\n", start)]

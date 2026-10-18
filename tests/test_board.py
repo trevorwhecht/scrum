@@ -1971,6 +1971,10 @@ class HookTest(unittest.TestCase):
 class DigestVerifyTest(unittest.TestCase):
     """board.py digest-verify: a job whose rules-file diff is exactly its cited, queued digest edits needs no human."""
 
+    def test_rules_re_covers_lane_files(self):
+        self.assertTrue(board.RULES_RE.search("skills/trevskills-scrum/lanes/cloud.md"))
+        self.assertIsNone(board.RULES_RE.search("src/lanes/foo.md"))
+
     BUILDER = "# Builder\n\nRule one.\n\nRule two.\n"
     PLANNER = "# Planner\n\nPlan it.\n"
 
