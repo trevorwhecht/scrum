@@ -1625,6 +1625,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("{setup:", "waits on Human setup", "runall-start", "Setup done"):
             self.assertIn(phrase, fmt, phrase)
 
+    def test_skill_human_setup_parks_for_runall_children_not_bigboy_children(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step = self.section(text, "**Human setup:** then,", "4. **Worktree:**")
+        self.assertIn("has no `parent` or its parent's `lane` is `runall`", step)
+        self.assertIn("so this skips a BigBoy child", step)
+
     def test_dashboard_backlog_setup_done(self):
         text = DASHBOARD.read_text()
         for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
