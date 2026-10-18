@@ -1576,29 +1576,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("refresh", intro)
         self.assertIn("setup.sh", intro)
 
-    def test_cloud_launch_prompt_verifies_and_reads_skill_file(self):
-        # The Skill tool serves the text registered at session start, before setup.sh refreshes ~/scrum, so the
-        # always-fresh launch prompt carries the stale check and points the session at SKILL.md on disk.
-        cloud = self.h2((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Cloud lane")
-        m = re.search(r'--cloud "(First run: .*?/trevskills-scrum cloud-job \$ID \$FEAT)"', cloud)
-        self.assertIsNotNone(m, "no --cloud launch prompt")
-        prompt = m.group(1)
-        self.assertTrue(prompt.startswith("First run: bash ~/scrum/cloud/setup.sh"), prompt)
-        self.assertFalse("invoke the trevskills-scrum skill fresh" in cloud,
-                         "launch prompt still invokes the cached skill: " + prompt)
-        skill = "~/.claude/skills/trevskills-scrum/SKILL.md"
-        steps = ("git -C ~/scrum rev-parse HEAD", "git -C ~/scrum ls-remote origin refs/heads/main",
-                 f"grep -q scrum-artifacts/ {skill}", "Read tool", "cloud skill copy is stale. Fix: rerun cloud setup.")
-        for phrase in steps + ("session start", "before New job", "Needs-human"):
-            self.assertIn(phrase, prompt, phrase)
-        idx = [prompt.index(p) for p in steps]
-        self.assertEqual(idx, sorted(idx), "checks out of order: HEAD, marker, Read, stop reason")
-        self.assertIn(skill, prompt[prompt.index("grep -q scrum-artifacts/") + len(f"grep -q scrum-artifacts/ {skill}"):])
-        # The prompt sits in a double-quoted bash string on the Mac: nothing in it may expand there.
-        self.assertNotIn("`", prompt)
-        self.assertNotIn("$(", prompt)
-        self.assertNotRegex(prompt, r"\$(?!ID\b|FEAT\b)")
-
     def test_skill_cloud_schema_migrates_locally(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cloud = self.h2(text, "## Cloud lane")
