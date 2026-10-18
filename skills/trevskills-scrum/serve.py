@@ -118,7 +118,7 @@ def orchestrator_model(root: Path) -> str | None:
     Missing, blank or malformed values give `sonnet`."""
     try:
         text = (root / "project.md").read_text()
-    except OSError:
+    except (OSError, ValueError):  # missing, or not UTF-8
         return "sonnet"
     m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
     value = m.group(1).strip() if m else ""
