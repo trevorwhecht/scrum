@@ -195,7 +195,7 @@ Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double 
 Cleans the backlog, then runs every open item as a child job of one Run-all parent, in parallel where files don't overlap, with nobody watching. Setup and Prerequisites apply. Trevor stops it by interrupting or closing its Terminal window.
 
 1. Run `B triage-start`. Under the board lock it claims `$F/triage/<id>/` and prints `{"id", "open"}`. If `id` is null, say the backlog is empty and stop.
-2. Spawn `scrum-triager` and wait for it. Prompt:
+2. Spawn `scrum-triager` with the Agent tool override `model: "sonnet"` (first spawn and the respawn below) and wait for it. Prompt:
    ```
    TRIAGE_DIR=$F/triage/<id>
    BACKLOG=$F/backlog.md
