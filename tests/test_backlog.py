@@ -403,6 +403,15 @@ class BacklogTest(unittest.TestCase):
             board.cmd_triage_apply(self.root, "001")
         self.assertIn("- [ ] One and two {needs #p999}\n", self.text())
 
+    def test_triage_merge_keeps_setup_marker(self):
+        self.triage("# Backlog\n- [ ] One {setup: Buy a number; Set the key}\n- [ ] Two {setup: Set the key; Add DNS}\n"
+                    "- [ ] Three\n- [ ] Free\n",
+                    {"merge": [{"items": ["One", "Two", "Three"], "text": "One two three"}]})
+        board.cmd_triage_apply(self.root, "001")
+        self.assertIn("- [ ] One two three {setup: Buy a number; Set the key; Add DNS}\n", self.text())
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Free")
+        self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+
     def test_triage_retire_and_manual_drop_needs(self):
         self.triage("# Backlog\n- [ ] Old {#o111}\n- [ ] Phone {#p222}\n- [ ] User {needs #o111}\n"
                     "- [ ] Both {needs #p222 #o111 #k333}\n- [ ] Keep {#k333}\n",

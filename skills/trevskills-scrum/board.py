@@ -945,7 +945,8 @@ def cmd_triage_apply(root, triage_id):
                     text = clean(e["text"], ITEM_MAX)
                     own = {i["id"] for i in got if i["id"]}
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
-                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own))}
+                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
+                            "setup": list(dict.fromkeys(st for i in got for st in i["setup"]))}  # still waits on setup
                     merged.append(item)
                     remap.update((n, item) for n in own)
                     for i in got:
