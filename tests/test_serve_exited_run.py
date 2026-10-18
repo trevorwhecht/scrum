@@ -1,0 +1,72 @@
+"""Repro: a dashboard-started `claude -p` start/resume run that exits while its job is still in a WATCHED stage
+is never noticed by watchdog_tick; the job sits in its stage until the 30-minute watchdog flags it."""
+import json, os, sys, tempfile, time, unittest
+from unittest import mock
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+import serve  # noqa: E402
+
+board = serve.board
+
+
+class ExitedRunTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def job(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def edit_job(self, job_id, **fields):
+        data = json.loads((self.root / "board.json").read_text())
+        next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
+        (self.root / "board.json").write_text(json.dumps(data))
+
+    def test_exited_start_run_respawns_resume_once(self):
+        job_id = board.cmd_new(self.root, "Exited headless run")
+        self.edit_job(job_id, stage="build", reason=None)  # updatedAt is fresh: the 30-minute watchdog won't fire
+        key = f"repo/{job_id}"
+        dead = mock.Mock()
+        dead.poll.return_value = 0  # the `claude -p` start run ended its turn and exited
+        with serve.RUNS_LOCK:
+            serve.RUNS[key] = {"action": "start", "started": time.time(), "proc": dead, "log": "runs/x.log"}
+        self.addCleanup(lambda: serve.RUNS.pop(key, None))
+
+        def fake_spawn(project, root, jid, action, prompt, flags=()):
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            with serve.RUNS_LOCK:
+                serve.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc,
+                                                  "log": "runs/y.log"}
+            return "runs/y.log"
+
+        with mock.patch.object(board, "projects", return_value={"repo": self.repo}), \
+                mock.patch.object(board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(serve, "spawn", side_effect=fake_spawn) as spawn:
+            serve.watchdog_tick()
+            calls = lambda: [(c.args[2], c.args[3], c.args[4]) for c in spawn.call_args_list]
+            self.assertEqual(calls(), [(job_id, "resume", f"/trevskills-scrum resume {job_id}")],
+                             "the exited start run mid-build must be respawned as resume")
+            self.assertEqual(self.job(job_id)["stage"], "needs-human")
+            self.assertEqual(self.job(job_id)["reason"],
+                             "stalled in build: session exited while the job was still in build. Fix: click Resume.")
+            # the respawned resume run puts the job back in build, then it exits too
+            self.edit_job(job_id, stage="build", reason=None)
+            serve.RUNS[key]["proc"].poll.return_value = 0
+            serve.watchdog_tick()
+            self.assertEqual(len(calls()), 1, "the auto-respawn happens only once")
+        self.assertEqual(self.job(job_id)["stage"], "needs-human")
+        self.assertTrue(self.job(job_id)["reason"].startswith("stalled in build: session exited"))
+
+
+if __name__ == "__main__":
+    unittest.main()

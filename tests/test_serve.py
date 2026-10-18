@@ -3356,3 +3356,88 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), ["kid"])
         self.assertEqual(s.AUTO_RESUME["p/kid"][0], 1)
         self.assertNotIn("p/lil", s.AUTO_RESUME)
+
+
+class ExitedRunSweepTest(unittest.TestCase):
+    """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
+    STALLED = "stalled in build: session exited while the job was still in build. Fix: click Resume."
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.repo = Path(tempfile.mkdtemp()); self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("p/")])
+
+    def write(self, jobs):
+        for j in jobs:
+            j.setdefault("updatedAt", self.board.now()); j.setdefault("reason", None)  # fresh: the 30-min watchdog stays quiet
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+
+    def job(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def run_entry(self, job_id, action="start", exit_code=0):
+        proc = mock.Mock(); proc.poll.return_value = exit_code
+        with self.serve.RUNS_LOCK:
+            self.serve.RUNS[f"p/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/x.log"}
+        return proc
+
+    def tick(self, alive=False):
+        """One watchdog_tick; returns the (job id, action) of every spawn it made."""
+        s = self.serve
+
+        def fake_spawn(project, root, jid, action, prompt, flags=()):
+            proc = mock.Mock(); proc.poll.return_value = None
+            with s.RUNS_LOCK:
+                s.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/y.log"}
+            return "runs/y.log"
+
+        with mock.patch.object(self.board, "projects", return_value={"p": self.repo}), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: alive), \
+                mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
+            s.watchdog_tick()
+        return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
+
+    def test_exited_run_ignored_outside_watched_stages(self):
+        jobs = [{"id": f"s-{st}", "stage": st} for st in ("done", "needs-human", "merging", "running", "plan", "aborted")]
+        jobs += [{"id": "wait", "stage": "build", "waiting": True}, {"id": "lil", "stage": "build", "lane": "lilguy"},
+                 {"id": "appr", "stage": "build"}, {"id": "live", "stage": "build"}]
+        self.write(jobs)
+        for j in jobs:
+            self.run_entry(j["id"], action="approve" if j["id"] == "appr" else "start",
+                           exit_code=None if j["id"] == "live" else 0)
+        before = (self.root / "board.json").read_text()
+        self.assertEqual(self.tick(), [])
+        self.assertEqual((self.root / "board.json").read_text(), before, "an ignored run writes nothing")
+        # each exit is handled once: the done job moving back into build later doesn't revive its old run
+        data = json.loads(before); next(j for j in data["jobs"] if j["id"] == "s-done")["stage"] = "build"
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.job("s-done")["stage"], "build")
+        # the still-running process is checked again once it exits
+        self.serve.RUNS["p/live"]["proc"].poll.return_value = 0
+        self.assertEqual(self.tick(), [("live", "resume")])
+        self.assertEqual(self.job("live")["reason"], self.STALLED)
+
+    def test_exited_run_waits_while_session_alive(self):
+        self.write([{"id": "tk", "stage": "build"}])
+        self.run_entry("tk")
+        self.assertEqual(self.tick(alive=True), [], "a live session (e.g. a Terminal) owns the job")
+        self.assertEqual(self.job("tk")["stage"], "build")
+        self.assertIsNone(self.job("tk")["reason"])
+        self.assertEqual(self.tick(alive=False), [("tk", "resume")], "checked again on the next tick")
+        self.assertEqual(self.job("tk")["stage"], "needs-human")
+
+    def test_exited_child_blocked_by_sibling_is_flagged_not_respawned(self):
+        (self.root / "jobs" / "kid").mkdir(); (self.root / "jobs" / "sib").mkdir()
+        for jid in ("kid", "sib"):
+            (self.root / "jobs" / jid / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `src/{jid}.py`: why\n")
+        self.write([{"id": "par", "stage": "running", "lane": "runall", "children": ["kid", "sib"]},
+                    {"id": "kid", "stage": "build", "parent": "par", "parallel": True},
+                    {"id": "sib", "stage": "build", "parent": "par", "parallel": True}])
+        self.run_entry("kid")
+        self.assertEqual(self.tick(), [], "kid waits on sib, which shares src/shared.py")
+        self.assertEqual(self.job("kid")["stage"], "needs-human")
+        self.assertEqual(self.job("kid")["reason"], self.STALLED)
+        self.assertEqual(self.job("sib")["stage"], "build")

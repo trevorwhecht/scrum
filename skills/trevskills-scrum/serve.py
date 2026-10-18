@@ -243,12 +243,61 @@ def auto_resume(project, root, jobs):
         resume_job(project, root, job, jobs)
 
 
+EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
+
+
+def respawn_exited(project, root):
+    """A dashboard-started `claude -p` start/resume run that exited while its job is still in a WATCHED stage (it
+    ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run that was itself that respawn,
+    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. Returns the flagged ids."""
+    with RUNS_LOCK:
+        runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and r.get("action") in ("start", "resume")
+                and not r.get("handled") and r["proc"].poll() is not None]
+    path = root / "board.json"
+    if not runs or not path.exists():
+        return []
+    jobs = json.loads(path.read_text())["jobs"]
+    alive, flagged = None, []
+    for key, run in runs:
+        job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
+        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or job.get("lane") == "lilguy":
+            run["handled"] = True
+            continue
+        alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
+        if alive(job):
+            continue  # another session (e.g. a Terminal) has the job; look again next tick
+        stage = job["stage"]
+        try:
+            with board.locked_board(root) as b:
+                live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+                if not live or live.get("stage") != stage:
+                    raise board._Gone
+                live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {EXITED.format(stage=stage)}",
+                            updatedAt=board.now())
+                job.update(live)
+        except board._Gone:
+            run["handled"] = True
+            continue
+        run["handled"] = True
+        flagged.append(job["id"])
+        if run.get("respawn") or resume_refusal(root, job):
+            board.play(board.sound("needs-human"))
+            continue
+        resume_job(project, root, job, jobs)
+        with RUNS_LOCK:
+            new = RUNS.get(key)
+            if new is not None and new is not run:  # the entry resume_job's spawn just created
+                new["respawn"] = True
+    return flagged
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
     whatever siblings are now ready, then auto-resume the stalled ones. One project's failure never stops the others."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
+            respawn_exited(project, root)
             flagged = set(board.cmd_watchdog(root))
             if not (root / "board.json").exists():
                 continue
