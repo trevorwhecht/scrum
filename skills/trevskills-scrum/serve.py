@@ -110,14 +110,33 @@ def kill_session(project, root, job_id):
             pass
 
 
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def orchestrator_model(root: Path) -> str | None:
+    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
+    Missing, blank or malformed values give `sonnet`."""
+    try:
+        text = (root / "project.md").read_text()
+    except OSError:
+        return "sonnet"
+    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    if value.lower() == "inherit":
+        return None
+    return value if MODEL_RE.fullmatch(value) else "sonnet"
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/. The dashboard shows it as running.
-    Returns the log path relative to root."""
+    start/resume orchestrator sessions also get `--model <Orchestrator model>`. Returns the log path relative to root."""
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    model = orchestrator_model(root) if action in ("start", "resume") else None
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
     with open(log, "w") as fh:
-        proc = subprocess.Popen([CLAUDE, "-p", prompt, *flags], cwd=root.parent,
+        proc = subprocess.Popen(argv, cwd=root.parent,
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
                                 env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))  # board.py plays scrum's sounds
     with RUNS_LOCK:

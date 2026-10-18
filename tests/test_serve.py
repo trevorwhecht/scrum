@@ -2668,8 +2668,42 @@ class AiResearchTest(unittest.TestCase):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             log = self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "start", "/trevskills-scrum start x")
         self.addCleanup(self.serve.RUNS.pop, "reg/999-not-a-job", None)
-        self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum start x", "--permission-mode", "acceptEdits"])
+        self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum start x", "--model", "sonnet",
+                                                   "--permission-mode", "acceptEdits"])
         self.assertRegex(log, r"^runs/\d{8}-\d{6}-start-999-not-a-job\.log$")
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "resume", "/trevskills-scrum resume x")
+        self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum resume x", "--model", "sonnet",
+                                                   "--permission-mode", "acceptEdits"])
+
+    def spawn_argv(self, action, prompt="/p"):
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", action, prompt)
+        self.addCleanup(self.serve.RUNS.pop, "reg/999-not-a-job", None)
+        return popen.call_args.args[0]
+
+    def test_spawn_orchestrator_model_from_project(self):
+        project = self.reg / "scrum" / "project.md"
+        self.addCleanup(lambda: project.unlink(missing_ok=True))
+        plain = ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits"]
+        for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: claude-sonnet-4.5  \n", "claude-sonnet-4.5"),
+                            ("- Orchestrator model: inherit\n", None), ("- Orchestrator model: Inherit\n", None),
+                            ("- Orchestrator model: so net; rm\n", "sonnet"), ("- Orchestrator model: $(touch x)\n", "sonnet"),
+                            ("- Orchestrator model:\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
+                            ("- Stack: Python\n", "sonnet")):
+            project.write_text("# Project profile\n- Test: none\n" + line + "- Notes: x\n")
+            for action in ("start", "resume"):
+                expect = plain if model is None else plain[:3] + ["--model", model] + plain[3:]
+                self.assertEqual(self.spawn_argv(action), expect, (line, action))
+
+    def test_spawn_other_actions_get_no_model(self):
+        project = self.reg / "scrum" / "project.md"
+        self.addCleanup(lambda: project.unlink(missing_ok=True))
+        for text in (None, "- Orchestrator model: opus\n"):
+            if text:
+                project.write_text(text)
+            for action in ("approve", "rework", "digest"):
+                self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits"], (text, action))
 
     def test_research_home_is_this_checkout(self):
         repo = self.serve.HERE.parent.parent
