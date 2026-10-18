@@ -61,16 +61,33 @@ When a verdict is unclear, ask Jev a yes/no question, e.g. `This failure is caus
    printf '%s' "<context>" | python3 ~/.claude/scripts/jev-rank.py "<question>" --top 1
    ```
    The score is the first tab-separated field; `>= 0.7` means yes.
-2. Otherwise POST to `https://api.typesafe.ai/v1/systemone` with model `jev-latest`, no UL parameter, and the question. The key comes from `TYPESAFE_API_KEY`, or else (macOS only) Keychain service `TypeSafe`, account `typesafe`:
-   ```bash
-   KEY="${TYPESAFE_API_KEY:-$(security find-generic-password -s TypeSafe -a typesafe -w 2>/dev/null)}"
-   curl -sS --max-time 60 https://api.typesafe.ai/v1/systemone \
-     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-     -d "$(python3 -c 'import json,sys; print(json.dumps({"model": "jev-latest", "question": sys.argv[1]}))' "<question>")"
-   ```
+2. Otherwise POST to `https://api.typesafe.ai/v1/systemone` with model `jev-latest` and one `noul` question, the way `jev-rank.py` does. Python reads the key from `TYPESAFE_API_KEY`, or else (macOS only) Keychain service `TypeSafe`, account `typesafe`, and sets the Authorization header itself. The script and the question travel in two single-quoted heredocs (script on fd 3, question on stdin: first line the question, the rest context), so neither the key nor the question touches a command line or a double-quoted shell string (paste it unindented so the `PY` and `Q` lines end the heredocs):
+
+```bash
+python3 /dev/fd/3 3<<'PY' <<'Q'
+import json, os, subprocess, sys, urllib.request
+question, _, context = sys.stdin.read().partition("\n")
+key = os.environ.get("TYPESAFE_API_KEY") or subprocess.run(
+    ["/usr/bin/security", "find-generic-password", "-s", "TypeSafe", "-a", "typesafe", "-w"],
+    capture_output=True, text=True).stdout.strip()
+if not key:
+    sys.exit("jev: no TYPESAFE_API_KEY and no Keychain item TypeSafe/typesafe")
+body = json.dumps({"model": "jev-latest", "state": {"context": context},
+                   "questions": {"q": {"type": "noul", "instructions": question}}}).encode()
+req = urllib.request.Request("https://api.typesafe.ai/v1/systemone", body,
+                             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=60) as r:
+    print(json.load(r)["answers"]["q"]["noul"])
+PY
+<question>
+<context>
+Q
+```
+
+   The printed score `>= 0.7` means yes.
 3. Any Jev error (no script and no key, a non-zero exit, a timeout, an unparseable answer) falls back to reading the output yourself.
 
-The Jev key is never printed, logged, echoed or written to any file (not the report, not a spec, not a review); it lives only in the environment of the one command that sends it.
+The Jev key is never placed in a shell variable, argv, a file or output (not the report, not a spec, not a review); only Python holds it, in memory, for the one request that sends it.
 
 ## 7. Token rules
 
