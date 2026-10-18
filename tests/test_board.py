@@ -2017,14 +2017,14 @@ class DigestVerifyTest(unittest.TestCase):
         self.git(self.wt, "add", rel)
         self.git(self.wt, "commit", "-q", "-m", "edit")
 
-    def run_cli(self):
+    def run_cli(self, *extra):
         out = io.StringIO()
         with redirect_stdout(out):
-            code = board.main(["--dir", str(self.root), "digest-verify", self.job])
+            code = board.main(["--dir", str(self.root), "digest-verify", self.job, *extra])
         return code or 0, json.loads(out.getvalue())
 
-    def assert_fails(self, needle=None):
-        code, out = self.run_cli()
+    def assert_fails(self, needle=None, *extra):
+        code, out = self.run_cli(*extra)
         self.assertEqual(code, 1, out)
         self.assertFalse(out["ok"])
         if needle:
@@ -2090,6 +2090,58 @@ class DigestVerifyTest(unittest.TestCase):
             self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper.",
                                    "target": str(Path(self.tmp.name) / "elsewhere" / "agents" / "scrum-builder.md")})
             self.assert_fails("p1")
+        with self.subTest("relative target"):
+            # From the repo root the relative path would resolve inside the repo; it must still be rejected.
+            self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper.",
+                                   "target": "agents/scrum-builder.md"})
+            cwd = os.getcwd()
+            os.chdir(self.repo)
+            try:
+                out = self.assert_fails("p1")
+            finally:
+                os.chdir(cwd)
+            self.assertIn("not an absolute path", out["error"])
+
+    def test_digest_verify_flags_override_board(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        with self.subTest("board worktree unset"):
+            board.cmd_set(self.root, self.job, ["worktree="])
+            code, out = self.run_cli("--worktree", str(self.wt), "--base", "main")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(out["files"], ["agents/scrum-builder.md"])
+        with self.subTest("board worktree lacks the edit"):
+            wt2 = Path(self.tmp.name) / "wt2"
+            self.git(self.repo, "worktree", "add", "-q", "-b", "other", str(wt2))
+            board.cmd_set(self.root, self.job, [f"worktree={wt2}"])
+            self.assert_fails("no rules file")
+            code, out = self.run_cli("--worktree", str(self.wt))
+            self.assertEqual(code, 0, out)
+            self.assertEqual(out["proposals"], ["repo digest 006 p1"])
+
+    def test_digest_verify_base_flag_sets_range(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        self.git(self.repo, "branch", "has-edit", f"scrum/{self.job}")
+        self.assert_fails("the diff changes no rules file", "--base", "has-edit")
+        code, out = self.run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["files"], ["agents/scrum-builder.md"])
+
+    def test_digest_verify_empty_or_bad_flag_fails(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        for flag, word in (("--worktree", "no worktree"), ("--base", "no base")):
+            with self.subTest(flag=flag):
+                out = self.assert_fails(word, flag, "")
+                self.assertEqual(out["ok"], False)
+        with self.subTest("dash base"):
+            self.assert_fails("bad base", "--base=-x")
+        code, out = self.run_cli()  # the board's own values still pass
+        self.assertEqual(code, 0, out)
 
     def test_digest_verify_fails_missing_digest(self):
         self.feature("Apply digest 007 p1 to agents/scrum-builder.md\n")

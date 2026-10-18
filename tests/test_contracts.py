@@ -378,8 +378,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("agent rules guard", step6)
         start = merge.index("**Agent rules guard")
         guard = merge[start:merge.index("\n", start)]
-        for phrase in ("B digest-verify $ID", f"grep -E '{regex}'", "human-approval.md",
-                       "Hard stop: agent rules — <first matching file>", "Run this guard again right before step 6"):
+        for phrase in ("B digest-verify $ID --worktree \"$WT\" --base \"$BASE\"", f"grep -E '{regex}'",
+                       "human-approval.md", "Hard stop: agent rules — <first matching file>", "Run this guard again right before step 6"):
             self.assertIn(phrase, guard, phrase)
         for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md"):
             self.assertIsNotNone(re.search(regex, path), path)
