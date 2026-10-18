@@ -313,6 +313,24 @@ class ContractTest(unittest.TestCase):
                        "never from the spec's `UI surface:` line"):
             self.assertIn(phrase, review, phrase)
 
+    def test_skill_passes_move_only_on_move_refactors(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("B move-ratio $ID", "MOVE_ONLY=yes", ">= 0.9", "never `scrum-review-security`"):
+            self.assertIn(phrase, review, phrase)
+        for phrase in ("move-ratio", "MOVE_ONLY"):
+            self.assertNotIn(phrase, self.section(text, "## Fast lane", "\n## "), phrase)
+
+    def test_reviewers_handle_move_only(self):
+        code = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("MOVE_ONLY=yes", "non-moved", "--color-moved=plain"):
+            self.assertIn(phrase, code, phrase)
+        for name in ("scrum-review-ui", "scrum-review-ux"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            for phrase in ("MOVE_ONLY=yes", "console error", "390", "1440", "smoke only (MOVE_ONLY)"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+        self.assertNotIn("MOVE_ONLY", (ROOT / "agents" / "scrum-review-security.md").read_text())
+
     def test_skill_review_respawns_missing_reviewers(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
