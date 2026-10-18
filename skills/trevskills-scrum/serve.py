@@ -72,9 +72,11 @@ def stop(project, job_id):
             pass
 
 
-def kill_session(project, job_id):
-    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan
-    SIGTERMs the process group of every claude line running /trevskills-scrum <cmd> <id> (nohup child, Terminal)."""
+def kill_session(project, root, job_id):
+    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan finds
+    claude lines running /trevskills-scrum <cmd> <id> (nohup child, Terminal), and one `lsof` call reads their cwds.
+    Only groups with such a line running inside this project's repo (root.parent, worktrees included) get SIGTERM:
+    job ids are per project. No cwd, no signal; the pause is already recorded, so a survivor is refused anyway."""
     with RUNS_LOCK:
         run = RUNS.get(f"{project}/{job_id}")
     if run and run["proc"].poll() is None:
@@ -84,8 +86,23 @@ def kill_session(project, job_id):
     except (OSError, subprocess.SubprocessError):
         return
     match = re.compile(rf"/trevskills-scrum \S+ {re.escape(job_id)}(\s|$)")
-    groups = {int(f[1]) for f in (l.split(None, 2) for l in out.splitlines())
-              if len(f) == 3 and f[1].isdigit() and "claude" in f[2] and match.search(f[2])}
+    lines = [(int(f[0]), int(f[1])) for f in (l.split(None, 2) for l in out.splitlines())
+             if len(f) == 3 and f[0].isdigit() and f[1].isdigit() and "claude" in f[2] and match.search(f[2])]
+    if not lines:
+        return
+    try:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(pid) for pid, _ in lines)],
+                             capture_output=True, text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return
+    cwds, pid = {}, None
+    for l in out.splitlines():
+        if l[:1] == "p" and l[1:].isdigit():
+            pid = int(l[1:])
+        elif l[:1] == "n" and pid is not None:
+            cwds[pid] = os.path.realpath(l[1:])
+    repo = os.path.realpath(root.parent)
+    groups = {pgid for pid, pgid in lines if pid in cwds and (cwds[pid] == repo or cwds[pid].startswith(repo + os.sep))}
     for pgid in sorted(groups - {os.getpgrp()}):
         try:
             os.killpg(pgid, signal.SIGTERM)
@@ -106,7 +123,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job  # a stale interactive tty would win over the log tail
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return f"runs/{log.name}"
@@ -137,7 +154,7 @@ def resume_job(project, root, job, jobs):
     resumes its paused children and starts whatever is ready instead."""
     job_id = job["id"]
     if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):
-        board.cmd_set(root, job_id, ["stage=running", "reason="])
+        board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
             kid = next((j for j in jobs if j["id"] == k), None)
             if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
@@ -990,6 +1007,37 @@ def open_terminal(project, root, job_id):
     if not tries:
         return 409, {"error": "no terminal recorded for this job"}
     code, obj = run_terminal(tries) or (404, {"error": f"no open tab on {tty}, and no run log to show"})
+    return code, {"id": job_id, **obj} if code == 200 else obj
+
+
+def ask_prompt(root: Path, job_id: str) -> str:
+    """The Ask Claude prompt: the job's artifacts that exist now, as absolute paths (never their contents)."""
+    d = root / "jobs" / job_id
+    rounds = sorted((p for p in d.glob("round-*") if p.is_dir() and re.fullmatch(r"round-\d+", p.name)),
+                    key=lambda p: int(p.name[6:]))
+    paths = [d / "feature.md", d / "spec.md", d / "build.md",
+             *(f for r in rounds for f in sorted(r.glob("*.md"), key=lambda f: f.name)), d / "decision.md"]
+    files = "".join(f"{p}\n" for p in paths if p.is_file())
+    return (f"Answer my questions about scrum job {job_id}. Its session has ended. Read these first:\n{files}"
+            f'Its board entry is the object with "id": "{job_id}" in {root / "board.json"}. '
+            "Don't change any file unless I ask.")
+
+
+def ask_claude(project: str, root: Path, job_id: str) -> tuple[int, dict]:
+    """Open a new interactive claude in the job's worktree (the repo root once it's gone), primed with its artifacts.
+    It isn't recorded as the job's tty or added to RUNS, so the board and the watchdog ignore it."""
+    jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
+    job = next((j for j in jobs if j.get("id") == job_id), None)
+    if not job:
+        return 404, {"error": "no such job"}
+    wt = job.get("worktree")
+    cwd = wt if isinstance(wt, str) and os.path.isdir(wt) else str(root.parent)
+    claude = ["env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, ask_prompt(root, job_id)]
+    if os.path.isdir("/Applications/Ghostty.app"):
+        tries = [(["open", "-na", "Ghostty", "--args", f"--working-directory={cwd}", "-e", *claude], "Claude opened in Ghostty.")]
+    else:
+        tries = [(osa_new_window(cwd, *claude), "Claude opened in a new Terminal window.")]
+    code, obj = run_terminal(tries)
     return code, {"id": job_id, **obj} if code == 200 else obj
 
 
@@ -1910,7 +1958,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -1971,6 +2019,8 @@ class Handler(BaseHTTPRequestHandler):
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
         if action == "terminal":
             return open_terminal(project, root, job_id)
+        if action == "ask":
+            return ask_claude(project, root, job_id)
         if action == "abort":
             stop(project, job_id)
             board.cmd_abort(root, job_id, bool(body.get("requeue")))
@@ -1978,7 +2028,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
             ids = board.cmd_pause(root, job_id)
             for i in ids:
-                kill_session(project, i)
+                kill_session(project, root, i)
             return 200, {"id": job_id, "paused": ids}
         if action == "setup-done":
             return setup_done(project, root, job_id)

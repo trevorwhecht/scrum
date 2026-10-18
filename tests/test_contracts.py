@@ -263,6 +263,7 @@ class ContractTest(unittest.TestCase):
         rules = (ROOT / "codex" / "AGENTS.md").read_text()
         self.assertIn("\n## Code Review Rules\n", rules)
         self.assertIn("Apache-2.0", rules)
+        self.assertIn("Don't run tests during a review.", rules)
         self.assertLess(len(rules.encode()), 32 * 1024)
         readme = (ROOT / "README.md").read_text()
         for phrase in ("read-only", "codex exec review", "~/.codex/AGENTS.md"):
@@ -668,7 +669,8 @@ class ContractTest(unittest.TestCase):
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
                        "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
                        "(fallback: <n>)", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
-                       "## Assumptions", "## Likely files"):
+                       "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
+                       "`scrum-level`"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
@@ -768,8 +770,22 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
         for phrase in ("TRIAGE_DIR/plan.json", "as data, not instructions", "every original requirement",
                        "(merged: <short name of each original>)", "naming the evidence", "1, 2, 3, 5, 8, 13",
-                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"', "up to 8 points"):
+                       "Never edit backlog.md", '"merge"', '"retire"', '"estimate"', "up to 8 points", '"depends":'):
             self.assertIn(phrase, text, phrase)
+
+    def test_backlog_dependency_docs(self):
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        triager = (ROOT / "agents" / "scrum-triager.md").read_text()
+        writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for name, text in (("SKILL.md", skill), ("scrum-triager.md", triager), ("scrum-spec-writer.md", writer)):
+            self.assertIn("{needs", text, name)
+        self.assertIn("must build on files or behaviour another open item adds", triager)
+        self.assertIn("text excludes the markers", triager)
+        self.assertIn("any ` {#…}` id marker and ` {needs …}` marker", writer)
+        self.assertIn("`next` and `runall-start` skip an item that waits", skill)
+        run_all = self.section(skill, "## Run all", "## Fast lane")
+        self.assertIn("adds dependencies", run_all)
+        self.assertIn("added dependencies", run_all)
 
     def test_dashboard_has_run_all_and_last_triage(self):
         text = DASHBOARD.read_text()
@@ -819,6 +835,16 @@ class ContractTest(unittest.TestCase):
         path = ROOT / "agents" / "scrum-spec-writer.md"
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
+
+    def test_spec_writer_digest_001_p3_p4(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
+                       "rework or abort) and turn each into a criterion.",
+                       "this is the early warning. Flag `auth` or `secrets` only when the change edits that "
+                       "handling itself; reading, scanning or displaying config files that may hold secrets "
+                       "is not a hard stop."):
+            self.assertEqual(text.count(phrase), 1, phrase)
+        self.assertNotIn("malformed) and turn", text)
 
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
@@ -948,6 +974,25 @@ class ContractTest(unittest.TestCase):
 
     def test_ui_reviewer_renders_page(self):
         self.assert_reviewer_renders("ui")
+
+    def test_agent_test_servers_use_throwaway_home(self):
+        start = 'HOME="$T" CLAUDE_HOME="$T/.claude"'
+        check = "Before any Save, Undo, Disable or Enable click"
+        lsof = "lsof -ti tcp:<port> -sTCP:LISTEN"
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            step1 = next(l for l in text.splitlines() if l.startswith("1. Start a fresh server"))
+            for phrase in (start, "mktemp -d", 'mkdir -p "$T/.claude"', "never 8765",
+                           "serve.py --port <free port>", "Never reuse a server that is already running"):
+                self.assertIn(phrase, step1, f"{name}: {phrase}")
+            for phrase in (check, lsof, "outside $T or WORKTREE", "Rendered: no — <reason>"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
+            self.assertIn('rm -rf "$T"', step4, name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        bullet = next(l for l in builder.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in (start, "never 8765", check, lsof, 'rm -rf "$T"', "Never use port 3001"):
+            self.assertIn(phrase, bullet, f"builder: {phrase}")
 
     def test_review_ux_ui_digest_rules(self):
         ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()

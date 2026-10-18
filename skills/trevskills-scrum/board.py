@@ -3,8 +3,10 @@
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
+  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
-  board.py next                    claim the first "- [ ]" backlog item as a new job, print {"id","feature"}
+  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
+                                   new job, print {"id","feature"}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
@@ -28,15 +30,16 @@
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
-  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate) to backlog.md (manual items
-                                   move to manual-checks.md), write report.md
+  board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
+                                   items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
                                    by ~/.claude/usage.json), print
                                    {"ready","merged","total","in_progress","all_merged"}
-  board.py runall-start           make a Run-all parent with every open backlog item as a waiting child, print
-                                   {"id","children"} (id null = nothing open); `ready <id>` then schedules them
+  board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
+                                   depends_on; items waiting on an outside job stay open), print {"id","children"}
+                                   (id null = nothing to claim); `ready <id>` then schedules them
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
@@ -48,7 +51,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, json, os, re, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, re, secrets, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
@@ -194,9 +197,12 @@ def cmd_new(root, title, job_id=None):
         return add_job(root, board, title, job_id)
 
 
-# --- backlog.md: "- [ ] [5] Text → 003-id <!-- why -->"; points and the estimate's reason are optional ---
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} → 003-id <!-- why -->"; points, the id and needs markers, the job
+# and the estimate's reason are optional. An item's text excludes the markers, so its spec_path never changes. ---
 FIB = (1, 2, 3, 5, 8, 13)
-ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
+                     r"(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
 
@@ -212,15 +218,35 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if m := ITEM_RE.match(line):
-            done, pts, text, job, why = m.groups()
+            done, pts, text, item_id, needs, job, why = m.groups()
             items.append({"index": len(items), "line": n, "done": done == "x",
-                          "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job})
+                          "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
+                          "id": item_id, "needs": needs.replace("#", "").split() if needs else []})
     return lines, items
 
 
 def format_item(item):
     return (f"- [{'x' if item['done'] else ' '}] " + (f"[{item['points']}] " if item["points"] else "") + item["text"]
+            + (f" {{#{item['id']}}}" if item.get("id") else "")
+            + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
+
+
+def new_item_id(items):
+    """4 random [a-z0-9] chars that no item in `items` carries as its id."""
+    taken = {i.get("id") for i in items}
+    while (new := "".join(secrets.choice(ID_CHARS) for _ in range(4))) in taken:
+        pass
+    return new
+
+
+def waiting_on(item, items, board):
+    """The ids in item's needs that still block it: a line with that id is open, or is claimed by a job whose board
+    stage is not done or aborted. An id no line carries, a closed line with no job, or a job missing from the board
+    does not block."""
+    stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
+    blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
+    return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
 
 
 def write_backlog(root, lines):
@@ -228,7 +254,12 @@ def write_backlog(root, lines):
 
 
 def backlog_items(root):
-    return [{k: v for k, v in item.items() if k != "line"} for item in read_backlog(root)[1]]
+    items = read_backlog(root)[1]
+    try:
+        board = read_board(root)
+    except SystemExit:  # a broken board.json must not break the backlog list; waits then only counts open lines
+        board = {"jobs": []}
+    return [{k: v for k, v in item.items() if k != "line"} | {"waits": waiting_on(item, items, board)} for item in items]
 
 
 def pick(items, index):
@@ -327,13 +358,15 @@ def cmd_next(root, index=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in items if not i["done"]), None)
+            item = next((i for i in items if not i["done"] and not waiting_on(i, items, board)), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
             item = pick(items, index)
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
+            if waits := waiting_on(item, items, board):
+                raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
         job_id = add_job(root, board, item["text"][:60])
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
@@ -818,7 +851,8 @@ def cmd_triage_start(root):
 
 
 def cmd_triage_apply(root, triage_id):
-    """Merge, retire, move to manual-checks.md and estimate open items by exact text. Stale, reused or bad entries are
+    """Merge, retire, move to manual-checks.md and estimate open items by exact text, then add dependencies. Merges
+    rewrite needs references to the merged item; retires and manual moves drop them. Stale, reused or bad entries are
     skipped and reported."""
     d = Path(root) / "triage" / str(triage_id)
     if not TRIAGE_RE.fullmatch(str(triage_id)) or not d.is_dir():
@@ -827,15 +861,19 @@ def cmd_triage_apply(root, triage_id):
         plan = json.loads((d / "plan.json").read_text())
     except (OSError, ValueError) as e:
         raise SystemExit(f"triage {triage_id}: plan.json is missing or not JSON ({e}); backlog.md was not touched")
-    if not isinstance(plan, dict) or any(not isinstance(plan.get(k) or [], list) for k in ("merge", "retire", "manual", "estimate")):
-        raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/manual/estimate lists; backlog.md was not touched")
-    report = {"Merged": [], "Retired": [], "Manual": [], "Estimated": [], "Skipped": []}
+    if not isinstance(plan, dict) or any(not isinstance(plan.get(k) or [], list)
+                                         for k in ("merge", "retire", "manual", "estimate", "depends")):
+        raise SystemExit(f"triage {triage_id}: plan.json must be an object of merge/retire/manual/estimate/depends lists; "
+                         "backlog.md was not touched")
+    report = {"Merged": [], "Retired": [], "Manual": [], "Estimated": [], "Depends": [], "Skipped": []}
     manual = []  # texts moved to manual-checks.md
-    consumed, merged = [], []  # items merged, retired or moved to manual; texts of the new merged items
+    consumed, merged = [], []  # items merged, retired or moved to manual; the new merged items
     gone = lambda text: format_item({"done": True, "points": None, "text": text, "job": None, "why": None})
     with locked_board(root):
         lines, items = read_backlog(root)
-        used, before = set(), {}  # item indexes already consumed; line number -> combined lines inserted above it
+        was = {i["index"]: (i["id"], list(i["needs"])) for i in items}
+        used, before = set(), {}  # item indexes already consumed; line number -> merged items inserted above it
+        remap, dropped = {}, set()  # id of a merged-away item -> its merged item; ids of retired and manual items
 
         def claim(texts):
             """The open item for each text (first free one wins), or (None, cause)."""
@@ -876,37 +914,99 @@ def cmd_triage_apply(root, triage_id):
                 why = clean(e.get("why") or "") or None
                 if kind == "merge":
                     text = clean(e["text"], ITEM_MAX)
-                    merged.append(text)
+                    own = {i["id"] for i in got if i["id"]}
+                    item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
+                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own))}
+                    merged.append(item)
+                    remap.update((n, item) for n in own)
                     for i in got:
                         lines[i["line"]] = gone(i["text"]) + f" <!-- merged into triage {triage_id} -->"
-                    before.setdefault(min(i["line"] for i in got), []).append(
-                        format_item({"done": False, "points": pts, "text": text, "job": None, "why": why}))
+                    before.setdefault(min(i["line"] for i in got), []).append(item)
                     report["Merged"].append(f"- {text}\n" + "".join(f"  - replaced: {i['text']}\n" for i in got))
                 elif kind == "retire":
                     reason = clean(e["reason"])
                     lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- retired: {reason} -->"
+                    dropped.add(got[0]["id"])
                     report["Retired"].append(f"- {got[0]['text']} — {reason}\n")
                 elif kind == "manual":
                     reason = clean(e["reason"])
                     lines[got[0]["line"]] = gone(got[0]["text"]) + f" <!-- manual check: {reason} -->"
+                    dropped.add(got[0]["id"])
                     manual.append(got[0]["text"])
                     report["Manual"].append(f"- {got[0]['text']} — {reason}\n")
                 else:
-                    item = got[0] | {"points": pts, "why": why}
-                    lines[item["line"]] = format_item(item)
-                    report["Estimated"].append(f"- [{pts}] {item['text']}" + (f" — {why}" if why else "") + "\n")
-        write_backlog(root, [x for n, line in enumerate(lines) for x in (*before.get(n, []), line)])
-        _append_manual(root, manual)
+                    got[0].update(points=pts, why=why)
+                    lines[got[0]["line"]] = format_item(got[0])
+                    report["Estimated"].append(f"- [{pts}] {got[0]['text']}" + (f" — {why}" if why else "") + "\n")
         gone_idx = {i["index"] for i in consumed}
-        after = [i for i in items if i["index"] not in gone_idx] + [{"done": False, "text": t} for t in merged]
+        live = [i for i in items if not i["done"] and i["index"] not in gone_idx] + merged  # the open items now
+        ids = items + merged  # every id in backlog.md, for new_item_id
+
+        def give_id(item):
+            if not item["id"]:
+                item["id"] = new_item_id(ids)
+            return item["id"]
+
+        for i in live:  # point references at the merged item, and forget retired and manual items
+            needs = []
+            for n in i["needs"]:
+                if n in remap:
+                    n = give_id(remap[n])
+                if n not in dropped and n not in needs and n != i["id"]:
+                    needs.append(n)
+            i["needs"] = needs
+
+        def reaches(start, goal):
+            """True when goal is start or is among start's needs, followed through the open items."""
+            seen, todo = set(), [start]
+            while todo:
+                cur = todo.pop()
+                if cur is goal:
+                    return True
+                if id(cur) not in seen:
+                    seen.add(id(cur))
+                    todo.extend(o for n in cur["needs"] for o in live if o["id"] == n)
+            return False
+
+        for e in plan.get("depends") or []:
+            e = e if isinstance(e, dict) else {}
+            text = e.get("item") if isinstance(e.get("item"), str) else ""
+            needs = [t for t in e.get("needs") if isinstance(t, str)] if isinstance(e.get("needs"), list) else []
+            label = f'depends "{clean(text, ITEM_MAX)}" ← ' + (" + ".join(f'"{clean(t, ITEM_MAX)}"' for t in needs) or "nothing")
+            find_open = lambda t: next((i for i in live if i["text"] == t), None)
+            item, pre = find_open(text), [find_open(t) for t in needs]
+            missing = next((t for t, p in zip(needs, pre) if p is None), None)
+            if not needs:
+                cause = "needs no prerequisites"
+            elif item is None or missing is not None:
+                cause = f'no open item has the text "{clean(text if item is None else missing, ITEM_MAX)}"'
+            elif any(p is item for p in pre):
+                cause = "an item cannot depend on itself"
+            elif any(reaches(p, item) for p in pre):
+                cause = "would close a dependency cycle"
+            else:
+                cause = None
+            if cause:
+                report["Skipped"].append(f"- {label} — {cause}\n")
+                continue
+            pre = [p for n, p in enumerate(pre) if all(p is not q for q in pre[:n])]
+            for p in pre:
+                if (n := give_id(p)) not in item["needs"]:
+                    item["needs"].append(n)
+            report["Depends"].append(f"- {item['text']} ← " + "; ".join(p["text"] for p in pre) + "\n")
+        for i in live:
+            if "index" in i and (i["id"], i["needs"]) != was[i["index"]]:
+                lines[i["line"]] = format_item(i)
+        write_backlog(root, [x for n, line in enumerate(lines) for x in (*map(format_item, before.get(n, [])), line)])
+        _append_manual(root, manual)
         for i in consumed:
-            drop_spec(root, i["text"], after)
+            drop_spec(root, i["text"], live)
         text = f"# Triage {triage_id} — {now()}\n" + "".join(
             f"\n## {title}\n" + ("".join(rows) or "None.\n") for title, rows in report.items())
         (d / "report.md").write_text(text)
         (Path(root) / "triage" / "latest.md").write_text(text)
     return {"merged": len(report["Merged"]), "retired": len(report["Retired"]), "manual": len(report["Manual"]),
-            "estimated": len(report["Estimated"]), "skipped": len(report["Skipped"])}
+            "estimated": len(report["Estimated"]), "depends": len(report["Depends"]), "skipped": len(report["Skipped"])}
 
 
 # --- bigboy: plan.md becomes 2-5 child jobs; `ready` claims the ones that may start ---
@@ -1095,20 +1195,35 @@ def cmd_plan_apply(root, parent_id, fix=False):
 
 
 def cmd_runall_start(root):
-    """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock."""
+    """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock.
+    An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
+    whose item needs another item claimed here depends_on that sibling's child."""
     with locked_board(root) as board:
         lines, items = read_backlog(root)
-        todo = [i for i in items if not i["done"]]
+        held = set()  # indexes of open items left open
+        while True:
+            more = {i["index"] for i in items if not i["done"] and i["index"] not in held
+                    and any(o["id"] == n and (o["done"] or o["index"] in held)
+                            for n in waiting_on(i, items, board) for o in items)}
+            if not more:
+                break
+            held |= more
+        todo = [i for i in items if not i["done"] and i["index"] not in held]
         if not todo:
             return {"id": None, "children": []}
         parent_id = add_job(root, board, "Run all")
         parent = board["jobs"][-1]
-        kids = []
+        kids, by_id = [], {}
         for item in todo:
             t = {"ticket": None, "title": item["text"][:60], "text": item["text"], "parallel": True}
             kids.append(add_child(root, board, parent, t, [], "", plain=True))
             take_spec(root, item["text"], kids[-1])
             claim_item(lines, item, kids[-1])
+            if item["id"]:
+                by_id.setdefault(item["id"], []).append(kids[-1])
+        for item, kid in zip(todo, kids):  # after all are created: an item may need one listed after it
+            find(board, kid)["depends_on"] = list(dict.fromkeys(k for n in item["needs"] for k in by_id.get(n, [])
+                                                                if k != kid))
         write_backlog(root, lines)
         parent.update(lane="runall", stage="running", children=kids, updatedAt=now())
         return {"id": parent_id, "children": kids}
@@ -1316,12 +1431,11 @@ def merge_refusal(job: dict) -> str | None:
 
 
 def cmd_set(root, job_id, pairs, unpause=False):
-    """unpause (library only: serve.py's spawn bookkeeping) writes to a paused job; so does any set with an empty
-    reason=, which is how resume and rework un-pause it."""
+    """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
+    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses."""
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
-    unpause = unpause or given.get("reason", None) == ""
     if given.get("stage") == "done":
         # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
         # so the read-then-write race is accepted.
@@ -1721,6 +1835,7 @@ def main(argv=None):
     n.add_argument("title")
     n.add_argument("--id")
     s = sub.add_parser("set")
+    s.add_argument("--unpause", action="store_true")
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
@@ -1788,7 +1903,7 @@ def main(argv=None):
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title, a.id))
     elif a.cmd == "set":
-        cmd_set(a.dir, a.id, a.pairs)
+        cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":

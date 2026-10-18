@@ -664,6 +664,57 @@ class BoardTest(unittest.TestCase):
         self.assertFalse(spec.exists())
         self.assertFalse((self.root / "jobs" / "002-add-csv-export" / "spec.md").exists())
 
+    def test_runall_start_maps_needs_to_depends_on(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Add UI {needs #api1 #sch2}\n- [ ] Add API {#api1} {needs #sch2}\n- [ ] Add schema {#sch2}\n"
+            "- [ ] Docs {needs #zzzz}\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all",
+                               "children": ["002-add-ui", "003-add-api", "004-add-schema", "005-docs"]})
+        self.assertEqual(self.child("002-add-ui")["depends_on"], ["003-add-api", "004-add-schema"])
+        self.assertEqual(self.child("003-add-api")["depends_on"], ["004-add-schema"])
+        self.assertEqual(self.child("004-add-schema")["depends_on"], [])
+        self.assertEqual(self.child("005-docs")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Add UI {needs #api1 #sch2} → 002-add-ui\n"
+                         "- [x] Add API {#api1} {needs #sch2} → 003-add-api\n- [x] Add schema {#sch2} → 004-add-schema\n"
+                         "- [x] Docs {needs #zzzz} → 005-docs\n")
+
+    def test_runall_start_leaves_items_waiting_on_outside_job_open(self):
+        self.root.mkdir(parents=True)
+        outside = board.cmd_new(self.root, "Outside")  # 001-outside, stage spec
+        finished = board.cmd_new(self.root, "Finished")  # 002-finished
+        board.cmd_set(self.root, finished, ["stage=done"])
+        backlog = (f"# Backlog\n- [x] Outside {{#out1}} → {outside}\n- [x] Finished {{#fin2}} → {finished}\n"
+                   "- [ ] Blocked {#blk3} {needs #out1}\n- [ ] Chained {needs #blk3}\n- [ ] Free {needs #fin2}\n")
+        (self.root / "backlog.md").write_text(backlog)
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "003-run-all", "children": ["004-free"]})
+        self.assertEqual(self.child("004-free")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         f"# Backlog\n- [x] Outside {{#out1}} → {outside}\n- [x] Finished {{#fin2}} → {finished}\n"
+                         "- [ ] Blocked {#blk3} {needs #out1}\n- [ ] Chained {needs #blk3}\n"
+                         "- [x] Free {needs #fin2} → 004-free\n")
+        # every open item held back: no parent
+        jobs = len(self.jobs())
+        self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
+        self.assertEqual(len(self.jobs()), jobs)
+
+    def test_ready_holds_dependent_runall_child(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Second {needs #aaaa}\n- [ ] First {#aaaa}\n")
+        out = board.cmd_runall_start(self.root)
+        parent, (second, first) = out["id"], out["children"]
+        self.spec(second, "src/second.py")
+        self.spec(first, "src/first.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [first])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, first, ["stage=review"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, first, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [second])
+
     def runall(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {chr(97 + i)}\n" for i in range(n)))
@@ -999,7 +1050,7 @@ class BoardTest(unittest.TestCase):
                                       {"item": "Check iPhone layout", "reason": "needs a device"}],
                            "estimate": [{"item": "Dark mode", "points": 2, "why": "one toggle"}]})
         res = board.cmd_triage_apply(self.root, tid)
-        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 2, "estimated": 1, "skipped": 0})
+        self.assertEqual(res, {"merged": 0, "retired": 0, "manual": 2, "estimated": 1, "depends": 0, "skipped": 0})
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] Check Safari login (from 004-auth) <!-- manual check: needs a real Safari -->\n"
                          "- [x] Check iPhone layout <!-- manual check: needs a device -->\n"
@@ -1018,7 +1069,7 @@ class BoardTest(unittest.TestCase):
                        {"item": "Alpha", "reason": "r"}, {"item": "Gamma", "reason": "device only"}],
             "estimate": [{"item": "Gamma", "points": 3, "why": "w"}]})
         res = board.cmd_triage_apply(self.root, tid)
-        self.assertEqual(res, {"merged": 0, "retired": 1, "manual": 1, "estimated": 0, "skipped": 5})
+        self.assertEqual(res, {"merged": 0, "retired": 1, "manual": 1, "estimated": 0, "depends": 0, "skipped": 5})
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] Alpha <!-- retired: done in 009-a -->\n- [ ] Beta\n"
                          "- [x] Gamma <!-- manual check: device only -->\n")
@@ -1123,21 +1174,47 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(str(e.exception), f"job {job_id} is {stage}; only a job in progress can be paused")
             self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_paused_job_refuses_orchestrator_writes_until_reason_cleared(self):
+    def test_paused_job_refuses_writes_until_explicit_unpause(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=review"])
         board.cmd_pause(self.root, job_id)
-        for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
-                     lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
-                     lambda: board.cmd_sync(self.root, job_id)):
-            with self.assertRaises(SystemExit) as e:
-                call()
-            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
-        board.cmd_set(self.root, job_id, ["stage=review", "reason="])
+        paused = "stalled in review: paused by Trevor. Fix: click Play."
+        with mock.patch.object(board, "merge_refusal", return_value=None):  # the pause must refuse, not the PR guard
+            for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
+                         lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                         lambda: board.cmd_sync(self.root, job_id),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=done", "reason="]),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=review", "reason="])):
+                with self.assertRaises(SystemExit) as e:
+                    call()
+                self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("needs-human", paused))
+        board.cmd_set(self.root, job_id, ["stage=review", "reason="], unpause=True)
         self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
         board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
         self.assertEqual(self.jobs()[0]["stage"], "approve")
+
+    def test_set_cli_unpause_flag(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]),
+                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        board.main(["--dir", str(self.root), "set", job_id, "stage=approve"])
+        self.assertEqual(self.jobs()[0]["stage"], "approve")
+        # not paused: --unpause is harmless, the write applies as without it
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=check", "reason=blocked: x"])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("check", "blocked: x"))
+        board.cmd_abort(self.root, job_id, requeue=False)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was aborted by Trevor; stop working on it")
+        self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
     def test_pause_parent_pauses_children_and_blocks_ready(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"),
