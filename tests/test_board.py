@@ -2138,5 +2138,197 @@ class DigestVerifyTest(unittest.TestCase):
         self.assertEqual(out["proposals"], ["onewitharts digest 003 p4"])
 
 
+class CloudSyncTest(unittest.TestCase):
+    """board.py cloud-sync: one REST list call moves each cloud job's PR result onto the board, with no LLM."""
+
+    PULLS = "repos/{owner}/{repo}/pulls?state=all&per_page=100&sort=created&direction=desc"
+    URL = "https://github.com/o/r/pull/7"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        for name, value in (("merge_refusal", None), ("artifacts_pushed", False)):
+            p = mock.patch.object(board, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.job = board.cmd_new(self.root, "Cloud thing")
+        board.cmd_set(self.root, self.job, ["stage=cloud", "cloud=https://claude.ai/code/session_abc"])
+        self.calls = []
+
+    def get(self, job_id=None):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == (job_id or self.job))
+
+    def pr(self, **kw):
+        return {"number": 7, "html_url": self.URL, "title": f"[scrum {self.job}] Cloud thing", "state": "open",
+                "merged_at": None, "labels": [], "base": {"ref": "main"}, **kw}
+
+    def gh(self, pulls, comments=None):
+        def fake(repo, endpoint):
+            self.calls.append((repo, endpoint))
+            if endpoint == self.PULLS:
+                return pulls
+            if endpoint == "repos/{owner}/{repo}/issues/7/comments?per_page=100":
+                return comments or []
+            raise AssertionError(f"unexpected gh api {endpoint}")
+        return mock.patch.object(board, "gh_api", side_effect=fake)
+
+    def assert_untouched(self, before):
+        self.assertEqual(self.get(), before)
+
+    def test_no_cloud_job_calls_no_gh(self):
+        board.cmd_set(self.root, self.job, ["stage=needs-human"])
+        with self.gh([self.pr()]):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": None})
+        self.assertEqual(self.calls, [])
+
+    def test_no_pr_leaves_job_cloud(self):
+        before = self.get()
+        other = self.pr(title="[scrum 999-other] x", merged_at="2026-01-01T00:00:00Z")
+        with self.gh([other]):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": None})
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])
+        self.assert_untouched(before)
+
+    def test_open_unlabelled_leaves_job_cloud(self):
+        before = self.get()
+        with self.gh([self.pr(labels=[{"name": "bug"}])]):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": None})
+        self.assertEqual(len(self.calls), 1)
+        self.assert_untouched(before)
+
+    def test_merged_pr_marks_done(self):
+        board.cmd_set(self.root, self.job, ["reason=old note"])
+        older = self.pr(html_url="https://github.com/o/r/pull/3", state="closed")  # newest first: the first match wins
+        with self.gh([self.pr(state="closed", merged_at="2026-10-01T00:00:00Z"), older]):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual(out, {"moved": [{"id": self.job, "state": "MERGED", "pr": self.URL, "reason": None,
+                                          "worktree": None, "artifacts": False}], "error": None})
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["reason"]), ("done", self.URL, None))
+        board.merge_refusal.assert_called()  # the cmd_set done guard ran
+
+    def test_merged_pr_refused_by_guard_stays_cloud(self):
+        board.merge_refusal.return_value = "not done: PR is OPEN, not merged"
+        with self.gh([self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")]), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"], [])
+        self.assertEqual(self.get()["stage"], "cloud")
+
+    def test_closed_pr_marks_needs_human(self):
+        with self.gh([self.pr(state="closed")]):
+            out = board.cmd_cloud_sync(self.root)
+        reason = "cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "CLOSED", "pr": self.URL, "reason": reason,
+                                         "worktree": None, "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["reason"]), ("needs-human", self.URL, reason))
+
+    def needs_human(self, comments, worktree):
+        labelled = self.pr(labels=[{"name": "bug"}, {"name": "scrum:needs-human"}], base={"ref": "dev"})
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=worktree) as wt:
+            out = board.cmd_cloud_sync(self.root)
+        wt.assert_called_once_with(self.root.parent, self.job)
+        return out
+
+    def test_needs_human_pr_reads_reason_and_adds_worktree(self):
+        comments = [{"body": "Hard stop: schema first\n<!-- scrum needs-human -->"}, {"body": "unrelated chat"},
+                    {"body": "Hard stop: money   in   checkout\n<!-- scrum needs-human -->\nmore"}, {"body": "thanks"}]
+        out = self.needs_human(comments, "/r/.claude/worktrees/scrum-x")
+        reason = "Hard stop: money in checkout"
+        self.assertEqual(out["moved"], [{"id": self.job, "state": "NEEDS-HUMAN", "pr": self.URL, "reason": reason,
+                                         "worktree": "/r/.claude/worktrees/scrum-x", "artifacts": False}])
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"]),
+                         ("needs-human", self.URL, "origin/dev", reason, "/r/.claude/worktrees/scrum-x"))
+
+    def test_needs_human_reason_is_capped_at_300(self):
+        out = self.needs_human([{"body": "x" * 400 + "\n<!-- scrum needs-human -->"}], None)
+        self.assertEqual(out["moved"][0]["reason"], "x" * 300)
+
+    def test_needs_human_worktree_add_fails_omits_worktree(self):
+        out = self.needs_human([{"body": "blocked: y\n<!-- scrum needs-human -->"}], None)
+        self.assertEqual(out["moved"][0]["worktree"], None)
+        job = self.get()
+        self.assertEqual((job["stage"], job["reason"], job["base"], job["worktree"]),
+                         ("needs-human", "blocked: y", "origin/dev", None))
+
+    def test_needs_human_without_comment_uses_fallback_reason(self):
+        out = self.needs_human([{"body": "no marker here"}], None)
+        reason = f"cloud job needs a human; no reason comment on {self.URL}. Fix: read the PR."
+        self.assertEqual(out["moved"][0]["reason"], reason)
+        self.assertEqual(self.get()["reason"], reason)
+
+    def test_artifacts_flag_comes_from_the_remote_branch(self):
+        board.artifacts_pushed.return_value = True
+        with self.gh([self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")]):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertIs(out["moved"][0]["artifacts"], True)
+        board.artifacts_pushed.assert_called_once_with(self.root.parent, self.job)
+
+    def test_gh_failure_changes_nothing(self):
+        second = board.cmd_new(self.root, "Cloud two")
+        board.cmd_set(self.root, second, ["stage=cloud"])
+        before = json.loads((self.root / "board.json").read_text())
+        merged = self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")
+        labelled = dict(self.pr(labels=[{"name": "scrum:needs-human"}]), title=f"[scrum {second}] two")
+        for fail in (board.GhError("HTTP 401: Bad credentials"), board.GhError("gh api timed out")):
+            def fake(repo, endpoint, fail=fail):
+                if "comments" in endpoint:  # the list call worked, the comment call for job 2 fails
+                    raise fail
+                return [merged, labelled]
+            with mock.patch.object(board, "gh_api", side_effect=fake), \
+                    mock.patch.object(board, "cloud_worktree", return_value="/wt") as wt:
+                self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": str(fail)})
+            wt.assert_not_called()
+            self.assertEqual(json.loads((self.root / "board.json").read_text()), before)
+
+    def test_gh_api_turns_every_failure_into_gh_error(self):
+        def run(rc=0, out="", err=""):
+            return mock.patch.object(board.subprocess, "run", return_value=subprocess.CompletedProcess([], rc, out, err))
+        with run(1, err="\ngh: Not Found (HTTP 404)\nmore\n"), self.assertRaisesRegex(board.GhError, r"^gh: Not Found \(HTTP 404\)$"):
+            board.gh_api(self.root.parent, "repos/x")
+        with run(0, out="not json"), self.assertRaises(board.GhError):
+            board.gh_api(self.root.parent, "repos/x")
+        with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 30)), \
+                self.assertRaisesRegex(board.GhError, "timed out"):
+            board.gh_api(self.root.parent, "repos/x")
+        with mock.patch.object(board.subprocess, "run", side_effect=FileNotFoundError(2, "No such file", "gh")), \
+                self.assertRaisesRegex(board.GhError, "No such file"):
+            board.gh_api(self.root.parent, "repos/x")
+        with run(0, out='[{"a": 1}]') as r:
+            self.assertEqual(board.gh_api(self.root.parent, "repos/x"), [{"a": 1}])
+        self.assertEqual(r.call_args.args[0], ["gh", "api", "repos/x"])
+        self.assertEqual((r.call_args.kwargs["cwd"], r.call_args.kwargs["timeout"]), (self.root.parent, 30))
+
+    def test_job_moved_meanwhile_is_skipped(self):
+        second = board.cmd_new(self.root, "Cloud two")
+        board.cmd_set(self.root, second, ["stage=cloud"])
+        merged = self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")
+        closed = dict(self.pr(state="closed"), title=f"[scrum {second}] two")
+        def fake(repo, endpoint):  # between the read and the writes: one job is aborted, the other set by hand
+            board.cmd_abort(self.root, self.job, False)
+            board.cmd_set(self.root, second, ["stage=build", "reason=picked up locally"])
+            return [merged, closed]
+        with mock.patch.object(board, "gh_api", side_effect=fake), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": None})
+        self.assertEqual(self.get()["stage"], "aborted")
+        self.assertEqual((self.get(second)["stage"], self.get(second)["reason"]), ("build", "picked up locally"))
+
+    def test_cli_prints_json(self):
+        with self.gh([self.pr(state="closed")]), redirect_stdout(io.StringIO()) as out:
+            code = board.main(["--dir", str(self.root), "cloud-sync"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["moved"][0]["state"], "CLOSED")
+        board.cmd_set(self.root, self.job, ["stage=cloud"])
+        with mock.patch.object(board, "gh_api", side_effect=board.GhError("gh: auth required")), \
+                redirect_stdout(io.StringIO()) as out:
+            code = board.main(["--dir", str(self.root), "cloud-sync"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out.getvalue()), {"moved": [], "error": "gh: auth required"})
+
+
 if __name__ == "__main__":
     unittest.main()

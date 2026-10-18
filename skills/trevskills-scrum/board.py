@@ -45,6 +45,10 @@
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
   board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
                                    needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
+  board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
+                                   MERGED -> done, CLOSED -> needs-human, open + scrum:needs-human -> needs-human with the
+                                   PR comment's reason and a fetched worktree; print {"moved","error"}, exit 1 on a gh
+                                   error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
@@ -1418,9 +1422,10 @@ def merge_refusal(job: dict) -> str | None:
     return f"not done: could not confirm PR {pr} is merged: {why}"
 
 
-def cmd_set(root, job_id, pairs, unpause=False):
+def cmd_set(root, job_id, pairs, unpause=False, expect=None):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
-    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses."""
+    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses. expect: write only while the
+    job is still in that stage (checked under the lock), else raise SystemExit and write nothing."""
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
@@ -1436,6 +1441,8 @@ def cmd_set(root, job_id, pairs, unpause=False):
     with locked_board(root) as board:
         job = live(board, check_id(job_id), unpause)
         was = job["stage"]
+        if expect and was != expect:
+            raise SystemExit(f"job {job_id} is {was}, not {expect}; left alone")
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:
@@ -1478,6 +1485,119 @@ def cmd_sync(root, job_id):
     missing = [f"review-{r}.md" for r, v in reviews.items() if v == "pending"]
     return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid, "missing": missing,
             "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
+
+
+# --- cloud-sync: SKILL.md Cloud lane Sync's PR lookup and board updates, in plain Python (serve.py polls it) ---
+CLOUD_PULLS = "repos/{owner}/{repo}/pulls?state=all&per_page=100&sort=created&direction=desc"  # gh fills in origin
+CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's needs-human comment
+CLOUD_LABEL = "scrum:needs-human"
+CLOUD_CLOSED = "cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."
+
+
+class GhError(Exception):
+    """A failed `gh api` call; the message is the reason."""
+
+
+def gh_api(repo: Path, endpoint: str) -> list | dict:
+    """`gh api <endpoint>` in repo, parsed. REST only: cloud sessions block GitHub GraphQL. Raises GhError."""
+    try:
+        r = subprocess.run(["gh", "api", endpoint], cwd=repo, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise GhError(f"gh api {endpoint} timed out") from None
+    except OSError as e:  # FileNotFoundError names the missing executable
+        raise GhError(str(e)) from None
+    if r.returncode != 0:
+        raise GhError(next((l.strip() for l in r.stderr.splitlines() if l.strip()), f"gh exited {r.returncode}"))
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        raise GhError(f"gh api {endpoint} printed no JSON ({e})") from None
+
+
+def cloud_worktree(repo: Path, job_id: str) -> str | None:
+    """`git fetch origin`, then `git worktree add <repo>/.claude/worktrees/scrum-<id> scrum/<id>`, as rework does.
+    Returns the path, or None when the add failed."""
+    repo = Path(repo).resolve()
+    path = repo / ".claude" / "worktrees" / f"scrum-{check_id(job_id)}"  # an id starts with a digit, never "-"
+    try:
+        subprocess.run(["git", "-C", str(repo), "fetch", "origin"], capture_output=True, timeout=120)
+        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), f"scrum/{job_id}"],
+                           capture_output=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return str(path) if r.returncode == 0 else None
+
+
+def artifacts_pushed(repo: Path, job_id: str) -> bool:
+    """Whether the cloud session pushed scrum-artifacts/<id> (Artifacts home then has work to do)."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "--exit-code", "origin",
+                            f"refs/heads/scrum-artifacts/{check_id(job_id)}"], capture_output=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return r.returncode == 0
+
+
+def _cloud_plan(repo, job_id, prs):
+    """(state, pairs, reason, needs a worktree) for this job's newest [scrum <id>] PR, or None while it still runs.
+    Makes the one comments call a needs-human PR needs; raises GhError."""
+    pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")),
+              None)
+    if not pr:
+        return None
+    url = pr.get("html_url") or ""
+    if pr.get("merged_at"):
+        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False
+    if pr.get("state") == "closed":
+        return "CLOSED", ["stage=needs-human", f"pr={url}", f"reason={CLOUD_CLOSED}"], CLOUD_CLOSED, False
+    if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
+        return None
+    number = pr.get("number")
+    if not isinstance(number, int):
+        raise GhError(f"PR {url} has no number")
+    comments = gh_api(repo, f"repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100")
+    if not isinstance(comments, list):
+        raise GhError(f"gh api comments for PR {url} did not return a list")
+    bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict) and CLOUD_MARK in str(c.get("body") or "")]
+    reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
+    reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
+    pairs = ["stage=needs-human", f"pr={url}"]
+    ref = (pr.get("base") or {}).get("ref")
+    if ref:
+        pairs.append(f"base=origin/{ref}")
+    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True
+
+
+def cmd_cloud_sync(root: Path) -> dict:
+    """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> needs-human, open with the
+    scrum:needs-human label -> needs-human with the comment's reason and a local worktree. Every gh call runs before
+    any write, so a gh failure changes nothing. A job that left stage cloud meanwhile is skipped. Returns
+    {"moved": [{"id","state","pr","reason","worktree","artifacts"}], "error"}."""
+    root = Path(root)
+    repo = root.parent
+    cloud = [j["id"] for j in read_board(root)["jobs"] if j.get("stage") == "cloud"]
+    if not cloud:
+        return {"moved": [], "error": None}
+    try:
+        prs = gh_api(repo, CLOUD_PULLS)
+        if not isinstance(prs, list):
+            raise GhError(f"gh api {CLOUD_PULLS} did not return a list")
+        plans = [(job_id, plan) for job_id in cloud if (plan := _cloud_plan(repo, job_id, prs))]
+    except GhError as e:
+        return {"moved": [], "error": str(e) or type(e).__name__}
+    moved = []
+    for job_id, (state, pairs, reason, wants_worktree) in plans:
+        try:
+            if live(read_board(root), job_id)["stage"] != "cloud":
+                continue  # moved meanwhile: add no worktree for it
+            worktree = cloud_worktree(repo, job_id) if wants_worktree else None
+            cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud")
+        except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
+            print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
+            continue
+        moved.append({"id": job_id, "state": state, "pr": pairs[1][3:], "reason": reason, "worktree": worktree,
+                      "artifacts": artifacts_pushed(repo, job_id)})
+    return {"moved": moved, "error": None}
 
 
 # --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
@@ -1863,6 +1983,7 @@ def main(argv=None):
     sub.add_parser("ready").add_argument("id")
     sub.add_parser("runall-start")
     sub.add_parser("watchdog")
+    sub.add_parser("cloud-sync")
     cl = sub.add_parser("chain-lock")
     cl.add_argument("id")
     cl.add_argument("holder")
@@ -1934,6 +2055,10 @@ def main(argv=None):
         print(json.dumps(cmd_runall_start(a.dir)))
     elif a.cmd == "watchdog":
         print(json.dumps({"flagged": cmd_watchdog(a.dir)}))
+    elif a.cmd == "cloud-sync":
+        out = cmd_cloud_sync(a.dir)
+        print(json.dumps(out))
+        return 1 if out["error"] else 0
     elif a.cmd == "chain-lock":
         print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
     elif a.cmd == "chain-unlock":
