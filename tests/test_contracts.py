@@ -1528,6 +1528,21 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertRegex(cloud, r'--cloud "First run: bash ~/scrum/cloud/setup\.sh .*/trevskills-scrum cloud-job \$ID \$FEAT"')
         self.assertNotRegex(cloud, r"--cloud +(-|\"\$)")  # no flag or "${E[@]}" between --cloud and its prompt
 
+    def test_skill_cloud_credit_cache(self):
+        # The credit read is cached for 24 h so Trevor is not asked every batch; the cache is consulted before Chrome.
+        cloud = self.h2((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Cloud lane")
+        for phrase in ("~/.claude/trevskills-scrum/cloud-credit.json", '"usd"', '"checked_at"', '"dispatched"',
+                       "under 24 h old", "$25 plus $5 per job dispatched since", "mkdir -p ~/.claude/trevskills-scrum",
+                       '"dispatched": 0', "missing or unreadable"):
+            self.assertIn(phrase, cloud, phrase)
+        credit = cloud[cloud.index("**Credit check"):]
+        credit = credit[:credit.index("\n")]
+        self.assertLess(credit.index("cloud-credit.json"), credit.index("https://claude.ai/settings/usage"))
+        started = cloud.index("B set $ID stage=cloud cloud=$URL")
+        self.assertIn("add 1 to `dispatched`", cloud[started:])
+        readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
+        self.assertIn("cloud-credit.json", readme)
+
     def test_skill_cloud_lane_inlines_digest_proposals(self):
         # jobs/ and digests/ stay on the Mac, so Dispatch inlines a pre-written spec and every digest proposal the item
         # points at into feature.md before the session reads it.
