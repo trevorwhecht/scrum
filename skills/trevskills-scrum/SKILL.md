@@ -493,6 +493,7 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
      - `N` is 1;
      - `round-1/check.md` is `CHECK: PASS`;
      - all four `round-1/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count);
+     - no `round-1/review-*.md` contains a line starting `Rendered: blocked` (an environment-blocked render always goes to **Approve**);
      - no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Merge** schema guard regex, the **Fast lane** sensitive-path regex, or `(^|/)\.env`;
      - the spec's `Hard stops:` line is exactly `none`;
      - this session knows the round was not started by the Merge **Conflicts** step.
