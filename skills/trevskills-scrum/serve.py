@@ -2089,8 +2089,8 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": new_id, "reopened_from": job_id}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
-        if action == "resume":  # only a job the watchdog flagged; never one stopped for any other reason
-            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
+        if action == "resume":  # only a job stopped for a reason whose card offers Resume (board.RESUMABLE)
+            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.RESUMABLE) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
             if refusal := resume_refusal(root, job):
