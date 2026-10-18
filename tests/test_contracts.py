@@ -417,7 +417,7 @@ class ContractTest(unittest.TestCase):
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("Dev command:", "UI globs", "not `none`", "round-$N/dev.log", "free port", "3001",
                        "round-$N/dev-url.txt", "unreachable: <why>", "200", "/api/", "DEV_URL=<url>",
-                       "kill", "-sTCP:LISTEN"):
+                       "kill", "-sTCP:LISTEN", 'exec env PORT=<port> nohup'):
             self.assertIn(phrase, review, phrase)
         url = review.index("round-$N/dev-url.txt")
         self.assertIn("kill", review[url:])
@@ -532,6 +532,19 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`stalled`", approve)
         runall = self.section(text, "## Run all", "## Fast lane")
         self.assertIn("B watchdog", runall)
+
+    def test_skill_headless_sessions_block(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("**Headless sessions block.**", text)
+        para = self.section(text, "**Headless sessions block.**", "\n\n")
+        self.assertLess(text.index("The session running this skill **is the orchestrator**"), text.index(para),
+                        "the rule follows the opening paragraph")
+        self.assertLess(text.index(para), text.index("This skill is a sanctioned exception"))
+        for phrase in ("claude -p", "ScheduleWakeup", "never ends its turn", "SendMessage reply"):
+            self.assertIn(phrase, para, phrase)
+        resuming = self.section(text, "## Resuming the builder", "## Digest")
+        self.assertIn("headless", resuming)
+        self.assertIn("skip SendMessage", resuming)
 
     def test_skill_documents_lilguy_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -773,8 +786,16 @@ class ContractTest(unittest.TestCase):
                        "**BigBoy lane** step 2", "**BigBoy lane** step 3",
                        "final report", "parent", "started", "triage"):
             self.assertIn(phrase, run_all, phrase)
-        for phrase in ("B next", "one after another", "nohup", "scrum-spec-writer"):
+        for phrase in ("B next", "one after another", "nohup", "scrum-spec-writer", "there is no Askme step"):
             self.assertNotIn(phrase, run_all, phrase)
+        self.assertIn("run-all askme <1-3>", description)
+        self.assertTrue(any(l.startswith("- **`/trevskills-scrum run-all askme <1-3>`**") for l in text.splitlines()))
+        for phrase in ("run-all askme", "## Q&A", "- Q: ", "  A: ", "$F/jobs/<child>/feature.md", "spec.md",
+                       "children", "level 2", "step 1c", "skip"):
+            self.assertIn(phrase, run_all, phrase)
+        askme = run_all.index("**Askme**")
+        self.assertLess(run_all.index("B runall-start"), askme)
+        self.assertLess(askme, run_all.index("**BigBoy lane** step 2"))
 
     def test_triager_contract(self):
         self.assertEqual(frontmatter(ROOT / "agents" / "scrum-triager.md").get("tools"), "Read, Grep, Glob, Write")
@@ -800,7 +821,7 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_run_all_and_last_triage(self):
         text = DASHBOARD.read_text()
-        for phrase in ('id="blRunAll"', "/run-all`", "Run all?", 'id="blTriage"', "Last triage", "triage/latest.md",
+        for phrase in ('id="blRunAll"', "/run-all`", 'id="blRunAllAskme"', 'id="blTriage"', "Last triage", "triage/latest.md",
                        'maxlength="2000" required placeholder="Add a backlog item"', 'maxlength="2000" aria-label="Item text"'):
             self.assertIn(phrase, text, phrase)
         button = re.search(r'<button[^>]*id="blRunAll"[^>]*>', text).group(0)
@@ -831,16 +852,25 @@ class ContractTest(unittest.TestCase):
         self.assertIn("never contradict", text.lower())
         self.assertRegex(text, r"followups/[^\n]*nothing else")
 
-    def test_dashboard_has_askme_select(self):
+    def test_dashboard_run_now_has_no_askme(self):
         text = DASHBOARD.read_text()
-        m = re.search(r'<select id="blAskme"[^>]*>(.*?)</select>', text)
+        for phrase in ('id="blAskme"', "blAskmeLabel", '"scrum.askme"', "#blAskme"):
+            self.assertNotIn(phrase, text, phrase)
+        self.assertIn("post(`${url}/run`, {index})", text)
+
+    def test_dashboard_run_all_askme_picker(self):
+        text = DASHBOARD.read_text()
+        m = re.search(r'<div id="blRunAllAskme" role="group" aria-label="Askme for this run"[^>]*>(.*?)</div>', text)
         self.assertIsNotNone(m)
-        self.assertIn('aria-label="Askme"', m.group(0))
         self.assertIn("data-agent-hint=", m.group(0))
-        self.assertEqual(re.findall(r'<option value="(\d?)"[^>]*>([^<]*)</option>', m.group(1)),
+        self.assertIn("hidden", re.match(r"<div[^>]*>", m.group(0)).group(0))
+        self.assertEqual(re.findall(r'<button type="button" data-askme="(\d?)">([^<]*)</button>', m.group(1)),
                          [("", "Off"), ("1", "1"), ("2", "2"), ("3", "3")])
-        self.assertIn('"scrum.askme"', text)
-        self.assertIn('{index, ...(askme ? {askme: +askme} : {})}', text)
+        self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-height:44px")
+        self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-width:44px")
+        self.assertIn("post(`${url}/run-all`, askme ? {askme} : {})", text)
+        self.assertIn('b.textContent = "Cancel"', text)
+        self.assertNotIn("Run all?", text)
 
     def test_spec_writer_refines_existing_criteria(self):
         path = ROOT / "agents" / "scrum-spec-writer.md"
@@ -991,6 +1021,27 @@ class ContractTest(unittest.TestCase):
             text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
             for phrase in ("DEV_URL", "`DEV_URL` is absent", "does not answer"):
                 self.assertIn(phrase, text, f"{name}: {phrase}")
+            step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
+            self.assertLess(step1.index("DEV_URL=<url>"), step1.index('HOME="$T" CLAUDE_HOME="$T/.claude"'), name)
+
+    def test_agent_test_servers_use_throwaway_home(self):
+        start = 'HOME="$T" CLAUDE_HOME="$T/.claude"'
+        check = "Before any Save, Undo, Disable or Enable click"
+        lsof = "lsof -ti tcp:<port> -sTCP:LISTEN"
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
+            for phrase in (start, "mktemp -d", 'mkdir -p "$T/.claude"', "never 8765",
+                           "serve.py --port <free port>", "Never reuse a server that is already running"):
+                self.assertIn(phrase, step1, f"{name}: {phrase}")
+            for phrase in (check, lsof, "outside $T or WORKTREE", "Rendered: no — <reason>"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
+            self.assertIn('rm -rf "$T"', step4, name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        bullet = next(l for l in builder.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in (start, "never 8765", check, lsof, 'rm -rf "$T"', "Never use port 3001"):
+            self.assertIn(phrase, bullet, f"builder: {phrase}")
 
     def test_review_ux_ui_digest_rules(self):
         ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()

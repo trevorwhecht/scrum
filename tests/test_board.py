@@ -1143,21 +1143,47 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(str(e.exception), f"job {job_id} is {stage}; only a job in progress can be paused")
             self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_paused_job_refuses_orchestrator_writes_until_reason_cleared(self):
+    def test_paused_job_refuses_writes_until_explicit_unpause(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=review"])
         board.cmd_pause(self.root, job_id)
-        for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
-                     lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
-                     lambda: board.cmd_sync(self.root, job_id)):
-            with self.assertRaises(SystemExit) as e:
-                call()
-            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
-        board.cmd_set(self.root, job_id, ["stage=review", "reason="])
+        paused = "stalled in review: paused by Trevor. Fix: click Play."
+        with mock.patch.object(board, "merge_refusal", return_value=None):  # the pause must refuse, not the PR guard
+            for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
+                         lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                         lambda: board.cmd_sync(self.root, job_id),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=done", "reason="]),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=review", "reason="])):
+                with self.assertRaises(SystemExit) as e:
+                    call()
+                self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("needs-human", paused))
+        board.cmd_set(self.root, job_id, ["stage=review", "reason="], unpause=True)
         self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
         board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
         self.assertEqual(self.jobs()[0]["stage"], "approve")
+
+    def test_set_cli_unpause_flag(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]),
+                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        board.main(["--dir", str(self.root), "set", job_id, "stage=approve"])
+        self.assertEqual(self.jobs()[0]["stage"], "approve")
+        # not paused: --unpause is harmless, the write applies as without it
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=check", "reason=blocked: x"])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("check", "blocked: x"))
+        board.cmd_abort(self.root, job_id, requeue=False)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was aborted by Trevor; stop working on it")
+        self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
     def test_pause_parent_pauses_children_and_blocks_ready(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"),
