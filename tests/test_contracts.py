@@ -210,6 +210,29 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("wait for the background"), 1)
 
+    def test_code_reviewer_acts_on_runner_alone(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        self.assertIn("Then act on `runner` alone; `why` is only note text, so `runner: cloud` with why "
+                      "`codex-review trust is off` still runs Codex on cloud:", text)
+        self.assertNotIn("Then act on `runner`:", text)
+
+    def test_code_reviewer_skip_reason_is_traceable(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        self.assertIn(
+            "- If Codex errors, refuses, runs out of quota, times out, or writes no `codex-review.md`, "
+            "write `codex: skipped — <reason>` under Notes.\n"
+            "- When Codex wrote no `codex-review.md`, the `<reason>` quotes the exit code and the last error "
+            "line from the background command's output, never just `invalid-artifact`. A skip is never a pass, "
+            "and it never fails the round on its own: judge the round on your own review.", text)
+
+    def test_code_reviewer_codex_path_includes_homebrew(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        line = next(l for l in text.splitlines() if "<RUNNER> codex exec review" in l)
+        self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) '
+                               '&& SCRUM_LOCAL_MODEL="$MODEL" <RUNNER> codex exec review --base "$BASE" -m gpt-6.1-sol \\')
+        self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
+        self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
+
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ('"pre-existing"', "must name that code", "opens with the scenario", '"No findings"',
