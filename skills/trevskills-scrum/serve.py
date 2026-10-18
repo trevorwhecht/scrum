@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
 files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done,
-pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees.
+pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees,
+and every 10 minutes, while a project has a job in stage cloud, board.py cloud-sync (starting cloud-home where it must).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
@@ -243,9 +244,35 @@ def auto_resume(project, root, jobs):
         resume_job(project, root, job, jobs)
 
 
+CLOUD_EVERY = 600  # seconds between one project's cloud-sync polls; fixed, not a setting
+CLOUD_LAST = {}  # project -> time of its last cloud-sync poll (0 = never, so the first one runs at once)
+CLOUD_HOME = ("Hard stop: schema", "Hard stop: agent rules")  # moved jobs whose Sync tail needs a session
+
+
+def cloud_tick(project, root, jobs, now=None):
+    """While a job is in stage cloud, run board.py cloud-sync (plain Python, no LLM) at most every CLOUD_EVERY
+    seconds, then start a headless `/trevskills-scrum cloud-home <id>` for each moved job with an artifacts branch
+    or a schema / agent-rules hard stop. Errors are printed, never raised."""
+    now = time.time() if now is None else now
+    if not any(j.get("stage") == "cloud" for j in jobs) or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
+        return
+    CLOUD_LAST[project] = now
+    try:
+        out = board.cmd_cloud_sync(root)
+        if out.get("error"):
+            print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
+        homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
+        for job_id in dict.fromkeys(homes):
+            if not running(project, job_id):
+                spawn(project, root, job_id, "cloud-home", f"/trevskills-scrum cloud-home {job_id}")
+    except (Exception, SystemExit) as e:
+        print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
-    whatever siblings are now ready, then auto-resume the stalled ones. One project's failure never stops the others."""
+    whatever siblings are now ready, then auto-resume the stalled ones, then poll its cloud jobs (cloud_tick). One
+    project's failure never stops the others."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
@@ -256,6 +283,7 @@ def watchdog_tick():
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             auto_resume(project, root, jobs)
+            cloud_tick(project, root, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
 
