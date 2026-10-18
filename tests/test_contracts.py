@@ -333,6 +333,10 @@ class ContractTest(unittest.TestCase):
         self.assertIn("scrum-approver", approve)
         self.assertIn("Opus", approve)
         self.assertIn("Conflicts", approve)
+        model = next(l for l in approve.splitlines() if "**Model:**" in l)
+        for phrase in ("B route-check $ID", "`approver_sonnet` is `true`", "--clean-start", "Conflicts"):
+            self.assertIn(phrase, model, phrase)
+        self.assertNotIn("schema guard regex matches nothing", approve)
 
     def test_skill_skips_security_when_not_sensitive(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -402,6 +406,10 @@ class ContractTest(unittest.TestCase):
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("Clean round: check gate + reviews", "Conflicts", "schema guard", "Hard stops:", "**Approve**"):
             self.assertIn(phrase, review, phrase)
+        route = self.section(text, "5. Route:\n   - `verdict` is `PASS` on a **clean round**", "## Approve")
+        for phrase in ("B route-check $ID", "`clean_round` is `true`", "--clean-start", "Conflicts"):
+            self.assertIn(phrase, route, phrase)
+        self.assertNotIn("A clean round is one where every one of these holds", route)
         self.assertIn("Clean round", self.section(text, "## Merge", "## Routing"))
 
     def test_skill_incremental_rereview(self):
@@ -624,6 +632,27 @@ class ContractTest(unittest.TestCase):
                        "Skipped by orchestrator: fast lane.", "LANE=fast"):
             self.assertIn(phrase, fast, phrase)
         self.assertRegex(fast, r"never[^\n]*fast")
+        promotion = self.section(fast, "1. **Promotion", "2. **Review.**")
+        for phrase in ("B route-check $ID", "`promote`", "non-null", "B route-check $ID --check-fails 2",
+                       "check failed twice", "--clean-start", "Conflicts"):
+            self.assertIn(phrase, promotion, phrase)
+        self.assertNotIn("sums to more than 100", promotion)
+        self.assertNotIn("promote if any of these hold", promotion)
+
+    def test_skill_regexes_match_board_route_check(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+        import board
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Check gate")
+        self.assertEqual(re.search(r"`grep -iE '([^']+)'`", fast).group(1), board.SENSITIVE_RE.pattern)
+        self.assertTrue(board.SENSITIVE_RE.flags & re.I)
+        merge = self.section(text, "## Merge", "## Routing")
+        guard = re.search(r"\*\*Schema guard[^\n]*?grep -E '([^']+)'", merge)
+        self.assertEqual(guard.group(1), board.SCHEMA_RE.pattern)
+        self.assertEqual(board.ENV_RE.pattern, r"(^|/)\.env")
+        self.assertIn(f"`{board.ENV_RE.pattern}`", self.section(text, "## Review (WAIT FOR ALL)", "## Approve"))
+        self.assertEqual(text.count(board.SENSITIVE_RE.pattern), 1)
 
     def test_skill_fast_lane_promotes_on_sensitive_paths(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

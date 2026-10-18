@@ -29,6 +29,9 @@
   board.py digest-verify <id>      exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
+  board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
+                                   Fast lane promotion trigger (or null), whether a PASS round is a clean round, and
+                                   whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -787,6 +790,100 @@ def cmd_digest_verify(root: Path, job_id: str) -> dict:
         return {"ok": True, "files": changed, "proposals": labels}
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)}
+
+
+# --- route-check: the Fast lane promotion, Review clean-round and Approve model decisions (SKILL.md), from files ---
+SCHEMA_RE = re.compile(r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$")  # SKILL.md Merge's schema guard
+ENV_RE = re.compile(r"(^|/)\.env")
+SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
+                          r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
+FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
+
+
+def ui_globs(root) -> list[str]:
+    """The `- UI globs:` entries of root/project.md; [] when the line is missing or `none`."""
+    path = Path(root) / "project.md"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    m = re.search(r"^\s*-\s*UI globs:[ \t]*(.*)$", text, re.M)
+    globs = m.group(1).split() if m else []
+    return [] if globs == ["none"] else globs
+
+
+def matches_ui(path: str, globs: list[str]) -> bool:
+    """SKILL.md First-run setup rules: `*.ext` = ends in .ext; `dir/` = has that directory as a component; else exact."""
+    for g in globs:
+        if g.startswith("*."):
+            if path.endswith(g[1:]):
+                return True
+        elif g.endswith("/"):
+            if ("/" + path).find("/" + g) != -1:
+                return True
+        elif path == g:
+            return True
+    return False
+
+
+def _route_diff(job):
+    """(numstat rows [(added, deleted, path)], changed paths) of base...HEAD in the job's worktree; None when unreadable.
+    added/deleted are None for a binary file."""
+    wt, base = job.get("worktree"), job.get("base")
+    if not wt or not base or base.startswith("-"):
+        return None
+    try:
+        rows = []
+        for line in _git(wt, "diff", "--numstat", f"{base}...HEAD", "--").decode().splitlines():
+            a, d, path = line.split("\t", 2)
+            rows.append((None, None, path) if a == "-" or d == "-" else (int(a), int(d), path))
+        names = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
+    except (ValueError, OSError, subprocess.SubprocessError):  # UnicodeDecodeError is a ValueError
+        return None
+    return rows, [n for n in names if n]
+
+
+def _promote_trigger(rows, names, globs):
+    """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
+    if binary := next((p for a, _, p in rows if a is None), None):
+        return f"binary file {binary}"
+    if (lines := sum(a + d for a, d, _ in rows)) > FAST_MAX_LINES:
+        return f"diff over {FAST_MAX_LINES} lines ({lines})"
+    if len(names) > FAST_MAX_FILES:
+        return f"more than {FAST_MAX_FILES} files ({len(names)})"
+    for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
+                       ("UI file", lambda p: matches_ui(p, globs)), ("sensitive path", SENSITIVE_RE.search)):
+        if path := next((p for p in names if hit(p)), None):
+            return f"{label} {path}"
+    return None
+
+
+def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool = False) -> dict:
+    """{"promote", "clean_round", "approver_sonnet"} for the job's latest round. Whatever can't be read counts against
+    the shortcut: an unreadable diff promotes a passed fast job and gives neither a clean round nor a Sonnet approver."""
+    d = Path(root) / "jobs" / check_id(job_id)
+    if not d.is_dir():
+        raise SystemExit(f"no job folder {d}")
+    job = find(read_board(root), job_id)
+    lane = job.get("lane") or "standard"
+    rounds = sorted((int(p.name[6:]) for p in d.iterdir() if p.is_dir() and re.fullmatch(r"round-\d+", p.name)))
+    last_n = rounds[-1] if rounds else 0
+    last = d / f"round-{last_n}"
+    check = first_word(last / "check.md", ("PASS", "FAIL")) if rounds else None
+    reviews_pass = bool(rounds) and all(first_word(last / f"review-{r}.md", ("PASS", "CHANGES")) == "PASS"
+                                        for r in REVIEWERS)
+    diff = _route_diff(job)
+    names = diff[1] if diff else []
+    promote = None
+    if lane == "fast" and check == "FAIL" and check_fails >= 2:
+        promote = "check failed twice"
+    elif lane == "fast" and check == "PASS":
+        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+    spec = d / "spec.md"
+    hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
+        if spec.is_file() else None
+    green = check == "PASS" and reviews_pass and clean_start and diff is not None \
+        and not any(SCHEMA_RE.search(p) for p in names)
+    clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
+        and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
+    return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
 
 
 # --- artifacts: what a cloud job may push to scrum-artifacts/<id> (SKILL.md Cloud lane); files are left out whole ---
@@ -1853,6 +1950,10 @@ def main(argv=None):
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("digest-verify").add_argument("id")
+    rc = sub.add_parser("route-check")
+    rc.add_argument("id")
+    rc.add_argument("--check-fails", type=int, default=0)
+    rc.add_argument("--clean-start", action="store_true")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -1920,6 +2021,8 @@ def main(argv=None):
         out = cmd_digest_verify(a.dir, a.id)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
+    elif a.cmd == "route-check":
+        print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":

@@ -214,14 +214,9 @@ The final report lists the Run-all parent id, the children it created, which chi
 
 Applies only while the job's `lane` on the board is `fast`. A job with no `lane`, or `lane=standard`, never reads this section. Same builder, same Check gate; then one diff-only code review and straight to Merge, with no approver.
 
-1. **Promotion (deterministic).** Promoting means running `B set $ID lane=standard` and appending `Promoted to standard: <trigger>` to `$F/jobs/$ID/promoted.md`; the job then continues on the standard path from where it is. A standard job is never set back to fast.
-   - **2nd check failure:** a fast job whose `check.md` says `CHECK: FAIL` for the 2nd time in a round is promoted (trigger `check failed twice`). The fix attempts in **Check gate** step 4 then carry on as standard.
-   - **After `CHECK: PASS`, before Review**, promote if any of these hold (trigger names the first one hit). This runs again on every round, including after the Merge **Conflicts** step sends the job back to the Check gate:
-     - `git -C "$WT" diff --numstat "$BASE"...HEAD` sums to more than 100 added+deleted lines, or any line shows `-` (a binary file);
-     - more than 3 files changed (exactly 100 lines or exactly 3 files stays fast);
-     - any changed file (`git -C "$WT" diff --name-only "$BASE"...HEAD`) matches the Merge schema guard regex `(^|/)prisma/(schema\.prisma|migrations/)|\.sql$` or `(^|/)\.env`;
-     - any changed file matches `UI globs` from `project.md` (matching rules are in First-run setup);
-     - any changed file matches the sensitive-path regex, case-insensitively: `grep -iE '(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing|checkout|stripe|webhook|secret|credential'` (trigger `sensitive path <first matching file>`).
+1. **Promotion (deterministic).** Promoting means running `B set $ID lane=standard` and appending `Promoted to standard: <trigger>` to `$F/jobs/$ID/promoted.md`; the job then continues on the standard path from where it is. A standard job is never set back to fast. You never judge the conditions yourself: run `B route-check $ID` (add `--clean-start` only when this session knows the round was not started by the Merge **Conflicts** step) and promote with trigger = its `promote` field whenever that is non-null; a `null` `promote` means the job stays fast.
+   - **2nd check failure:** when `check.md` says `CHECK: FAIL` for the 2nd time in a round, run `B route-check $ID --check-fails 2` (`check.md` is overwritten per attempt, so you pass the count). Its `promote` is then `check failed twice`. The fix attempts in **Check gate** step 4 then carry on as standard.
+   - **After `CHECK: PASS`, before Review**, run `B route-check $ID`. This runs again on every round, including after the Merge **Conflicts** step sends the job back to the Check gate. It checks, in order, against `git -C "$WT" diff --numstat`/`--name-only "$BASE"...HEAD`: a binary file; more than 100 added+deleted lines; more than 3 files (exactly 100 lines or exactly 3 files stays fast); the Merge schema guard regex or `(^|/)\.env`; `UI globs` from `project.md`; then the sensitive-path regex, case-insensitively: `grep -iE '(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing|checkout|stripe|webhook|secret|credential'` (trigger `sensitive path <first matching file>`; **Review** step 2's Security skip uses this same regex). A diff it can't read promotes (`diff unreadable`).
 2. **Review.** Run `B set $ID stage=review`. Write `round-$N/review-security.md`, `round-$N/review-ux.md` and `round-$N/review-ui.md` yourself, each containing exactly:
    ```
    VERDICT: PASS
@@ -478,24 +473,17 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
    - **Never resume the builder mid-round.**
 5. Route:
-   - `verdict` is `PASS` on a **clean round**: go straight to **Merge**. Spawn no approver; there is no decision.md. A clean round is one where every one of these holds:
-     - the job's `lane` is `standard`;
-     - `N` is 1;
-     - `round-1/check.md` is `CHECK: PASS`;
-     - all four `round-1/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count);
-     - no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Merge** schema guard regex, the **Fast lane** sensitive-path regex, or `(^|/)\.env`;
-     - the spec's `Hard stops:` line is exactly `none`;
-     - this session knows the round was not started by the Merge **Conflicts** step.
+   - `verdict` is `PASS` on a **clean round**: go straight to **Merge**. Spawn no approver; there is no decision.md. Run `B route-check $ID`, adding `--clean-start` only when this session knows the round was not started by the Merge **Conflicts** step; it is a clean round only when its `clean_round` is `true` (it checks the lane, `N` = 1, `round-1/check.md` and all four reviews passing with skip files counted, no schema guard, `.env` or sensitive-path file in the diff, and the spec's `Hard stops:` line being exactly `none`).
 
      The PR uses the no-Merge-summary fallback in Merge step 3 (job title, spec acceptance criteria as bullets), and the body line `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` is replaced by `Clean round: check gate + reviews. Spec and reviews: scrum/jobs/$ID/`. The schema guard still runs unchanged. With no decision.md, the `Restart:` line counts as `none`.
-   - `verdict` is `PASS` otherwise, including when you can't tell whether a condition above holds: go to **Approve**.
+   - `verdict` is `PASS` otherwise (`clean_round` is `false`, or `route-check` exits non-zero): go to **Approve**.
    - `verdict` is `CHANGES` and `round < limit`: resume the builder with `Review round N has CHANGES: read every review-*.md in JOB_DIR/round-N/, fix blocking findings, commit, update build.md.` Run `B set $ID stage=build`, then go to **Check gate**.
    - `verdict` is `CHANGES` and `round >= limit`: go to **Approve**.
 
 ## Approve
 
 1. Run `B set $ID stage=approve`. Spawn `scrum-approver` and wait for it. Prompt: the 5 lines plus `Decide this job. Write decision.md.`
-   - **Model:** pass the Agent tool override `model: "sonnet"` to `scrum-approver` only when all of these hold: the latest `round-$N/check.md` is `CHECK: PASS`; all four `round-$N/review-*.md` start `VERDICT: PASS` (orchestrator-written skip files count); the Merge schema guard regex matches nothing in the diff; and you know this round was not started by the Merge **Conflicts** step. In every other case (including when you can't tell, e.g. after a session restart) omit the override so the agent's default, Opus, runs.
+   - **Model:** run `B route-check $ID`, adding `--clean-start` only when this session knows the round was not started by the Merge **Conflicts** step. Pass the Agent tool override `model: "sonnet"` to `scrum-approver` only when its `approver_sonnet` is `true`. In every other case (including when you can't tell, e.g. after a session restart, so no `--clean-start`) omit the override so the agent's default, Opus, runs.
 2. Copy `decision.md` into `round-$N/decision.md`; that's how the approver later sees whether REWORK has already been used. Run `B sync $ID` and read `decision`.
 3. **Manual checks and follow-ups.** First, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet. It appends them to `$F/manual-checks.md`, the checklist Trevor ticks off in the dashboard's Backlog dialog, never to the backlog. Do this whether or not `## Follow-ups` is empty; if `manual-add` exits non-zero, name it in the final report only.
    Then, when `decision.md` has no `## Follow-ups` section, or it is empty, or its only bullet is `- none`, spawn nothing, run neither `backlog-spec` nor `backlog-add`, and go to step 4. Otherwise pre-write a spec per follow-up:
