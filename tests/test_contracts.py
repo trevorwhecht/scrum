@@ -389,6 +389,66 @@ class ContractTest(unittest.TestCase):
         approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
         self.assertNotIn("`Hard stop`", approve)
 
+    def test_agent_rules_workflow_matches_merge_guard(self):
+        wf_path = ROOT / ".github" / "workflows" / "agent-rules-guard.yml"
+        self.assertTrue(wf_path.exists(), wf_path)
+        wf = wf_path.read_text()
+        self.assertIn("pull_request:", wf)
+        types = re.search(r"types:\s*\[([^\]]*)\]", wf)
+        self.assertIsNotNone(types, "no pull_request types list")
+        self.assertEqual({t.strip() for t in types.group(1).split(",")},
+                         {"opened", "synchronize", "reopened", "labeled", "unlabeled"})
+        self.assertRegex(wf, r"(?m)^  agent-rules-guard:\s*$")
+        self.assertRegex(wf, r"(?m)^    name: agent-rules-guard\s*$")
+        self.assertIn("'human-approved'", wf)
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'human-approved')", wf)
+        self.assertIn("pull-requests: read", wf)
+        wf_regex = re.findall(r"grep -E '([^']*)'", wf)
+        self.assertEqual(len(wf_regex), 1, wf_regex)
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(skill, "## Merge", "## Routing")
+        start = merge.index("**Agent rules guard")
+        guard = merge[start:merge.index("\n", start)]
+        skill_regex = re.findall(r"grep -E '([^']*)'", guard)
+        self.assertEqual(len(skill_regex), 1, skill_regex)
+        self.assertEqual(wf_regex[0], skill_regex[0])
+        self.assertEqual(wf_regex[0], r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$")
+        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md"):
+            self.assertIsNotNone(re.search(wf_regex[0], path), path)
+        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py"):
+            self.assertIsNone(re.search(wf_regex[0], path), path)
+        # Failure only when a file matched and the label is missing; no match exits 0.
+        self.assertRegex(wf, r'if \[ -n "\$matches" \] && \[ "\$HAS_LABEL" != "true" \]; then')
+        fail = wf[wf.index('if [ -n "$matches" ]'):]
+        self.assertIn("exit 1", fail[:fail.index("fi")])
+
+    def test_skill_approve_adds_human_approved_label(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Routing")
+        label = 'gh pr edit "scrum/$ID" --add-label human-approved'
+        self.assertIn(label, merge)
+        self.assertIn("human-approval.md", merge)
+        self.assertIn("gh label create human-approved --description 'Trevor approved this PR' 2>/dev/null || true", merge)
+        self.assertIn("could not add the human-approved label", merge)
+        self.assertLess(merge.index("gh pr create"), merge.index(label))
+        self.assertLess(merge.index(label), merge.index("4. **Checks.**"))
+        line = next(l for l in merge.splitlines() if label in l)
+        self.assertIn("human-approval.md", line)
+
+    def test_fast_lane_promotes_agent_rule_edits(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Debug lane")
+        bullet = next(l for l in fast.splitlines() if "agent rules <first matching file>" in l)
+        self.assertIn(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$", bullet)
+        self.assertLess(fast.index("**After `CHECK: PASS`, before Review**"), fast.index(bullet))
+        self.assertLess(fast.index(bullet), fast.index("2. **Review.**"))
+
+    def test_readme_documents_agent_rules_guard(self):
+        readme = (ROOT / "README.md").read_text()
+        for phrase in ("agent-rules-guard", "required", "human-approved", "agents/scrum-*.md",
+                       "/trevskills-scrum approve", "`main`"):
+            self.assertIn(phrase, readme, phrase)
+
     def test_lilguy_stops_for_agent_rule_edits(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         lilguy = self.h2(text, "## Lilguy lane")

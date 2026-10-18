@@ -1,0 +1,36 @@
+name: agent-rules-guard
+
+# Fails any PR that changes the pipeline's own rules (agents/scrum-*.md or any
+# SKILL.md) unless it carries the human-approved label. The regex below must stay
+# identical to the Merge "Agent rules guard" line in skills/trevskills-scrum/SKILL.md.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  agent-rules-guard:
+    name: agent-rules-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require human-approved for agent rules edits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'human-approved') }}
+        run: |
+          files=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename')
+          matches=$(printf '%s\n' "$files" | grep -E '(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$' || true)
+          if [ -n "$matches" ] && [ "$HAS_LABEL" != "true" ]; then
+            echo "This PR changes the scrum's agent rules and lacks the human-approved label:"
+            printf '%s\n' "$matches"
+            echo "Trevor adds the label with /trevskills-scrum approve (or by hand on GitHub)."
+            exit 1
+          fi
+          if [ -n "$matches" ]; then
+            echo "Agent rules changed; human-approved label present."
+          else
+            echo "No agent rules files changed."
+          fi

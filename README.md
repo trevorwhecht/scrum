@@ -70,6 +70,8 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
 
+**Agent rules guard on GitHub.** `.github/workflows/agent-rules-guard.yml` runs on every PR. Trevor makes `agent-rules-guard` a required status check on `main` (GitHub Settings → Branches / Rulesets), so no session can skip it. A PR that changes `agents/scrum-*.md` or any `SKILL.md` fails that check until it carries the `human-approved` label, which means Trevor reviewed and approved the PR; `/trevskills-scrum approve` adds it. Removing the label makes the check fail again.
+
 ## Cloud lane
 
 `/trevskills-scrum cloud [N]` runs up to N (default 4) backlog items in Claude Code cloud sessions (claude.ai/code), paid by cloud-session credit instead of the weekly plan. Each session first reruns `cloud/setup.sh` to refresh the skill, since the environment caches an old copy, then runs the normal pipeline and squash-merges its own `[scrum <id>]` PR, or labels it `scrum:needs-human` with a comment saying why. `/trevskills-scrum cloud-sync` (also run by `cloud` and bare `/trevskills-scrum`) moves those results onto the board. Each cloud job also pushes its folder to a `scrum-artifacts/<id>` branch that `cloud-sync` fetches into the local board (follow-ups go to the backlog) and then deletes. Before each batch the orchestrator reads the credit at https://claude.ai/settings/usage through Claude in Chrome and refuses under $25. The rules are in SKILL.md **Cloud lane**.
