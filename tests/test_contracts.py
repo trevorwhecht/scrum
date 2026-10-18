@@ -10,6 +10,7 @@ AGENTS = {
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
+BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
@@ -309,9 +310,9 @@ class ContractTest(unittest.TestCase):
     def test_skill_skips_ui_reviewers_without_ui_files(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review", "## Approve")
-        for phrase in ("Skipped by orchestrator: no UI files in diff.", "UI globs", "VERDICT: PASS",
-                       "never from the spec's `UI surface:` line"):
+        for phrase in ("B review-plan $ID", "UI globs", "never from the spec's `UI surface:` line"):
             self.assertIn(phrase, review, phrase)
+        self.assertIn("Skipped by orchestrator: no UI files in diff.", BOARD_PY.read_text())  # review-plan writes it
 
     def test_skill_review_respawns_missing_reviewers(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -337,9 +338,11 @@ class ContractTest(unittest.TestCase):
     def test_skill_skips_security_when_not_sensitive(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        self.assertIn("B review-plan $ID", review)
+        self.assertIn("scrum-review-security", review)
         for phrase in ("Skipped by orchestrator: no sensitive files in diff.", "pnpm-lock", "Cargo",
-                       "scrum-review-security", "schema guard", r"(^|/)\.env"):
-            self.assertIn(phrase, review, phrase)
+                       "schema guard", r"(^|/)\.env"):
+            self.assertIn(phrase, BOARD_PY.read_text(), phrase)  # review-plan owns the security skip
         for line in review.splitlines():
             if "scrum-review-security" in line:
                 self.assertNotIn('model: "sonnet"', line, line)
@@ -348,10 +351,11 @@ class ContractTest(unittest.TestCase):
     def test_skill_security_skip_treats_api_paths_as_sensitive(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
-        skip = next(l for l in review.splitlines() if "**Security skip.**" in l)
+        self.assertIn("B review-plan $ID", review)
         api = r"(^|/)api/|(^|/)route\.[cm]?[jt]sx?$"
-        self.assertIn(f"`{api}`", skip)
-        self.assertIn("case-insensitive", skip)
+        source = BOARD_PY.read_text()
+        self.assertIn(f'r"{api}"', source)  # review-plan's SECURITY_RES, compiled with re.I
+        self.assertIn("re.compile(p, re.I) for p in", source)
         for path in ("src/app/api/orders/route.ts", "app/routes/route.js", "api/users.py", "src/pages/api/hello.ts"):
             self.assertIsNotNone(re.search(api, path, re.I), path)
         for path in ("src/lib/rapid/x.ts", "docs/apis.md", "skills/trevskills-scrum/SKILL.md", "src/app/orders/page.tsx"):
@@ -407,8 +411,9 @@ class ContractTest(unittest.TestCase):
     def test_skill_incremental_rereview(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
-        for phrase in ("head.txt", "Carried forward from round", "SINCE=", "VERDICT: CHANGES", "REWORK", "Conflicts"):
+        for phrase in ("head.txt", "B review-plan $ID", "--incremental", "SINCE=", "Re-review:", "REWORK", "Conflicts"):
             self.assertIn(phrase, review, phrase)
+        self.assertIn("Carried forward from round", BOARD_PY.read_text())  # review-plan writes it
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertIn("Carried forward", line)
 

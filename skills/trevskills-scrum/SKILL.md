@@ -447,32 +447,13 @@ If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, 
 If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 
 1. Run `B set $ID stage=review`. Write `git -C "$WT" rev-parse HEAD` to `round-$N/head.txt` (the HEAD this round reviews).
-2. **Which reviewers run.** First decide incremental or full review, then apply the skips. Every file written here is written before any spawn.
-   - **Incremental re-review** (only on a round `N >= 2` that this session started through step 5's `CHANGES` route). `SINCE` is the content of `round-(N-1)/head.txt`. For each of `security`, `ux`, `ui`, `code`: when `round-(N-1)/review-<role>.md` starts `VERDICT: PASS`, spawn nothing for it and write `round-$N/review-<role>.md` yourself, containing exactly:
-     ```
-     VERDICT: PASS
-     Carried forward from round <N-1>: no blocking findings.
-     ```
-     When it starts `VERDICT: CHANGES`, that reviewer is spawned in step 3 with two extra prompt lines: `SINCE=<SINCE>` and `Re-review: verify each blocking finding in JOB_DIR/round-<N-1>/review-<role>.md against git diff SINCE..HEAD.` The skips and the Jev gate below are not applied on an incremental round.
-   - **Full review fallback.** Skip the incremental rule, and run every reviewer on the full diff with the normal skips below, when any of these holds: `round-(N-1)/head.txt` is missing or unreadable; any path in `git -C "$WT" diff --name-only <SINCE> HEAD` is not in `git -C "$WT" diff --name-only "$BASE"...<SINCE>` (the fix touched a file the earlier reviews never saw); or the round was started by the Approve `REWORK` route, by the Merge **Conflicts** step, or by a resumed session that can't tell how it started.
-   - **UI/UX skip (decided from the diff, never from the spec's `UI surface:` line).** If `project.md` has `UI globs` set to something other than `none`, and no file from `git -C "$WT" diff --name-only "$BASE"...HEAD` matches any of them (matching rules are in First-run setup), write `round-$N/review-ui.md` and `round-$N/review-ux.md` yourself, each containing exactly:
-     ```
-     VERDICT: PASS
-     Skipped by orchestrator: no UI files in diff.
-     ```
-     Otherwise (`UI globs` missing or `none`, or any file matches), ui and ux run.
-   - **Security skip.** When the diff can be read and no file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches the **Fast lane** sensitive-path regex, the **Merge** schema guard regex, `(^|/)\.env`, the manifest regex `(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|go\.mod|Cargo\.toml)$`, or the API regex `(^|/)api/|(^|/)route\.[cm]?[jt]sx?$` (matched case-insensitive, like the others; a diff that touches API handlers always gets a security review), write `round-$N/review-security.md` yourself, containing exactly:
-     ```
-     VERDICT: PASS
-     Skipped by orchestrator: no sensitive files in diff.
-     ```
-     Otherwise (a match, or the diff can't be read) security runs. Re-check every round.
-   - **Jev gate (additive only).** On a full-review round, only when at least one of the two skips above was taken and `~/.claude/scripts/jev-rank.py` exists, ask it about each skipped kind. The questions are `This diff needs a security review` and `This diff needs a UI review`. Run each with Bash timeout 90000:
+2. **Which reviewers run.** Run `B review-plan $ID`, adding `--incremental` only on a round `N >= 2` that this session started through step 5's `CHANGES` route (never after the Approve `REWORK` route, the Merge **Conflicts** step, or in a resumed session that can't tell how the round started). It decides incremental re-review or full review, writes the carried-forward and skip files into `round-$N/` before any spawn, and prints `{"spawn": [...], "since": ...}`. `since` is the SINCE sha on an incremental round and `null` on a full one; on a full round a reviewer missing from `spawn` was skipped (security: no sensitive files in diff; ui and ux: no `UI globs` file in diff, decided from the diff, never from the spec's `UI surface:` line).
+   - **Jev gate (additive only).** Only when `since` is `null`, at least one of `security`, `ui`, `ux` is missing from `spawn`, and `~/.claude/scripts/jev-rank.py` exists, ask it about each skipped kind (security missing: the security question; ui and ux missing: the UI question). The questions are `This diff needs a security review` and `This diff needs a UI review`. Run each with Bash timeout 90000:
      ```bash
      { git -C "$WT" diff --stat "$BASE"...HEAD | tail -1; git -C "$WT" diff --name-only "$BASE"...HEAD; } | tr '\n' ' ' | python3 ~/.claude/scripts/jev-rank.py "<question>" --top 1
      ```
-     The score is the first tab-separated field of its output. A score `>= 0.7` deletes that skip file and the reviewer runs: security for the security question, both ui and ux for the UI question. A non-zero exit, a timeout, empty output or an unparseable score leaves the skips as they are. Jev never removes a reviewer, and is never consulted in the fast lane or for carried-forward reviewers.
-3. Spawn the reviewers **in ONE message**, in the background: `scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code`, minus every one whose `round-$N/review-*.md` step 2 wrote. Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.`, and the two re-review lines from step 2 on an incremental round. No `model:` override is passed to any reviewer.
+     The score is the first tab-separated field of its output. A score `>= 0.7` deletes that skip file and adds the reviewer back to `spawn`: security for the security question, both ui and ux for the UI question. A non-zero exit, a timeout, empty output or an unparseable score leaves the skips as they are. Jev never removes a reviewer, and is never consulted in the fast lane or for carried-forward reviewers.
+3. Spawn **in ONE message**, in the background, exactly the reviewers in step 2's `spawn`, each as `scrum-review-<role>` (`scrum-review-security`, `scrum-review-ux`, `scrum-review-ui`, `scrum-review-code`). Each gets the 5 lines with `ROUND=$N` plus `Review this round. Write only your own review file.` When `since` is non-null, each also gets `SINCE=<since>` and `Re-review: verify each blocking finding in JOB_DIR/round-<N-1>/review-<role>.md against git diff SINCE..HEAD.` No `model:` override is passed to any reviewer.
 4. **WAIT FOR ALL.** Do nothing else until every spawned reviewer has completed. Then run `B sync $ID`. If the board says `builder=local`, log `review-pass` or `review-changes` (see **Routing** step 5).
    - `complete` must be `true`. If it isn't, `missing` lists the absent files (e.g. `review-ui.md`): re-spawn only the reviewers named in `missing`, once. If a file is still missing after the re-spawn, write that file yourself as `VERDICT: CHANGES` plus `Reviewer produced no output.`, then run `B sync $ID` again.
    - If `invalid` is non-empty, delete those files and re-spawn those reviewers, once. If they come back invalid again, treat them as CHANGES.
@@ -616,7 +597,7 @@ If the board's `builder` is `local`, re-run the local builder subprocess instead
 1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.`
 2. Run `B set $ID builder=<new id>`.
 
-Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for these sanctioned review files: the UI/UX skip files and the security skip file in **Review** step 2, the `Carried forward from round` files in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
+Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for these sanctioned review files: the UI/UX skip, security skip and `Carried forward from round` files that `B review-plan` writes in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
 
 ## Digest
 
