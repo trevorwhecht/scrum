@@ -1176,6 +1176,13 @@ class ContractTest(unittest.TestCase):
                        "without its `main not updated` check", "B abort <c> --reason 'skipped: depends on aborted <ids>'",
                        "B set <id> stage=spec reason=", "**New job** from step 2"):
             self.assertIn(phrase, resume, phrase)
+        # an older `bigboy blocked` fallback names no aborted child: Resume must not discard its waiting children
+        self.assertIn("only the `waiting` children that depend (directly or through another `waiting` child) on an "
+                      "aborted sibling", resume)
+        self.assertIn("If none do, set the same reason again and stop.", resume)
+        step6 = next(l for l in text.splitlines() if l.startswith("6. **After a child stops.**"))
+        self.assertIn("If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` "
+                      "instead. Otherwise **start** each id in `ready`", step6)
         rework = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum rework <id> <feedback>`**"))
         for phrase in ("`children`", "`bigboy off track`", "B chain-lock", "scrum-tracker",
                        "Trevor's decision is in PARENT_DIR/rework.md: read it first and follow it.",
