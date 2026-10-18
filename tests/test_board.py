@@ -633,6 +633,102 @@ class BoardTest(unittest.TestCase):
         self.assertFalse(spec.exists())
         self.assertFalse((self.root / "jobs" / "002-add-csv-export" / "spec.md").exists())
 
+    # --- cloud-claim ---
+    def cloud_backlog(self, specs):
+        """backlog.md with one open item per (text, likely files) pair; files None = no backlog-specs file."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"- [ ] {t}\n" for t, _ in specs))
+        (self.root / "backlog-specs").mkdir(exist_ok=True)
+        for text, files in specs:
+            if files is not None:
+                self.spec_file(text).write_text(
+                    f"# {text}\n\n## Likely files\n" + "".join(f"- `{f}`: edit\n" for f in files))
+
+    def spec_file(self, text):
+        return self.root / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+
+    def in_flight(self, job_id, stage, files):
+        """A board job in `stage`; files None = no jobs/<id>/spec.md."""
+        board_path = self.root / "board.json"
+        data = json.loads(board_path.read_text()) if board_path.exists() else {"jobs": []}
+        data["jobs"].append({"id": job_id, "title": job_id, "stage": stage})
+        board_path.write_text(json.dumps(data))
+        (self.root / "jobs" / job_id).mkdir(parents=True)
+        if files is not None:
+            self.write(f"{job_id}/spec.md", "# x\n\n## Likely files\n" + "".join(f"- `{f}`\n" for f in files))
+
+    def test_cloud_claim_claims_up_to_n_disjoint_items(self):
+        self.cloud_backlog([("Alpha", ["a.py"]), ("Beta", ["b.py"]), ("Gamma", ["c.py"])])
+        out = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual(out, {"claimed": [{"id": "001-alpha", "feature": "Alpha"}, {"id": "002-beta", "feature": "Beta"}]})
+        self.assertEqual((self.root / "jobs" / "001-alpha" / "spec.md").read_text(),
+                         "# Alpha\n\n## Likely files\n- `a.py`: edit\n")
+        self.assertTrue((self.root / "jobs" / "002-beta" / "spec.md").is_file())
+        self.assertFalse(self.spec_file("Alpha").exists())
+        self.assertTrue(self.spec_file("Gamma").exists())
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Alpha → 001-alpha\n- [x] Beta → 002-beta\n- [ ] Gamma\n")
+        self.assertEqual([(j["id"], j["stage"]) for j in self.jobs()], [("001-alpha", "spec"), ("002-beta", "spec")])
+
+    def test_cloud_claim_cuts_title_to_60_and_skips_waiting_items(self):
+        long = "L" * 70
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] Blocked {{needs #aaaa}}\n- [ ] Pre {{#aaaa}}\n- [ ] {long}\n")
+        (self.root / "backlog-specs").mkdir()
+        for t, f in (("Blocked", "z.py"), ("Pre", "p.py"), (long, "l.py")):
+            self.spec_file(t).write_text(f"## Likely files\n- `{f}`\n")
+        out = board.cmd_cloud_claim(self.root, 5)
+        self.assertEqual([c["feature"] for c in out["claimed"]], ["Pre", long])
+        self.assertEqual(self.jobs()[1]["title"], "L" * 60)
+        self.assertTrue((self.root / "backlog.md").read_text().startswith("# Backlog\n- [ ] Blocked {needs #aaaa}\n"))
+
+    def test_cloud_claim_skips_item_overlapping_earlier_pick(self):
+        self.cloud_backlog([("A", ["a.py"]), ("B", ["a.py", "b.py"]), ("C", ["c.py"])])
+        out = board.cmd_cloud_claim(self.root, 3)
+        self.assertEqual(out, {"claimed": [{"id": "001-a", "feature": "A"}, {"id": "002-c", "feature": "C"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [x] A → 001-a\n- [ ] B\n- [x] C → 002-c\n")
+        self.assertTrue(self.spec_file("B").exists())
+
+    def test_cloud_claim_skips_items_without_spec(self):
+        self.cloud_backlog([("Nospec", None), ("Empty", []), ("Good", ["g.py"])])
+        out = board.cmd_cloud_claim(self.root, 3)
+        self.assertEqual(out, {"claimed": [{"id": "001-good", "feature": "Good"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Nospec\n- [ ] Empty\n- [x] Good → 001-good\n")
+        self.assertTrue(self.spec_file("Empty").exists())
+
+    def test_cloud_claim_respects_in_flight_jobs(self):
+        self.cloud_backlog([("X item", ["x.py"]), ("Y item", ["y.py"])])
+        self.in_flight("010-cloudy", "cloud", ["x.py"])
+        self.in_flight("011-reviewing", "review", ["y.py"])
+        out = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual(out, {"claimed": [{"id": "012-y-item", "feature": "Y item"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] X item\n- [x] Y item → 012-y-item\n")
+
+    def test_cloud_claim_in_flight_job_without_spec_blocks_all(self):
+        self.cloud_backlog([("X item", ["x.py"]), ("Y item", ["y.py"])])
+        self.in_flight("010-building", "build", None)
+        before = (self.root / "backlog.md").read_text()
+        self.assertEqual(board.cmd_cloud_claim(self.root, 2), {"claimed": []})
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
+
+    def test_cloud_claim_rejects_n_below_one(self):
+        self.cloud_backlog([("A", ["a.py"])])
+        before = (self.root / "backlog.md").read_bytes()
+        for n in ("0", "-1"):
+            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", n],
+                                 capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("N must be at least 1", out.stderr)
+            self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+        self.assertFalse((self.root / "jobs").exists())
+
+    def test_cloud_claim_cli_prints_json(self):
+        self.cloud_backlog([("A", ["a.py"])])
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", "4"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"claimed": [{"id": "001-a", "feature": "A"}]})
+
     def test_runall_start_maps_needs_to_depends_on(self):
         self.root.mkdir(parents=True)
         (self.root / "backlog.md").write_text(

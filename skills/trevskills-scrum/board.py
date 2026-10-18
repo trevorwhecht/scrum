@@ -7,6 +7,9 @@
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
                                    new job, print {"id","feature"}
+  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits, has no
+                                   pre-written spec with Likely files, or shares a Likely file with an earlier pick or a
+                                   cloud/build job; print {"claimed": [{"id","feature"}, ...]}
   board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
@@ -372,6 +375,42 @@ def cmd_next(root, index=None):
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
         return {"id": job_id, "feature": item["text"]}
+
+
+def cmd_cloud_claim(root, n) -> dict:
+    """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
+    An item is skipped (left open) when it waits on a prerequisite, has no pre-written spec with readable Likely files,
+    or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build. A cloud or
+    build job with no readable Likely files may touch anything, so it blocks every item."""
+    if n < 1:
+        raise SystemExit("N must be at least 1")
+    with locked_board(root) as board:
+        lines, items = read_backlog(root)
+        taken, blocked_all = set(), False
+        for job in board["jobs"]:
+            if job.get("stage") in ("cloud", "build"):
+                spec = Path(root) / "jobs" / job.get("id", "") / "spec.md"
+                files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+                blocked_all |= not files
+                taken |= files
+        claimed = []
+        for item in items:
+            if blocked_all or len(claimed) >= n:
+                break
+            if item["done"] or waiting_on(item, items, board):
+                continue
+            spec = spec_path(root, item["text"])
+            files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+            if not files or files & taken:
+                continue
+            job_id = add_job(root, board, item["text"][:60])
+            take_spec(root, item["text"], job_id)
+            claim_item(lines, item, job_id)
+            taken |= files
+            claimed.append({"id": job_id, "feature": item["text"]})
+        if claimed:
+            write_backlog(root, lines)
+        return {"claimed": claimed}
 
 
 def cmd_abort(root, job_id, requeue, reason=None):
@@ -1826,6 +1865,7 @@ def main(argv=None):
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
+    sub.add_parser("cloud-claim").add_argument("n", type=int)
     sub.add_parser("backlog-add").add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("roadmap-show")
@@ -1894,6 +1934,8 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "cloud-claim":
+        print(json.dumps(cmd_cloud_claim(a.dir, a.n)))
     elif a.cmd == "roadmap-show":
         print(json.dumps(roadmap_show(a.dir)))
     elif a.cmd == "roadmap-link":
