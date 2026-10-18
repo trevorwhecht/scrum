@@ -220,6 +220,7 @@ Applies only while the job's `lane` on the board is `fast`. A job with no `lane`
      - `git -C "$WT" diff --numstat "$BASE"...HEAD` sums to more than 100 added+deleted lines, or any line shows `-` (a binary file);
      - more than 3 files changed (exactly 100 lines or exactly 3 files stays fast);
      - any changed file (`git -C "$WT" diff --name-only "$BASE"...HEAD`) matches the Merge schema guard regex `(^|/)prisma/(schema\.prisma|migrations/)|\.sql$` or `(^|/)\.env`;
+     - any changed file matches the Merge agent rules guard regex `(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$` (`grep -E`) (trigger `agent rules <first matching file>`);
      - any changed file matches `UI globs` from `project.md` (matching rules are in First-run setup);
      - any changed file matches the sensitive-path regex, case-insensitively: `grep -iE '(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing|checkout|stripe|webhook|secret|credential'` (trigger `sensitive path <first matching file>`).
 2. **Review.** Run `B set $ID stage=review`. Write `round-$N/review-security.md`, `round-$N/review-ux.md` and `round-$N/review-ui.md` yourself, each containing exactly:
@@ -534,6 +535,8 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
    - No PR, or reusing one: the title is the decision.md `Merge summary` title. If there is no Merge summary (a human-approved ESCALATE), use the job title and the spec's acceptance criteria as bullets. Either way write the body to `BODY=$F/jobs/$ID/pr-body.txt`, which is also used in step 6. Write the body to that file and pass it with `--body-file`. The body is the Merge summary bullets, then `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` (for a fast-lane job, the line in **Fast lane** step 3 instead; for a Clean round, the `Clean round:` line in **Review** step 5 instead), then a line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Create it with `gh pr create --base "$DEFAULT" --head "scrum/$ID" --title "<Merge summary title>" --body-file "$BODY"`.
 
    Then `B set $ID pr=<url>`.
+
+   **Human-approved label.** When `$F/jobs/$ID/human-approval.md` exists (the `approve` path), run `gh label create human-approved --description 'Trevor approved this PR' 2>/dev/null || true`, then `gh pr edit "scrum/$ID" --add-label human-approved`. The `labeled` event re-runs the `agent-rules-guard` GitHub check, so step 4's wait sees it pass. If `gh pr edit` fails, run `B set $ID stage=needs-human reason='could not add the human-approved label: <first line of stderr>. Fix: add it on GitHub, then click Approve & merge.'` and stop.
 4. **Checks.** Run this in the **background**, because foreground `sleep` is blocked:
    ```bash
    for i in 1 2 3 4; do out=$(gh pr checks "scrum/$ID" --watch --fail-fast --interval 15 2>&1); code=$?
