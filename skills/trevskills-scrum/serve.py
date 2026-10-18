@@ -5,7 +5,7 @@ pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on ev
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
-  python3 serve.py --digest-auto <NNN> --dir <scrum>      → auto-approve a digest's obvious proposals, print JSON, exit
+  python3 serve.py --digest-auto <NNN> --dir <scrum>      → apply (or queue) a digest's obvious proposals, print JSON, exit
   python3 serve.py --digest-skill-check <NNN> <PID> --dir <scrum> → re-check a queued skill proposal, print JSON, exit 1 if stale
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
@@ -1799,22 +1799,142 @@ def digest_target_auto_ok(target):
     return None
 
 
+DIGEST_CONTRACT_TESTS = [sys.executable, "-m", "unittest", "tests.test_contracts"]  # run from the target repo's root
+
+
+def git_run(repo, *args):
+    """`git -C repo <args>`; a missing git or a hung call reads as exit code 1 with the error on stderr."""
+    try:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(args, 1, "", str(e))
+
+
+def digest_apply_ready(repo: Path) -> str | None:
+    """None when digest_auto may edit and commit in repo: its own git work tree, on a branch, clean outside scrum/, with
+    tests/test_contracts.py. Else the reason its obvious proposals are queued instead."""
+    top = git_run(repo, "rev-parse", "--show-toplevel")
+    if top.returncode or os.path.realpath(top.stdout.strip()) != os.path.realpath(repo):
+        return "not a git checkout"
+    if git_run(repo, "symbolic-ref", "-q", "HEAD").returncode:
+        return "detached HEAD"
+    status = git_run(repo, "status", "--porcelain", "--", ".", ":(exclude)scrum")
+    if status.returncode or status.stdout.strip():
+        return "uncommitted changes"
+    if not (Path(repo) / "tests" / "test_contracts.py").is_file():
+        return "no contract tests"
+    return None
+
+
+def digest_contract_ok(repo):
+    try:
+        return subprocess.run(DIGEST_CONTRACT_TESTS, cwd=repo, capture_output=True, timeout=600,
+                              stdin=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def digest_mark_applied(root, digest_id, pids):
+    """Set these still-pending proposals to applied; the last decision in the digest trims it, as in digest_decide."""
+    path = root / "digests" / digest_id / "proposals.json"
+    with DIGEST_LOCK:
+        data, raw = read_proposals(path)
+        for entry in raw:
+            if (v := valid_proposal(entry)) and v["id"] in pids and v["status"] == "pending":
+                entry["status"] = "applied"
+        tmp = path.with_name("proposals.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+        if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
+            board.cmd_digest_trim(root, digest_id)
+
+
+def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[dict], list[dict], str | None]:
+    """Apply one repo's obvious edit proposals in place, running the contract tests after each, then commit the ones that
+    passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
+    to-queue entry carries the reason it wasn't applied, and nothing of it is left written."""
+    repo = repo_of(props[0]["target"])[0]
+    entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "obvious_reason")} | ({"reason": why} if why else {})
+    if why := digest_apply_ready(repo):
+        return [], [entry(p, why) for p in props], None
+    done, queued = [], []  # done: (proposal, path relative to repo, original bytes)
+    for p in props:
+        target = Path(p["target"])
+        try:
+            orig = target.read_bytes()
+            text = orig.decode()
+        except (OSError, UnicodeDecodeError):
+            orig, text = b"", ""
+        if (n := text.count(p["old"])) != 1:
+            queued.append(entry(p, f"old text found {n} times"))
+            continue
+        try:
+            target.write_bytes(text.replace(p["old"], p["new"], 1).encode())  # in place: keeps a symlink
+        except OSError as e:
+            queued.append(entry(p, f"write failed: {e}"))
+            continue
+        if not digest_contract_ok(repo):
+            target.write_bytes(orig)
+            queued.append(entry(p, "contract tests failed"))
+            continue
+        done.append((p, repo_of(p["target"])[1], orig))
+    order = {p["id"]: i for i, p in enumerate(props)}
+    if not done:
+        return [], queued, None
+    scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel, _ in done))
+    pids = ", ".join(p["id"] for p, _, _ in done)
+    lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel, _ in done)
+
+    def undo(why):
+        for p, _, orig in reversed(done):  # reversed: two proposals on one file restore to its first bytes
+            Path(p["target"]).write_bytes(orig)
+        git_run(repo, "restore", "--staged", "--", *files)
+        return [], sorted(queued + [entry(p, why) for p, _, _ in done], key=lambda q: order[q["id"]])
+
+    try:
+        job_id = board.cmd_new(scrum, f"Apply digest {digest_id} {pids}")
+        (scrum / "jobs" / job_id / "feature.md").write_text(f"Apply digest {digest_id} obvious proposals:\n\n{lines}")
+        board.cmd_set(scrum, job_id, ["lane=lilguy"])
+    except (OSError, SystemExit) as e:
+        return (*undo(f"board job failed: {e}"), None)
+    r = git_run(repo, "add", "--", *files)
+    if not r.returncode:
+        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] Apply digest {digest_id} {pids}\n\n{lines}", "--", *files)
+    if r.returncode:
+        first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
+        applied, queued = undo(f"commit failed: {first}")
+        board.cmd_set(scrum, job_id, ["stage=needs-human", f"reason=digest apply: git commit failed: {first}"])
+        return applied, queued, job_id
+    digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
+    board.cmd_set(scrum, job_id, ["stage=done"])
+    return [entry(p) for p, _, _ in done], queued, job_id
+
+
 def digest_auto(root, digest_id):
-    """Approve each pending proposal the digester marked obvious and that passes digest_target_auto_ok; the rest stay
-    pending for Trevor, with the digester's reason or the re-check's."""
-    out = {"approved": [], "human": []}
+    """Apply each pending edit proposal the digester marked obvious and that passes digest_target_auto_ok (digest_apply),
+    queueing a backlog item through digest_decide for any it can't apply; the rest stay pending for Trevor, with the
+    digester's reason or the re-check's."""
+    out = {"applied": [], "queued": [], "human": [], "job": None}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
     path = root / "digests" / digest_id / "proposals.json"
+    by_repo = {}
     for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
         reason = "new skill" if p["kind"] == "skill" else digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
         if p["obvious"] and reason is None:
-            code, res = digest_decide(root, digest_id, p["id"], "approve")
+            by_repo.setdefault(repo_of(p["target"])[0], []).append(p)
+        else:
+            out["human"].append({"id": p["id"], "reason": reason})
+    for props in by_repo.values():
+        applied, to_queue, job_id = digest_apply(root, digest_id, props)
+        out["applied"] += applied
+        out["job"] = out["job"] or job_id
+        for q in to_queue:
+            code, res = digest_decide(root, digest_id, q["id"], "approve")
             if code == 200:
-                out["approved"].append({"id": p["id"], "target": p["target"], "obvious_reason": p["obvious_reason"]})
-                continue
-            reason = res["error"]
-        out["human"].append({"id": p["id"], "reason": reason})
+                out["queued"].append(q)
+            else:
+                out["human"].append({"id": q["id"], "reason": res["error"]})
     return out
 
 
@@ -2074,7 +2194,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
-    p.add_argument("--digest-auto", metavar="NNN", help="auto-approve this digest's obvious proposals, print JSON and exit")
+    p.add_argument("--digest-auto", metavar="NNN", help="apply (or queue) this digest's obvious proposals, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
     p.add_argument("--dir", type=Path, default=Path("scrum"),

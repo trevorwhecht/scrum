@@ -688,8 +688,9 @@ class ContractTest(unittest.TestCase):
         digest = self.section(text, "## Digest", "## Final report")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
                        "error.md", "B digest-trim", "no remote", "--digest-auto", "ROUTING=", "local/routing.json",
-                       "realpath ~/.claude/skills/trevskills-scrum"):
+                       "realpath ~/.claude/skills/trevskills-scrum", '"applied"', '"queued"', "queued: <reason>"):
             self.assertIn(phrase, digest, phrase)
+        self.assertNotIn("only ever queues a repo backlog item", digest)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
         self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
