@@ -43,8 +43,9 @@
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
-  board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
-                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
+  board.py watchdog                flag jobs stuck 30+ min in spec/build/check/review/approve with no live session
+                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}; a stuck spec
+                                   job with no feature.md is an orphaned claim: aborted and requeued, never flagged
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
@@ -376,19 +377,33 @@ def cmd_next(root, index=None):
 
 def cmd_abort(root, job_id, requeue, reason=None):
     """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
-    folder = Path(root) / "jobs" / check_id(job_id)
-    feature = folder / "feature.md"
     with locked_board(root) as board:
-        job = find(board, job_id)
+        job = find(board, check_id(job_id))
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
-        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now(),
-                   files=job_files(folder))
-        if requeue:
-            text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
-            lines, _ = read_backlog(root)
-            lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
-            write_backlog(root, lines)
+        abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
+
+
+def abort_job(root, job, requeue, reason):
+    """cmd_abort's body; caller holds the lock. With no feature.md (a claim whose session died before writing it),
+    the requeue reopens the claimed backlog line in place, points, id, needs and pre-written spec kept."""
+    folder = Path(root) / "jobs" / job["id"]
+    feature = folder / "feature.md"
+    job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    if not requeue:
+        return
+    lines, items = read_backlog(root)
+    claimed = next((i for i in items if i["job"] == job["id"]), None)
+    if claimed and not feature.exists():
+        claimed.update(done=False, job=None)
+        lines[claimed["line"]] = format_item(claimed)
+        if (folder / "spec.md").is_file():
+            spec_path(root, claimed["text"]).parent.mkdir(exist_ok=True)
+            os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
+    else:
+        text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
+        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+    write_backlog(root, lines)
 
 
 def md_section(text, heading):
@@ -1575,6 +1590,7 @@ RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLO
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
 PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
 
 
 def cmd_pause(root, job_id):
@@ -1623,9 +1639,10 @@ def stalled_since(job, cutoff):
 
 def cmd_watchdog(root, alive=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
+    A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
-    flagged = []
+    flagged, requeued = [], []
     try:
         with locked_board(root) as board:
             # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
@@ -1633,11 +1650,17 @@ def cmd_watchdog(root, alive=None):
                      and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
-                if not alive(job):
+                if alive(job):
+                    continue
+                if job["stage"] == "spec" and not job.get("parent") \
+                        and not (Path(root) / "jobs" / job["id"] / "feature.md").exists():
+                    abort_job(root, job, True, ORPHANED)  # nothing to resume: put the item back, no human needed
+                    requeued.append(job["id"])
+                else:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
                                f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
                     flagged.append(job["id"])
-            if not flagged:
+            if not flagged and not requeued:
                 raise _Gone
     except _Gone:
         pass

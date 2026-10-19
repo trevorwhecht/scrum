@@ -1440,11 +1440,27 @@ class BoardTest(unittest.TestCase):
     def test_watchdog_flags_stalled_spec_job(self):
         fresh = self.aged("Fresh spec", 1, stage="spec")
         stuck = self.aged("Stuck spec", 31, stage="spec")
+        (self.root / "jobs" / stuck / "feature.md").write_text("Stuck spec\n")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [stuck])
         self.assertEqual(self.get(stuck)["stage"], "needs-human")
         self.assertEqual(self.get(stuck)["reason"],
                          "stalled in spec: no board update for 30 min and no live session. Fix: click Resume.")
         self.assertEqual(self.get(fresh)["stage"], "spec")
+
+    def test_watchdog_requeues_orphaned_spec_claim_in_place(self):
+        (self.root / "backlog-specs").mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Full item text, every detail {#ab12} <!-- why -->\n- [ ] Other\n")
+        board.spec_path(self.root, "Full item text, every detail").write_text("pre-written spec")
+        claimed = board.cmd_next(self.root)["id"]
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][0]["updatedAt"] = "2000-01-01T00:00:00+00:00"
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.get(claimed)["stage"], "aborted")
+        self.assertEqual(self.get(claimed)["reason"], board.ORPHANED)
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] [3] Full item text, every detail {#ab12} <!-- why -->\n- [ ] Other\n")
+        self.assertEqual(board.spec_path(self.root, "Full item text, every detail").read_text(), "pre-written spec")
 
     def test_watchdog_never_flags_cloud_jobs(self):
         cloud = self.aged("In cloud", 120, stage="cloud")
