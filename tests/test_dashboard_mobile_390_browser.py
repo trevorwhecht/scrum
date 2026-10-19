@@ -125,7 +125,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
     def test_viewer_action_buttons_44px(self):
         actions = self.browse("actions")["before"]["actions"]
         self.assertEqual([a["text"] for a in actions],
-                         ["Approve & merge", "Discuss first", "Send back to builder", "Open terminal", "Abort job"], actions)
+                         ["Approve & merge", "Discuss first", "Send back to builder", "Open terminal", "Ask Claude", "Abort job"], actions)
         for a in actions:
             self.assertGreaterEqual(a["height"], 44, a)
 

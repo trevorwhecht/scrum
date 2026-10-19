@@ -401,13 +401,44 @@ class BoardTest(unittest.TestCase):
         board.cmd_abort(self.root, c2, requeue=False)
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
-        p = self.child(parent)
-        self.assertEqual(p["stage"], "needs-human")
-        self.assertTrue(p["reason"].startswith(f"bigboy blocked: {c1}, {c2}. Fix: "), p["reason"])
+        p = self.child(parent)  # a needs-human child is actionable, so the parent keeps running
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {c1}"))
         board.cmd_set(self.root, c1, ["stage=done", "reason="])  # Trevor approved it and it merged
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_bigboy_aborted_child_blocks_with_resume(self):
+        # Blocked: c2 aborted, and waiting c4 (and c5 through c4) depend on it; nothing else to act on.
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_abort(self.root, c2, requeue=False)
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c3, ["stage=done"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy blocked: 003-part-2. Fix: click Resume to "
+                         "skip the children that depend on them and run the final review."))
+        self.assertNotIn("Abort", p["reason"])
+        # Resume aborts the waiting dependents; every child is then done or aborted, so all_merged is true.
+        board.cmd_abort(self.root, c4, requeue=False)
+        board.cmd_abort(self.root, c5, requeue=False)
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "ready", parent],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((json.loads(out.stdout)["all_merged"], json.loads(out.stdout)["merged"]), (True, 2))
+        # One aborted child plus one needs-human child: the parent keeps running and names the needs-human one.
+        parent, (d1, d2, d3, d4, d5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_abort(self.root, d1, requeue=False)
+        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {d2}"))
+        play.assert_not_called()
 
     def test_ready_parent_waits_on_needs_human_children(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
@@ -531,7 +562,7 @@ class BoardTest(unittest.TestCase):
             play.assert_not_called()
             parent, (c1, c2, c3, c4, c5) = self.five()
             board.cmd_ready(self.root, parent)
-            board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+            board.cmd_abort(self.root, c1, requeue=False)
             board.cmd_abort(self.root, c2, requeue=False)
             play.reset_mock()
             board.cmd_ready(self.root, parent)
@@ -1143,21 +1174,47 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(str(e.exception), f"job {job_id} is {stage}; only a job in progress can be paused")
             self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_paused_job_refuses_orchestrator_writes_until_reason_cleared(self):
+    def test_paused_job_refuses_writes_until_explicit_unpause(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=review"])
         board.cmd_pause(self.root, job_id)
-        for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
-                     lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
-                     lambda: board.cmd_sync(self.root, job_id)):
-            with self.assertRaises(SystemExit) as e:
-                call()
-            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
-        board.cmd_set(self.root, job_id, ["stage=review", "reason="])
+        paused = "stalled in review: paused by Trevor. Fix: click Play."
+        with mock.patch.object(board, "merge_refusal", return_value=None):  # the pause must refuse, not the PR guard
+            for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
+                         lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                         lambda: board.cmd_sync(self.root, job_id),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=done", "reason="]),
+                         lambda: board.cmd_set(self.root, job_id, ["stage=review", "reason="])):
+                with self.assertRaises(SystemExit) as e:
+                    call()
+                self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("needs-human", paused))
+        board.cmd_set(self.root, job_id, ["stage=review", "reason="], unpause=True)
         self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
         board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
         self.assertEqual(self.jobs()[0]["stage"], "approve")
+
+    def test_set_cli_unpause_flag(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]),
+                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        board.main(["--dir", str(self.root), "set", job_id, "stage=approve"])
+        self.assertEqual(self.jobs()[0]["stage"], "approve")
+        # not paused: --unpause is harmless, the write applies as without it
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=check", "reason=blocked: x"])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("check", "blocked: x"))
+        board.cmd_abort(self.root, job_id, requeue=False)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
+        self.assertEqual(str(e.exception), f"job {job_id} was aborted by Trevor; stop working on it")
+        self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
     def test_pause_parent_pauses_children_and_blocks_ready(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"),
