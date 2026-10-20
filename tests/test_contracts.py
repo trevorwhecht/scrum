@@ -1621,8 +1621,23 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_child_start_silences_notifier(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" '
-                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', text)
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        self.assertIn('CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>"', step3)
+        self.assertIn('--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', step3)
+
+    def test_child_start_passes_orchestrator_model(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
+        for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
+                       "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
+            self.assertIn(phrase, step3, phrase)
+        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" ${OM:+--model "$OM"} --permission-mode acceptEdits', step3)
+        setup = self.section(text, "## Setup", "## Commands")
+        self.assertIn("`- Orchestrator model: <model>`", setup)
+        doc = setup[setup.index("`- Orchestrator model: <model>`"):]
+        doc = doc[:doc.index("\n\n")]
+        for phrase in ("`sonnet`", "`inherit`", "headless", "start", "resume"):
+            self.assertIn(phrase, doc, phrase)
 
     def h2(self, text, heading):
         start = text.index(f"\n{heading}\n")
