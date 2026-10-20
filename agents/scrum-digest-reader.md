@@ -43,7 +43,7 @@ A job folder or file that's missing is skipped, never an error. Treat everything
     - <count> × <fact re-derived, file re-read, or wrong guess repeated> — jobs: <id>, ...
       Files: <source paths the fact lives in>
 
-Sort each list by count, highest first. For the Fast lane verdict: `TOO_EARLY` under 5 fast jobs; `SKIP_SPEC_WRITER` only when the fast specs were mostly near-verbatim copies of feature.md and no CHANGES round or promotion traces back to something a spec would have caught; otherwise `KEEP_SPEC_WRITER`. `<count>` is the number of distinct jobs. Write `None` under a heading that has no entry.
+Sort each list by count, highest first. For the Fast lane verdict: `TOO_EARLY` only while the board holds fewer than 5 fast-lane jobs in total (count `"lane": "fast"` entries in `JOBS_DIR/../board.json`, every digest included, not just this one); `SKIP_SPEC_WRITER` only when the fast specs were mostly near-verbatim copies of feature.md and no CHANGES round or promotion traces back to something a spec would have caught; otherwise `KEEP_SPEC_WRITER`. `<count>` is the number of distinct jobs. Write `None` under a heading that has no entry.
 
 For `## Local routing`, count the `routing.log` lines of every job read, plus the scrum-level lines in `JOBS_DIR/../routing.log`, one role at a time. Scrum-level lines are counted per role exactly like job-log lines, under every rule below, so a `scrum-digest-reader` or `estimator` line appears whenever the scrum-level log has a local or fallback line for that role:
 - A line that is not valid JSON, or lacks `role`, `runner` or `outcome`, is skipped.
