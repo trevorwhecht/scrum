@@ -789,6 +789,16 @@ class ContractTest(unittest.TestCase):
         self.assertLess(run_all.index("B runall-start"), askme)
         self.assertLess(askme, run_all.index("**BigBoy lane** step 2"))
 
+    def test_skill_run_all_triager_on_sonnet(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        run_all = self.section(text, "## Run all", "## Fast lane")
+        step2 = run_all[run_all.index("2. Spawn"):run_all.index("3. Run")]
+        self.assertIn('model: "sonnet"', step2)
+        self.assertIn("scrum-triager", step2)
+        self.assertIn("spawn it once more", step2)
+        self.assertIn("respawn", step2)
+        self.assertEqual(run_all.count('model: "sonnet"'), 1)
+
     def test_triager_contract(self):
         self.assertEqual(frontmatter(ROOT / "agents" / "scrum-triager.md").get("tools"), "Read, Grep, Glob, Write")
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
