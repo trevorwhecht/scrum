@@ -26,9 +26,11 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
-  board.py digest-verify <id>      exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
+  board.py digest-verify <id> [--worktree PATH] [--base REF]
+                                   exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
-                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
+                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
+                                   --worktree/--base override the board's values (an empty one fails, never falls back)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -740,6 +742,8 @@ def _cited_proposal(root, scrum, digest_id, pid):
         raise ValueError(f"digest {digest_id} {pid}: not a valid edit proposal")
     if p.get("status") != "queued":
         raise ValueError(f"digest {digest_id} {pid}: status is {p.get('status')!r}, not queued")
+    if not os.path.isabs(p["target"]):
+        raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is not an absolute path")
     rel = os.path.relpath(os.path.realpath(p["target"]), os.path.realpath(Path(root).resolve().parent))
     if rel == ".." or rel.startswith(".." + os.sep):
         raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is outside this repo")
@@ -764,18 +768,20 @@ def _applies(base_text, props, head_text):
     return False
 
 
-def cmd_digest_verify(root: Path, job_id: str) -> dict:
+def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
     """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
-    and every cited proposal's file changed; else {"ok": False, "error"}."""
+    and every cited proposal's file changed; else {"ok": False, "error"}. worktree/base, when not None, replace the
+    board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails."""
     try:
         job = find(read_board(root), check_id(job_id))
         feature = Path(root) / "jobs" / job_id / "feature.md"
         cites = digest_citations(root, feature.read_text(errors="replace") if feature.is_file() else "")
         if not cites:
             raise ValueError("feature.md cites no digest proposal")
-        wt, base = job.get("worktree"), job.get("base")
+        wt = job.get("worktree") if worktree is None else worktree
+        base = job.get("base") if base is None else base
         if not wt or not base:
-            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+            raise ValueError(f"no {'worktree' if not wt else 'base'}")
         if base.startswith("-"):
             raise ValueError(f"bad base {base!r}")
         by_file, labels = {}, []
@@ -1889,7 +1895,10 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
-    sub.add_parser("digest-verify").add_argument("id")
+    dv = sub.add_parser("digest-verify")
+    dv.add_argument("id")
+    dv.add_argument("--worktree", default=None)
+    dv.add_argument("--base", default=None)
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -1954,7 +1963,7 @@ def main(argv=None):
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
-        out = cmd_digest_verify(a.dir, a.id)
+        out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
     elif a.cmd == "triage-start":
