@@ -1770,7 +1770,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings",
             'claude "${E[@]}" --cloud "First run: bash ~/scrum/cloud/setup.sh (the environment caches an old copy of the '
             'skill). Then check that the refresh took: git -C ~/scrum rev-parse HEAD',
-            "B next", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
+            'B cloud-claim "$N"', "`B cloud-claim` moved it there", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
             "[scrum $ID]", "merge_method=squash", "/merge", "same sanctioned PR create and squash-merge",
@@ -1779,6 +1779,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "gh pr list --state all --search", "B set $ID stage=done pr=<url> reason=",  # sync
             "**Untrusted reason text**", "**Fast-forward main**"):
             self.assertIn(phrase, cloud, phrase)
+        self.assertNotIn("B next", cloud)  # dispatch claims through cloud-claim's overlap check, never blind next calls
         self.assertIn("first run **Cloud lane** **Sync**", self.section(text, "## Commands", "## New job"))
         self.assertIn("`cloud`, `cloud-job`", self.section(text, "## Setup", "## Commands"))
         self.assertIn("cloud-sync", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
