@@ -1671,7 +1671,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             'E=(--settings "{\\"remote\\":{\\"defaultEnvironmentId\\":\\"$CE\\"}}")',
             "grep -qE '^[A-Za-z0-9_-]+$' && E=(--settings",
             'claude "${E[@]}" --cloud "First run: bash ~/scrum/cloud/setup.sh (the environment caches an old copy of the '
-            'skill). Then invoke the trevskills-scrum skill fresh and run: /trevskills-scrum cloud-job $ID $FEAT"',
+            'skill). Then check that the refresh took: git -C ~/scrum rev-parse HEAD',
             "B next", "B set $ID stage=cloud cloud=$URL", "https://claude.ai/settings/usage", "under $25",
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
@@ -1735,12 +1735,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
         for phrase in ("lacks the **Artifacts** step", "before New job",
-                       "cloud skill copy is stale. Fix: rerun cloud setup.", "reports to GitHub as **Needs-human** does"):
+                       "cloud skill copy is stale. Fix: rerun cloud setup.", "reports to GitHub as **Needs-human** does",
+                       "`git -C ~/scrum rev-parse HEAD`", "`git -C ~/scrum ls-remote origin refs/heads/main`",
+                       "`grep -q scrum-artifacts/ ~/.claude/skills/trevskills-scrum/SKILL.md`"):
             self.assertIn(phrase, setup, phrase)
         readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
         intro = readme.split("\n\n")[1]  # the first paragraph after the heading
         self.assertIn("refresh", intro)
         self.assertIn("setup.sh", intro)
+        self.assertIn("HEAD", intro)
 
     def test_skill_cloud_schema_migrates_locally(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
