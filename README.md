@@ -16,13 +16,15 @@ feature → spec-writer → builder → check gate → security · ux · ui · c
 
 **Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The approver decides everything else. It runs on Opus, or on Sonnet when the round is all green (check PASS, every review PASS, no schema files, not a conflict round).
 
+**E2E reviewer (optional).** When `scrum/project.md` has an `E2E:` line that isn't `none`, `scrum-review-e2e` replays the saved Playwright specs, covers changed UI that has none, and sorts failures into real bug, stale test or flake. It runs when the E2E check fails and when the diff touches `UI globs`; a `real bug` makes the round `CHANGES`.
+
 **Skips the ux and ui reviewers** when no file in the diff matches `UI globs` in `scrum/project.md`; the orchestrator writes their review files as `VERDICT: PASS`. A missing or `none` line means all four run.
 
 ## Install (once)
 
 ```bash
 brew install gh && gh auth login   # needed to open and merge PRs
-./install.sh                       # links skills/trevskills-scrum and agents/* into ~/.claude
+./install.sh                       # links skills/trevskills-scrum, skills/trevskills-e2e and agents/* into ~/.claude
 ```
 
 `install.sh` also links `codex/AGENTS.md` to `~/.codex/AGENTS.md` (or `$CODEX_HOME/AGENTS.md`), the review rules Codex reads. It refuses to replace a real file there.
@@ -65,7 +67,8 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 
 ## Change the scrum
 
-- Agents: `agents/scrum-*.md`. A repo can override one with its own `.claude/agents/<same name>.md`.
+- Agents: `agents/scrum-*.md` (including `scrum-review-e2e`, which loads the `trevskills-e2e` skill). A repo can override one with its own `.claude/agents/<same name>.md`.
+- E2E flow: `skills/trevskills-e2e/SKILL.md`, also runnable directly as `/trevskills-e2e`
 - The loop: `skills/trevskills-scrum/SKILL.md`
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`

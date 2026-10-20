@@ -8,6 +8,7 @@ AGENTS = {
     "scrum-approver": "opus", "scrum-debugger": "opus",
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
+    "scrum-review-e2e": "sonnet",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 FIRST_LINE = {
@@ -15,6 +16,7 @@ FIRST_LINE = {
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
     "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
     "scrum-planner": "PLAN: READY", "scrum-tracker": "TRACK: ON TRACK", "scrum-bigboy-reviewer": "BIGBOY: PASS",
+    "scrum-review-e2e": "VERDICT: PASS",
 }
 
 
@@ -460,6 +462,51 @@ class ContractTest(unittest.TestCase):
         self.assertIn("E2E:", self.section(text, "## Check gate", "## Review (WAIT FOR ALL)"))
         self.assertIn("E2E:", self.section(text, "### First-run setup", "## Commands"))
         self.assertIn("E2E", (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text())
+
+    def test_e2e_skill_contract(self):
+        path = ROOT / "skills" / "trevskills-e2e" / "SKILL.md"
+        fm = frontmatter(path)
+        self.assertEqual(fm.get("name"), "trevskills-e2e")
+        self.assertTrue(fm.get("description"))
+        body = path.read_text().split("\n---\n", 1)[1]
+        for phrase in ("E2E:", "test:e2e", "getByRole", "getByLabel", "data-testid", "init-agents", "innerText",
+                       "jev-rank.py", "jev-latest", "TYPESAFE_API_KEY", "real bug", "stale test", "flake",
+                       "Specs run", "Specs added"):
+            self.assertIn(phrase, body, phrase)
+        # The flow is documented in order: command, routes, replay, cover, failure, Jev, tokens, report.
+        order = ["## 1. Find the E2E command", "E2E: no command", "## 2. Map changed files", "--name-only",
+                 "## 3. Replay", "## 4. Cover changed UI", "init-agents", "## 5. On failure", "innerText",
+                 "## 6. Jev", "jev-rank.py", "## 7. Token rules", "browser MCP", "## 8. The report"]
+        at = [body.index(p) for p in order]
+        self.assertEqual(at, sorted(at), list(zip(order, at)))
+        lines = [l.lower() for l in body.splitlines()]
+        self.assertTrue(any("never" in l and "assertion" in l for l in lines), "never-weaken-assertion rule")
+        self.assertTrue(any("never" in l and "key" in l for l in lines), "never-print-key rule")
+        self.assertIn("api.typesafe.ai/v1/systemone", body)
+        self.assertIn("E2E: no command", body)
+
+    def test_e2e_agent_loads_skill(self):
+        text = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        fm_lines = m.group(1).splitlines()
+        at = fm_lines.index("skills:")
+        skills = [l.strip()[2:].strip() for l in fm_lines[at + 1:] if l.startswith("  - ")]
+        self.assertIn("trevskills-e2e", skills)
+        self.assertEqual(frontmatter(ROOT / "agents" / "scrum-review-e2e.md").get("tools"),
+                         "Read, Grep, Glob, Bash, Edit, Write")
+        body = text[m.end():]
+        for phrase in ("trevskills-e2e", "review-e2e.md", "VERDICT: CHANGES", "real bug"):
+            self.assertIn(phrase, body, phrase)
+
+    def test_skill_wires_e2e_reviewer(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        self.assertIn("scrum-review-e2e", check)
+        self.assertIn("scrum-review-e2e", review)
+        self.assertIn("review-e2e.md", review)
+        self.assertIn("review-e2e.md", check)
+        self.assertIn("never spawns `scrum-review-e2e`", text)
 
     def test_spec_writer_exits_early_on_bigboy(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()

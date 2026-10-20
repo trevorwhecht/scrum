@@ -1505,12 +1505,15 @@ def cmd_sync(root, job_id):
         job = live(board, job_id)
         job.update(rounds=rounds, files=files, diverged=diverged(d), reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
     complete = bool(last) and "pending" not in reviews.values()
-    invalid = [r for r, v in reviews.items() if v == "INVALID"]
+    # Optional e2e review: counts toward verdict and invalid when present, never reported missing.
+    e2e = first_word(round_dirs[-1] / "review-e2e.md", ("PASS", "CHANGES")) if round_dirs else None
+    counted = {**reviews, **({"e2e": e2e} if e2e else {})}
+    invalid = [r for r, v in counted.items() if v == "INVALID"]
     verdict = None if not complete else "INVALID" if invalid else \
-        "PASS" if all(v == "PASS" for v in reviews.values()) else "CHANGES"
+        "PASS" if all(v == "PASS" for v in counted.values()) else "CHANGES"
     missing = [f"review-{r}.md" for r, v in reviews.items() if v == "pending"]
     return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid, "missing": missing,
-            "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
+            "check": last["check"] if last else None, "decision": decision, "reworks": reworks, "e2e": e2e}
 
 
 # --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
