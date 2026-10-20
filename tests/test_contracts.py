@@ -440,6 +440,17 @@ class ContractTest(unittest.TestCase):
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertIn("Carried forward", line)
 
+    def test_skill_review_shares_one_dev_server(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("Dev command:", "UI globs", "not `none`", "round-$N/dev.log", "free port", "3001",
+                       "round-$N/dev-url.txt", "unreachable: <why>", "200", "/api/", "DEV_URL=<url>",
+                       "kill", "-sTCP:LISTEN", 'exec env PORT=<port> nohup'):
+            self.assertIn(phrase, review, phrase)
+        url = review.index("round-$N/dev-url.txt")
+        self.assertIn("kill", review[url:])
+        self.assertIn("-sTCP:LISTEN", review[url:])
+
     def test_review_code_has_security_checklist(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("injection", "secrets", "dangerouslySetInnerHTML"):
@@ -1102,13 +1113,21 @@ class ContractTest(unittest.TestCase):
     def test_ui_reviewer_renders_page(self):
         self.assert_reviewer_renders("ui")
 
+    def test_ui_reviewers_use_dev_url(self):
+        for name in ("ui", "ux"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            for phrase in ("DEV_URL", "`DEV_URL` is absent", "does not answer"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
+            self.assertLess(step1.index("DEV_URL=<url>"), step1.index('HOME="$T" CLAUDE_HOME="$T/.claude"'), name)
+
     def test_agent_test_servers_use_throwaway_home(self):
         start = 'HOME="$T" CLAUDE_HOME="$T/.claude"'
         check = "Before any Save, Undo, Disable or Enable click"
         lsof = "lsof -ti tcp:<port> -sTCP:LISTEN"
         for name in ("ux", "ui"):
             text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
-            step1 = next(l for l in text.splitlines() if l.startswith("1. Start a fresh server"))
+            step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
             for phrase in (start, "mktemp -d", 'mkdir -p "$T/.claude"', "never 8765",
                            "serve.py --port <free port>", "Never reuse a server that is already running"):
                 self.assertIn(phrase, step1, f"{name}: {phrase}")
