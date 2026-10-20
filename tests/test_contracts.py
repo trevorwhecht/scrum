@@ -1142,6 +1142,22 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn("- Judge new violations in this diff, not existing debt.\n", text, name)
         self.assertEqual(ux.count("throwaway harness"), 1)
 
+    def test_review_ux_ui_find_cloud_chromium(self):
+        lookup = ("If that binary is missing, look for Chromium under `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` "
+                  "(`ls -d \"${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}\"/chromium-*/chrome-linux/chrome`) "
+                  "and use it with the same flags.")
+        never = ("Never write `Rendered: no` because Chrome is missing until the `/opt/pw-browsers` Chromium "
+                 "lookup in step 2 has also found nothing.")
+        for name in ("scrum-review-ux.md", "scrum-review-ui.md"):
+            text = (ROOT / "agents" / name).read_text()
+            step2 = next(l for l in text.splitlines() if l.startswith("2. Open the page in headless Chrome"))
+            for phrase in ("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers", "chromium-*/chrome-linux/chrome",
+                           "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", lookup):
+                self.assertIn(phrase, step2, f"{name}: {phrase}")
+            para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
+            self.assertIn(never, para, name)
+            self.assertEqual(text.count(never), 1, name)
+
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Rendered: yes", "UI not rendered"):
