@@ -102,6 +102,33 @@ class InstallTest(unittest.TestCase):
             self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
             self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
 
+    def test_install_links_jev_rank(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            self.assertEqual(self.run_install(home).returncode, 0)  # $dest/scripts missing: created and linked
+            link = home / "scripts" / "jev-rank.py"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), ROOT / "skills" / "trevskills-scrum" / "jev-rank.py")
+            link.unlink()
+            link.symlink_to(home / "elsewhere.py")  # an existing symlink is replaced
+            self.assertEqual(self.run_install(home).returncode, 0)
+            self.assertEqual(link.resolve(), ROOT / "skills" / "trevskills-scrum" / "jev-rank.py")
+
+    def test_install_keeps_real_jev_rank(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            (home / "scripts").mkdir()
+            real = home / "scripts" / "jev-rank.py"
+            real.write_bytes(b"#!/usr/bin/env python3\nprint('mine')\n")
+            result = self.run_install(home)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(real.is_symlink())
+            self.assertEqual(real.read_bytes(), b"#!/usr/bin/env python3\nprint('mine')\n")
+            notices = [l for l in (result.stdout + result.stderr).splitlines() if "jev-rank.py" in l and "real file" in l]
+            self.assertEqual(len(notices), 1, result.stdout + result.stderr)
+            self.assertEqual((home / "agents" / "scrum-builder.md").resolve(), ROOT / "agents" / "scrum-builder.md")
+            self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
+
     def test_install_sets_status_line_only_when_absent(self):
         with tempfile.TemporaryDirectory() as t:
             home = Path(t)

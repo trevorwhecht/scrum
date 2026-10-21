@@ -25,6 +25,14 @@ link "$here/skills/trevskills-scrum" "$dest/skills/trevskills-scrum"
 link "$here/skills/trevskills-e2e" "$dest/skills/trevskills-e2e"
 for f in "$here"/agents/*.md; do link "$f" "$dest/agents/$(basename "$f")"; done
 link "$here/codex/AGENTS.md" "$codex/AGENTS.md"
+# jev-rank.py: a real file there predates this repo's copy, so keep it and carry on rather than refuse.
+mkdir -p "$dest/scripts"
+jev_rank="$dest/scripts/jev-rank.py"
+if [ -e "$jev_rank" ] && [ ! -L "$jev_rank" ]; then
+  echo "kept real file $jev_rank; jev-rank.py not linked"
+else
+  link "$here/skills/trevskills-scrum/jev-rank.py" "$jev_rank"
+fi
 # Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set.
 python3 - "$dest" <<'PY'
 import json, os, shlex, sys
