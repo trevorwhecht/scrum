@@ -462,7 +462,13 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
         - With no verify string (behavioural): it passes only when the PID from `lsof -ti tcp:<port> -sTCP:LISTEN` after the start differs from the one recorded before the kill, and `curl -sfL localhost:<port>/<path>` exits 0. Either failing is `verify failed`; passing is reported as `restarted + verified (behavioural)`.
    - **Mark done, only now.** If the guard, the fast-forward, the restart or the verify failed, run `B set $ID stage=done reason='merged, not live: <why>'`, where `<why>` is `not on <default>`, `uncommitted changes`, `fast-forward failed`, `restart failed`, `restart command not allowed` or `verify failed`. Otherwise (including `Restart: none` after a successful fast-forward) run `B set $ID stage=done reason=`. The dashboard card shows the `merged, not live` reason as a warning; Trevor clears it with `B set <id> reason=` once he has made the change live.
    - If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.
-   - **Roadmap chaining.** If the job has no `parent`, after `stage=done` run `B roadmap-next $ID`. When it prints a step, do **Roadmap lane** **Starting a step** with it after the Digest check. A job in no roadmap prints `null`: nothing more happens.
+   - **Roadmap chaining.** If the job has no `parent`, after `stage=done` run `B roadmap-next $ID`. When it prints a step, do **Roadmap lane** **Starting a step** with it after the Digest check. When it prints `null`, run `B roadmap-show`. A job in no roadmap, or a roadmap whose `current` is not `null` (a `running`, `stopped` or `todo` step is left), starts nothing. If it prints a roadmap that lists `$ID` as a step's `job` and whose `current` is `null`, and `grep -q '^- \[ \] ' "$F/backlog.md"` succeeds, start run-all detached from the main checkout after the Digest check, the same way as **BigBoy lane** step 3, and report `Run all started: runs/<LOG>`. An empty backlog starts nothing, and so does a missing `backlog.md`.
+      ```bash
+      mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-run-all.log"
+      OM=$(sed -n 's/^- Orchestrator model: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')
+      case "$OM" in [Ii][Nn][Hh][Ee][Rr][Ii][Tt]) OM= ;; ""|*[!A-Za-z0-9._-]*) OM=sonnet ;; esac
+      (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum run-all" ${OM:+--model "$OM"} --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
+      ```
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 
