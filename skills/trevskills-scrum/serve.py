@@ -2072,7 +2072,8 @@ def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[di
     if r.returncode:
         first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
         applied, queued = undo(f"commit failed: {first}")
-        board.cmd_set(scrum, job_id, ["stage=needs-human", f"reason=digest apply: git commit failed: {first}"])
+        board.cmd_ask(scrum, job_id, f"digest apply: git commit failed: {first}",
+                      [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
         return applied, queued, job_id
     digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
     board.cmd_set(scrum, job_id, ["stage=done"])
