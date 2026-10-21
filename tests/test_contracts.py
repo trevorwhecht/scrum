@@ -1766,7 +1766,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
                        "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
             self.assertIn(phrase, step3, phrase)
-        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" ${OM:+--model "$OM"} --permission-mode acceptEdits', step3)
+        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step3)
+        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits', step3)
         setup = self.section(text, "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]

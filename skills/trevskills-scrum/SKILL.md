@@ -275,10 +275,11 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
    mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-start-<child>.log"
    OM=$(sed -n 's/^- Orchestrator model: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')
    case "$OM" in [Ii][Nn][Hh][Ee][Rr][Ii][Tt]) OM= ;; ""|*[!A-Za-z0-9._-]*) OM=sonnet ;; esac
-   (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" ${OM:+--model "$OM"} --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
+   MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")
+   (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
    B set <child> runlog=runs/$LOG
    ```
-   `OM` is the `- Orchestrator model:` line (see Setup): blank, missing or malformed gives `sonnet`, and `inherit` drops `--model`.
+   `OM` is the `- Orchestrator model:` line (see Setup): blank, missing or malformed gives `sonnet`, and `inherit` drops `--model`. `MODEL` is an array on purpose: zsh never word-splits `${OM:+--model "$OM"}`, so that form passes one word and `claude` dies with `unknown option`.
    This session is then done with the parent: each child chains the next from its own Merge step 7. Give the final report.
 4. **Spec refresh** (in the child's own `start` session, after New job step 2). For each id in the child's `depends_on`, list the files its PR changed: `gh pr diff <that job's pr> --name-only`. Compare them, as exact paths, with the backtick-quoted paths under `## Likely files` in the child's `spec.md`. If `spec.md` is missing, run New job step 3 as usual. If any path overlaps, run New job step 3 with the extra prompt line `Refresh spec.md: dependencies <ids> merged and changed <files>.`, then step 3b and 3c. Otherwise skip step 3 (3b and 3c ran in step 2). Then continue at New job step 4.
 5. **Chaining** (Merge step 7, after `stage=done`, for a job with a `parent`). Sub-steps 1-2 run under P's chain lock, so two children that merge close together never write the same `track-N.md`, rewrite the same waiting child, or claim a child mid-rewrite:
