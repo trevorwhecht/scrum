@@ -467,7 +467,8 @@ The steps below reuse the lessons from `/trevskills-commitpush`.
       mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-run-all.log"
       OM=$(sed -n 's/^- Orchestrator model: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')
       case "$OM" in [Ii][Nn][Hh][Ee][Rr][Ii][Tt]) OM= ;; ""|*[!A-Za-z0-9._-]*) OM=sonnet ;; esac
-      (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum run-all" ${OM:+--model "$OM"} --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
+      MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")
+      (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum run-all" "${MODEL[@]}" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
       ```
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.

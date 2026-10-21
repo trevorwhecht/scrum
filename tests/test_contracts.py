@@ -1856,6 +1856,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        'nohup claude -p "/trevskills-scrum run-all"', "-run-all.log",
                        "empty backlog starts nothing", "Run all started: runs/<LOG>"):
             self.assertIn(phrase, step)
+        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step)
+        self.assertIn('nohup claude -p "/trevskills-scrum run-all" "${MODEL[@]}" --permission-mode acceptEdits', step)
+        self.assertNotIn('${OM:+', step)
 
     def test_no_sound_clip_committed(self):
         out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
