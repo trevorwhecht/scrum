@@ -815,7 +815,9 @@ class ContractTest(unittest.TestCase):
                        "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
                        "(fallback: <n>)", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
                        "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
-                       "`scrum-level`"):
+                       "`scrum-level`", "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
+                       "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
+                       "(unanimous)", "branch names", "hashes"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
@@ -823,7 +825,9 @@ class ContractTest(unittest.TestCase):
                        '"obvious"', '"obvious_reason"', "2 or more different jobs", "never removes or loosens",
                        "never a global file", "ROUTING", "local/routing.json", "## Local routing",
                        "at least 5 local runs", "at least 3 local runs", "more than one third", "codex-review",
-                       '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false'):
+                       '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
+                       "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "(unanimous)",
+                       "pick not unanimous"):
             self.assertIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
