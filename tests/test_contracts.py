@@ -1578,6 +1578,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("<option>bigboy</option>", text)
         self.assertIn("<option>runall</option>", text)
         self.assertIn("<option>lilguy</option>", text)
+        self.assertIn("<option>roadmap</option>", text)
         self.assertNotIn("<option>epic</option>", text)
         shown = re.search(r"^const shown = .*$", text, re.M).group(0)
         self.assertIn("lane", shown)
