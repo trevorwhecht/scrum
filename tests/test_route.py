@@ -71,6 +71,9 @@ class RouteTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop('SCRUM_ROUTE', None)
+        codex = patch.object(route_mod, '_codex_installed', lambda: True)
+        codex.start()
+        self.addCleanup(codex.stop)
         self.config()
 
     def job(self, job_id, lane='standard', parent=None, points=None):
@@ -273,6 +276,16 @@ class RouteTests(unittest.TestCase):
         self.assertIn('cloud-tagged', codex['why'])
 
     # 5
+    def test_codex_missing_binary_skips_before_trust_and_override(self):
+        with patch.object(route_mod, '_codex_installed', lambda: False):
+            for roles, env in (({}, {}), ({'codex-review': 'off'}, {}), ({}, {'SCRUM_ROUTE': 'cloud'})):
+                self.config(**roles)
+                with patch.dict(os.environ, env):
+                    self.assertEqual(route_mod.route('codex-review'),
+                                     {'runner': 'skip', 'model': None, 'why': 'codex not installed'})
+        self.config(**{'codex-review': 'off'})
+        self.assertEqual(self.runner('codex-review'), 'cloud')  # installed + trust off: unchanged
+
     def test_codex_5h_90_local(self):
         self.rollout(primary=90.0, secondary=10.0)
         result = route_mod.route('codex-review')
