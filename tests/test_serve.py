@@ -3753,6 +3753,97 @@ class AutoResumeTest(unittest.TestCase):
         self.assertNotIn("p/lil", s.AUTO_RESUME)
 
 
+class CloudPollTest(unittest.TestCase):
+    """The 60 s watchdog loop polls board.py cloud-sync every 10 min while a project has a job in stage cloud, and
+    spawns cloud-home only for a moved job with artifacts or a schema / agent-rules hard stop."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.CLOUD_LAST.clear()
+        self.addCleanup(serve.CLOUD_LAST.clear)
+        self.root = Path(tempfile.mkdtemp()) / "scrum"
+        self.cloud = [{"id": "001-a", "stage": "cloud"}, {"id": "002-b", "stage": "build"}]
+
+    def tick(self, jobs, now, result=None, error=None):
+        s = self.serve
+        sync = mock.patch.object(s.board, "cmd_cloud_sync", return_value=result or {"moved": [], "error": None},
+                                 side_effect=error)
+        with sync as cs, mock.patch.object(s, "spawn") as sp, mock.patch.object(s, "running", return_value=False):
+            s.cloud_tick("p", self.root, jobs, now=now)
+        return cs, sp
+
+    def test_cloud_poll_runs_only_when_cloud_job_exists(self):
+        cs, _ = self.tick([{"id": "002-b", "stage": "build"}, {"id": "003-c", "stage": "done"}], now=10_000)
+        cs.assert_not_called()
+        self.assertNotIn("p", self.serve.CLOUD_LAST)
+        cs, _ = self.tick(self.cloud, now=10_000)
+        cs.assert_called_once_with(self.root)
+
+    def test_cloud_poll_waits_ten_minutes(self):
+        self.assertEqual(self.serve.CLOUD_EVERY, 600)
+        cs, _ = self.tick(self.cloud, now=10_000)
+        self.assertEqual(cs.call_count, 1, "the first poll runs at once")
+        cs, _ = self.tick(self.cloud, now=10_599)
+        cs.assert_not_called()
+        cs, _ = self.tick(self.cloud, now=10_600)
+        self.assertEqual(cs.call_count, 1)
+        other = self.serve.cloud_tick  # another project keeps its own clock
+        with mock.patch.object(self.serve.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}) as cs2:
+            other("q", self.root, self.cloud, now=10_601)
+        self.assertEqual(cs2.call_count, 1)
+
+    def test_cloud_poll_spawns_home_only_for_artifact_or_hard_stop(self):
+        def m(job_id, state, reason=None, artifacts=False):
+            return {"id": job_id, "state": state, "pr": "u", "reason": reason, "worktree": None, "artifacts": artifacts}
+        moved = [m("001-art", "MERGED", artifacts=True),
+                 m("002-plain", "MERGED"),
+                 m("003-schema", "NEEDS-HUMAN", "Hard stop: schema change in prisma"),
+                 m("004-rules", "NEEDS-HUMAN", "Hard stop: agent rules edit"),
+                 m("005-money", "NEEDS-HUMAN", "Hard stop: money"),
+                 m("006-closed", "CLOSED", "cloud PR closed without merging. Fix: x"),
+                 m("001-art", "MERGED", artifacts=True)]
+        _, sp = self.tick(self.cloud, now=10_000, result={"moved": moved, "error": None})
+        self.assertEqual([c.args for c in sp.call_args_list], [
+            ("p", self.root, "001-art", "cloud-home", "/trevskills-scrum cloud-home 001-art"),
+            ("p", self.root, "003-schema", "cloud-home", "/trevskills-scrum cloud-home 003-schema"),
+            ("p", self.root, "004-rules", "cloud-home", "/trevskills-scrum cloud-home 004-rules")])
+        for c in sp.call_args_list:
+            self.assertEqual(c.kwargs, {}, "default flags: no model override")
+
+    def test_cloud_poll_error_is_contained(self):
+        for err in (RuntimeError("boom"), SystemExit("board.json is not valid JSON")):
+            self.serve.CLOUD_LAST.clear()
+            with mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+                cs, sp = self.tick(self.cloud, now=10_000, error=err)
+            self.assertEqual(cs.call_count, 1)
+            sp.assert_not_called()
+            self.assertEqual(e.getvalue(), f"cloud-sync: p: {err}\n")
+        with mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+            self.serve.CLOUD_LAST.clear()
+            self.tick(self.cloud, now=10_000, result={"moved": [], "error": "gh: auth required"})
+        self.assertEqual(e.getvalue(), "cloud-sync: p: gh: auth required\n")
+
+    def test_watchdog_tick_polls_cloud_and_survives_a_failing_project(self):
+        s = self.serve
+        base = Path(tempfile.mkdtemp())
+        projects = {}
+        for name in ("bad", "good"):
+            (base / name / "scrum").mkdir(parents=True)
+            (base / name / "scrum" / "board.json").write_text(json.dumps({"jobs": [{"id": "001-a", "stage": "cloud"}]}))
+            projects[name] = base / name
+        def sync(root):
+            if root.parent.name == "bad":
+                raise RuntimeError("gh exploded")
+            return {"moved": [], "error": None}
+        with mock.patch.object(s.board, "projects", return_value=projects), \
+                mock.patch.object(s.board, "cmd_cloud_sync", side_effect=sync) as cs, \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+            s.watchdog_tick()
+        self.assertEqual([c.args[0] for c in cs.call_args_list], [projects["bad"] / "scrum", projects["good"] / "scrum"])
+        self.assertEqual(e.getvalue(), "cloud-sync: bad: gh exploded\n")
+
+
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
     STALLED = "stalled in build: session exited while the job was still in build. Fix: click Resume."

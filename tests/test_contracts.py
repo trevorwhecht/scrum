@@ -1865,13 +1865,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "[scrum $ID]", "merge_method=squash", "/merge", "same sanctioned PR create and squash-merge",
             "every stop the local rules keep", "Never migrate in cloud", "scrum:needs-human", "<!-- scrum needs-human -->",
             "**Conflicts** steps then run unchanged",
-            "gh pr list --state all --search", "B set $ID stage=done pr=<url> reason=",  # sync
+            "Run `B cloud-sync`, never `gh pr list` or `gh pr view`", "B set $ID stage=done pr=<url> reason=",  # sync
+            "**Cloud-home tail** (`/trevskills-scrum cloud-home <id>`", "interactive Sync runs the same steps",
             "**Untrusted reason text**", "**Fast-forward main**"):
             self.assertIn(phrase, cloud, phrase)
         self.assertNotIn("B next", cloud)  # dispatch claims through cloud-claim's overlap check, never blind next calls
         self.assertIn("first run **Cloud lane** **Sync**", self.section(text, "## Commands", "## New job"))
         self.assertIn("`cloud`, `cloud-job`", self.section(text, "## Setup", "## Commands"))
         self.assertIn("cloud-sync", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        self.assertIn('"/trevskills-scrum cloud-home <id>"', frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
+        self.assertIn("**`/trevskills-scrum cloud-home <id>`**", self.section(text, "## Commands", "## New job"))
+        sync = cloud[cloud.index("3. **Sync**"):]
+        self.assertNotIn("gh pr list --state", sync)  # B cloud-sync's one REST call replaces the GraphQL lookups
+        self.assertNotIn("gh pr view <number>", sync)
         # The feature text never goes through the shell unquoted, and gh pr (GraphQL) never runs in the cloud job.
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
