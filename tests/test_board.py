@@ -2368,5 +2368,91 @@ class DigestVerifyTest(unittest.TestCase):
         self.assertEqual(out["proposals"], ["onewitharts digest 003 p4"])
 
 
+class MoveRatioTest(unittest.TestCase):
+    """board.py move-ratio: the share of a job's added lines that git marks as moved (SKILL.md Review MOVE_ONLY)."""
+
+    BLOCK = "".join(f"def helper_{i}(value):  # moved helper number {i}\n" for i in range(20))
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "repo"
+        self.root = base / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json"),
+                                           "SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.repo.mkdir()
+        (self.repo / "a.py").write_text("# a\n" + self.BLOCK + "# end a\n")
+        (self.repo / "b.py").write_text("# b\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "a.py", "b.py")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "work")
+        self.job = board.cmd_new(self.root, "Move helpers")
+        board.cmd_set(self.root, self.job, [f"worktree={self.repo}", "base=main"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, files):
+        for rel, text in files.items():
+            (self.repo / rel).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "edit")
+
+    def move(self, extra=""):
+        self.commit({"a.py": "# a\n# end a\n", "b.py": "# b\n" + self.BLOCK + extra})
+
+    def run_cli(self, job=None):
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "move-ratio", job or self.job],
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotIn("Traceback", r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 1, r.stdout)
+        return r.returncode, json.loads(lines[0])
+
+    def test_pure_move_is_ratio_one(self):
+        self.move()
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
+
+    def test_mixed_diff_ratio(self):
+        self.move("".join(f"brand_new_value_{i} = compute_something_fresh({i})\n" for i in range(20)))
+        self.assertEqual(self.run_cli(), (0, {"added": 40, "moved": 20, "ratio": 0.5}))
+
+    def test_ignores_user_color_config(self):
+        self.git("config", "color.diff.newMoved", "magenta")
+        self.git("config", "color.diff.new", "bold cyan")
+        self.git("config", "color.diff.meta", "green")
+        self.git("config", "diff.colorMoved", "no")
+        self.move()
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
+
+    def test_no_added_lines_is_zero(self):
+        self.commit({"a.py": "# a\n# end a\n"})
+        self.assertEqual(self.run_cli(), (0, {"added": 0, "moved": 0, "ratio": 0.0}))
+
+    def test_missing_worktree_errors(self):
+        self.move()
+        cases = {"no worktree": (["worktree="], "no worktree"), "no base": (["base="], "no base"),
+                 "dash base": (["base=--output=/tmp/x"], "bad base"), "git fails": (["base=no-such-branch"], "failed")}
+        for label, (pairs, needle) in cases.items():
+            with self.subTest(label):
+                board.cmd_set(self.root, self.job, [f"worktree={self.repo}", "base=main"])
+                board.cmd_set(self.root, self.job, pairs)
+                code, out = self.run_cli()
+                self.assertEqual(code, 1, out)
+                self.assertFalse(out["ok"])
+                self.assertIn(needle, out["error"])
+        with self.subTest("unknown id"):
+            code, out = self.run_cli("999-no-such-job")
+            self.assertEqual(code, 1, out)
+            self.assertFalse(out["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

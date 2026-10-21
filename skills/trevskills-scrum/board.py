@@ -34,6 +34,8 @@
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
+                                   git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -848,6 +850,35 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)}
 
+
+
+# --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
+# Colours are pinned so the user's git config can't change what is parsed; the meta colour keeps `+++` headers apart.
+MOVE_COLORS = ("color.diff.new=green", "color.diff.newMoved=bold cyan", "color.diff.meta=bold")
+NEW_SGR, MOVED_SGR = b"\x1b[32m+", b"\x1b[1;36m+"
+
+
+def cmd_move_ratio(root: Path, job_id: str) -> dict:
+    """{"added", "moved", "ratio"} for the job worktree's BASE...HEAD diff (ratio = moved / added, 2 decimals, 0.0 when
+    nothing is added); else {"ok": False, "error"}."""
+    try:
+        job = find(read_board(root), check_id(job_id))
+        wt, base = job.get("worktree"), job.get("base")
+        if not wt or not base:
+            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+        if base.startswith("-"):
+            raise ValueError(f"bad base {base!r}")
+        pins = [a for c in MOVE_COLORS for a in ("-c", c)]
+        out = _git(wt, *pins, "diff", "--no-ext-diff", "--color=always", "--color-moved=plain", f"{base}...HEAD", "--")
+        added = moved = 0
+        for line in out.splitlines():
+            if line.startswith(MOVED_SGR):
+                added, moved = added + 1, moved + 1
+            elif line.startswith(NEW_SGR):
+                added += 1
+        return {"added": added, "moved": moved, "ratio": round(moved / added, 2) if added else 0.0}
+    except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": str(e)}
 
 # --- artifacts: what a cloud job may push to scrum-artifacts/<id> (SKILL.md Cloud lane); files are left out whole ---
 ARTIFACT_MAX = 1024 * 1024
@@ -1942,6 +1973,7 @@ def main(argv=None):
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
+    sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -2011,6 +2043,10 @@ def main(argv=None):
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
+    elif a.cmd == "move-ratio":
+        out = cmd_move_ratio(a.dir, a.id)
+        print(json.dumps(out))
+        return 1 if out.get("ok") is False else 0
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":

@@ -40,6 +40,8 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 
 **Fast lane.** When your prompt contains `LANE=fast`, read only spec.md, check.md, the diff, and the changed files the diff touches. Skip the Codex step entirely and write `codex: skipped — fast lane` under Notes. The output format and the blocking rules below are unchanged.
 
+**Move-only refactor.** When your prompt contains `MOVE_ONLY=yes`, the orchestrator measured that nearly every added line is moved code. Run `git -C WORKTREE diff --color=always --color-moved=plain BASE...HEAD` to tell moved lines (bold cyan by default) from the rest. Review only the non-moved hunks in full: the new lines, plus the edges where moved code meets its new surroundings (imports, call sites, names it now resolves). Treat moved lines as checked when they are verbatim; a moved block whose text changed is not moved and is reviewed in full. The Codex step, the output format and the blocking rules are unchanged.
+
 **Look for:**
 - every acceptance criterion actually implemented and actually verified; run the tests yourself if in doubt
 - bugs and missing edge cases
