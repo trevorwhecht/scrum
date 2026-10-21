@@ -16,7 +16,7 @@ class InstallTest(unittest.TestCase):
                 self.assertEqual(self.run_install(home).returncode, 0)
             self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
             self.assertEqual((home / "skills" / "trevskills-e2e").resolve(), ROOT / "skills" / "trevskills-e2e")
-            for lane in ("cloud.md", "roadmap.md", "lilguy.md"):
+            for lane in ("cloud.md", "roadmap.md", "lilguy.md", "runall.md", "debug.md", "bigboy.md"):
                 linked = home / "skills" / "trevskills-scrum" / "lanes" / lane
                 self.assertTrue(linked.is_file(), lane)
                 self.assertEqual(linked.resolve(), ROOT / "skills" / "trevskills-scrum" / "lanes" / lane)
