@@ -2160,6 +2160,10 @@ class HookTest(unittest.TestCase):
 class DigestVerifyTest(unittest.TestCase):
     """board.py digest-verify: a job whose rules-file diff is exactly its cited, queued digest edits needs no human."""
 
+    def test_rules_re_covers_lane_files(self):
+        self.assertTrue(board.RULES_RE.search("skills/trevskills-scrum/lanes/cloud.md"))
+        self.assertIsNone(board.RULES_RE.search("src/lanes/foo.md"))
+
     BUILDER = "# Builder\n\nRule one.\n\nRule two.\n"
     PLANNER = "# Planner\n\nPlan it.\n"
 
@@ -2615,6 +2619,265 @@ class CloudSyncTest(unittest.TestCase):
             code = board.main(["--dir", str(self.root), "cloud-sync"])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out.getvalue()), {"moved": [], "error": "gh: auth required"})
+
+
+class ReviewPlanTest(unittest.TestCase):
+    """board.py review-plan: SKILL.md Review step 2 (incremental vs full, carried-forward files, UI/UX and security skips)."""
+
+    CARRIED = "VERDICT: PASS\nCarried forward from round 1: no blocking findings.\n"
+    UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
+    SEC_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "repo"
+        self.root = self.repo / "scrum"
+        self.wt = base / "wt"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json"),
+                                           "SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        (self.repo / "src").mkdir(parents=True)
+        (self.repo / "src" / "a.py").write_text("a = 1\n")
+        (self.repo / "README.md").write_text("readme\n")
+        self.git(self.repo, "init", "-q", "-b", "main")
+        self.git(self.repo, "add", "src", "README.md")
+        self.git(self.repo, "commit", "-q", "-m", "base")
+        self.job = board.cmd_new(self.root, "Review plan")
+        self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main", "round=1", "stage=review"])
+        self.project("*.html")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def project(self, globs):
+        line = "" if globs is None else f"- UI globs: {globs}\n"
+        (self.root / "project.md").write_text(f"# Project profile\n- Test: none\n{line}- Notes: x\n")
+
+    def commit(self, rel, text):
+        p = self.wt / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        self.git(self.wt, "add", rel)
+        self.git(self.wt, "commit", "-q", "-m", f"edit {rel}")
+        return self.git(self.wt, "rev-parse", "HEAD")
+
+    def rdir(self, n):
+        return self.root / "jobs" / self.job / f"round-{n}"
+
+    def round_one(self, verdicts, head=True):
+        """Round 1 reviewed a src/a.py change; writes its head.txt and review files, then sets round=2."""
+        sha = self.commit("src/a.py", "a = 2\n")
+        d = self.rdir(1)
+        d.mkdir(parents=True, exist_ok=True)
+        if head:
+            (d / "head.txt").write_text(sha + "\n")
+        for role, verdict in verdicts.items():
+            (d / f"review-{role}.md").write_text(f"VERDICT: {verdict}\nstuff\n")
+        board.cmd_set(self.root, self.job, ["round=2"])
+        return sha
+
+    def files(self, n):
+        d = self.rdir(n)
+        return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
+
+    def read(self, n, role):
+        return (self.rdir(n) / f"review-{role}.md").read_text()
+
+    MIXED = {"security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "CHANGES"}
+
+    # --- AC 1 ---
+    def test_review_plan_incremental_carries_forward_pass_reviews(self):
+        since = self.round_one(self.MIXED)
+        self.commit("src/a.py", "a = 3\n")  # the fix touches only a file round 1 saw
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["security", "code"], "since": since})
+        self.assertEqual(self.read(2, "ux"), self.CARRIED)
+        self.assertEqual(self.read(2, "ui"), self.CARRIED)
+        self.assertEqual(self.files(2), ["review-ui.md", "review-ux.md"])  # no security skip file, no UI skip text
+
+    # --- AC 2 ---
+    def assert_full(self, out, n=2):
+        self.assertIsNone(out["since"])
+        for name in self.files(n):
+            self.assertNotIn("Carried forward", (self.rdir(n) / name).read_text())
+
+    def test_review_plan_full_fallback_when_fix_touches_new_file(self):
+        self.round_one(self.MIXED)
+        self.commit("src/b.py", "b = 1\n")
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assert_full(out)
+        self.assertEqual(out["spawn"], ["code"])  # a.py and b.py: no UI file, nothing sensitive
+        self.assertEqual(self.read(2, "ui"), self.UI_SKIP)
+        self.assertEqual(self.read(2, "security"), self.SEC_SKIP)
+
+    def test_review_plan_full_fallback_without_prev_head(self):
+        self.round_one(self.MIXED, head=False)
+        self.commit("src/a.py", "a = 3\n")
+        self.commit("index.html", "<p>x</p>\n")  # UI files: ui and ux run, so nothing but security is skipped
+        with self.subTest("missing head.txt"):
+            out = board.cmd_review_plan(self.root, self.job, incremental=True)
+            self.assert_full(out)
+            self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        with self.subTest("head.txt is not a commit"):
+            (self.rdir(1) / "head.txt").write_text("0123456789abcdef0123456789abcdef01234567\n")
+            out = board.cmd_review_plan(self.root, self.job, incremental=True)
+            self.assert_full(out)
+            self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        with self.subTest("previous review file unreadable"):
+            (self.rdir(1) / "head.txt").write_text(self.git(self.wt, "rev-parse", "HEAD~2") + "\n")
+            (self.rdir(1) / "review-ui.md").write_text("garbage\n")
+            out = board.cmd_review_plan(self.root, self.job, incremental=True)
+            self.assert_full(out)
+            self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+
+    def test_review_plan_full_when_not_incremental(self):
+        self.round_one(self.MIXED)
+        self.commit("src/a.py", "a = 3\n")
+        self.commit("app/api/x.py", "x = 1\n")  # sensitive: security runs
+        board.cmd_set(self.root, self.job, ["round=2"])
+        with self.subTest("no --incremental"):
+            out = board.cmd_review_plan(self.root, self.job)
+            self.assert_full(out)
+            self.assertEqual(out["spawn"], ["security", "code"])
+        with self.subTest("round 1"):
+            board.cmd_set(self.root, self.job, ["round=1"])
+            out = board.cmd_review_plan(self.root, self.job, incremental=True)
+            self.assertIsNone(out["since"])
+            self.assertEqual(out["spawn"], ["security", "code"])
+            self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
+    # --- AC 3 ---
+    def test_review_plan_ui_skip_when_no_ui_files(self):
+        self.commit("src/a.py", "a = 2\n")
+        self.commit("app/api/x.py", "x = 1\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["security", "code"], "since": None})
+        self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+        self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
+    def test_review_plan_ui_runs_when_html_changed(self):
+        self.commit("web/page.html", "<p>x</p>\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_ui_runs_when_globs_none(self):
+        self.commit("src/a.py", "a = 2\n")
+        for globs in ("none", None):
+            with self.subTest(globs=globs):
+                self.project(globs)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+                self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_ui_glob_dir_component(self):
+        self.assertTrue(board.glob_match("src/components/x.py", ["components/"]))
+        self.assertTrue(board.glob_match("components/x.py", ["components/"]))
+        self.assertFalse(board.glob_match("mycomponents/x.py", ["components/"]))
+        self.assertFalse(board.glob_match("src/components", ["components/"]))  # a file, not a directory
+        self.assertTrue(board.glob_match("app/page.tsx", ["app/page.tsx"]))
+        self.assertFalse(board.glob_match("src/app/page.tsx", ["app/page.tsx"]))
+        self.assertTrue(board.glob_match("a/b/style.css", ["*.css"]))
+        self.assertFalse(board.glob_match("a/b/style.scss", ["*.css"]))
+        self.project("*.tsx components/")
+        self.commit("lib/mycomponents/x.py", "x\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["code"])
+        for name in self.files(1):
+            (self.rdir(1) / name).unlink()
+        self.commit("lib/components/y.py", "y\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertFalse((self.rdir(1) / "review-ui.md").exists())
+
+    # --- AC 4 ---
+    def test_review_plan_security_skip_when_no_sensitive_files(self):
+        self.commit("src/a.py", "a = 2\n")
+        self.commit("docs/guide.md", "guide\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["code"], "since": None})
+        self.assertEqual(self.read(1, "security"), self.SEC_SKIP)
+
+    def test_review_plan_security_runs_on_sensitive_paths(self):
+        paths = ["src/Auth/login.py", "app/api/x.py", ".env.local", "pyproject.toml", "middleware.ts",
+                 "lib/SESSION.py", "prisma/schema.prisma", "db/001.SQL", "package-lock.json", "requirements-dev.txt",
+                 "app/users/route.ts", "src/stripe_hooks.py"]
+        for rel in paths:
+            with self.subTest(rel):
+                sec = self.rdir(1) / "review-security.md"
+                if sec.exists():
+                    sec.unlink()
+                self.commit(rel, "x\n")
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out["spawn"], ["security", "code"])
+                self.assertFalse(sec.exists())
+                self.git(self.wt, "rm", "-q", rel)
+                self.git(self.wt, "commit", "-q", "-m", f"drop {rel}")
+        for rel in ("src/routes.py", "src/apix/y.py", "pkg/package.json.bak"):
+            with self.subTest(rel):
+                self.commit(rel, "x\n")
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out["spawn"], ["code"])
+                self.git(self.wt, "rm", "-q", rel)
+                self.git(self.wt, "commit", "-q", "-m", f"drop {rel}")
+
+    # --- AC 5 ---
+    def test_review_plan_unreadable_diff_spawns_all(self):
+        self.commit("src/a.py", "a = 2\n")
+        for pairs in (["base=no-such-branch"], [f"worktree={Path(self.tmp.name) / 'gone'}", "base=main"]):
+            with self.subTest(pairs=pairs):
+                board.cmd_set(self.root, self.job, pairs)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
+                self.assertEqual(self.files(1), [])
+
+    # --- AC 6 ---
+    def test_review_plan_refuses_aborted_or_missing_worktree(self):
+        self.commit("src/a.py", "a = 2\n")
+        with self.subTest("not on the board"):
+            with self.assertRaises(SystemExit):
+                board.cmd_review_plan(self.root, "999-nope")
+        for key in ("worktree", "base"):
+            with self.subTest(f"no {key}"):
+                board.cmd_set(self.root, self.job, [f"{key}="])
+                with self.assertRaises(SystemExit):
+                    board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(self.files(1), [])
+                board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
+        with self.subTest("paused"):
+            board.cmd_pause(self.root, self.job)
+            with self.assertRaises(SystemExit):
+                board.cmd_review_plan(self.root, self.job)
+            self.assertEqual(self.files(1), [])
+        with self.subTest("aborted"):
+            board.cmd_abort(self.root, self.job, False)
+            with self.assertRaises(SystemExit):
+                board.cmd_review_plan(self.root, self.job)
+            self.assertEqual(self.files(1), [])
+
+    # --- AC 7 ---
+    def test_review_plan_cli_prints_json(self):
+        since = self.round_one(self.MIXED)
+        self.commit("src/a.py", "a = 3\n")
+        before = (self.root / "board.json").read_bytes()
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "review-plan", self.job,
+                            "--incremental"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.count("\n"), 1)
+        self.assertEqual(json.loads(r.stdout), {"spawn": ["security", "code"], "since": since})
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "review-plan", self.job],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"spawn": ["code"], "since": None})
+        self.assertEqual((self.root / "board.json").read_bytes(), before)
+
 
 
 class MoveRatioTest(unittest.TestCase):

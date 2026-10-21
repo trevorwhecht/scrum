@@ -3,13 +3,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = "~/.claude/skills/trevskills-scrum/SKILL.md"
+LANE = "~/.claude/skills/trevskills-scrum/lanes/cloud.md"
 
 
 def cloud_lane():
-    text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-    start = text.index("\n## Cloud lane\n")
-    end = text.find("\n## ", start + 1)
-    return text[start:end if end != -1 else len(text)]
+    return (ROOT / "skills" / "trevskills-scrum" / "lanes" / "cloud.md").read_text()
 
 
 class CloudLaunchPromptTest(unittest.TestCase):
@@ -24,11 +22,13 @@ class CloudLaunchPromptTest(unittest.TestCase):
         self.assertFalse("invoke the trevskills-scrum skill fresh" in cloud,
                          "launch prompt still invokes the cached skill: " + prompt)
         steps = ("git -C ~/scrum rev-parse HEAD", "git -C ~/scrum ls-remote origin refs/heads/main",
-                 f"grep -q scrum-artifacts/ {SKILL}", "Read tool", "cloud skill copy is stale. Fix: rerun cloud setup.")
+                 f"grep -q scrum-artifacts/ {LANE}", "Read tool", "cloud skill copy is stale. Fix: rerun cloud setup.")
         for phrase in steps + ("session start", "before New job", "Needs-human"):
             self.assertIn(phrase, prompt, phrase)
         idx = [prompt.index(p) for p in steps]
         self.assertEqual(idx, sorted(idx), "checks out of order: HEAD, marker, Read, stop reason")
+        # The grepped file really holds the marker, so a fresh copy passes the check.
+        self.assertIn("scrum-artifacts/", cloud)
         # The Read instruction names the file on disk again, after the grep.
         self.assertIn(SKILL, prompt[prompt.index(steps[2]) + len(steps[2]):])
         # The prompt sits in a double-quoted bash string on the Mac: nothing in it may expand there.
