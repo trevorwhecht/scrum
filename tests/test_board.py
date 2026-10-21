@@ -144,6 +144,160 @@ class BoardTest(unittest.TestCase):
             self.assertIn("fast|standard|debug|bigboy", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
 
+    # --- ask / answer ---
+    def log_lines(self):
+        p = self.root / "questions.log"
+        return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+    def test_ask_parks_job_with_question_and_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        out = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        want = [{"key": "a", "label": "Approve", "command": f"approve {job_id}"},
+                {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}]
+        self.assertEqual(out, want)
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"], job["question"], job["options"]),
+                         ("needs-human", "Ship it?", "Ship it?", want))
+        self.assertRegex(job["updatedAt"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+    def test_ask_cli_three_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "ask", job_id, "Which?", "--a", f"Approve=approve {job_id}",
+                        "--b", f"Abort=abort {job_id} --requeue", "--c", f"Resume=resume {job_id}"])
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(self.jobs()[0]["options"][2], {"key": "c", "label": "Resume", "command": f"resume {job_id}"})
+        self.assertEqual(len(self.jobs()[0]["options"]), 3)
+
+    def test_ask_accepts_each_command_form(self):
+        job_id = board.cmd_new(self.root, "x")
+        for cmd in ("approve 012-other-job", 'rework 012-other-job "fix the tests"', "abort 012-other-job",
+                    "abort 012-other-job --requeue", "resume 012-other-job", "shell: git status"):
+            with self.subTest(cmd=cmd):
+                out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"])
+                self.assertEqual(out[0]["command"], cmd)
+
+    def test_ask_splits_on_first_equals(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"])
+        self.assertEqual(self.jobs()[0]["options"][0],
+                         {"key": "a", "label": "Rework", "command": f'rework {job_id} "a=b"'})
+
+    def test_ask_rejects_bad_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "First?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        gone = board.cmd_new(self.root, "y")
+        board.cmd_abort(self.root, gone, False)
+        ok = f"B=abort {job_id}"
+        cases = {
+            "unknown command": (job_id, "Q?", [f"Merge=merge {job_id}", ok]),
+            "empty shell": (job_id, "Q?", ["Run=shell:", ok]),
+            "blank shell": (job_id, "Q?", ["Run=shell:   ", ok]),
+            "bad id": (job_id, "Q?", ["Go=approve ../etc", ok]),
+            "empty rework text": (job_id, "Q?", [f'Fix=rework {job_id} ""', ok]),
+            "unquoted rework": (job_id, "Q?", [f"Fix=rework {job_id} text", ok]),
+            "no equals": (job_id, "Q?", [f"approve {job_id}", ok]),
+            "empty label": (job_id, "Q?", [f"=approve {job_id}", ok]),
+            "whitespace label": (job_id, "Q?", [f"   =approve {job_id}", ok]),
+            "one option": (job_id, "Q?", [ok]),
+            "four options": (job_id, "Q?", [ok, ok, ok, ok]),
+            "empty question": (job_id, "  ", [f"A=approve {job_id}", ok]),
+            "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
+        }
+        for name, (jid, q, opts) in cases.items():
+            with self.subTest(name):
+                before = (self.root / "board.json").read_bytes()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_ask(self.root, jid, q, opts)
+                self.assertTrue(str(e.exception.code))
+                self.assertEqual((self.root / "board.json").read_bytes(), before)
+                self.assertEqual(len(self.log_lines()), 1)
+
+    def test_ask_rejects_without_creating_log(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_ask(self.root, job_id, "Q?", [f"Merge=merge {job_id}", f"B=abort {job_id}"])
+        self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_appends_questions_log(self):
+        job_id = board.cmd_new(self.root, "x")
+        opts = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id}"])
+        [line] = self.log_lines()
+        self.assertEqual(set(line), {"date", "project", "job", "question", "options"})
+        self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertEqual(line["project"], Path(self.tmp.name).name)
+        self.assertEqual((line["job"], line["question"]), (job_id, "Ship it?"))
+        self.assertEqual(line["options"], [{"key": "a", "label": "Approve", "command": f"approve {job_id}"},
+                                           {"key": "b", "label": "Abort", "command": f"abort {job_id}"}])
+        self.assertEqual(line["options"], opts)
+
+    def test_ask_twice_overwrites_and_logs_twice(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "One?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Two?", [f"R=resume {job_id}", "S=shell: ls"])
+        job = self.jobs()[0]
+        self.assertEqual((job["question"], job["reason"]), ("Two?", "Two?"))
+        self.assertEqual([o["label"] for o in job["options"]], ["R", "S"])
+        self.assertEqual([l["question"] for l in self.log_lines()], ["One?", "Two?"])
+
+    def test_stage_change_clears_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        job = self.jobs()[0]
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+
+    def test_abort_clears_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_abort(self.root, job_id, False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+
+    def test_set_keeping_needs_human_keeps_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["waiting=asked"])
+        job = self.jobs()[0]
+        self.assertEqual(job["question"], "Q?")
+        self.assertEqual([o["key"] for o in job["options"]], ["a", "b"])
+
+    def test_answer_prints_option_and_logs_pick(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        before = self.jobs()[0]
+        want = {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}
+        self.assertEqual(board.cmd_answer(self.root, job_id, "b"), want)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "answer", job_id, "b"])
+        self.assertEqual(json.loads(buf.getvalue()), want)
+        lines = self.log_lines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(set(lines[1]), {"date", "job", "pick"})
+        self.assertEqual((lines[1]["job"], lines[1]["pick"], lines[2]["pick"]), (job_id, "Abort", "Abort"))
+        after = self.jobs()[0]
+        self.assertEqual((after["stage"], after["question"], after["options"]),
+                         ("needs-human", "Q?", before["options"]))
+
+    def test_answer_refuses_wrong_stage_or_key(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "a")  # spec stage, never asked
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "c")  # not on a 2-option question
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            board.main(["--dir", str(self.root), "answer", job_id, "d"])  # argparse choices
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "a")  # question cleared by the stage change
+        self.assertEqual(len(self.log_lines()), 1)
+
     def test_lane_accepts_bigboy_rejects_epic(self):
         job_id = board.cmd_new(self.root, "x")
         out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=bigboy"],
