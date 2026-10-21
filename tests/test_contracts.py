@@ -485,17 +485,39 @@ class ContractTest(unittest.TestCase):
         for phrase in ("injection", "secrets", "dangerouslySetInnerHTML"):
             self.assertIn(phrase, text, phrase)
 
-    def test_skill_spec_writer_sonnet_when_criteria_present(self):
+    def test_skill_jev_model_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         new_job = self.section(text, "## New job", "## Run all")
-        for phrase in ("## Acceptance criteria", "## Done when", "## Q&A", 'model: "sonnet"'):
+        for phrase in ("jev-gate.py model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
             self.assertIn(phrase, new_job, phrase)
+        self.assertNotIn("## Done when", new_job)
+
+    def test_skill_jev_promote_step(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        resume = self.section(text, "## Resuming the builder", "## Digest")
+        for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"', "builder=local"):
+            self.assertIn(phrase, resume, phrase)
+
+    def test_skill_jev_dupe_step(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for phrase in ("jev-gate.py dupe", "possible dupe of", "always added"):
+            self.assertIn(phrase, text, phrase)
+        self.assertIn("jev-gate.py dupe", self.section(text, "## BigBoy lane", "## Roadmap lane"))
+        self.assertIn("jev-gate.py dupe", self.section(text, "## Approve", "## Migrate"))
+
+    def test_skill_jev_approver_step(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        approve = self.section(text, "## Approve", "## Migrate")
+        for phrase in ("approver_sonnet", "jev-gate.py approver", "schema guard", "timeout 90000"):
+            self.assertIn(phrase, approve, phrase)
 
     def test_skill_jev_gate_additive_only(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
-        for phrase in ("jev-rank.py", "0.7", "never removes", "timeout"):
+        for phrase in ("jev-gate.py", "0.7", "never removes", "timeout"):
             self.assertIn(phrase, review, phrase)
+        self.assertNotIn("jev-rank.py", review)
+        self.assertIn("never approves a merge", text)
 
     def test_skill_e2e_hook(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -817,7 +839,8 @@ class ContractTest(unittest.TestCase):
                        "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
                        "`scrum-level`", "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
-                       "(unanimous)", "branch names", "hashes"):
+                       "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
+                       "Opus-built", "promote", "avg fix rounds"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
@@ -1766,7 +1789,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
                        "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
             self.assertIn(phrase, step3, phrase)
-        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" ${OM:+--model "$OM"} --permission-mode acceptEdits', step3)
+        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step3)
+        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits', step3)
         setup = self.section(text, "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]
