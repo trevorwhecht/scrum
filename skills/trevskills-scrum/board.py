@@ -36,6 +36,9 @@
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
+                                   --incremental) or full review, write round-N's carried-forward or UI/UX and security
+                                   skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
@@ -778,7 +781,7 @@ def cmd_digest_trim(root, digest_id):
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
 # the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
 CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
-RULES_RE = re.compile(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$")
+RULES_RE = re.compile(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$")
 DIGEST_ORDERS_MAX = 6  # up to this many proposals in one file, every application order is tried
 
 
@@ -892,27 +895,112 @@ SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|
 FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
 
 
-def ui_globs(root) -> list[str]:
-    """The `- UI globs:` entries of root/project.md; [] when the line is missing or `none`."""
-    path = Path(root) / "project.md"
-    text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-    m = re.search(r"^\s*-\s*UI globs:[ \t]*(.*)$", text, re.M)
-    globs = m.group(1).split() if m else []
-    return [] if globs == ["none"] else globs
+# --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
+# and skip files before any spawn; behaviour-preserving move of the old prose, so every rule here is SKILL.md's.
+SECURITY_RES = tuple(re.compile(p, re.I) for p in (
+    SENSITIVE_RE.pattern,  # Fast lane sensitive-path regex
+    SCHEMA_RE.pattern,  # Merge schema guard regex
+    ENV_RE.pattern,
+    r"(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|go\.mod"
+    r"|Cargo\.toml)$",  # manifest regex
+    r"(^|/)api/|(^|/)route\.[cm]?[jt]sx?$",  # API regex
+))
+CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n"
+UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
+SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
 
 
-def matches_ui(path: str, globs: list[str]) -> bool:
-    """SKILL.md First-run setup rules: `*.ext` = ends in .ext; `dir/` = has that directory as a component; else exact."""
+def ui_globs(root):
+    """project.md's `- UI globs:` entries; None when the file or line is missing, empty or `none`."""
+    try:
+        text = (Path(root) / "project.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if m := re.match(r"^\s*-\s*UI globs:(.*)$", line):
+            globs = [g.strip("`") for g in m[1].split() if g.strip("`")]
+            return None if not globs or globs == ["none"] else globs
+    return None
+
+
+def glob_match(path, globs):
+    """First-run setup's matching: `*.ext` is a suffix, `dir/` a directory path component, anything else an exact path."""
     for g in globs:
         if g.startswith("*."):
             if path.endswith(g[1:]):
                 return True
         elif g.endswith("/"):
-            if ("/" + path).find("/" + g) != -1:
+            if ("/" + g) in ("/" + path):
                 return True
         elif path == g:
             return True
     return False
+
+
+def _names(wt, *args):
+    """git diff --name-only <args> as a set of paths; None when the diff can't be read."""
+    try:
+        return set(_git(wt, "diff", "--name-only", *args, "--").decode().splitlines())
+    except (ValueError, OSError, UnicodeDecodeError, subprocess.SubprocessError):
+        return None
+
+
+def _incremental_since(prev, wt, base):
+    """(SINCE, round-(N-1) verdicts) when an incremental re-review holds, else None (the full-review fallback)."""
+    try:
+        since = (prev / "head.txt").read_text(encoding="utf-8", errors="replace").strip()
+        if not since or since.startswith("-"):
+            return None
+        _git(wt, "rev-parse", "--verify", "--quiet", f"{since}^{{commit}}")
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+    verdicts = {r: first_word(prev / f"review-{r}.md", ("PASS", "CHANGES")) for r in REVIEWERS}
+    if any(v not in ("PASS", "CHANGES") for v in verdicts.values()):
+        return None  # a re-review would have no findings to check
+    fix, seen = _names(wt, since, "HEAD"), _names(wt, f"{base}...{since}")
+    if fix is None or seen is None or not fix <= seen:
+        return None  # the fix touched a file the earlier reviews never saw
+    return since, verdicts
+
+
+def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
+    """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
+    (incremental) or UI/UX and security skip files (full); never writes board.json."""
+    job = live(read_board(root), check_id(job_id))
+    wt, base = job.get("worktree"), job.get("base")
+    if not wt or not base:
+        raise SystemExit(f"job {job_id} has no {'worktree' if not wt else 'base'} on the board")
+    try:
+        n = int(job.get("round") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 1:
+        raise SystemExit(f"job {job_id} has no round on the board")
+    rd = Path(root) / "jobs" / job_id / f"round-{n}"
+    inc = _incremental_since(rd.parent / f"round-{n - 1}", wt, base) if incremental and n >= 2 \
+        and not base.startswith("-") else None
+    if inc:
+        since, verdicts = inc
+        rd.mkdir(parents=True, exist_ok=True)
+        for r in REVIEWERS:
+            if verdicts[r] == "PASS":
+                (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
+        return {"spawn": [r for r in REVIEWERS if verdicts[r] == "CHANGES"], "since": since}
+    spawn = list(REVIEWERS)
+    files = None if base.startswith("-") else _names(wt, f"{base}...HEAD")
+    if files is not None:
+        skips = {}
+        globs = ui_globs(root)
+        if globs and not any(glob_match(f, globs) for f in files):
+            skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        if not any(rx.search(f) for f in files for rx in SECURITY_RES):
+            skips["security"] = SECURITY_SKIP
+        if skips:
+            rd.mkdir(parents=True, exist_ok=True)
+        for r, text in skips.items():
+            (rd / f"review-{r}.md").write_text(text, encoding="utf-8")
+        spawn = [r for r in REVIEWERS if r not in skips]
+    return {"spawn": spawn, "since": None}
 
 
 def _route_diff(job):
@@ -926,10 +1014,10 @@ def _route_diff(job):
         for line in _git(wt, "diff", "--numstat", f"{base}...HEAD", "--").decode().splitlines():
             a, d, path = line.split("\t", 2)
             rows.append((None, None, path) if a == "-" or d == "-" else (int(a), int(d), path))
-        names = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
     except (ValueError, OSError, subprocess.SubprocessError):  # UnicodeDecodeError is a ValueError
         return None
-    return rows, [n for n in names if n]
+    names = _names(wt, f"{base}...HEAD")
+    return None if names is None else (rows, sorted(n for n in names if n))
 
 
 def _promote_trigger(rows, names, globs):
@@ -941,7 +1029,7 @@ def _promote_trigger(rows, names, globs):
     if len(names) > FAST_MAX_FILES:
         return f"more than {FAST_MAX_FILES} files ({len(names)})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
-                       ("UI file", lambda p: matches_ui(p, globs)), ("sensitive path", SENSITIVE_RE.search)):
+                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
             return f"{label} {path}"
     return None
@@ -2124,6 +2212,9 @@ def main(argv=None):
     cl.add_argument("id")
     cl.add_argument("holder")
     cl.add_argument("--wait", type=int, default=540)
+    rp = sub.add_parser("review-plan")
+    rp.add_argument("id")
+    rp.add_argument("--incremental", action="store_true")
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
@@ -2203,6 +2294,8 @@ def main(argv=None):
         print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
     elif a.cmd == "chain-unlock":
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
+    elif a.cmd == "review-plan":
+        print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
