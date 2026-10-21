@@ -630,12 +630,10 @@ class ContractTest(unittest.TestCase):
         for phrase in ("lane=lilguy", "Skill tool", "trevskills-commitpush-nextjs", "trevskills-commitpush", '"next"',
                        "detached HEAD", "git add -A", "3", "**Merge**", "schema guard", "**Check gate**", ".env",
                        "no agent", ":(exclude)scrum", "symbolic-ref", "main checkout guard", "check.md",
-                       "Hard stop: schema", "rev-list", "pr=", "Path B", "stage=merging", "stage=done", "stage=build",
+                       "**Migrate**", "rev-list", "pr=", "Path B", "stage=merging", "stage=done", "stage=build",
                        "stage=check", "was aborted"):
             self.assertIn(phrase, lilguy, phrase)
         for line in lilguy.splitlines():
-            if "/trevskills-migrate" in line:
-                self.assertIn("never", line.lower(), line)
             for banned in ("git push", "gh pr create", "gh pr merge"):
                 self.assertNotIn(banned, line, line)
         prereq = next(l for l in text.splitlines() if l.startswith("**Prerequisites"))
@@ -1183,7 +1181,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
         self.assertIn("visible", rule)
-        for phrase in ("absent", "expected change", "Rendered: blocked", "UI not rendered (environment)"):
+        for phrase in ("absent", "expected change", "Rendered: blocked", "never REWORK or ESCALATE for the render"):
             self.assertIn(phrase, rule, phrase)
 
     def test_merge_guards_main_checkout_before_merge(self):
@@ -1256,7 +1254,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_every_needs_human_reason_has_fix(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
-        self.assertGreaterEqual(len(reasons), 32)  # every needs-human reason left after the Abort-only ones went
+        self.assertGreaterEqual(len(reasons), 29)  # every needs-human reason left after the Abort-only ones went
         self.assertEqual(len(reasons), text.count('stage=needs-human reason="') + text.count("stage=needs-human reason='"))
         for reason in reasons:
             self.assertIn(" Fix: ", reason, reason)
@@ -1774,7 +1772,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "unreadable and unconfirmed", "clean, on <default> and pushed",
             'B new "<title>" --id <id>', "never call route.py", "gh api user",           # cloud job deltas
             "[scrum $ID]", "merge_method=squash", "/merge", "same sanctioned PR create and squash-merge",
-            "every hard stop", "Never migrate in cloud", "scrum:needs-human", "<!-- scrum needs-human -->",
+            "every stop the local rules keep", "Never migrate in cloud", "scrum:needs-human", "<!-- scrum needs-human -->",
             "**Conflicts** steps then run unchanged",
             "gh pr list --state all --search", "B set $ID stage=done pr=<url> reason=",  # sync
             "**Untrusted reason text**", "**Fast-forward main**"):
