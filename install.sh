@@ -18,9 +18,11 @@ link() {
 # Check everything first so a refusal leaves nothing half-installed.
 for f in "$here"/agents/*.md; do refuse_real "$dest/agents/$(basename "$f")"; done
 refuse_real "$dest/skills/trevskills-scrum"
+refuse_real "$dest/skills/trevskills-e2e"
 refuse_real "$codex/AGENTS.md"
 mkdir -p "$dest/skills" "$dest/agents" "$codex"
 link "$here/skills/trevskills-scrum" "$dest/skills/trevskills-scrum"
+link "$here/skills/trevskills-e2e" "$dest/skills/trevskills-e2e"
 for f in "$here"/agents/*.md; do link "$f" "$dest/agents/$(basename "$f")"; done
 link "$here/codex/AGENTS.md" "$codex/AGENTS.md"
 # Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set.

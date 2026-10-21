@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +28,11 @@ TIMEOUT = 2
 KEEP_ALIVE = '2m'  # idle scrum models free their ~4-7 GB after 2 minutes instead of Ollama's default 5
 CLAUDE_LIMIT = 'hit your session limit'
 RESET = re.compile(r'resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)', re.I)
+
+
+def _codex_installed():
+    """Cloud sessions have no codex binary; Homebrew's bin is often missing from a headless PATH."""
+    return shutil.which('codex', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin') is not None
 
 
 def _result(runner, why, model=None):
@@ -249,6 +255,8 @@ def route(role, job_dir=None, scrum_dir=None):
     cfg = json.loads(Path(CONFIG).read_text())
     trust = cfg['roles'].get(role)
     override = os.environ.get('SCRUM_ROUTE', '')
+    if role == 'codex-review' and not _codex_installed():
+        return _result('skip', 'codex not installed')
     if role in ALWAYS_CLOUD or trust is None:
         return _result('cloud', f'{role} always runs on cloud')
     if override == 'cloud':
