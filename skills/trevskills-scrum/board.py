@@ -4,6 +4,10 @@
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
+  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
+                                   closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
+                                   shell: <cmd>), log it to questions.log
+  board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
                                    no {setup: …} Human setup as a new job, print {"id","feature"}
@@ -41,6 +45,9 @@
                                    skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
+  board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
+                                   Fast lane promotion trigger (or null), whether a PASS round is a clean round, and
+                                   whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -89,6 +96,9 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
+# The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue)?|rework {id} "[^"]+"|shell: \S.*)'
+                            .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 # Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
 # the repo), or its system sound when the clip is missing.
@@ -158,6 +168,10 @@ def locked_board(root):
         path = root / "board.json"
         board = read_board(root)
         yield board
+        for job in board["jobs"]:  # a question lives only while its job waits on Trevor, whoever moved it on
+            if job.get("stage") != "needs-human":
+                job.pop("question", None)
+                job.pop("options", None)
         tmp = path.with_name("board.json.tmp")
         tmp.write_text(json.dumps(board, indent=2) + "\n")
         os.replace(tmp, path)
@@ -889,13 +903,20 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
         return {"ok": False, "error": str(e)}
 
 
+# --- route-check: the Fast lane promotion, Review clean-round and Approve model decisions (SKILL.md), from files ---
+SCHEMA_RE = re.compile(r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$")  # SKILL.md Merge's schema guard
+ENV_RE = re.compile(r"(^|/)\.env")
+SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
+                          r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
+FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
+
+
 # --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
 # and skip files before any spawn; behaviour-preserving move of the old prose, so every rule here is SKILL.md's.
 SECURITY_RES = tuple(re.compile(p, re.I) for p in (
-    r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing"
-    r"|checkout|stripe|webhook|secret|credential",  # Fast lane sensitive-path regex
-    r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$",  # Merge schema guard regex
-    r"(^|/)\.env",
+    SENSITIVE_RE.pattern,  # Fast lane sensitive-path regex
+    SCHEMA_RE.pattern,  # Merge schema guard regex
+    ENV_RE.pattern,
     r"(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|go\.mod"
     r"|Cargo\.toml)$",  # manifest regex
     r"(^|/)api/|(^|/)route\.[cm]?[jt]sx?$",  # API regex
@@ -996,6 +1017,71 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
             (rd / f"review-{r}.md").write_text(text, encoding="utf-8")
         spawn = [r for r in REVIEWERS if r not in skips]
     return {"spawn": spawn, "since": None}
+
+
+def _route_diff(job):
+    """(numstat rows [(added, deleted, path)], changed paths) of base...HEAD in the job's worktree; None when unreadable.
+    added/deleted are None for a binary file."""
+    wt, base = job.get("worktree"), job.get("base")
+    if not wt or not base or base.startswith("-"):
+        return None
+    try:
+        rows = []
+        for line in _git(wt, "diff", "--numstat", f"{base}...HEAD", "--").decode().splitlines():
+            a, d, path = line.split("\t", 2)
+            rows.append((None, None, path) if a == "-" or d == "-" else (int(a), int(d), path))
+    except (ValueError, OSError, subprocess.SubprocessError):  # UnicodeDecodeError is a ValueError
+        return None
+    names = _names(wt, f"{base}...HEAD")
+    return None if names is None else (rows, sorted(n for n in names if n))
+
+
+def _promote_trigger(rows, names, globs):
+    """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
+    if binary := next((p for a, _, p in rows if a is None), None):
+        return f"binary file {binary}"
+    if (lines := sum(a + d for a, d, _ in rows)) > FAST_MAX_LINES:
+        return f"diff over {FAST_MAX_LINES} lines ({lines})"
+    if len(names) > FAST_MAX_FILES:
+        return f"more than {FAST_MAX_FILES} files ({len(names)})"
+    for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
+                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
+        if path := next((p for p in names if hit(p)), None):
+            return f"{label} {path}"
+    return None
+
+
+def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool = False) -> dict:
+    """{"promote", "clean_round", "approver_sonnet"} for the job's latest round. Whatever can't be read counts against
+    the shortcut: an unreadable diff promotes a passed fast job and gives neither a clean round nor a Sonnet approver."""
+    d = Path(root) / "jobs" / check_id(job_id)
+    if not d.is_dir():
+        raise SystemExit(f"no job folder {d}")
+    job = find(read_board(root), job_id)
+    lane = job.get("lane") or "standard"
+    rounds = sorted((int(p.name[6:]) for p in d.iterdir() if p.is_dir() and re.fullmatch(r"round-\d+", p.name)))
+    last_n = rounds[-1] if rounds else 0
+    last = d / f"round-{last_n}"
+    check = first_word(last / "check.md", ("PASS", "FAIL")) if rounds else None
+    reviews_pass = bool(rounds) and all(first_word(last / f"review-{r}.md", ("PASS", "CHANGES")) == "PASS"
+                                        for r in REVIEWERS)
+    diff = _route_diff(job)
+    names = diff[1] if diff else []
+    promote = None
+    if lane == "fast" and check == "FAIL" and check_fails >= 2:
+        promote = "check failed twice"
+    elif lane == "fast" and check == "PASS":
+        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+    spec = d / "spec.md"
+    hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
+        if spec.is_file() else None
+    green = check == "PASS" and reviews_pass and clean_start and diff is not None \
+        and not any(SCHEMA_RE.search(p) for p in names)
+    blocked = any(re.search(r"^Rendered: blocked", f.read_text(encoding="utf-8", errors="replace"), re.M)
+                  for f in last.glob("review-*.md")) if rounds else False
+    clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
+        and not blocked and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
+    return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
@@ -1707,6 +1793,54 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None):
         play(sound(job["stage"]))
 
 
+def questions_log(root, entry):
+    """Append one JSON line to <scrum>/questions.log. Caller holds the board lock, so lines never interleave."""
+    with open(Path(root) / "questions.log", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def cmd_ask(root, job_id, question, options):
+    """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
+    order. Returns the stored option dicts."""
+    question = question.strip()
+    if not question:
+        raise SystemExit("ask needs a question")
+    if not 2 <= len(options) <= 3:
+        raise SystemExit(f"ask needs 2 or 3 options, got {len(options)}")
+    parsed = []
+    for key, raw in zip("abc", options):
+        label, sep, command = raw.partition("=")
+        label, command = label.strip(), command.strip()
+        if not sep or not label:
+            raise SystemExit(f"bad option {raw!r}; expected label=command")
+        if not ASK_COMMAND_RE.fullmatch(command):
+            raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
+                             "abort <id> [--requeue], resume <id>, shell: <command>")
+        parsed.append({"key": key, "label": label, "command": command})
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        was = job["stage"]
+        job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
+        questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                             "question": question, "options": parsed})
+    if was != "needs-human":
+        play(sound("needs-human"))
+    return parsed
+
+
+def cmd_answer(root, job_id, key):
+    """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names."""
+    with locked_board(root) as board:
+        job = find(board, check_id(job_id))
+        if job["stage"] != "needs-human" or not job.get("options"):
+            raise SystemExit(f"job {job_id} has no open question")
+        option = next((o for o in job["options"] if o["key"] == key), None)
+        if option is None:
+            raise SystemExit(f"no option {key!r}; the question offers {', '.join(o['key'] for o in job['options'])}")
+        questions_log(root, {"date": now(), "job": job_id, "pick": option["label"]})
+    return option
+
+
 def cmd_sync(root, job_id):
     d = Path(root) / "jobs" / check_id(job_id)
     if not d.is_dir():
@@ -2229,6 +2363,15 @@ def main(argv=None):
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
+    ak = sub.add_parser("ask")
+    ak.add_argument("id")
+    ak.add_argument("question")
+    ak.add_argument("--a", required=True, metavar="LABEL=COMMAND")
+    ak.add_argument("--b", required=True, metavar="LABEL=COMMAND")
+    ak.add_argument("--c", metavar="LABEL=COMMAND")
+    an = sub.add_parser("answer")
+    an.add_argument("id")
+    an.add_argument("key", choices=("a", "b", "c"))
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("cloud-claim").add_argument("n", type=int)
     ba = sub.add_parser("backlog-add")
@@ -2264,6 +2407,10 @@ def main(argv=None):
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
     sub.add_parser("move-ratio").add_argument("id")
+    rc = sub.add_parser("route-check")
+    rc.add_argument("id")
+    rc.add_argument("--check-fails", type=int, default=0)
+    rc.add_argument("--clean-start", action="store_true")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -2307,6 +2454,10 @@ def main(argv=None):
         cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
+    elif a.cmd == "ask":
+        cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None])
+    elif a.cmd == "answer":
+        print(json.dumps(cmd_answer(a.dir, a.id, a.key)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
     elif a.cmd == "cloud-claim":
@@ -2341,6 +2492,8 @@ def main(argv=None):
         out = cmd_move_ratio(a.dir, a.id)
         print(json.dumps(out))
         return 1 if out.get("ok") is False else 0
+    elif a.cmd == "route-check":
+        print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":

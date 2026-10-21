@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
 files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done,
-pause, resume/play). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees,
+pause, resume/play, answer). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees,
 and every 10 minutes, while a project has a job in stage cloud, board.py cloud-sync (starting cloud-home where it must).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
@@ -28,7 +28,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fnmatch, hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fnmatch, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -195,6 +195,79 @@ def resume_refusal(root, job):
         return LILGUY_RESUME
     blocker = job.get("parent") and board.resume_blocker(root, job["id"])
     return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
+
+
+def approve_job(project, root, job_id, migrated=False):
+    """The Approve & merge button, and an `approve` answer."""
+    note = " — Trevor confirms /trevskills-migrate has already been run for this job." if migrated else ""
+    spawn(project, root, job_id, "approve", f"/trevskills-scrum approve {job_id}{note}")
+
+
+def rework_job(project, root, job_id, feedback):
+    """The Send back button, and a `rework` answer."""
+    feedback = board.clean(feedback or "")
+    if not feedback:
+        raise SystemExit("feedback is empty")
+    spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
+
+
+def abort_job(project, root, job_id, requeue):
+    """The Abort job button, and an `abort` answer: stop its run, then mark it aborted."""
+    stop(project, job_id)
+    board.cmd_abort(root, job_id, requeue)
+    return 200, {"id": job_id, "stage": "aborted"}
+
+
+def option_command(command):
+    """(verb, arg) for a closed-question option's command (board.py ask), or None when it is none of
+    approve/rework/abort/resume/shell:. arg is the rework text, the abort requeue flag or the shell command."""
+    if not isinstance(command, str):
+        return None
+    if command.startswith("shell:"):  # passed on to the resumed session as text; never run here
+        cmd = command[len("shell:"):].strip()
+        return ("shell", cmd) if cmd else None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) == 2 and words[0] in ("approve", "resume"):
+        return words[0], None
+    if len(words) == 3 and words[0] == "rework" and board.clean(words[2]):
+        return "rework", words[2]
+    if len(words) in (2, 3) and words[0] == "abort" and words[2:] in ([], ["--requeue"]):
+        return "abort", words[2:] == ["--requeue"]
+    return None
+
+
+def answer_job(project, root, job, jobs, key):
+    """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
+    records the pick; the command it returns runs through the same helpers as the matching button, on this job."""
+    opts = job.get("options") if job else None
+    opt = next((o for o in opts or [] if isinstance(o, dict) and isinstance(key, str) and o.get("key") == key), None)
+    if not job or job["stage"] != "needs-human" or running(project, job["id"]) or not opt:
+        return 409, {"error": "job isn't waiting on that answer, or is already running"}
+    if not option_command(opt.get("command")):
+        return 409, {"error": f"unknown option command: {opt.get('command')}"}
+    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(root, job)):
+        return 409, {"error": refusal}
+    job_id = job["id"]
+    picked = board.cmd_answer(root, job_id, key)
+    parsed = option_command(picked.get("command"))
+    if not parsed:
+        return 409, {"error": f"unknown option command: {picked.get('command')}"}
+    verb, arg = parsed
+    if verb == "abort":
+        return abort_job(project, root, job_id, arg)
+    if verb == "approve":
+        approve_job(project, root, job_id)
+    elif verb == "rework":
+        rework_job(project, root, job_id, arg)
+    elif verb == "resume":
+        resume_job(project, root, job, jobs)
+    else:
+        note = f'Trevor picked "{picked.get("label")}": run {arg}, then continue'
+        spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}")
+    return 202, {"id": job_id, "action": "answer", "command": verb}
 
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
@@ -2174,7 +2247,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -2240,9 +2313,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "ask":
             return ask_claude(project, root, job_id)
         if action == "abort":
-            stop(project, job_id)
-            board.cmd_abort(root, job_id, bool(body.get("requeue")))
-            return 200, {"id": job_id, "stage": "aborted"}
+            return abort_job(project, root, job_id, bool(body.get("requeue")))
         if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
             ids = board.cmd_pause(root, job_id)
             for i in ids:
@@ -2256,6 +2327,8 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": new_id, "reopened_from": job_id}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
+        if action == "answer":
+            return answer_job(project, root, job, jobs, body.get("key"))
         if action == "resume":  # only a job stopped for a reason whose card offers Resume (board.RESUMABLE)
             if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.RESUMABLE) \
                     or running(project, job_id):
@@ -2267,8 +2340,7 @@ class Handler(BaseHTTPRequestHandler):
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}
         if action == "approve":
-            note = " — Trevor confirms /trevskills-migrate has already been run for this job." if body.get("migrated") else ""
-            spawn(project, root, job_id, action, f"/trevskills-scrum approve {job_id}{note}")
+            approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
             note = board.clean(body.get("feedback") or "")
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
@@ -2277,10 +2349,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "Discussion opened in a new Terminal window.")])
             return code, {"id": job_id, **obj} if code == 200 else obj
         else:
-            feedback = board.clean(body.get("feedback") or "")
-            if not feedback:
-                raise SystemExit("feedback is empty")
-            spawn(project, root, job_id, action, f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
+            rework_job(project, root, job_id, body.get("feedback"))
         return 202, {"id": job_id, "action": action}
 
 

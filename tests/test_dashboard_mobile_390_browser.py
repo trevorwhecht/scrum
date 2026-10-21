@@ -20,7 +20,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
   try { browser = await chromium.launch(); } catch (e) { console.log(JSON.stringify({skip: "chromium failed to launch: " + String(e.message).split("\n")[0]})); return; }
   try {
     const mode = process.env.MODE, wide = mode === "desktop";
-    const page = await browser.newPage({viewport: wide ? {width: 1280, height: 800} : {width: 390, height: 844}});
+    const page = await browser.newPage({viewport: wide ? {width: 1280, height: 800} : {width: +process.env.WIDTH || 390, height: 844}});
     await page.goto(process.env.DASH_URL);
     await page.waitForSelector(".card[data-key]");
     if (mode === "header") {
@@ -32,6 +32,16 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         children: [...document.querySelector("header").children].filter(el => el.getClientRects().length)
           .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right}; })}));
       console.log(JSON.stringify(got));
+      return;
+    }
+    if (mode === "options") {  // option buttons on the card, then in the modal (opened by clicking the card's title)
+      const boxes = sel => page.evaluate(s => [...document.querySelectorAll(s)].map(b => {
+        const r = b.getBoundingClientRect(); return {text: b.textContent, top: r.top, left: r.left, right: r.right, bottom: r.bottom, height: r.height};
+      }), sel);
+      const card = await boxes(".card .answer button");
+      await page.click(".card[data-key] .title");
+      await page.waitForFunction(() => document.getElementById("viewer").open && document.querySelector("#actions .answer button"));
+      console.log(JSON.stringify({card, modal: await boxes("#actions .answer button")}));
       return;
     }
     await page.click(".card[data-key]");
@@ -68,7 +78,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         for f in FILES:
             (job / f).write_text(f"# {f}\n")
         (home / ".claude.json").write_text("{}")
-        (repo / "scrum" / "board.json").write_text(json.dumps({"jobs": [
+        self.board_path = repo / "scrum" / "board.json"
+        self.board_path.write_text(json.dumps({"jobs": [
             {"id": "007-human", "title": "Needs a human", "stage": "needs-human", "reason": "review: CHANGES after 3 rounds",
              "worktree": str(repo), "tty": "ttys001", "files": FILES}]}))
         registry = Path(self.tmp.name) / "projects.json"
@@ -86,8 +97,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
-    def browse(self, mode):
-        env = dict(os.environ, MODE=mode, DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
+    def browse(self, mode, width=None):
+        env = dict(os.environ, MODE=mode, WIDTH=str(width or ""), DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
         if "NODE_PATH" not in env:
             npm = shutil.which("npm")
             root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip() if npm else ""
@@ -135,6 +146,25 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertEqual(m["position"], "static", m)
         self.assertGreater(float(m["marginLeft"].removesuffix("px")), 0, m)  # margin-left:auto pushes the ✕ right
         self.assertAlmostEqual(m["close"]["right"], m["tabsRight"] - 10, delta=1, msg=m)  # 10 px padding after the ✕
+
+    def test_option_buttons_390px(self):
+        board = json.loads(self.board_path.read_text())
+        board["jobs"] = [{**board["jobs"][0], "id": "008-asked", "question": "Which way?", "reason": "blocked: pick one",
+                          "options": [{"key": "a", "label": "Ship it", "command": "approve 008-asked"},
+                                      {"key": "b", "label": "Send it back with a much longer label", "command": 'rework 008-asked "again"'},
+                                      {"key": "c", "label": "Drop it", "command": "abort 008-asked"}]}]
+        self.board_path.write_text(json.dumps(board))
+        for width in (390, 1440):
+            got = self.browse("options", width)
+            for where in ("card", "modal"):
+                with self.subTest(width=width, where=where):
+                    boxes = got[where]
+                    self.assertEqual([b["text"] for b in boxes], ["Ship it", "Send it back with a much longer label", "Drop it"])
+                    for i, a in enumerate(boxes):
+                        self.assertGreaterEqual(a["height"], 44, a)
+                        for b in boxes[i + 1:]:
+                            overlap = a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]
+                            self.assertFalse(overlap, (a, b))
 
 
 if __name__ == "__main__":

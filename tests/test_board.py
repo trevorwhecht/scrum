@@ -144,6 +144,160 @@ class BoardTest(unittest.TestCase):
             self.assertIn("fast|standard|debug|bigboy", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
 
+    # --- ask / answer ---
+    def log_lines(self):
+        p = self.root / "questions.log"
+        return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+    def test_ask_parks_job_with_question_and_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        out = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        want = [{"key": "a", "label": "Approve", "command": f"approve {job_id}"},
+                {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}]
+        self.assertEqual(out, want)
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"], job["question"], job["options"]),
+                         ("needs-human", "Ship it?", "Ship it?", want))
+        self.assertRegex(job["updatedAt"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+
+    def test_ask_cli_three_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "ask", job_id, "Which?", "--a", f"Approve=approve {job_id}",
+                        "--b", f"Abort=abort {job_id} --requeue", "--c", f"Resume=resume {job_id}"])
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(self.jobs()[0]["options"][2], {"key": "c", "label": "Resume", "command": f"resume {job_id}"})
+        self.assertEqual(len(self.jobs()[0]["options"]), 3)
+
+    def test_ask_accepts_each_command_form(self):
+        job_id = board.cmd_new(self.root, "x")
+        for cmd in ("approve 012-other-job", 'rework 012-other-job "fix the tests"', "abort 012-other-job",
+                    "abort 012-other-job --requeue", "resume 012-other-job", "shell: git status"):
+            with self.subTest(cmd=cmd):
+                out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"])
+                self.assertEqual(out[0]["command"], cmd)
+
+    def test_ask_splits_on_first_equals(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"])
+        self.assertEqual(self.jobs()[0]["options"][0],
+                         {"key": "a", "label": "Rework", "command": f'rework {job_id} "a=b"'})
+
+    def test_ask_rejects_bad_options(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "First?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        gone = board.cmd_new(self.root, "y")
+        board.cmd_abort(self.root, gone, False)
+        ok = f"B=abort {job_id}"
+        cases = {
+            "unknown command": (job_id, "Q?", [f"Merge=merge {job_id}", ok]),
+            "empty shell": (job_id, "Q?", ["Run=shell:", ok]),
+            "blank shell": (job_id, "Q?", ["Run=shell:   ", ok]),
+            "bad id": (job_id, "Q?", ["Go=approve ../etc", ok]),
+            "empty rework text": (job_id, "Q?", [f'Fix=rework {job_id} ""', ok]),
+            "unquoted rework": (job_id, "Q?", [f"Fix=rework {job_id} text", ok]),
+            "no equals": (job_id, "Q?", [f"approve {job_id}", ok]),
+            "empty label": (job_id, "Q?", [f"=approve {job_id}", ok]),
+            "whitespace label": (job_id, "Q?", [f"   =approve {job_id}", ok]),
+            "one option": (job_id, "Q?", [ok]),
+            "four options": (job_id, "Q?", [ok, ok, ok, ok]),
+            "empty question": (job_id, "  ", [f"A=approve {job_id}", ok]),
+            "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
+        }
+        for name, (jid, q, opts) in cases.items():
+            with self.subTest(name):
+                before = (self.root / "board.json").read_bytes()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_ask(self.root, jid, q, opts)
+                self.assertTrue(str(e.exception.code))
+                self.assertEqual((self.root / "board.json").read_bytes(), before)
+                self.assertEqual(len(self.log_lines()), 1)
+
+    def test_ask_rejects_without_creating_log(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_ask(self.root, job_id, "Q?", [f"Merge=merge {job_id}", f"B=abort {job_id}"])
+        self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_appends_questions_log(self):
+        job_id = board.cmd_new(self.root, "x")
+        opts = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id}"])
+        [line] = self.log_lines()
+        self.assertEqual(set(line), {"date", "project", "job", "question", "options"})
+        self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertEqual(line["project"], Path(self.tmp.name).name)
+        self.assertEqual((line["job"], line["question"]), (job_id, "Ship it?"))
+        self.assertEqual(line["options"], [{"key": "a", "label": "Approve", "command": f"approve {job_id}"},
+                                           {"key": "b", "label": "Abort", "command": f"abort {job_id}"}])
+        self.assertEqual(line["options"], opts)
+
+    def test_ask_twice_overwrites_and_logs_twice(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "One?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Two?", [f"R=resume {job_id}", "S=shell: ls"])
+        job = self.jobs()[0]
+        self.assertEqual((job["question"], job["reason"]), ("Two?", "Two?"))
+        self.assertEqual([o["label"] for o in job["options"]], ["R", "S"])
+        self.assertEqual([l["question"] for l in self.log_lines()], ["One?", "Two?"])
+
+    def test_stage_change_clears_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        job = self.jobs()[0]
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+
+    def test_abort_clears_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_abort(self.root, job_id, False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+
+    def test_set_keeping_needs_human_keeps_question(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["waiting=asked"])
+        job = self.jobs()[0]
+        self.assertEqual(job["question"], "Q?")
+        self.assertEqual([o["key"] for o in job["options"]], ["a", "b"])
+
+    def test_answer_prints_option_and_logs_pick(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        before = self.jobs()[0]
+        want = {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}
+        self.assertEqual(board.cmd_answer(self.root, job_id, "b"), want)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "answer", job_id, "b"])
+        self.assertEqual(json.loads(buf.getvalue()), want)
+        lines = self.log_lines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(set(lines[1]), {"date", "job", "pick"})
+        self.assertEqual((lines[1]["job"], lines[1]["pick"], lines[2]["pick"]), (job_id, "Abort", "Abort"))
+        after = self.jobs()[0]
+        self.assertEqual((after["stage"], after["question"], after["options"]),
+                         ("needs-human", "Q?", before["options"]))
+
+    def test_answer_refuses_wrong_stage_or_key(self):
+        job_id = board.cmd_new(self.root, "x")
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "a")  # spec stage, never asked
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "c")  # not on a 2-option question
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            board.main(["--dir", str(self.root), "answer", job_id, "d"])  # argparse choices
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        with self.assertRaises(SystemExit):
+            board.cmd_answer(self.root, job_id, "a")  # question cleared by the stage change
+        self.assertEqual(len(self.log_lines()), 1)
+
     def test_lane_accepts_bigboy_rejects_epic(self):
         job_id = board.cmd_new(self.root, "x")
         out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=bigboy"],
@@ -2964,6 +3118,346 @@ class MoveRatioTest(unittest.TestCase):
             code, out = self.run_cli("999-no-such-job")
             self.assertEqual(code, 1, out)
             self.assertFalse(out["ok"])
+
+
+class RouteCheckTest(unittest.TestCase):
+    """board.py route-check: the Fast lane promotion, Review clean-round and Approve model decisions."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root = base / "scrum"
+        self.wt = base / "wt"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.wt.mkdir()
+        (self.wt / "README.md").write_text("readme\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "README.md")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "work")
+        self.job = board.cmd_new(self.root, "Route me")
+        self.jd = self.root / "jobs" / self.job
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
+        (self.root / "project.md").write_text("# Project profile\n- Test: none\n- UI globs: *.html components/ app/page.tsx\n")
+        self.spec("none")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, files):
+        for rel, text in files.items():
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_bytes(text) if isinstance(text, bytes) else (self.wt / rel).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change")
+
+    def spec(self, hard):
+        (self.jd / "spec.md").write_text(f"# Spec\nUI surface: no\nHard stops: {hard}\nLane: standard\n")
+
+    def round(self, n, check="PASS", changes=()):
+        d = self.jd / f"round-{n}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "check.md").write_text(f"CHECK: {check}\n")
+        for r in ("security", "ux", "ui", "code"):
+            (d / f"review-{r}.md").write_text("VERDICT: CHANGES\n" if r in changes else "VERDICT: PASS\nok\n")
+
+    def fast(self):
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+
+    def route(self, **kw):
+        return board.cmd_route_check(self.root, self.job, **kw)
+
+    def promote(self, files, **kw):
+        self.fast()
+        self.commit(files)
+        self.round(1)
+        return self.route(**kw)["promote"]
+
+    # --- CLI ---
+    def test_route_check_cli_prints_three_keys(self):
+        self.commit({"src/util.py": "x = 1\n"})
+        self.round(1)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "route-check", self.job, "--clean-start"])
+        self.assertIn(code, (0, None))
+        self.assertEqual(json.loads(out.getvalue()), {"promote": None, "clean_round": True, "approver_sonnet": True})
+        self.assertEqual(out.getvalue().count("\n"), 1)
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", self.job,
+                            "--check-fails", "2"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"promote": None, "clean_round": False, "approver_sonnet": False})
+
+    def test_route_check_unknown_job_fails(self):
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", "999-nope"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("999-nope", r.stderr)
+        (self.root / "jobs" / "998-gone").mkdir()
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", "998-gone"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no job '998-gone' on the board", r.stderr)
+        other = board.cmd_new(self.root, "Folder gone")
+        (self.root / "jobs" / other).rmdir()
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", other],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no job folder", r.stderr)
+
+    # --- promotion triggers ---
+    def test_route_check_promote_null_when_not_fast(self):
+        self.commit({"src/auth.py": "x\n" * 200})
+        self.round(1)
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_promote_null_when_small_and_plain(self):
+        self.assertIsNone(self.promote({"src/util.py": "x = 1\n"}))
+
+    def test_route_check_promotes_on_binary(self):
+        self.assertEqual(self.promote({"img/logo.bin": b"\x00\x01\x02\xff" * 10}), "binary file img/logo.bin")
+
+    def test_route_check_promotes_on_over_100_lines(self):
+        self.assertEqual(self.promote({"src/a.py": "x\n" * 60, "src/b.py": "y\n" * 41}), "diff over 100 lines (101)")
+
+    def test_route_check_promotes_on_more_than_3_files(self):
+        self.assertEqual(self.promote({f"src/f{i}.py": "x\n" for i in range(4)}), "more than 3 files (4)")
+
+    def test_route_check_boundaries_stay_fast(self):
+        self.assertIsNone(self.promote({"src/a.py": "x\n" * 50, "src/b.py": "y\n" * 25, "src/c.py": "z\n" * 25}))
+
+    def test_route_check_promotes_on_schema_path(self):
+        self.assertEqual(self.promote({"prisma/schema.prisma": "model A {}\n"}), "schema path prisma/schema.prisma")
+        self.commit({"db/init.sql": "select 1;\n"})
+        self.assertEqual(self.route()["promote"], "schema path db/init.sql")
+
+    def test_route_check_promotes_on_env_file(self):
+        self.assertEqual(self.promote({".env.example": "A=1\n"}), "env file .env.example")
+
+    def test_route_check_promotes_on_ui_file(self):
+        self.assertEqual(self.promote({"web/index.html": "<p>\n"}), "UI file web/index.html")
+
+    def test_route_check_promotes_on_ui_directory_and_exact_path(self):
+        self.assertEqual(self.promote({"src/components/x.py": "x\n"}), "UI file src/components/x.py")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"app/page.tsx": "x\n"})
+        self.assertEqual(self.route()["promote"], "UI file app/page.tsx")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"src/app/page.tsx": "x\n", "mycomponents/y.py": "y\n"})
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_ui_globs_none_matches_nothing(self):
+        (self.root / "project.md").write_text("- UI globs: none\n")
+        self.assertIsNone(self.promote({"web/index.html": "<p>\n"}))
+        (self.root / "project.md").write_text("- Test: none\n")
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_promotes_on_sensitive_path(self):
+        self.assertEqual(self.promote({"src/lib/Session.py": "x\n"}), "sensitive path src/lib/Session.py")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"src/middleware.ts": "x\n"})
+        self.assertEqual(self.route()["promote"], "sensitive path src/middleware.ts")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"src/lib/middlewareUtils/format.py": "x\n"})
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_trigger_order(self):
+        # binary before size, size before file count, count before paths, schema before env/UI/sensitive
+        self.assertEqual(self.promote({"a.bin": b"\x00\xff", "src/a.py": "x\n" * 200}), "binary file a.bin")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({**{f"f{i}.py": "x\n" for i in range(5)}, "big.py": "x\n" * 200})
+        self.assertEqual(self.route()["promote"], "diff over 100 lines (205)")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"x/auth.py": "x\n", "x.html": "x\n", ".env": "A=1\n", "m.sql": "s\n"})
+        self.assertEqual(self.route()["promote"], "more than 3 files (4)")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"x/auth.py": "x\n", "x.html": "x\n", "m.sql": "s\n"})
+        self.assertEqual(self.route()["promote"], "schema path m.sql")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"x/auth.py": "x\n", "x.html": "x\n", ".env": "A=1\n"})
+        self.assertEqual(self.route()["promote"], "env file .env")
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"x/auth.py": "x\n", "x.html": "x\n"})
+        self.assertEqual(self.route()["promote"], "UI file x.html")
+
+    # --- 2nd check failure ---
+    def test_route_check_promotes_on_second_check_fail(self):
+        self.fast()
+        self.commit({"src/util.py": "x\n"})
+        self.round(1, check="FAIL")
+        self.assertEqual(self.route(check_fails=2)["promote"], "check failed twice")
+        self.assertEqual(self.route(check_fails=3)["promote"], "check failed twice")
+
+    def test_route_check_first_fail_does_not_promote(self):
+        self.fast()
+        self.commit({"src/auth.py": "x\n" * 200})
+        self.round(1, check="FAIL")
+        self.assertIsNone(self.route(check_fails=1)["promote"])
+        self.assertIsNone(self.route()["promote"])
+        (self.jd / "round-1" / "check.md").write_text("garbage\n")
+        self.assertIsNone(self.route(check_fails=2)["promote"])
+        (self.jd / "round-1" / "check.md").unlink()
+        self.assertIsNone(self.route(check_fails=2)["promote"])
+
+    def test_route_check_uses_highest_round(self):
+        self.fast()
+        self.commit({"src/util.py": "x\n"})
+        self.round(1)
+        self.round(10, check="FAIL")
+        self.round(2)
+        self.assertEqual(self.route(check_fails=2)["promote"], "check failed twice")
+
+    # --- clean round ---
+    def clean_setup(self, files=None):
+        self.commit(files or {"src/util.py": "x = 1\n"})
+        self.round(1)
+
+    def test_route_check_clean_round_true(self):
+        self.clean_setup()
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+        board.cmd_set(self.root, self.job, ["lane=standard"])
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_lane(self):
+        self.clean_setup()
+        for lane in ("fast", "debug", "bigboy"):
+            board.cmd_set(self.root, self.job, [f"lane={lane}"])
+            self.assertFalse(self.route(clean_start=True)["clean_round"], lane)
+
+    def test_route_check_clean_round_false_round_2(self):
+        self.clean_setup()
+        self.round(2)
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_no_round(self):
+        self.commit({"src/util.py": "x = 1\n"})
+        self.assertEqual(self.route(clean_start=True), {"promote": None, "clean_round": False, "approver_sonnet": False})
+
+    def test_route_check_clean_round_false_check_fail(self):
+        self.commit({"src/util.py": "x = 1\n"})
+        self.round(1, check="FAIL")
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_review_changes(self):
+        self.commit({"src/util.py": "x = 1\n"})
+        self.round(1, changes=("ux",))
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+        self.round(1)
+        (self.jd / "round-1" / "review-code.md").unlink()
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_rendered_blocked(self):
+        self.clean_setup()
+        (self.jd / "round-1" / "review-ui.md").write_text("VERDICT: PASS\nRendered: blocked — no Chrome\n")
+        out = self.route(clean_start=True)
+        self.assertFalse(out["clean_round"])
+        self.assertTrue(out["approver_sonnet"])
+
+    def test_route_check_clean_round_false_schema_path(self):
+        self.clean_setup({"prisma/migrations/1/migration.sql": "x\n"})
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_env_path(self):
+        self.clean_setup({"config/.env.local": "A=1\n"})
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_sensitive_path(self):
+        self.clean_setup({"src/Billing/invoice.py": "x\n"})
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_ignores_ui_and_size(self):
+        self.clean_setup({**{f"web/p{i}.html": "<p>\n" * 50 for i in range(5)}})
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_hard_stops(self):
+        self.clean_setup()
+        for hard in ("schema", "none, schema", ""):
+            self.spec(hard)
+            self.assertFalse(self.route(clean_start=True)["clean_round"], hard)
+        self.spec("  none  ")
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+        (self.jd / "spec.md").write_text("# Spec\nUI surface: no\nLane: standard\n")
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
+
+    def test_route_check_clean_round_false_no_clean_start(self):
+        self.clean_setup()
+        self.assertFalse(self.route()["clean_round"])
+
+    def test_route_check_missing_spec_not_clean(self):
+        self.clean_setup()
+        (self.jd / "spec.md").unlink()
+        out = self.route(clean_start=True)
+        self.assertFalse(out["clean_round"])
+        self.assertTrue(out["approver_sonnet"])
+
+    # --- approver model ---
+    def test_route_check_approver_sonnet_true_on_round_2(self):
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.spec("schema")
+        self.commit({"src/auth.py": "x\n" * 200})
+        self.round(1, check="FAIL", changes=("code",))
+        self.round(2)
+        out = self.route(clean_start=True)
+        self.assertTrue(out["approver_sonnet"])
+        self.assertFalse(out["clean_round"])
+
+    def test_route_check_approver_sonnet_false_on_schema_path(self):
+        self.commit({"src/schema.sql": "x\n"})
+        self.round(1)
+        self.assertFalse(self.route(clean_start=True)["approver_sonnet"])
+
+    def test_route_check_approver_sonnet_false_without_clean_start(self):
+        self.commit({"src/util.py": "x\n"})
+        self.round(1)
+        self.assertFalse(self.route()["approver_sonnet"])
+
+    def test_route_check_approver_sonnet_false_on_review_changes(self):
+        self.commit({"src/util.py": "x\n"})
+        self.round(1, changes=("security",))
+        self.assertFalse(self.route(clean_start=True)["approver_sonnet"])
+
+    def test_route_check_approver_sonnet_false_on_check_fail(self):
+        self.commit({"src/util.py": "x\n"})
+        self.round(1, check="FAIL")
+        self.assertFalse(self.route(clean_start=True)["approver_sonnet"])
+
+    # --- can't tell ---
+    def test_route_check_unreadable_diff_is_conservative(self):
+        self.commit({"src/util.py": "x\n"})
+        self.round(1)
+        want_fast = {"promote": "diff unreadable", "clean_round": False, "approver_sonnet": False}
+        want_std = {"promote": None, "clean_round": False, "approver_sonnet": False}
+        for pairs in (["base=nosuchbranch"], ["base=-p"], ["base="], ["worktree=", "base=main"]):
+            board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "lane=standard", *pairs])
+            self.assertEqual(self.route(clean_start=True), want_std, pairs)
+            board.cmd_set(self.root, self.job, ["lane=fast"])
+            self.assertEqual(self.route(clean_start=True), want_fast, pairs)
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=nosuchbranch", "lane=fast"])
+        self.round(1, check="FAIL")
+        self.assertIsNone(self.route(clean_start=True)["promote"])
+        self.assertEqual(self.route(check_fails=2)["promote"], "check failed twice")
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", self.job],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), want_std)
+
+    def test_ui_globs_and_glob_match(self):
+        self.assertEqual(board.ui_globs(self.root), ["*.html", "components/", "app/page.tsx"])
+        (self.root / "project.md").write_text("- UI globs: none\n")
+        self.assertIsNone(board.ui_globs(self.root))
+        (self.root / "project.md").unlink()
+        self.assertIsNone(board.ui_globs(self.root))
+        globs = ["*.tsx", "components/", "app/layout.ts"]
+        for path in ("a.tsx", "src/x/b.tsx", "components/x.py", "src/components/y/z.py", "app/layout.ts"):
+            self.assertTrue(board.glob_match(path, globs), path)
+        for path in ("a.ts", "mycomponents/x.py", "src/app/layout.ts", "app/layout.js", "components"):
+            self.assertFalse(board.glob_match(path, globs), path)
 
 
 if __name__ == "__main__":

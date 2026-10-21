@@ -656,6 +656,130 @@ class ServeTest(unittest.TestCase):
         self.assertIn("abort me", [i["text"] for i in self.serve.board.backlog_items(self.root) if not i["done"]])
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/abort", {})[0], 400)  # already aborted
 
+    # --- /answer: a needs-human job's closed question (board.py ask) ---
+    def asked(self, *commands, **fields):
+        """A needs-human job whose options a, b, c carry these commands. Returns its id."""
+        job_id = self.serve.board.cmd_new(self.root, "Asked")
+        opts = [{"key": k, "label": f"Option {k}", "command": c} for k, c in zip("abc", commands)]
+        self.edit_job(job_id, **{"stage": "needs-human", "reason": "blocked: pick one. Fix: click an option.",
+                                 "question": "Which way?", "options": opts, **fields})
+        return job_id
+
+    def answer(self, job_id, body, picked=None):
+        """POST /answer with cmd_answer, spawn, stop and cmd_abort patched. Returns (status, body, mocks)."""
+        b = self.serve.board
+        with mock.patch.object(b, "cmd_answer", create=True, return_value=picked) as ans, \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "stop") as stop, \
+                mock.patch.object(b, "cmd_abort") as abort, mock.patch.object(self.serve, "resume_job") as resume:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", body)
+        return code, out, {"answer": ans, "spawn": spawn, "stop": stop, "abort": abort, "resume": resume}
+
+    def assert_nothing_ran(self, m):
+        for name in ("answer", "spawn", "stop", "abort", "resume"):
+            m[name].assert_not_called()
+
+    def test_answer_refuses_409(self):
+        ok = self.asked("approve 1", "abort 1")
+        cases = {"not on board": ("999-nope", {"key": "a"}),
+                 "missing key": (ok, {}), "key not a string": (ok, {"key": 1}), "no such option": (ok, {"key": "c"})}
+        wrong_stage = self.asked("approve 1", stage="build")
+        cases["stage"] = (wrong_stage, {"key": "a"})
+        cases["no options"] = (self.asked(options=[]), {"key": "a"})
+        no_field = self.asked("approve 1")
+        data = json.loads((self.root / "board.json").read_text())
+        next(j for j in data["jobs"] if j["id"] == no_field).pop("options")
+        (self.root / "board.json").write_text(json.dumps(data))
+        cases["options absent"] = (no_field, {"key": "a"})
+        for name, (job_id, body) in cases.items():
+            with self.subTest(name):
+                code, out, m = self.answer(job_id, body, {"key": "a", "label": "Option a", "command": "approve 1"})
+                self.assertEqual(code, 409, out)
+                self.assert_nothing_ran(m)
+        busy = self.asked("approve 1")
+        with mock.patch.object(self.serve, "running", return_value=True):
+            code, out, m = self.answer(busy, {"key": "a"})
+        self.assertEqual(code, 409, out)
+        self.assert_nothing_ran(m)
+
+    def test_answer_dispatch_approve(self):
+        job_id = self.asked("approve 77", "abort 77")
+        code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Ship it", "command": "approve 77"})
+        self.assertEqual((code, out), (202, {"id": job_id, "action": "answer", "command": "approve"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "approve", f"/trevskills-scrum approve {job_id}")])
+
+    def test_answer_dispatch_rework(self):
+        job_id = self.asked('rework 77 "use the  existing\nhelper"')
+        code, out, m = self.answer(job_id, {"key": "a"},
+                                   {"key": "a", "label": "Rework", "command": 'rework 77 "use the  existing\nhelper"'})
+        self.assertEqual((code, out), (202, {"id": job_id, "action": "answer", "command": "rework"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "rework", f'/trevskills-scrum rework {job_id} "use the existing helper"')])
+
+    def test_answer_dispatch_abort(self):
+        for command, requeue in (("abort 77", False), ("abort 77 --requeue", True)):
+            with self.subTest(command):
+                job_id = self.asked(command)
+                order = mock.Mock()
+                b = self.serve.board
+                with mock.patch.object(b, "cmd_answer", create=True,
+                                       return_value={"key": "a", "label": "Drop", "command": command}) as ans, \
+                        mock.patch.object(self.serve, "spawn") as spawn, \
+                        mock.patch.object(self.serve, "stop", side_effect=lambda *a: order("stop", *a)), \
+                        mock.patch.object(b, "cmd_abort", side_effect=lambda *a: order("abort", *a)):
+                    code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a"})
+                self.assertEqual((code, out), (200, {"id": job_id, "stage": "aborted"}))
+                ans.assert_called_once_with(self.root.resolve(), job_id, "a")
+                self.assertEqual(order.call_args_list, [mock.call("stop", "repo", job_id),
+                                                        mock.call("abort", self.root.resolve(), job_id, requeue)])
+                spawn.assert_not_called()
+
+    def test_answer_dispatch_resume(self):
+        job_id = self.asked("resume 77")
+        code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Carry on", "command": "resume 77"})
+        self.assertEqual((code, out), (202, {"id": job_id, "action": "answer", "command": "resume"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        self.assertEqual(m["resume"].call_count, 1)
+        self.assertEqual(m["resume"].call_args.args[2]["id"], job_id)  # the job is not RESUMABLE-flagged, still runs
+
+    def test_answer_dispatch_shell(self):
+        job_id = self.asked("shell: npm run seed -- --force")
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            code, out, m = self.answer(job_id, {"key": "a"},
+                                       {"key": "a", "label": "Seed it", "command": "shell: npm run seed -- --force"})
+        self.assertEqual((code, out), (202, {"id": job_id, "action": "answer", "command": "shell"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "resume", f"/trevskills-scrum resume {job_id} "
+                                             '"Trevor picked \\"Seed it\\": run npm run seed -- --force, then continue"')])
+        run.assert_not_called()
+        popen.assert_not_called()
+
+    def test_answer_resume_refusal(self):
+        lil = self.asked("resume 1", lane="lilguy")
+        code, out, m = self.answer(lil, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
+        self.assertEqual((code, out), (409, {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change "
+                                                      "by hand in the main checkout and run /trevskills-commitpush, or "
+                                                      "discard it, then click Abort."}))
+        self.assert_nothing_ran(m)
+        blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
+        kid = self.asked("resume 1", parent="100-parent")
+        with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
+            code, out, m = self.answer(kid, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
+        self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
+                                                      "Fix: click Resume when 123-sib finish."}))
+        self.assert_nothing_ran(m)
+
+    def test_answer_unknown_command(self):
+        for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
+            with self.subTest(command=command):
+                job_id = self.asked(command)
+                code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "X", "command": command})
+                self.assertEqual((code, out), (409, {"error": f"unknown option command: {command}"}))
+                self.assert_nothing_ran(m)
+
     # --- pause / play ---
     def test_pause_endpoint_kills_fake_run_and_marks_paused(self):
         job_id = self.serve.board.cmd_new(self.root, "pause me")

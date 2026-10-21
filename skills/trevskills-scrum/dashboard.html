@@ -63,7 +63,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
 .btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
 .card.aborted{opacity:.55}
-.card.dcard{cursor:default}.dcard .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.card.dcard{cursor:default}.dcard .acts,.answer .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.tall{min-height:44px}
 .btn.more{width:100%}
@@ -396,7 +396,9 @@ function card(job) {
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
-  return `<button class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
+  // A card with option buttons is a focusable div that opens like a button (see the board keydown handler): buttons can't nest.
+  const opts = optionsRow(job), el = opts ? "div" : "button";
+  return `<${el} class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}"${opts ? ' tabindex="0" role="button"' : ""}>
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
@@ -404,7 +406,7 @@ function card(job) {
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
-    ${human && !paused(job) && job.reason ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}
+    ${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
     ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
@@ -413,7 +415,7 @@ function card(job) {
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
       : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
-  </button>`;
+  </${el}>`;
 }
 
 // A pending digest proposal: Trevor decides it here or in the Digest dialog. A div, so its buttons don't nest in a <button>.
@@ -443,6 +445,7 @@ function render() {
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
+  const optFocused = document.activeElement?.matches?.("#board [data-answer]") && [document.activeElement.closest(".card").dataset.key, document.activeElement.dataset.answer];
   $("board").innerHTML = cols.map(stage => {
     const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : "";
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
@@ -451,6 +454,7 @@ function render() {
       ${inCol.map(card).join("") + extra + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
+  if (optFocused) focusOption($("board"), ...optFocused);
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
   $("status").textContent = projects.length
@@ -642,6 +646,16 @@ const splitReason = reason => {
   const fix = r.slice(i + 6);
   return {problem: r.slice(0, i), fix: fix.charAt(0).toUpperCase() + fix.slice(1)};
 };
+// A needs-human job's closed question (board.py ask): the question, then one button per option in key order. Its
+// armed/pending/error state lives outside the DOM, so a poll re-render keeps it.
+const answerState = {};
+function optionsRow(job) {
+  if (job.stage !== "needs-human" || !job.options?.length) return "";
+  const st = answerState[job.key] || {}, off = st.pending || runs[job.key]?.alive;
+  const opts = [...job.options].sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  return `<div class="answer"><span class="reason">${esc(job.question || splitReason(job.reason).problem)}</span><div class="acts">${opts.map(o =>
+    `<button class="btn tall${st.armed === o.key ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${off ? " disabled" : ""}>${st.armed === o.key ? "Confirm: " : ""}${esc(o.label)}</button>`).join("")}</div><p class="error" role="alert">${esc(st.err || "")}</p></div>`;
+}
 const waitingBanner = job => {
   const p = paused(job);
   if (!p && job.stage !== "needs-human") return "";
@@ -664,13 +678,13 @@ function renderActions(job) {
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
-  el.innerHTML = banner + kids + last + resumeForm(reason)
+  el.innerHTML = banner + kids + last + (optionsRow(job) || resumeForm(reason)
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`) + termForm(job) + askForm(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + termForm(job) + askForm(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
@@ -697,8 +711,42 @@ $("actions").addEventListener("submit", async e => {
     renderActions(jobs.find(j => j.key === key));
   } catch (err) {
     btn.disabled = false;
-    $("actions").querySelector(".error").textContent = err.message;
+    $("actions").querySelector(":scope > .error").textContent = err.message;
   }
+});
+
+// Option buttons, on a card and in the modal. An abort option arms first; the second click posts.
+// box is the board (rows sit in cards) or the modal's #actions (its one row belongs to the open job).
+const ofJob = (el, key) => (el.closest(".card")?.dataset.key ?? key) === key;
+const focusOption = (box, key, k) => [...box.querySelectorAll("button[data-answer]")].find(b => ofJob(b, key) && b.dataset.answer === k)?.focus();
+function redrawAnswer(key, k) {
+  const job = jobs.find(j => j.key === key);
+  const boxes = [$("board"), $("viewer").open && $("viewer").dataset.key === key ? $("actions") : null];
+  for (const box of boxes) {
+    const row = [...box?.querySelectorAll(".answer") || []].find(r => ofJob(r, key));
+    if (!row || !job) continue;
+    const refocus = row.contains(document.activeElement) || document.activeElement === document.body;
+    row.outerHTML = optionsRow(job);
+    if (refocus) focusOption(box, key, k);
+  }
+}
+async function answer(key, k) {
+  const job = jobs.find(j => j.key === key), opt = job?.options?.find(o => o.key === k), st = answerState[key] || {};
+  if (!opt || st.pending) return;
+  if (/^abort\b/.test(opt.command || "") && st.armed !== k) { answerState[key] = {armed: k}; return redrawAnswer(key, k); }
+  answerState[key] = {pending: true}; redrawAnswer(key, k);
+  try {
+    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/answer`, {key: k});
+    delete answerState[key];
+    await poll();
+    const now = $("viewer").open && $("viewer").dataset.key === key && jobs.find(j => j.key === key);
+    if (now) renderActions(now);
+  } catch (err) { answerState[key] = {err: err.message}; redrawAnswer(key, k); }
+}
+// answer() end
+$("actions").addEventListener("click", e => {
+  const b = e.target.closest("button[data-answer]");
+  if (b) answer($("viewer").dataset.key, b.dataset.answer);
 });
 
 const blProject = () => $("blProject").value;
@@ -1364,6 +1412,17 @@ $("board").addEventListener("click", e => {
   if (!$("board").querySelector("[data-more]")) doneCards()[before]?.focus();
 });
 $("board").addEventListener("click", e => {
+  const b = e.target.closest("button[data-answer]");
+  if (b) answer(b.closest(".card").dataset.key, b.dataset.answer);
+});
+$("board").addEventListener("keydown", e => {  // a div card (one with option buttons) opens on Enter or Space, like a button
+  if (!(e.key === "Enter" || e.key === " ") || !e.target.matches("div.card[data-key]")) return;
+  e.preventDefault();
+  const job = jobs.find(j => j.key === e.target.dataset.key);
+  if (job) open(job);
+});
+$("board").addEventListener("click", e => {
+  if (e.target.closest("button[data-answer]")) return;
   const el = e.target.closest(".card");
   const job = el && jobs.find(j => j.key === el.dataset.key);
   if (job) open(job);
