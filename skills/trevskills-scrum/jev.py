@@ -4,6 +4,7 @@ Every failure raises JevError, so a caller can catch one thing and carry on.
 Key: $TYPESAFE_API_KEY, else the macOS Keychain item TypeSafe/typesafe.
 """
 import json, os, subprocess, time, urllib.error, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -103,3 +104,19 @@ def choice(state, instructions, options, timeout=TIMEOUT):
     if not isinstance(picked, str) or picked not in options:
         raise JevError("choice answer is not one of the options")
     return picked, answer
+
+
+def rank(query, items, instruction, key=None, batch=20, max_chars=1500):
+    """Score each item with one noul question (`instruction.format(i=i)`), `batch` items per request, 4 requests at
+    a time. Returns scores in input order; raises JevError on any failure."""
+    if not items:
+        return []
+    key = key or api_key()
+
+    def one(chunk):
+        answers = ask({"query": query, "items": {str(i): t[:max_chars] for i, t in enumerate(chunk)}},
+                      {f"q{i}": {"type": "noul", "instructions": instruction.format(i=i)} for i in range(len(chunk))},
+                      key=key)
+        return [parse_noul(answers.get(f"q{i}")) for i in range(len(chunk))]
+    with ThreadPoolExecutor(4) as pool:
+        return [s for b in pool.map(one, [items[i:i + batch] for i in range(0, len(items), batch)]) for s in b]
