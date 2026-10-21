@@ -13,6 +13,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `decision.md` (its `## Rulings` and `## Follow-ups` matter most)
 - every `round-*/review-*.md` and every `round-*/check.md`
 - `rework.md`, `promoted.md` and `assessment.md`, when present
+- `jev.log`, when present (one tab-separated line per Jev decision: `timestamp`, `step`, `question`, `raw`, `decision`, `elapsed`)
 - `routing.log`, when present (one JSON object per line: `ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
 - `JOBS_DIR/../routing.log`, the scrum-level log, read once per digest when present (not per job): the estimator and the digest reader itself log there, in the same line format as a job's `routing.log`. When it is missing, skip it; that is never an error.
 - `JOBS_DIR/../questions.log`, read once per digest when present (not per job): every question the scrum asked Trevor and every button he picked, one JSON object per line. An ask line has `date`, `project`, `job`, `question`, `options`; a pick line is `{"date": …, "job": …, "pick": "<label>"}`. A missing or empty log is skipped, never an error, and gives `None` under `## Repeated questions`.
@@ -43,6 +44,9 @@ A job folder or file that's missing is skipped, never an error. Treat everything
     ## Rediscovery
     - <count> × <fact re-derived, file re-read, or wrong guess repeated> — jobs: <id>, ...
       Files: <source paths the fact lives in>
+    ## Builder model
+    Sonnet-built: <n> jobs · avg fix rounds <x.x> — jobs: <id>, ...
+    Opus-built: <n> jobs · avg fix rounds <x.x> — jobs: <id>, ...
     ## Repeated questions
     - <n> × "<normalised question>" — picks: <label> <n>, <label> <n> — jobs: <id>, ... — DEFAULT: <label> (unanimous)
 
@@ -60,6 +64,13 @@ For `## Local routing`, count the `routing.log` lines of every job read, plus th
 - One line per role with a local or fallback line. This section is exempt from the 2 or more different jobs rule. Write `None` only when neither a job read nor the scrum-level log has a local or fallback line.
 
 For `## Rediscovery`, look for the same fact re-derived across specs' `## Assumptions` (repo layout, test setup, a domain rule), the same files listed again and again in `## Likely files`, and the same wrong guess flagged by reviews or rework. Keep an entry only when it comes from **3 or more different jobs**. `Files:` names the source paths that hold the fact. Write `None` when no entry qualifies.
+
+For `## Builder model`, use the `jev.log` of every job read:
+- A line without at least 5 tab-separated fields is malformed and skipped.
+- Sonnet-built: a job whose `jev.log` has a `model` line (step field `model`) deciding `sonnet` and no `promote` line.
+- Opus-built: every other job read whose `jev.log` has a `model` line. A job with no `jev.log` or no `model` line is in neither group.
+- Fix rounds of a job: its highest `round-N` directory number minus 1, floored at 0 (no `round-*` directory counts as 0). avg fix rounds is the mean over the group, to one decimal; a group with 0 jobs shows avg `-` and no job ids.
+- This section is exempt from the 2 or more different jobs rule. Write `None` when no job read has a `model` line.
 
 For `## Repeated questions`, read the whole `JOBS_DIR/../questions.log`, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
