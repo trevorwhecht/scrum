@@ -205,30 +205,7 @@ For a BigBoy child (the job has a `parent`), every time this run sets the child 
 
 ## Run all
 
-Cleans the backlog, then runs every open item as a child job of one Run-all parent, in parallel where files don't overlap, with nobody watching. Setup and Prerequisites apply. Trevor stops it by interrupting or closing its Terminal window.
-
-1. Run `B triage-start`. Under the board lock it claims `$F/triage/<id>/` and prints `{"id", "open"}`. If `id` is null, say the backlog is empty and stop.
-2. Spawn `scrum-triager` with the Agent tool override `model: "sonnet"` (first spawn and the respawn below) and wait for it. Prompt:
-   ```
-   TRIAGE_DIR=$F/triage/<id>
-   BACKLOG=$F/backlog.md
-   PROJECT=$F/project.md
-   Write plan.json for this triage.
-   ```
-   If `$F/triage/<id>/plan.json` is missing afterwards, spawn it once more.
-3. Run `B triage-apply <id>`. It merges, retires, moves manual-only items to `$F/manual-checks.md`, estimates and adds dependencies (the plan's `depends` entries become `{needs …}` markers) under the board lock, skips stale entries, and writes `$F/triage/<id>/report.md` and `$F/triage/latest.md`. If it exits non-zero (including when plan.json is still missing), write `Triage <id> failed: <message>` to `$F/triage/latest.md`, with its error line as the message, and continue. A failed triage never blocks the run.
-4. Run `B watchdog`; for each flagged id that has a `parent`, run **BigBoy lane** step 6 with `ID=<that id>`. Then run `B runall-start`. Under the board lock it makes a `lane=runall` parent with every open backlog item as a `waiting` child and prints `{"id", "children"}`. A child whose item needs another item claimed in the same run `depends_on` that sibling, so `B ready` holds it until the sibling is `done`; an item waiting on a job outside the run stays open and gets no child. If `id` is null, say the backlog is empty (or every open item waits) and stop. Otherwise `P` is that id.
-5. **Askme** (only for `run-all askme <n>`; otherwise skip to step 6). Record no terminal here; Run all never does. For each child in `runall-start`'s `children`, in that order, run a question round with Trevor in this same session, exactly as New job step 1c does for one job: read `$F/jobs/<child>/feature.md` (and `$F/jobs/<child>/spec.md` when the item came with one), ask at that level's semantics from step 1c (level 1 only what blocks the build, level 2 a moderate number, level 3 thorough; a bad or missing level means level 2), with follow-ups when an answer is unclear. Say which item each round is about. Spawn no agent and edit no file except the children's `feature.md` and `spec.md` while asking. After each child's round, append its pairs to `$F/jobs/<child>/feature.md`, one pair per question asked, follow-ups included:
-   ```
-   ## Q&A
-   - Q: <question>
-     A: <Trevor's answer>
-   ```
-   A child with no questions gets no `## Q&A` section. When a child already had a pre-written `spec.md` and got at least one Q&A pair, delete that `spec.md`: the answers are Trevor's decisions, so its spec is rewritten from them in step 6 or in its own `start`. A child with no pairs keeps its `spec.md`. If Trevor says to skip or stop, write the pairs answered so far for the current child (and delete its `spec.md` if it got any), ask nothing for the remaining children, and carry on. This is the only place Run all asks questions; no child `start` session ever asks.
-6. Run **BigBoy lane** step 2 for P's children.
-7. Run **BigBoy lane** step 3 for `P`, then give the final report. Never ask questions here outside step 5.
-
-The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired, moved to manual checks, estimated and added dependencies for (counts from `triage-apply`, `depends` included, or the failure line).
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/runall.md` when this lane runs.
 
 ## Fast lane
 
@@ -250,73 +227,11 @@ Applies only while the job's `lane` on the board is `fast`. A job with no `lane`
 
 ## Debug lane
 
-Applies only while the job's `lane` on the board is `debug`. A job with any other `lane` never reads this section. It replaces New job step 5; Check gate, Review and Approve then run as standard, with the debug additions in **Check gate**.
-
-1. **Diagnose.** Spawn `scrum-debugger` and wait for it. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Reproduce and diagnose. Write assessment.md.` Whenever the debugger is spawned again for the same job (step 2's re-spawn, or `rework`), its prompt also gets the **re-spawn line**: `An earlier attempt may have committed a repro test: reuse it if it still fails for the reported reason, otherwise remove it with git rm and commit that removal.`
-2. **Validate `$F/jobs/$ID/assessment.md`.** It is invalid when it is missing, its first line is not one of `ASSESSMENT: READY`, `ASSESSMENT: NO_REPRO` or `ASSESSMENT: BLOCKED`, or a READY one lacks a `Repro:` line, a `Repro test:` line or at least one `- ` line under `## Allowed files`, or has a `## Compliance` line containing `conflict`. A READY one is also invalid unless its `Repro:` value (trimmed) starts with project.md's `Test:` command (trimmed), followed by a space or the end of the line. When `Test:` is `none`, a READY one is valid only when the trimmed `Repro:` value's first space-separated word is one of `python3`, `python`, `node`, `bash`, `sh`, `ruby` or `perl`, and its second word equals the trimmed `Repro test:` path exactly; more arguments may follow after a space. Anything else is invalid: a bare path, the path in a later position, or a different first word. It is also invalid when the `Repro:` value contains any of `;` `&` `|` `` ` `` `$` `<` `>` or a newline. If invalid, delete it and re-spawn the debugger once, with the re-spawn line. If it is still missing or invalid, run `B abort $ID --requeue --reason 'requeue: debugger output unreadable'` and stop (see **Auto-abort instead of needs-human**).
-3. **No repro or blocked.** `<line 2>` is line 2 of assessment.md after removing every `` ` ``, `$`, `"` and `'` from it. For `ASSESSMENT: NO_REPRO`, run `B abort $ID --reason 'looks already fixed: no repro — <line 2>'` and stop; the final report says the job was auto-closed as looks already fixed and why (see **Auto-abort instead of needs-human**). For `ASSESSMENT: BLOCKED`, run `B set $ID stage=needs-human reason='debug: blocked — <line 2>. Fix: click Discuss first.'` and stop.
-4. **Repro must fail.** Run the `Repro:` command in `$WT`. Write `$F/jobs/$ID/repro-before.md`: first line `REPRO: FAIL` (non-zero exit) or `REPRO: PASS` (exit 0), then `Commit: <git -C "$WT" rev-parse HEAD>`, the exit code, and the last 40 lines of output in a fenced block. If the exit code is 0, run `B abort $ID --reason 'looks already fixed: repro passes on <short HEAD> — see repro-before.md'` (`<short HEAD>` is `git -C "$WT" rev-parse --short HEAD`) and stop; the final report says the job was auto-closed as looks already fixed and why.
-5. **Build.** Spawn the builder as New job step 5 does (same name, same `B set $ID builder=`, same BLOCKED handling), but the last prompt line is `Implement the fix in JOB_DIR/assessment.md. Change only the files under ## Allowed files. Write build.md.` Then continue at **Check gate**.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/debug.md` when this lane runs.
 
 ## BigBoy lane
 
-Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **parent**), and to its **children**. A request too big for one job is split by `scrum-planner` into 2-5 tickets; each ticket runs as its own child job (spec → build → check → review → approve → its own PR, in its own lane and its own session) and merges on its own. The parent gets no worktree, branch or PR, and never goes through Check gate, Review, Approve or Merge. `B next` never claims a child. A `runall` parent comes from **Run all**: steps 1 and 7 never run for it, and it has no plan.md. In steps 1-3, `$ID` is the parent; in steps 4-7, `P` is the child's `parent` from the board.
-
-1. **Plan.** Run `B set $ID stage=plan`. Spawn `scrum-planner` and wait for it. Prompt:
-   ```
-   JOB_DIR=$F/jobs/$ID
-   PROJECT=$F/project.md
-   Read JOB_DIR/spec.md first when it exists; do not re-audit its ## Findings.
-   Write plan.md for this job.
-   ```
-   Then run `B plan-apply $ID`. Under the board lock it checks plan.md (first line `PLAN: READY`, 2-5 tickets, every `Depends on:` names a known ticket other than itself with no cycle, exactly one `Exposure: yes` ticket and it depends on every other), creates one `waiting` child job per ticket with its `feature.md`, sets the parent's `children`, moves the parent to `running`, and prints `{"children": [...]}`. A refused plan creates nothing. If it exits non-zero, delete `$F/jobs/$ID/plan.md`, spawn the planner once more, and run `B plan-apply $ID` again. If that fails too, take its error line, strip quotes (`'` and `"`) and backticks, run `B abort $ID --requeue --reason 'requeue: planner output unreadable: <error line>'` and stop (see **Auto-abort instead of needs-human**).
-2. **Child specs, startable children only.** Spawn one `scrum-spec-writer` per child whose `depends_on` is empty, **in ONE message**, in the background, and wait for all of them (see **Routing**: each child is routed on its own, and local ones run as background subprocesses alongside the cloud ones). Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Every other child gets its spec in its own `start` session (step 4 runs New job step 3 when `spec.md` is missing); until then a child with no spec.md runs alone, which is the accepted cost. Then, for each child spawned for here:
-   - **Obsolete:** if its `spec.md` starts with `OBSOLETE:`, run `B abort <child> --reason 'obsolete: <rest of that line, single quotes stripped>'`. Its dependents never become ready.
-   - **Lane:** otherwise run New job step 3c with `ID=<child>` (`Lane: bigboy` counts as `standard`). A child without a `spec.md` is fine: its own `start` writes it.
-3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run detached from the main checkout, logging to `scrum/runs/`:
-   ```bash
-   mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-start-<child>.log"
-   OM=$(sed -n 's/^- Orchestrator model: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')
-   case "$OM" in [Ii][Nn][Hh][Ee][Rr][Ii][Tt]) OM= ;; ""|*[!A-Za-z0-9._-]*) OM=sonnet ;; esac
-   MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")
-   (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
-   B set <child> runlog=runs/$LOG
-   ```
-   `OM` is the `- Orchestrator model:` line (see Setup): blank, missing or malformed gives `sonnet`, and `inherit` drops `--model`. `MODEL` is an array on purpose: zsh never word-splits `${OM:+--model "$OM"}`, so that form passes one word and `claude` dies with `unknown option`.
-   This session is then done with the parent: each child chains the next from its own Merge step 7. Give the final report.
-4. **Spec refresh** (in the child's own `start` session, after New job step 2). For each id in the child's `depends_on`, list the files its PR changed: `gh pr diff <that job's pr> --name-only`. Compare them, as exact paths, with the backtick-quoted paths under `## Likely files` in the child's `spec.md`. If `spec.md` is missing, run New job step 3 as usual. If any path overlaps, run New job step 3 with the extra prompt line `Refresh spec.md: dependencies <ids> merged and changed <files>.`, then step 3b and 3c. Otherwise skip step 3 (3b and 3c ran in step 2). Then continue at New job step 4.
-5. **Chaining** (Merge step 7, after `stage=done`, for a job with a `parent`). Sub-steps 1-2 run under P's chain lock, so two children that merge close together never write the same `track-N.md`, rewrite the same waiting child, or claim a child mid-rewrite:
-   - **Lock.** Run `B chain-lock $P $ID` with Bash timeout 600000. It waits up to 540 s while another session holds the lock, then prints `{"acquired", "holder"}`. While it prints `"acquired": false`, run it again, up to 4 tries in all. If it still has not acquired the lock, run `B set $P stage=needs-human reason='bigboy chain lock held by <holder>. Fix: if no session for <holder> is running, delete scrum/jobs/<P>/.chain.lock, then click Run now on a waiting child.'` (`<holder>` from its output, `'` removed; `<P>` is the parent id) and stop.
-   - **Unlock.** Run `B chain-unlock $P $ID` right after sub-step 2's `B ready $P`, and before every earlier stop: OFF TRACK, or a tracker or spec writer failure that ends this session.
-   1. **Tracker.** Skip it when P's `lane` is `runall`. Unless every child of `P` in `$F/board.json` is now `done`, spawn `scrum-tracker` with the Agent tool override `model: "sonnet"` and wait for it. `N` is how many children of `P` are `done`. Prompt:
-      ```
-      PARENT_DIR=$F/jobs/$P
-      JOBS_DIR=$F/jobs
-      BOARD_JSON=$F/board.json
-      PROJECT=$F/project.md
-      N=<merged count>
-      Check the BigBoy goal. Write track-N.md.
-      ```
-      Read the first line of `$F/jobs/$P/track-N.md`:
-      - `TRACK: ADJUST`: it may have rewritten the `feature.md` of children still `waiting` (listed under `## Rewritten`), and logged each change under `## Diverged` in the parent's plan.md. Re-run step 2 for exactly those children.
-      - `TRACK: OFF TRACK`: run `B set $P stage=needs-human reason='bigboy off track: <line 2 of track-N.md>. Fix: read the latest track file, then click Resume to carry on with the plan or Send back with your decision to replan.'`, start no child, run `B chain-unlock $P $ID`, and stop.
-      - `TRACK: ON TRACK`, or a missing or unreadable file: carry on.
-   2. Run `B ready $P`. Under the lock it claims (moves to `spec`) every `waiting` child whose `depends_on` are all `done`, whose `setup` is not `pending`, and that can run beside the siblings in progress (a `parallel=no` child, or a `parallel=yes` child whose `spec.md` is missing or has no backtick-quoted path under `## Likely files`, runs alone: only when none is, and none starts beside it; any other child never beside one whose `## Likely files` overlap its own), up to an in-progress cap paced by `~/.claude/usage.json` (written by the `board.py statusline` status line: a Run-all parent's cap of 3 rises to 5 when well under pace and drops to 2 or 1 when over; a BigBoy parent is only ever throttled to 2 or 1; at least 1 child always starts, and running children are never touched), so a second call never returns it again. An aborted child counts as finished, so `all_merged` is true once every child is `done` or `aborted`. When nothing is ready or in progress and not every child is finished, the parent stays `running` with reason `waiting on you in: <ids>` while any `needs-human` or setup-pending child exists (no sound; their actions are on the children); otherwise, when some `waiting` child of a BigBoy depends (directly or through another waiting child) on an aborted one, it sets the parent `needs-human` with reason `bigboy blocked: <aborted ids>. Fix: click Resume to skip the children that depend on them and run the final review.` A later claim, or a child in progress, sets it back to `running` with no reason; a legacy `bigboy blocked` / `run-all blocked` parent is re-evaluated the same way. It prints `{"ready", "merged", "total", "in_progress", "all_merged"}`. Then run `B chain-unlock $P $ID`.
-   3. If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` instead. Otherwise **start** each id in `ready` (step 3; its own `start` runs the step 4 refresh).
-6. **After a child stops.** When a child's run sets it `needs-human` or auto-aborts it (**New job** **Auto-abort instead of needs-human**), run `B chain-lock $P $ID` (same tries and stop as step 5), then `B ready $P`, then `B chain-unlock $P $ID`. If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` instead. Otherwise **start** each id in `ready`, so tickets that don't depend on it keep going. A failed child blocks only its dependents.
-7. **Final BigBoy review.** Run `B set $P stage=review`. If Merge step 7 reported `main not updated`, run `B set $P stage=needs-human reason="bigboy review: main not updated. Fix: make the main checkout fast-forward, then click Resume to re-run the review."` and stop. Otherwise spawn `scrum-bigboy-reviewer` and wait for it. Prompt:
-   ```
-   PARENT_DIR=$F/jobs/$P
-   JOBS_DIR=$F/jobs
-   BOARD_JSON=$F/board.json
-   REPO=$REPO
-   PROJECT=$F/project.md
-   Review the whole BigBoy on main. Write bigboy-review.md.
-   ```
-   If the first line of `bigboy-review.md` is neither `BIGBOY: PASS` nor `BIGBOY: GAPS`, delete it and spawn the reviewer once more; if it is still unreadable, treat it as GAPS with no fix ticket.
-   - `BIGBOY: PASS`: run `B set $P stage=done reason=`. If plan.md has a `## Phase 2` section and `B roadmap-show` lists `$P` as a step's `job`, run `B roadmap-insert <that p> <that s> bigboy '<its line, every ' removed>'` instead of `backlog-add`; otherwise, with a `## Phase 2` section, run the **Dupe check** (3c, `jev-gate.py dupe`) on it, then `B backlog-add "<its line> (Phase 2 of $P)"`. Either way, then run `B roadmap-next $P` and, when it prints a step, do **Roadmap lane** **Starting a step** with it.
-   - `BIGBOY: GAPS` the first time: run `B plan-apply $P --fix`. It adds one child, ticket `FIX`, from the `## Fix ticket` text, with no dependencies, and moves the parent back to `running`. Run step 2 for it, then `B ready $P` and **start** it. When it merges, step 5 brings the parent back here and the reviewer runs once more.
-   - `BIGBOY: GAPS` again, or `plan-apply --fix` exits non-zero (no `## Fix ticket`, or the FIX child already exists): the parent goes done and every gap is filed; there is no needs-human. Run `B set $P stage=done reason='merged + gaps: <line 2 of bigboy-review.md>'`. The items are every `## Done when` line marked `— gap —`, plus one item when `## Tests` shows a non-zero exit, each with every `'` removed. When `B roadmap-show` lists `$P` as a step's `job`, run `B roadmap-insert <p> <s> standard '<item>'` for each (`<p> <s>` from that step); otherwise run the **Dupe check** (3c, `jev-gate.py dupe`) on each, then `B backlog-add "<item> (gap of $P)" ...`, one argument per item. Then run `B roadmap-next $P` and, when it prints a step, do **Roadmap lane** **Starting a step** with it, as PASS does.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/bigboy.md` when this lane runs.
 
 ## Roadmap lane
 
