@@ -15,6 +15,7 @@ class InstallTest(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
             self.assertEqual((home / "skills" / "trevskills-scrum").resolve(), ROOT / "skills" / "trevskills-scrum")
+            self.assertEqual((home / "skills" / "trevskills-e2e").resolve(), ROOT / "skills" / "trevskills-e2e")
             for lane in ("cloud.md", "roadmap.md", "lilguy.md"):
                 linked = home / "skills" / "trevskills-scrum" / "lanes" / lane
                 self.assertTrue(linked.is_file(), lane)
@@ -83,6 +84,21 @@ class InstallTest(unittest.TestCase):
             self.assertIn("refusing", result.stderr)
             self.assertFalse(real.is_symlink())
             self.assertEqual((real / "marker").read_text(), "mine")
+            self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
+            self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
+
+    def test_install_refuses_to_clobber_real_e2e_skill_dir(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t)
+            real = home / "skills" / "trevskills-e2e"
+            real.mkdir(parents=True)
+            (real / "marker").write_text("mine")
+            result = self.run_install(home)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing", result.stderr)
+            self.assertFalse(real.is_symlink())
+            self.assertEqual((real / "marker").read_text(), "mine")
+            self.assertFalse((home / "skills" / "trevskills-scrum").exists(), "a refusal must link nothing")
             self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
             self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
 
