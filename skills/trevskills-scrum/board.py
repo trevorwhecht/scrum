@@ -4,6 +4,10 @@
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
+  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
+                                   closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
+                                   shell: <cmd>), log it to questions.log
+  board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
                                    no {setup: …} Human setup as a new job, print {"id","feature"}
@@ -81,6 +85,9 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
+# The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue)?|rework {id} "[^"]+"|shell: \S.*)'
+                            .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 # Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
 # the repo), or its system sound when the clip is missing.
@@ -150,6 +157,10 @@ def locked_board(root):
         path = root / "board.json"
         board = read_board(root)
         yield board
+        for job in board["jobs"]:  # a question lives only while its job waits on Trevor, whoever moved it on
+            if job.get("stage") != "needs-human":
+                job.pop("question", None)
+                job.pop("options", None)
         tmp = path.with_name("board.json.tmp")
         tmp.write_text(json.dumps(board, indent=2) + "\n")
         os.replace(tmp, path)
@@ -1588,6 +1599,54 @@ def cmd_set(root, job_id, pairs, unpause=False):
         play(sound(job["stage"]))
 
 
+def questions_log(root, entry):
+    """Append one JSON line to <scrum>/questions.log. Caller holds the board lock, so lines never interleave."""
+    with open(Path(root) / "questions.log", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def cmd_ask(root, job_id, question, options):
+    """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
+    order. Returns the stored option dicts."""
+    question = question.strip()
+    if not question:
+        raise SystemExit("ask needs a question")
+    if not 2 <= len(options) <= 3:
+        raise SystemExit(f"ask needs 2 or 3 options, got {len(options)}")
+    parsed = []
+    for key, raw in zip("abc", options):
+        label, sep, command = raw.partition("=")
+        label, command = label.strip(), command.strip()
+        if not sep or not label:
+            raise SystemExit(f"bad option {raw!r}; expected label=command")
+        if not ASK_COMMAND_RE.fullmatch(command):
+            raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
+                             "abort <id> [--requeue], resume <id>, shell: <command>")
+        parsed.append({"key": key, "label": label, "command": command})
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        was = job["stage"]
+        job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
+        questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                             "question": question, "options": parsed})
+    if was != "needs-human":
+        play(sound("needs-human"))
+    return parsed
+
+
+def cmd_answer(root, job_id, key):
+    """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names."""
+    with locked_board(root) as board:
+        job = find(board, check_id(job_id))
+        if job["stage"] != "needs-human" or not job.get("options"):
+            raise SystemExit(f"job {job_id} has no open question")
+        option = next((o for o in job["options"] if o["key"] == key), None)
+        if option is None:
+            raise SystemExit(f"no option {key!r}; the question offers {', '.join(o['key'] for o in job['options'])}")
+        questions_log(root, {"date": now(), "job": job_id, "pick": option["label"]})
+    return option
+
+
 def cmd_sync(root, job_id):
     d = Path(root) / "jobs" / check_id(job_id)
     if not d.is_dir():
@@ -1973,6 +2032,15 @@ def main(argv=None):
     s.add_argument("id")
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
+    ak = sub.add_parser("ask")
+    ak.add_argument("id")
+    ak.add_argument("question")
+    ak.add_argument("--a", required=True, metavar="LABEL=COMMAND")
+    ak.add_argument("--b", required=True, metavar="LABEL=COMMAND")
+    ak.add_argument("--c", metavar="LABEL=COMMAND")
+    an = sub.add_parser("answer")
+    an.add_argument("id")
+    an.add_argument("key", choices=("a", "b", "c"))
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("cloud-claim").add_argument("n", type=int)
     ba = sub.add_parser("backlog-add")
@@ -2047,6 +2115,10 @@ def main(argv=None):
         cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
+    elif a.cmd == "ask":
+        cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None])
+    elif a.cmd == "answer":
+        print(json.dumps(cmd_answer(a.dir, a.id, a.key)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
     elif a.cmd == "cloud-claim":
