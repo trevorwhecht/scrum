@@ -7,6 +7,9 @@
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
                                    no {setup: …} Human setup as a new job, print {"id","feature"}
+  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
+                                   (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
+                                   Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
   board.py backlog-add [--setup "<step>; <step>"] "<item>"...  append "- [ ] <item>" lines to backlog.md (--setup adds a
                                    " {setup: step; step}" marker: next and runall-start skip the item until Trevor clicks
                                    Setup done), then estimate each in the background
@@ -28,9 +31,11 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
-  board.py digest-verify <id>      exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
+  board.py digest-verify <id> [--worktree PATH] [--base REF]
+                                   exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
-                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
+                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
+                                   --worktree/--base override the board's values (an empty one fails, never falls back)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -45,8 +50,9 @@
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
-  board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
-                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
+  board.py watchdog                flag jobs stuck 30+ min in spec/build/check/review/approve with no live session
+                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}; a stuck spec
+                                   job with no feature.md is an orphaned claim: aborted and requeued, never flagged
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
@@ -401,21 +407,71 @@ def cmd_next(root, index=None):
         return {"id": job_id, "feature": item["text"]}
 
 
+def cmd_cloud_claim(root, n) -> dict:
+    """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
+    An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
+    or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build. A cloud or
+    build job with no readable Likely files may touch anything, so it blocks every item."""
+    if n < 1:
+        raise SystemExit("N must be at least 1")
+    with locked_board(root) as board:
+        lines, items = read_backlog(root)
+        taken, blocked_all = set(), False
+        for job in board["jobs"]:
+            if job.get("stage") in ("cloud", "build"):
+                spec = Path(root) / "jobs" / job.get("id", "") / "spec.md"
+                files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+                blocked_all |= not files
+                taken |= files
+        claimed = []
+        for item in items:
+            if blocked_all or len(claimed) >= n:
+                break
+            if item["done"] or item["setup"] or waiting_on(item, items, board):
+                continue
+            spec = spec_path(root, item["text"])
+            files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+            if not files or files & taken:
+                continue
+            job_id = add_job(root, board, item["text"][:60])
+            take_spec(root, item["text"], job_id)
+            claim_item(lines, item, job_id)
+            taken |= files
+            claimed.append({"id": job_id, "feature": item["text"]})
+        if claimed:
+            write_backlog(root, lines)
+        return {"claimed": claimed}
+
+
 def cmd_abort(root, job_id, requeue, reason=None):
     """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
-    folder = Path(root) / "jobs" / check_id(job_id)
-    feature = folder / "feature.md"
     with locked_board(root) as board:
-        job = find(board, job_id)
+        job = find(board, check_id(job_id))
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
-        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now(),
-                   files=job_files(folder))
-        if requeue:
-            text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
-            lines, _ = read_backlog(root)
-            lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
-            write_backlog(root, lines)
+        abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
+
+
+def abort_job(root, job, requeue, reason):
+    """cmd_abort's body; caller holds the lock. With no feature.md (a claim whose session died before writing it),
+    the requeue reopens the claimed backlog line in place, points, id, needs and pre-written spec kept."""
+    folder = Path(root) / "jobs" / job["id"]
+    feature = folder / "feature.md"
+    job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    if not requeue:
+        return
+    lines, items = read_backlog(root)
+    claimed = next((i for i in items if i["job"] == job["id"]), None)
+    if claimed and not feature.exists():
+        claimed.update(done=False, job=None)
+        lines[claimed["line"]] = format_item(claimed)
+        if (folder / "spec.md").is_file():
+            spec_path(root, claimed["text"]).parent.mkdir(exist_ok=True)
+            os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
+    else:
+        text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
+        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+    write_backlog(root, lines)
 
 
 def md_section(text, heading):
@@ -755,6 +811,8 @@ def _cited_proposal(root, scrum, digest_id, pid):
         raise ValueError(f"digest {digest_id} {pid}: not a valid edit proposal")
     if p.get("status") != "queued":
         raise ValueError(f"digest {digest_id} {pid}: status is {p.get('status')!r}, not queued")
+    if not os.path.isabs(p["target"]):
+        raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is not an absolute path")
     rel = os.path.relpath(os.path.realpath(p["target"]), os.path.realpath(Path(root).resolve().parent))
     if rel == ".." or rel.startswith(".." + os.sep):
         raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is outside this repo")
@@ -779,18 +837,20 @@ def _applies(base_text, props, head_text):
     return False
 
 
-def cmd_digest_verify(root: Path, job_id: str) -> dict:
+def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
     """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
-    and every cited proposal's file changed; else {"ok": False, "error"}."""
+    and every cited proposal's file changed; else {"ok": False, "error"}. worktree/base, when not None, replace the
+    board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails."""
     try:
         job = find(read_board(root), check_id(job_id))
         feature = Path(root) / "jobs" / job_id / "feature.md"
         cites = digest_citations(root, feature.read_text(errors="replace") if feature.is_file() else "")
         if not cites:
             raise ValueError("feature.md cites no digest proposal")
-        wt, base = job.get("worktree"), job.get("base")
+        wt = job.get("worktree") if worktree is None else worktree
+        base = job.get("base") if base is None else base
         if not wt or not base:
-            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+            raise ValueError(f"no {'worktree' if not wt else 'base'}")
         if base.startswith("-"):
             raise ValueError(f"bad base {base!r}")
         by_file, labels = {}, []
@@ -1516,12 +1576,15 @@ def cmd_sync(root, job_id):
         job = live(board, job_id)
         job.update(rounds=rounds, files=files, diverged=diverged(d), reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
     complete = bool(last) and "pending" not in reviews.values()
-    invalid = [r for r, v in reviews.items() if v == "INVALID"]
+    # Optional e2e review: counts toward verdict and invalid when present, never reported missing.
+    e2e = first_word(round_dirs[-1] / "review-e2e.md", ("PASS", "CHANGES")) if round_dirs else None
+    counted = {**reviews, **({"e2e": e2e} if e2e else {})}
+    invalid = [r for r, v in counted.items() if v == "INVALID"]
     verdict = None if not complete else "INVALID" if invalid else \
-        "PASS" if all(v == "PASS" for v in reviews.values()) else "CHANGES"
+        "PASS" if all(v == "PASS" for v in counted.values()) else "CHANGES"
     missing = [f"review-{r}.md" for r, v in reviews.items() if v == "pending"]
     return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid, "missing": missing,
-            "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
+            "check": last["check"] if last else None, "decision": decision, "reworks": reworks, "e2e": e2e}
 
 
 # --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
@@ -1607,6 +1670,7 @@ RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLO
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
 PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
 
 
 def cmd_pause(root, job_id):
@@ -1655,9 +1719,10 @@ def stalled_since(job, cutoff):
 
 def cmd_watchdog(root, alive=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
+    A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
-    flagged = []
+    flagged, requeued = [], []
     try:
         with locked_board(root) as board:
             # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
@@ -1665,11 +1730,17 @@ def cmd_watchdog(root, alive=None):
                      and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
-                if not alive(job):
+                if alive(job):
+                    continue
+                if job["stage"] == "spec" and not job.get("parent") \
+                        and not (Path(root) / "jobs" / job["id"] / "feature.md").exists():
+                    abort_job(root, job, True, ORPHANED)  # nothing to resume: put the item back, no human needed
+                    requeued.append(job["id"])
+                else:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
                                f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
                     flagged.append(job["id"])
-            if not flagged:
+            if not flagged and not requeued:
                 raise _Gone
     except _Gone:
         pass
@@ -1872,6 +1943,7 @@ def main(argv=None):
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
+    sub.add_parser("cloud-claim").add_argument("n", type=int)
     ba = sub.add_parser("backlog-add")
     ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
     ba.add_argument("items", nargs="+")
@@ -1900,7 +1972,10 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
-    sub.add_parser("digest-verify").add_argument("id")
+    dv = sub.add_parser("digest-verify")
+    dv.add_argument("id")
+    dv.add_argument("--worktree", default=None)
+    dv.add_argument("--base", default=None)
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -1942,6 +2017,8 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "cloud-claim":
+        print(json.dumps(cmd_cloud_claim(a.dir, a.n)))
     elif a.cmd == "roadmap-show":
         print(json.dumps(roadmap_show(a.dir)))
     elif a.cmd == "roadmap-link":
@@ -1965,7 +2042,7 @@ def main(argv=None):
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
-        out = cmd_digest_verify(a.dir, a.id)
+        out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
     elif a.cmd == "triage-start":
