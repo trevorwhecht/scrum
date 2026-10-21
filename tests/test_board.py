@@ -401,13 +401,44 @@ class BoardTest(unittest.TestCase):
         board.cmd_abort(self.root, c2, requeue=False)
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
-        p = self.child(parent)
-        self.assertEqual(p["stage"], "needs-human")
-        self.assertTrue(p["reason"].startswith(f"bigboy blocked: {c1}, {c2}. Fix: "), p["reason"])
+        p = self.child(parent)  # a needs-human child is actionable, so the parent keeps running
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {c1}"))
         board.cmd_set(self.root, c1, ["stage=done", "reason="])  # Trevor approved it and it merged
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_bigboy_aborted_child_blocks_with_resume(self):
+        # Blocked: c2 aborted, and waiting c4 (and c5 through c4) depend on it; nothing else to act on.
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_abort(self.root, c2, requeue=False)
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c3, ["stage=done"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy blocked: 003-part-2. Fix: click Resume to "
+                         "skip the children that depend on them and run the final review."))
+        self.assertNotIn("Abort", p["reason"])
+        # Resume aborts the waiting dependents; every child is then done or aborted, so all_merged is true.
+        board.cmd_abort(self.root, c4, requeue=False)
+        board.cmd_abort(self.root, c5, requeue=False)
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "ready", parent],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((json.loads(out.stdout)["all_merged"], json.loads(out.stdout)["merged"]), (True, 2))
+        # One aborted child plus one needs-human child: the parent keeps running and names the needs-human one.
+        parent, (d1, d2, d3, d4, d5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_abort(self.root, d1, requeue=False)
+        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {d2}"))
+        play.assert_not_called()
 
     def test_ready_parent_waits_on_needs_human_children(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
@@ -531,7 +562,7 @@ class BoardTest(unittest.TestCase):
             play.assert_not_called()
             parent, (c1, c2, c3, c4, c5) = self.five()
             board.cmd_ready(self.root, parent)
-            board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+            board.cmd_abort(self.root, c1, requeue=False)
             board.cmd_abort(self.root, c2, requeue=False)
             play.reset_mock()
             board.cmd_ready(self.root, parent)
@@ -632,6 +663,113 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "jobs" / "003-dark-mode" / "spec.md").read_text(), "# Dark mode\nbody\n")
         self.assertFalse(spec.exists())
         self.assertFalse((self.root / "jobs" / "002-add-csv-export" / "spec.md").exists())
+
+    # --- cloud-claim ---
+    def cloud_backlog(self, specs):
+        """backlog.md with one open item per (text, likely files) pair; files None = no backlog-specs file."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"- [ ] {t}\n" for t, _ in specs))
+        (self.root / "backlog-specs").mkdir(exist_ok=True)
+        for text, files in specs:
+            if files is not None:
+                self.spec_file(text).write_text(
+                    f"# {text}\n\n## Likely files\n" + "".join(f"- `{f}`: edit\n" for f in files))
+
+    def spec_file(self, text):
+        return self.root / "backlog-specs" / (hashlib.sha1(text.encode()).hexdigest()[:12] + ".md")
+
+    def in_flight(self, job_id, stage, files):
+        """A board job in `stage`; files None = no jobs/<id>/spec.md."""
+        board_path = self.root / "board.json"
+        data = json.loads(board_path.read_text()) if board_path.exists() else {"jobs": []}
+        data["jobs"].append({"id": job_id, "title": job_id, "stage": stage})
+        board_path.write_text(json.dumps(data))
+        (self.root / "jobs" / job_id).mkdir(parents=True)
+        if files is not None:
+            self.write(f"{job_id}/spec.md", "# x\n\n## Likely files\n" + "".join(f"- `{f}`\n" for f in files))
+
+    def test_cloud_claim_claims_up_to_n_disjoint_items(self):
+        self.cloud_backlog([("Alpha", ["a.py"]), ("Beta", ["b.py"]), ("Gamma", ["c.py"])])
+        out = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual(out, {"claimed": [{"id": "001-alpha", "feature": "Alpha"}, {"id": "002-beta", "feature": "Beta"}]})
+        self.assertEqual((self.root / "jobs" / "001-alpha" / "spec.md").read_text(),
+                         "# Alpha\n\n## Likely files\n- `a.py`: edit\n")
+        self.assertTrue((self.root / "jobs" / "002-beta" / "spec.md").is_file())
+        self.assertFalse(self.spec_file("Alpha").exists())
+        self.assertTrue(self.spec_file("Gamma").exists())
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Alpha → 001-alpha\n- [x] Beta → 002-beta\n- [ ] Gamma\n")
+        self.assertEqual([(j["id"], j["stage"]) for j in self.jobs()], [("001-alpha", "spec"), ("002-beta", "spec")])
+
+    def test_cloud_claim_cuts_title_to_60_and_skips_waiting_items(self):
+        long = "L" * 70
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] Blocked {{needs #aaaa}}\n- [ ] Pre {{#aaaa}}\n- [ ] {long}\n")
+        (self.root / "backlog-specs").mkdir()
+        for t, f in (("Blocked", "z.py"), ("Pre", "p.py"), (long, "l.py")):
+            self.spec_file(t).write_text(f"## Likely files\n- `{f}`\n")
+        out = board.cmd_cloud_claim(self.root, 5)
+        self.assertEqual([c["feature"] for c in out["claimed"]], ["Pre", long])
+        self.assertEqual(self.jobs()[1]["title"], "L" * 60)
+        self.assertTrue((self.root / "backlog.md").read_text().startswith("# Backlog\n- [ ] Blocked {needs #aaaa}\n"))
+
+    def test_cloud_claim_skips_item_parked_on_human_setup(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Parked {setup: add the API key}\n- [ ] Free\n")
+        (self.root / "backlog-specs").mkdir()
+        for t, f in (("Parked", "p.py"), ("Free", "f.py")):
+            self.spec_file(t).write_text(f"## Likely files\n- `{f}`\n")
+        out = board.cmd_cloud_claim(self.root, 5)
+        self.assertEqual(out, {"claimed": [{"id": "001-free", "feature": "Free"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] Parked {setup: add the API key}\n- [x] Free → 001-free\n")
+
+    def test_cloud_claim_skips_item_overlapping_earlier_pick(self):
+        self.cloud_backlog([("A", ["a.py"]), ("B", ["a.py", "b.py"]), ("C", ["c.py"])])
+        out = board.cmd_cloud_claim(self.root, 3)
+        self.assertEqual(out, {"claimed": [{"id": "001-a", "feature": "A"}, {"id": "002-c", "feature": "C"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [x] A → 001-a\n- [ ] B\n- [x] C → 002-c\n")
+        self.assertTrue(self.spec_file("B").exists())
+
+    def test_cloud_claim_skips_items_without_spec(self):
+        self.cloud_backlog([("Nospec", None), ("Empty", []), ("Good", ["g.py"])])
+        out = board.cmd_cloud_claim(self.root, 3)
+        self.assertEqual(out, {"claimed": [{"id": "001-good", "feature": "Good"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Nospec\n- [ ] Empty\n- [x] Good → 001-good\n")
+        self.assertTrue(self.spec_file("Empty").exists())
+
+    def test_cloud_claim_respects_in_flight_jobs(self):
+        self.cloud_backlog([("X item", ["x.py"]), ("Y item", ["y.py"])])
+        self.in_flight("010-cloudy", "cloud", ["x.py"])
+        self.in_flight("011-reviewing", "review", ["y.py"])
+        out = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual(out, {"claimed": [{"id": "012-y-item", "feature": "Y item"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] X item\n- [x] Y item → 012-y-item\n")
+
+    def test_cloud_claim_in_flight_job_without_spec_blocks_all(self):
+        self.cloud_backlog([("X item", ["x.py"]), ("Y item", ["y.py"])])
+        self.in_flight("010-building", "build", None)
+        before = (self.root / "backlog.md").read_text()
+        self.assertEqual(board.cmd_cloud_claim(self.root, 2), {"claimed": []})
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
+
+    def test_cloud_claim_rejects_n_below_one(self):
+        self.cloud_backlog([("A", ["a.py"])])
+        before = (self.root / "backlog.md").read_bytes()
+        for n in ("0", "-1"):
+            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", n],
+                                 capture_output=True, text=True)
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("N must be at least 1", out.stderr)
+            self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+        self.assertFalse((self.root / "jobs").exists())
+
+    def test_cloud_claim_cli_prints_json(self):
+        self.cloud_backlog([("A", ["a.py"])])
+        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", "4"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"claimed": [{"id": "001-a", "feature": "A"}]})
 
     def test_runall_start_maps_needs_to_depends_on(self):
         self.root.mkdir(parents=True)
@@ -918,6 +1056,41 @@ class BoardTest(unittest.TestCase):
         status = board.cmd_sync(self.root, job_id)
         self.assertTrue(status["complete"])
         self.assertEqual((status["verdict"], status["invalid"]), ("INVALID", ["ux"]))
+        self.assertEqual(status["missing"], [])
+
+    def test_sync_e2e_changes_overrides_pass(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-1/review-e2e.md", "VERDICT: CHANGES\n## Findings\n1. real bug")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertTrue(status["complete"])
+        self.assertEqual(status["verdict"], "CHANGES")
+        self.assertEqual(status["invalid"], [])
+        self.assertEqual(status["e2e"], "CHANGES")
+        self.write(f"{job_id}/round-1/review-e2e.md", "VERDICT: PASS")
+        self.assertEqual(board.cmd_sync(self.root, job_id)["verdict"], "PASS")
+        self.assertEqual(self.jobs()[0]["reviews"], {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"})
+
+    def test_sync_e2e_absent_is_not_missing(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["complete"], status["verdict"], status["missing"], status["invalid"]),
+                         (True, "PASS", [], []))
+        self.assertIsNone(status["e2e"])
+        (self.root / "jobs" / job_id / "round-1" / "review-ui.md").unlink()
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["complete"], status["verdict"], status["missing"]), (False, None, ["review-ui.md"]))
+
+    def test_sync_e2e_invalid(self):
+        job_id = board.cmd_new(self.root, "x")
+        for r in board.REVIEWERS:
+            self.write(f"{job_id}/round-1/review-{r}.md", "VERDICT: PASS")
+        self.write(f"{job_id}/round-1/review-e2e.md", "Looks fine to me")
+        status = board.cmd_sync(self.root, job_id)
+        self.assertEqual((status["verdict"], status["invalid"], status["e2e"]), ("INVALID", ["e2e"], "INVALID"))
         self.assertEqual(status["missing"], [])
 
     def test_sync_no_rounds_lists_all_missing(self):
@@ -1409,11 +1582,27 @@ class BoardTest(unittest.TestCase):
     def test_watchdog_flags_stalled_spec_job(self):
         fresh = self.aged("Fresh spec", 1, stage="spec")
         stuck = self.aged("Stuck spec", 31, stage="spec")
+        (self.root / "jobs" / stuck / "feature.md").write_text("Stuck spec\n")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [stuck])
         self.assertEqual(self.get(stuck)["stage"], "needs-human")
         self.assertEqual(self.get(stuck)["reason"],
                          "stalled in spec: no board update for 30 min and no live session. Fix: click Resume.")
         self.assertEqual(self.get(fresh)["stage"], "spec")
+
+    def test_watchdog_requeues_orphaned_spec_claim_in_place(self):
+        (self.root / "backlog-specs").mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] [3] Full item text, every detail {#ab12} <!-- why -->\n- [ ] Other\n")
+        board.spec_path(self.root, "Full item text, every detail").write_text("pre-written spec")
+        claimed = board.cmd_next(self.root)["id"]
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][0]["updatedAt"] = "2000-01-01T00:00:00+00:00"
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.get(claimed)["stage"], "aborted")
+        self.assertEqual(self.get(claimed)["reason"], board.ORPHANED)
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] [3] Full item text, every detail {#ab12} <!-- why -->\n- [ ] Other\n")
+        self.assertEqual(board.spec_path(self.root, "Full item text, every detail").read_text(), "pre-written spec")
 
     def test_watchdog_never_flags_cloud_jobs(self):
         cloud = self.aged("In cloud", 120, stage="cloud")
@@ -2017,14 +2206,14 @@ class DigestVerifyTest(unittest.TestCase):
         self.git(self.wt, "add", rel)
         self.git(self.wt, "commit", "-q", "-m", "edit")
 
-    def run_cli(self):
+    def run_cli(self, *extra):
         out = io.StringIO()
         with redirect_stdout(out):
-            code = board.main(["--dir", str(self.root), "digest-verify", self.job])
+            code = board.main(["--dir", str(self.root), "digest-verify", self.job, *extra])
         return code or 0, json.loads(out.getvalue())
 
-    def assert_fails(self, needle=None):
-        code, out = self.run_cli()
+    def assert_fails(self, needle=None, *extra):
+        code, out = self.run_cli(*extra)
         self.assertEqual(code, 1, out)
         self.assertFalse(out["ok"])
         if needle:
@@ -2090,6 +2279,58 @@ class DigestVerifyTest(unittest.TestCase):
             self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper.",
                                    "target": str(Path(self.tmp.name) / "elsewhere" / "agents" / "scrum-builder.md")})
             self.assert_fails("p1")
+        with self.subTest("relative target"):
+            # From the repo root the relative path would resolve inside the repo; it must still be rejected.
+            self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper.",
+                                   "target": "agents/scrum-builder.md"})
+            cwd = os.getcwd()
+            os.chdir(self.repo)
+            try:
+                out = self.assert_fails("p1")
+            finally:
+                os.chdir(cwd)
+            self.assertIn("not an absolute path", out["error"])
+
+    def test_digest_verify_flags_override_board(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        with self.subTest("board worktree unset"):
+            board.cmd_set(self.root, self.job, ["worktree="])
+            code, out = self.run_cli("--worktree", str(self.wt), "--base", "main")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(out["files"], ["agents/scrum-builder.md"])
+        with self.subTest("board worktree lacks the edit"):
+            wt2 = Path(self.tmp.name) / "wt2"
+            self.git(self.repo, "worktree", "add", "-q", "-b", "other", str(wt2))
+            board.cmd_set(self.root, self.job, [f"worktree={wt2}"])
+            self.assert_fails("no rules file")
+            code, out = self.run_cli("--worktree", str(self.wt))
+            self.assertEqual(code, 0, out)
+            self.assertEqual(out["proposals"], ["repo digest 006 p1"])
+
+    def test_digest_verify_base_flag_sets_range(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        self.git(self.repo, "branch", "has-edit", f"scrum/{self.job}")
+        self.assert_fails("the diff changes no rules file", "--base", "has-edit")
+        code, out = self.run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["files"], ["agents/scrum-builder.md"])
+
+    def test_digest_verify_empty_or_bad_flag_fails(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+        for flag, word in (("--worktree", "no worktree"), ("--base", "no base")):
+            with self.subTest(flag=flag):
+                out = self.assert_fails(word, flag, "")
+                self.assertEqual(out["ok"], False)
+        with self.subTest("dash base"):
+            self.assert_fails("bad base", "--base=-x")
+        code, out = self.run_cli()  # the board's own values still pass
+        self.assertEqual(code, 0, out)
 
     def test_digest_verify_fails_missing_digest(self):
         self.feature("Apply digest 007 p1 to agents/scrum-builder.md\n")
@@ -2167,8 +2408,10 @@ class CloudSyncTest(unittest.TestCase):
                 "merged_at": None, "labels": [], "base": {"ref": "main"}, **kw}
 
     def gh(self, pulls, comments=None):
-        def fake(repo, endpoint):
-            self.calls.append((repo, endpoint))
+        def fake(repo, endpoint, *flags):
+            self.calls.append((repo, endpoint, *flags))
+            if flags == ("-X", "PATCH", "-f", "state=closed") and endpoint == "repos/{owner}/{repo}/pulls/7":
+                return {}
             if endpoint == self.PULLS:
                 return pulls
             if endpoint == "repos/{owner}/{repo}/issues/7/comments?per_page=100":
@@ -2217,14 +2460,58 @@ class CloudSyncTest(unittest.TestCase):
             self.assertEqual(board.cmd_cloud_sync(self.root)["moved"], [])
         self.assertEqual(self.get()["stage"], "cloud")
 
-    def test_closed_pr_marks_needs_human(self):
+    def backlog_texts(self):
+        return [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
+
+    def test_closed_pr_aborts_and_requeues(self):
         with self.gh([self.pr(state="closed")]):
             out = board.cmd_cloud_sync(self.root)
-        reason = "cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."
+        reason = "requeue: cloud PR closed without merging"
         self.assertEqual(out["moved"], [{"id": self.job, "state": "CLOSED", "pr": self.URL, "reason": reason,
                                          "worktree": None, "artifacts": False}])
         job = self.get()
-        self.assertEqual((job["stage"], job["pr"], job["reason"]), ("needs-human", self.URL, reason))
+        self.assertEqual((job["stage"], job["pr"], job["reason"]), ("aborted", self.URL, reason))
+        self.assertEqual(self.backlog_texts(), ["Cloud thing"])
+        self.assertEqual(len(self.calls), 1)  # an already-closed PR is not closed again
+
+    def self_abort(self, line):
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"body": f"{line}\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree") as wt:
+            out = board.cmd_cloud_sync(self.root)
+        wt.assert_not_called()
+        self.assertEqual(self.calls[-1], (self.root.parent, "repos/{owner}/{repo}/pulls/7", "-X", "PATCH", "-f",
+                                          "state=closed"))
+        return out
+
+    def test_requeue_comment_aborts_requeues_and_closes_pr(self):
+        out = self.self_abort("requeue: spec writer produced nothing")
+        self.assertEqual(out["moved"][0]["state"], "ABORTED")
+        job = self.get()
+        self.assertEqual((job["stage"], job["pr"], job["reason"]),
+                         ("aborted", self.URL, "requeue: spec writer produced nothing"))
+        self.assertEqual(self.backlog_texts(), ["Cloud thing"])
+
+    def test_obsolete_and_already_fixed_comments_abort_without_requeue(self):
+        for line in ("obsolete: nothing to change", "looks already fixed: see main"):
+            with self.subTest(line=line):
+                self.setUp()
+                self.self_abort(line)
+                self.assertEqual((self.get()["stage"], self.get()["reason"]), ("aborted", line))
+                self.assertEqual(self.backlog_texts(), [])
+
+    def test_pr_close_failure_still_aborts(self):
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
+        comments = [{"body": "obsolete: gone\n<!-- scrum needs-human -->"}]
+        def fake(repo, endpoint, *flags):
+            if flags:
+                raise board.GhError("HTTP 403")
+            return [labelled] if endpoint == self.PULLS else comments
+        err = io.StringIO()
+        with mock.patch.object(board, "gh_api", side_effect=fake), mock.patch("sys.stderr", err):
+            out = board.cmd_cloud_sync(self.root)
+        self.assertEqual((out["error"], self.get()["stage"]), (None, "aborted"))
+        self.assertIn("PR close failed: HTTP 403", err.getvalue())
 
     def needs_human(self, comments, worktree):
         labelled = self.pr(labels=[{"name": "bug"}, {"name": "scrum:needs-human"}], base={"ref": "dev"})
@@ -2322,12 +2609,98 @@ class CloudSyncTest(unittest.TestCase):
             code = board.main(["--dir", str(self.root), "cloud-sync"])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.getvalue())["moved"][0]["state"], "CLOSED")
-        board.cmd_set(self.root, self.job, ["stage=cloud"])
+        board.cmd_set(self.root, board.cmd_new(self.root, "Another"), ["stage=cloud"])
         with mock.patch.object(board, "gh_api", side_effect=board.GhError("gh: auth required")), \
                 redirect_stdout(io.StringIO()) as out:
             code = board.main(["--dir", str(self.root), "cloud-sync"])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out.getvalue()), {"moved": [], "error": "gh: auth required"})
+
+
+class MoveRatioTest(unittest.TestCase):
+    """board.py move-ratio: the share of a job's added lines that git marks as moved (SKILL.md Review MOVE_ONLY)."""
+
+    BLOCK = "".join(f"def helper_{i}(value):  # moved helper number {i}\n" for i in range(20))
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "repo"
+        self.root = base / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json"),
+                                           "SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.repo.mkdir()
+        (self.repo / "a.py").write_text("# a\n" + self.BLOCK + "# end a\n")
+        (self.repo / "b.py").write_text("# b\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "a.py", "b.py")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "work")
+        self.job = board.cmd_new(self.root, "Move helpers")
+        board.cmd_set(self.root, self.job, [f"worktree={self.repo}", "base=main"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, files):
+        for rel, text in files.items():
+            (self.repo / rel).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "edit")
+
+    def move(self, extra=""):
+        self.commit({"a.py": "# a\n# end a\n", "b.py": "# b\n" + self.BLOCK + extra})
+
+    def run_cli(self, job=None):
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "move-ratio", job or self.job],
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotIn("Traceback", r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 1, r.stdout)
+        return r.returncode, json.loads(lines[0])
+
+    def test_pure_move_is_ratio_one(self):
+        self.move()
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
+
+    def test_mixed_diff_ratio(self):
+        self.move("".join(f"brand_new_value_{i} = compute_something_fresh({i})\n" for i in range(20)))
+        self.assertEqual(self.run_cli(), (0, {"added": 40, "moved": 20, "ratio": 0.5}))
+
+    def test_ignores_user_color_config(self):
+        self.git("config", "color.diff.newMoved", "magenta")
+        self.git("config", "color.diff.new", "bold cyan")
+        self.git("config", "color.diff.meta", "green")
+        self.git("config", "diff.colorMoved", "no")
+        self.move()
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
+
+    def test_no_added_lines_is_zero(self):
+        self.commit({"a.py": "# a\n# end a\n"})
+        self.assertEqual(self.run_cli(), (0, {"added": 0, "moved": 0, "ratio": 0.0}))
+
+    def test_missing_worktree_errors(self):
+        self.move()
+        cases = {"no worktree": (["worktree="], "no worktree"), "no base": (["base="], "no base"),
+                 "dash base": (["base=--output=/tmp/x"], "bad base"), "git fails": (["base=no-such-branch"], "failed")}
+        for label, (pairs, needle) in cases.items():
+            with self.subTest(label):
+                board.cmd_set(self.root, self.job, [f"worktree={self.repo}", "base=main"])
+                board.cmd_set(self.root, self.job, pairs)
+                code, out = self.run_cli()
+                self.assertEqual(code, 1, out)
+                self.assertFalse(out["ok"])
+                self.assertIn(needle, out["error"])
+        with self.subTest("unknown id"):
+            code, out = self.run_cli("999-no-such-job")
+            self.assertEqual(code, 1, out)
+            self.assertFalse(out["ok"])
 
 
 if __name__ == "__main__":

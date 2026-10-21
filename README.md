@@ -16,13 +16,15 @@ feature → spec-writer → builder → check gate → security · ux · ui · c
 
 **Escalates only for:** DB schema/migrations, money, auth, secrets, a blocked builder, or infrastructure (no `gh`, or merge conflicts or CI still failing after 2 automatic fixes). The approver decides everything else. It runs on Opus, or on Sonnet when the round is all green (check PASS, every review PASS, no schema files, not a conflict round).
 
+**E2E reviewer (optional).** When `scrum/project.md` has an `E2E:` line that isn't `none`, `scrum-review-e2e` replays the saved Playwright specs, covers changed UI that has none, and sorts failures into real bug, stale test or flake. It runs when the E2E check fails and when the diff touches `UI globs`; a `real bug` makes the round `CHANGES`.
+
 **Skips the ux and ui reviewers** when no file in the diff matches `UI globs` in `scrum/project.md`; the orchestrator writes their review files as `VERDICT: PASS`. A missing or `none` line means all four run.
 
 ## Install (once)
 
 ```bash
 brew install gh && gh auth login   # needed to open and merge PRs
-./install.sh                       # links skills/trevskills-scrum and agents/* into ~/.claude
+./install.sh                       # links skills/trevskills-scrum, skills/trevskills-e2e and agents/* into ~/.claude
 ```
 
 `install.sh` also links `codex/AGENTS.md` to `~/.codex/AGENTS.md` (or `$CODEX_HOME/AGENTS.md`), the review rules Codex reads. It refuses to replace a real file there.
@@ -65,14 +67,15 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 
 ## Change the scrum
 
-- Agents: `agents/scrum-*.md`. A repo can override one with its own `.claude/agents/<same name>.md`.
+- Agents: `agents/scrum-*.md` (including `scrum-review-e2e`, which loads the `trevskills-e2e` skill). A repo can override one with its own `.claude/agents/<same name>.md`.
+- E2E flow: `skills/trevskills-e2e/SKILL.md`, also runnable directly as `/trevskills-e2e`
 - The loop: `skills/trevskills-scrum/SKILL.md`
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
 - Tests: `python3 -m unittest discover -s tests -v`
 
 ## Cloud lane
 
-`/trevskills-scrum cloud [N]` runs up to N (default 4) backlog items in Claude Code cloud sessions (claude.ai/code), paid by cloud-session credit instead of the weekly plan. Each session first reruns `cloud/setup.sh` to refresh the skill, since the environment caches an old copy, then runs the normal pipeline and squash-merges its own `[scrum <id>]` PR, or labels it `scrum:needs-human` with a comment saying why. `/trevskills-scrum cloud-sync` (also run by `cloud` and bare `/trevskills-scrum`) moves those results onto the board. Its PR lookup and board update are plain Python, `board.py cloud-sync` (one GitHub REST call, no LLM), and the dashboard server runs that every 10 minutes while any job is in stage `cloud`, so a merged or stopped cloud job lands without a session. Each cloud job also pushes its folder to a `scrum-artifacts/<id>` branch that `cloud-sync` fetches into the local board (follow-ups go to the backlog) and then deletes. When the poll moves a job with such a branch, or one stopped on a schema or agent-rules hard stop, the server starts a headless `/trevskills-scrum cloud-home <id>` for just that work. Before each batch the orchestrator reads the credit at https://claude.ai/settings/usage through Claude in Chrome and refuses under $25. The rules are in SKILL.md **Cloud lane**.
+`/trevskills-scrum cloud [N]` runs up to N (default 4) backlog items in Claude Code cloud sessions (claude.ai/code), paid by cloud-session credit instead of the weekly plan. Each session first reruns `cloud/setup.sh` to refresh the skill, since the environment caches an old copy, verifies its skill copy (`~/scrum` HEAD matches origin main and SKILL.md has the Artifacts step, else it stops as needs-human), reads SKILL.md from disk instead of the skill text loaded at session start, then runs the normal pipeline and squash-merges its own `[scrum <id>]` PR, or labels it `scrum:needs-human` with a comment saying why. `/trevskills-scrum cloud-sync` (also run by `cloud` and bare `/trevskills-scrum`) moves those results onto the board. Its PR lookup and board update are plain Python, `board.py cloud-sync` (one GitHub REST call, no LLM), and the dashboard server runs that every 10 minutes while any job is in stage `cloud`, so a merged or stopped cloud job lands without a session. Each cloud job also pushes its folder to a `scrum-artifacts/<id>` branch that `cloud-sync` fetches into the local board (follow-ups go to the backlog) and then deletes. When the poll moves a job with such a branch, or one stopped on a schema or agent-rules hard stop, the server starts a headless `/trevskills-scrum cloud-home <id>` for just that work. Before each batch the orchestrator reads the credit at https://claude.ai/settings/usage through Claude in Chrome and refuses under $25; the value is cached for 24 h in `~/.claude/trevskills-scrum/cloud-credit.json`, and a batch skips the read and the question while that value is under 24 h old and above $25 plus $5 per job dispatched since. The rules are in SKILL.md **Cloud lane**.
 
 Set up the cloud environment once:
 

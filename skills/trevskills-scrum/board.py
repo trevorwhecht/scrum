@@ -5,9 +5,14 @@
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
-  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
-                                   new job, print {"id","feature"}
-  board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
+  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
+                                   no {setup: …} Human setup as a new job, print {"id","feature"}
+  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
+                                   (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
+                                   Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
+  board.py backlog-add [--setup "<step>; <step>"] "<item>"...  append "- [ ] <item>" lines to backlog.md (--setup adds a
+                                   " {setup: step; step}" marker: next and runall-start skip the item until Trevor clicks
+                                   Setup done), then estimate each in the background
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
@@ -26,9 +31,13 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
-  board.py digest-verify <id>      exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
+  board.py digest-verify <id> [--worktree PATH] [--base REF]
+                                   exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
-                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard)
+                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
+                                   --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
+                                   git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
@@ -38,16 +47,18 @@
                                    by ~/.claude/usage.json), print
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
-                                   depends_on; items waiting on an outside job stay open), print {"id","children"}
+                                   depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
                                    (id null = nothing to claim); `ready <id>` then schedules them
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
-  board.py watchdog                flag jobs stuck 30+ min in build/check/review/approve with no live session
-                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}
+  board.py watchdog                flag jobs stuck 30+ min in spec/build/check/review/approve with no live session
+                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}; a stuck spec
+                                   job with no feature.md is an orphaned claim: aborted and requeued, never flagged
   board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
-                                   MERGED -> done, CLOSED -> needs-human, open + scrum:needs-human -> needs-human with the
-                                   PR comment's reason and a fetched worktree; print {"moved","error"}, exit 1 on a gh
+                                   MERGED -> done, CLOSED -> aborted + requeued, open + scrum:needs-human -> needs-human with
+                                   the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
+                                   fixed: reason aborts it and closes the PR instead); print {"moved","error"}, exit 1 on a gh
                                    error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
@@ -201,11 +212,12 @@ def cmd_new(root, title, job_id=None):
         return add_job(root, board, title, job_id)
 
 
-# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} → 003-id <!-- why -->"; points, the id and needs markers, the job
-# and the estimate's reason are optional. An item's text excludes the markers, so its spec_path never changes. ---
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} {setup: step; step} → 003-id <!-- why -->"; points, the id, needs
+# and setup markers, the job and the estimate's reason are optional. An item's text excludes the markers, so its spec_path
+# never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
-                     r"(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+                     r"(?: \{setup: ([^{}]*)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
@@ -222,10 +234,11 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if m := ITEM_RE.match(line):
-            done, pts, text, item_id, needs, job, why = m.groups()
+            done, pts, text, item_id, needs, setup, job, why = m.groups()
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
-                          "id": item_id, "needs": needs.replace("#", "").split() if needs else []})
+                          "id": item_id, "needs": needs.replace("#", "").split() if needs else [],
+                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else []})
     return lines, items
 
 
@@ -233,6 +246,7 @@ def format_item(item):
     return (f"- [{'x' if item['done'] else ' '}] " + (f"[{item['points']}] " if item["points"] else "") + item["text"]
             + (f" {{#{item['id']}}}" if item.get("id") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
+            + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
 
 
@@ -251,6 +265,17 @@ def waiting_on(item, items, board):
     stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
     blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
     return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+
+
+def setup_steps(raw):
+    """A Human setup checklist "step; step" as its list of steps: split on ";", braces removed, trimmed, empties dropped.
+    Raises when no step is left or the checklist would not fit on one backlog line."""
+    steps = [s for s in (clean(part.replace("{", "").replace("}", ""), None) for part in str(raw or "").split(";")) if s]
+    if not steps:
+        raise SystemExit("setup checklist is empty")
+    if len("; ".join(steps)) > ITEM_MAX:
+        raise SystemExit(f"setup checklist is longer than {ITEM_MAX} characters")
+    return steps
 
 
 def write_backlog(root, lines):
@@ -277,8 +302,9 @@ def check_points(points):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
-    """add / edit / delete / move one backlog item under the board lock. Returns the new item list."""
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None):
+    """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
+    add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -287,7 +313,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             if points is not KEEP:
                 check_points(points)
             lines.append(format_item({"done": False, "points": None if points is KEEP else points,
-                                      "text": clean(text, ITEM_MAX), "job": None, "why": None}))
+                                      "text": clean(text, ITEM_MAX), "job": None, "why": None,
+                                      "setup": None if setup is None else setup_steps(setup)}))
         elif op == "edit":
             item = pick(items, index)
             old = item["text"]
@@ -312,6 +339,13 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             b = next((items[j] for j in step if not items[j]["done"]), None)
             if b:
                 lines[a["line"]], lines[b["line"]] = lines[b["line"]], lines[a["line"]]
+        elif op == "setup-done":
+            item = pick(items, index)
+            if item["done"] or not item["setup"]:
+                raise SystemExit(f"backlog item {index} has no Human setup")
+            line = lines[item["line"]]
+            m = ITEM_RE.match(line)  # cut just the marker, so the rest of the line stays byte for byte
+            lines[item["line"]] = line[:m.start(6) - len(" {setup: ")] + line[m.end(6) + 1:]
         else:
             raise SystemExit(f"unknown backlog op {op!r}")
         write_backlog(root, lines)
@@ -362,13 +396,15 @@ def cmd_next(root, index=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in items if not i["done"] and not waiting_on(i, items, board)), None)
+            item = next((i for i in items if not i["done"] and not i["setup"] and not waiting_on(i, items, board)), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
             item = pick(items, index)
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
+            if item["setup"]:
+                raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
         job_id = add_job(root, board, item["text"][:60])
@@ -378,21 +414,71 @@ def cmd_next(root, index=None):
         return {"id": job_id, "feature": item["text"]}
 
 
+def cmd_cloud_claim(root, n) -> dict:
+    """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
+    An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
+    or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build. A cloud or
+    build job with no readable Likely files may touch anything, so it blocks every item."""
+    if n < 1:
+        raise SystemExit("N must be at least 1")
+    with locked_board(root) as board:
+        lines, items = read_backlog(root)
+        taken, blocked_all = set(), False
+        for job in board["jobs"]:
+            if job.get("stage") in ("cloud", "build"):
+                spec = Path(root) / "jobs" / job.get("id", "") / "spec.md"
+                files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+                blocked_all |= not files
+                taken |= files
+        claimed = []
+        for item in items:
+            if blocked_all or len(claimed) >= n:
+                break
+            if item["done"] or item["setup"] or waiting_on(item, items, board):
+                continue
+            spec = spec_path(root, item["text"])
+            files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
+            if not files or files & taken:
+                continue
+            job_id = add_job(root, board, item["text"][:60])
+            take_spec(root, item["text"], job_id)
+            claim_item(lines, item, job_id)
+            taken |= files
+            claimed.append({"id": job_id, "feature": item["text"]})
+        if claimed:
+            write_backlog(root, lines)
+        return {"claimed": claimed}
+
+
 def cmd_abort(root, job_id, requeue, reason=None):
     """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
-    folder = Path(root) / "jobs" / check_id(job_id)
-    feature = folder / "feature.md"
     with locked_board(root) as board:
-        job = find(board, job_id)
+        job = find(board, check_id(job_id))
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
-        job.update(stage="aborted", reason=reason or f"Aborted by Trevor {now()}", updatedAt=now(),
-                   files=job_files(folder))
-        if requeue:
-            text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
-            lines, _ = read_backlog(root)
-            lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
-            write_backlog(root, lines)
+        abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
+
+
+def abort_job(root, job, requeue, reason):
+    """cmd_abort's body; caller holds the lock. With no feature.md (a claim whose session died before writing it),
+    the requeue reopens the claimed backlog line in place, points, id, needs and pre-written spec kept."""
+    folder = Path(root) / "jobs" / job["id"]
+    feature = folder / "feature.md"
+    job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    if not requeue:
+        return
+    lines, items = read_backlog(root)
+    claimed = next((i for i in items if i["job"] == job["id"]), None)
+    if claimed and not feature.exists():
+        claimed.update(done=False, job=None)
+        lines[claimed["line"]] = format_item(claimed)
+        if (folder / "spec.md").is_file():
+            spec_path(root, claimed["text"]).parent.mkdir(exist_ok=True)
+            os.replace(folder / "spec.md", spec_path(root, claimed["text"]))
+    else:
+        text = clean(feature.read_text() if feature.exists() else job["title"], ITEM_MAX) or job["title"]
+        lines.append(format_item({"done": False, "points": None, "text": text, "job": None, "why": None}))
+    write_backlog(root, lines)
 
 
 def md_section(text, heading):
@@ -469,12 +555,15 @@ def projects():
     return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
 
 
-def cmd_backlog_add(root, items):
-    """Append each non-empty item; returns the texts as stored."""
+def cmd_backlog_add(root, items, setup=None):
+    """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
+    texts as stored. An empty checklist adds nothing."""
+    if setup is not None:
+        setup_steps(setup)
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item)
+            backlog_op(root, "add", text=item, setup=setup)
             added.append(clean(item, ITEM_MAX))
     return added
 
@@ -729,6 +818,8 @@ def _cited_proposal(root, scrum, digest_id, pid):
         raise ValueError(f"digest {digest_id} {pid}: not a valid edit proposal")
     if p.get("status") != "queued":
         raise ValueError(f"digest {digest_id} {pid}: status is {p.get('status')!r}, not queued")
+    if not os.path.isabs(p["target"]):
+        raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is not an absolute path")
     rel = os.path.relpath(os.path.realpath(p["target"]), os.path.realpath(Path(root).resolve().parent))
     if rel == ".." or rel.startswith(".." + os.sep):
         raise ValueError(f"digest {digest_id} {pid}: target {p['target']} is outside this repo")
@@ -753,18 +844,20 @@ def _applies(base_text, props, head_text):
     return False
 
 
-def cmd_digest_verify(root: Path, job_id: str) -> dict:
+def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
     """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
-    and every cited proposal's file changed; else {"ok": False, "error"}."""
+    and every cited proposal's file changed; else {"ok": False, "error"}. worktree/base, when not None, replace the
+    board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails."""
     try:
         job = find(read_board(root), check_id(job_id))
         feature = Path(root) / "jobs" / job_id / "feature.md"
         cites = digest_citations(root, feature.read_text(errors="replace") if feature.is_file() else "")
         if not cites:
             raise ValueError("feature.md cites no digest proposal")
-        wt, base = job.get("worktree"), job.get("base")
+        wt = job.get("worktree") if worktree is None else worktree
+        base = job.get("base") if base is None else base
         if not wt or not base:
-            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+            raise ValueError(f"no {'worktree' if not wt else 'base'}")
         if base.startswith("-"):
             raise ValueError(f"bad base {base!r}")
         by_file, labels = {}, []
@@ -792,6 +885,35 @@ def cmd_digest_verify(root: Path, job_id: str) -> dict:
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)}
 
+
+
+# --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
+# Colours are pinned so the user's git config can't change what is parsed; the meta colour keeps `+++` headers apart.
+MOVE_COLORS = ("color.diff.new=green", "color.diff.newMoved=bold cyan", "color.diff.meta=bold")
+NEW_SGR, MOVED_SGR = b"\x1b[32m+", b"\x1b[1;36m+"
+
+
+def cmd_move_ratio(root: Path, job_id: str) -> dict:
+    """{"added", "moved", "ratio"} for the job worktree's BASE...HEAD diff (ratio = moved / added, 2 decimals, 0.0 when
+    nothing is added); else {"ok": False, "error"}."""
+    try:
+        job = find(read_board(root), check_id(job_id))
+        wt, base = job.get("worktree"), job.get("base")
+        if not wt or not base:
+            raise ValueError(f"job has no {'worktree' if not wt else 'base'} on the board")
+        if base.startswith("-"):
+            raise ValueError(f"bad base {base!r}")
+        pins = [a for c in MOVE_COLORS for a in ("-c", c)]
+        out = _git(wt, *pins, "diff", "--no-ext-diff", "--color=always", "--color-moved=plain", f"{base}...HEAD", "--")
+        added = moved = 0
+        for line in out.splitlines():
+            if line.startswith(MOVED_SGR):
+                added, moved = added + 1, moved + 1
+            elif line.startswith(NEW_SGR):
+                added += 1
+        return {"added": added, "moved": moved, "ratio": round(moved / added, 2) if added else 0.0}
+    except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": str(e)}
 
 # --- artifacts: what a cloud job may push to scrum-artifacts/<id> (SKILL.md Cloud lane); files are left out whole ---
 ARTIFACT_MAX = 1024 * 1024
@@ -920,7 +1042,8 @@ def cmd_triage_apply(root, triage_id):
                     text = clean(e["text"], ITEM_MAX)
                     own = {i["id"] for i in got if i["id"]}
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
-                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own))}
+                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
+                            "setup": list(dict.fromkeys(st for i in got for st in i["setup"]))}  # still waits on setup
                     merged.append(item)
                     remap.update((n, item) for n in own)
                     for i in got:
@@ -1201,10 +1324,11 @@ def cmd_plan_apply(root, parent_id, fix=False):
 def cmd_runall_start(root):
     """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
-    whose item needs another item claimed here depends_on that sibling's child."""
+    whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
+    open, and so does every item that needs it."""
     with locked_board(root) as board:
         lines, items = read_backlog(root)
-        held = set()  # indexes of open items left open
+        held = {i["index"] for i in items if not i["done"] and i["setup"]}  # indexes of open items left open
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)
@@ -1287,6 +1411,19 @@ def resume_blocker(root, job_id):
     return Blocker(*hit) if hit else None
 
 
+def stuck_on(kids, aborted):
+    """True when some waiting child depends on an aborted id, directly or through other waiting children."""
+    deps = {k["id"]: k.get("depends_on") or [] for k in kids if k["stage"] == "waiting"}
+    stuck, grew = set(), True
+    while grew:
+        grew = False
+        for kid, on in deps.items():
+            if kid not in stuck and any(d in aborted or d in stuck for d in on):
+                stuck.add(kid)
+                grew = True
+    return bool(stuck)
+
+
 def cmd_ready(root, parent_id):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
     jobs_dir = Path(root) / "jobs"
@@ -1319,24 +1456,23 @@ def cmd_ready(root, parent_id):
             busy.append(k)
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
-        finished = sum(k["stage"] in (("done", "aborted") if runall else ("done",)) for k in kids)
+        finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
         if blocked and (ready or busy or finished == len(kids)):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
             human = [k["id"] for k in kids if k["stage"] == "needs-human"]
-            if not runall and any(k["stage"] == "aborted" for k in kids):  # only Abort on the parent fixes this
-                stuck = [k["id"] for k in kids if k["stage"] in ("needs-human", "aborted")]  # Run-all: aborted = finished
-                new = "needs-human", f"{BLOCKED}: {', '.join(stuck)}. Fix: clear each listed child (Approve " \
-                    "& merge, Send back to builder or Setup done); if one was aborted, click Abort job on this BigBoy."
-            else:  # every action is on a child, so the parent keeps running and names them
-                waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
-                if waits:
-                    new = "running", WAITING_ON + ", ".join(waits)
-                else:  # nothing on a child is actionable (e.g. a depends_on that is not a finished sibling)
-                    left = [k["id"] for k in kids if k["stage"] not in (("done", "aborted") if runall else ("done",))]
-                    new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
-                        "then click Run now on a waiting child."
+            waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
+            aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
+            if waits:  # every action is on a child, so the parent keeps running and names them
+                new = "running", WAITING_ON + ", ".join(waits)
+            elif not runall and aborted and stuck_on(kids, set(aborted)):  # Resume skips the dependents
+                new = "needs-human", f"{BLOCKED}: {', '.join(aborted)}. Fix: click Resume to skip the children " \
+                    "that depend on them and run the final review."
+            else:  # nothing on a child is actionable (e.g. a depends_on that is not a finished sibling)
+                left = [k["id"] for k in kids if k["stage"] not in ("done", "aborted")]
+                new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
+                    "then click Run now on a waiting child."
         if new != (parent["stage"], parent.get("reason")):
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
@@ -1479,29 +1615,33 @@ def cmd_sync(root, job_id):
         job = live(board, job_id)
         job.update(rounds=rounds, files=files, diverged=diverged(d), reviews=reviews, round=max(job["round"], last_n), updatedAt=now())
     complete = bool(last) and "pending" not in reviews.values()
-    invalid = [r for r, v in reviews.items() if v == "INVALID"]
+    # Optional e2e review: counts toward verdict and invalid when present, never reported missing.
+    e2e = first_word(round_dirs[-1] / "review-e2e.md", ("PASS", "CHANGES")) if round_dirs else None
+    counted = {**reviews, **({"e2e": e2e} if e2e else {})}
+    invalid = [r for r, v in counted.items() if v == "INVALID"]
     verdict = None if not complete else "INVALID" if invalid else \
-        "PASS" if all(v == "PASS" for v in reviews.values()) else "CHANGES"
+        "PASS" if all(v == "PASS" for v in counted.values()) else "CHANGES"
     missing = [f"review-{r}.md" for r, v in reviews.items() if v == "pending"]
     return {"round": last_n, "complete": complete, "verdict": verdict, "invalid": invalid, "missing": missing,
-            "check": last["check"] if last else None, "decision": decision, "reworks": reworks}
+            "check": last["check"] if last else None, "decision": decision, "reworks": reworks, "e2e": e2e}
 
 
 # --- cloud-sync: SKILL.md Cloud lane Sync's PR lookup and board updates, in plain Python (serve.py polls it) ---
 CLOUD_PULLS = "repos/{owner}/{repo}/pulls?state=all&per_page=100&sort=created&direction=desc"  # gh fills in origin
 CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's needs-human comment
 CLOUD_LABEL = "scrum:needs-human"
-CLOUD_CLOSED = "cloud PR closed without merging. Fix: click Abort job with Put back in backlog ticked to run it again."
+CLOUD_CLOSED = "requeue: cloud PR closed without merging"
+CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
 
 
 class GhError(Exception):
     """A failed `gh api` call; the message is the reason."""
 
 
-def gh_api(repo: Path, endpoint: str) -> list | dict:
-    """`gh api <endpoint>` in repo, parsed. REST only: cloud sessions block GitHub GraphQL. Raises GhError."""
+def gh_api(repo: Path, endpoint: str, *flags: str) -> list | dict:
+    """`gh api <flags> <endpoint>` in repo, parsed. REST only: cloud sessions block GitHub GraphQL. Raises GhError."""
     try:
-        r = subprocess.run(["gh", "api", endpoint], cwd=repo, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["gh", "api", *flags, endpoint], cwd=repo, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         raise GhError(f"gh api {endpoint} timed out") from None
     except OSError as e:  # FileNotFoundError names the missing executable
@@ -1539,17 +1679,18 @@ def artifacts_pushed(repo: Path, job_id: str) -> bool:
 
 
 def _cloud_plan(repo, job_id, prs):
-    """(state, pairs, reason, needs a worktree) for this job's newest [scrum <id>] PR, or None while it still runs.
-    Makes the one comments call a needs-human PR needs; raises GhError."""
+    """(state, pairs, reason, needs a worktree, abort) for this job's newest [scrum <id>] PR, or None while it still
+    runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
+    raises GhError."""
     pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")),
               None)
     if not pr:
         return None
     url = pr.get("html_url") or ""
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False
+        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False, None
     if pr.get("state") == "closed":
-        return "CLOSED", ["stage=needs-human", f"pr={url}", f"reason={CLOUD_CLOSED}"], CLOUD_CLOSED, False
+        return "CLOSED", [f"pr={url}"], CLOUD_CLOSED, False, (True, None)
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -1561,17 +1702,30 @@ def _cloud_plan(repo, job_id, prs):
     bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict) and CLOUD_MARK in str(c.get("body") or "")]
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
+    if reason.startswith(CLOUD_SELF_ABORT):
+        return "ABORTED", [f"pr={url}"], reason, False, (reason.startswith("requeue:"), number)
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True
+    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True, None
+
+
+def _cloud_abort(root, job_id, url, requeue, reason):
+    """Record pr= and abort a job still in stage cloud, atomically; requeue skips a BigBoy child (Auto-abort rule)."""
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        if job["stage"] != "cloud":
+            raise SystemExit(f"job {job_id} is {job['stage']}, not cloud; left alone")
+        job["pr"] = url
+        abort_job(root, job, requeue and not job.get("parent"), reason)
 
 
 def cmd_cloud_sync(root: Path) -> dict:
-    """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> needs-human, open with the
-    scrum:needs-human label -> needs-human with the comment's reason and a local worktree. Every gh call runs before
-    any write, so a gh failure changes nothing. A job that left stage cloud meanwhile is skipped. Returns
+    """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> aborted and requeued, open with the
+    scrum:needs-human label -> needs-human with the comment's reason and a local worktree, or, for a requeue:,
+    obsolete: or looks already fixed: reason, aborted with the PR closed. Every gh read runs before any write, so a
+    gh failure changes nothing. A job that left stage cloud meanwhile is skipped. Returns
     {"moved": [{"id","state","pr","reason","worktree","artifacts"}], "error"}."""
     root = Path(root)
     repo = root.parent
@@ -1586,16 +1740,25 @@ def cmd_cloud_sync(root: Path) -> dict:
     except GhError as e:
         return {"moved": [], "error": str(e) or type(e).__name__}
     moved = []
-    for job_id, (state, pairs, reason, wants_worktree) in plans:
+    for job_id, (state, pairs, reason, wants_worktree, abort) in plans:
+        worktree, url = None, next(p[3:] for p in pairs if p.startswith("pr="))
         try:
             if live(read_board(root), job_id)["stage"] != "cloud":
                 continue  # moved meanwhile: add no worktree for it
-            worktree = cloud_worktree(repo, job_id) if wants_worktree else None
-            cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud")
+            if abort:
+                _cloud_abort(root, job_id, url, abort[0], reason)
+            else:
+                worktree = cloud_worktree(repo, job_id) if wants_worktree else None
+                cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud")
         except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
             print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
             continue
-        moved.append({"id": job_id, "state": state, "pr": pairs[1][3:], "reason": reason, "worktree": worktree,
+        if abort and abort[1]:
+            try:  # best effort: the job is already aborted, so a later poll skips it either way
+                gh_api(repo, f"repos/{{owner}}/{{repo}}/pulls/{abort[1]}", "-X", "PATCH", "-f", "state=closed")
+            except GhError as e:
+                print(f"cloud-sync: {job_id}: PR close failed: {e}", file=sys.stderr)
+        moved.append({"id": job_id, "state": state, "pr": url, "reason": reason, "worktree": worktree,
                       "artifacts": artifacts_pushed(repo, job_id)})
     return {"moved": moved, "error": None}
 
@@ -1677,10 +1840,13 @@ def cmd_hook(event, tty):
 WATCHED = ("spec", "build", "check", "review", "approve")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+# Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
+RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
 PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
 
 
 def cmd_pause(root, job_id):
@@ -1729,9 +1895,10 @@ def stalled_since(job, cutoff):
 
 def cmd_watchdog(root, alive=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
+    A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
-    flagged = []
+    flagged, requeued = [], []
     try:
         with locked_board(root) as board:
             # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
@@ -1739,11 +1906,17 @@ def cmd_watchdog(root, alive=None):
                      and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
-                if not alive(job):
+                if alive(job):
+                    continue
+                if job["stage"] == "spec" and not job.get("parent") \
+                        and not (Path(root) / "jobs" / job["id"] / "feature.md").exists():
+                    abort_job(root, job, True, ORPHANED)  # nothing to resume: put the item back, no human needed
+                    requeued.append(job["id"])
+                else:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
                                f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
                     flagged.append(job["id"])
-            if not flagged:
+            if not flagged and not requeued:
                 raise _Gone
     except _Gone:
         pass
@@ -1946,7 +2119,10 @@ def main(argv=None):
     s.add_argument("pairs", nargs="+")
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
-    sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    sub.add_parser("cloud-claim").add_argument("n", type=int)
+    ba = sub.add_parser("backlog-add")
+    ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
+    ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
@@ -1972,7 +2148,11 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
-    sub.add_parser("digest-verify").add_argument("id")
+    dv = sub.add_parser("digest-verify")
+    dv.add_argument("id")
+    dv.add_argument("--worktree", default=None)
+    dv.add_argument("--base", default=None)
+    sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
@@ -2015,6 +2195,8 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
+    elif a.cmd == "cloud-claim":
+        print(json.dumps(cmd_cloud_claim(a.dir, a.n)))
     elif a.cmd == "roadmap-show":
         print(json.dumps(roadmap_show(a.dir)))
     elif a.cmd == "roadmap-link":
@@ -2038,9 +2220,13 @@ def main(argv=None):
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
-        out = cmd_digest_verify(a.dir, a.id)
+        out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
+    elif a.cmd == "move-ratio":
+        out = cmd_move_ratio(a.dir, a.id)
+        print(json.dumps(out))
+        return 1 if out.get("ok") is False else 0
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
@@ -2068,7 +2254,7 @@ def main(argv=None):
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items))
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup))
 
 
 def spawn_estimates(root, texts):

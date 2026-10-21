@@ -6,7 +6,7 @@ and every 10 minutes, while a project has a job in stage cloud, board.py cloud-s
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
-  python3 serve.py --digest-auto <NNN> --dir <scrum>      → auto-approve a digest's obvious proposals, print JSON, exit
+  python3 serve.py --digest-auto <NNN> --dir <scrum>      → apply (or queue) a digest's obvious proposals, print JSON, exit
   python3 serve.py --digest-skill-check <NNN> <PID> --dir <scrum> → re-check a queued skill proposal, print JSON, exit 1 if stale
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
@@ -111,14 +111,33 @@ def kill_session(project, root, job_id):
             pass
 
 
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def orchestrator_model(root: Path) -> str | None:
+    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
+    Missing, blank or malformed values give `sonnet`."""
+    try:
+        text = (root / "project.md").read_text()
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return "sonnet"
+    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    if value.lower() == "inherit":
+        return None
+    return value if MODEL_RE.fullmatch(value) else "sonnet"
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/. The dashboard shows it as running.
-    Returns the log path relative to root."""
+    start/resume orchestrator sessions also get `--model <Orchestrator model>`. Returns the log path relative to root."""
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    model = orchestrator_model(root) if action in ("start", "resume") else None
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
     with open(log, "w") as fh:
-        proc = subprocess.Popen([CLAUDE, "-p", prompt, *flags], cwd=root.parent,
+        proc = subprocess.Popen(argv, cwd=root.parent,
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
                                 env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))  # board.py plays scrum's sounds
     with RUNS_LOCK:
@@ -269,6 +288,54 @@ def cloud_tick(project, root, jobs, now=None):
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 
 
+EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
+
+
+def respawn_exited(project, root):
+    """A dashboard-started `claude -p` start/resume run that exited while its job is still in a WATCHED stage (it
+    ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run that was itself that respawn,
+    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. Returns the flagged ids."""
+    with RUNS_LOCK:
+        runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and r.get("action") in ("start", "resume")
+                and not r.get("handled") and r["proc"].poll() is not None]
+    path = root / "board.json"
+    if not runs or not path.exists():
+        return []
+    jobs = json.loads(path.read_text())["jobs"]
+    alive, flagged = None, []
+    for key, run in runs:
+        job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
+        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or job.get("lane") == "lilguy":
+            run["handled"] = True
+            continue
+        alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
+        if alive(job):
+            continue  # another session (e.g. a Terminal) has the job; look again next tick
+        stage = job["stage"]
+        try:
+            with board.locked_board(root) as b:
+                live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+                if not live or live.get("stage") != stage:
+                    raise board._Gone
+                live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {EXITED.format(stage=stage)}",
+                            updatedAt=board.now())
+                job.update(live)
+        except board._Gone:
+            run["handled"] = True
+            continue
+        run["handled"] = True
+        flagged.append(job["id"])
+        if run.get("respawn") or resume_refusal(root, job):
+            board.play(board.sound("needs-human"))
+            continue
+        resume_job(project, root, job, jobs)
+        with RUNS_LOCK:
+            new = RUNS.get(key)
+            if new is not None and new is not run:  # the entry resume_job's spawn just created
+                new["respawn"] = True
+    return flagged
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
     whatever siblings are now ready, then auto-resume the stalled ones, then poll its cloud jobs (cloud_tick). One
@@ -276,6 +343,7 @@ def watchdog_tick():
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
+            respawn_exited(project, root)
             flagged = set(board.cmd_watchdog(root))
             if not (root / "board.json").exists():
                 continue
@@ -1827,22 +1895,142 @@ def digest_target_auto_ok(target):
     return None
 
 
+DIGEST_CONTRACT_TESTS = [sys.executable, "-m", "unittest", "tests.test_contracts"]  # run from the target repo's root
+
+
+def git_run(repo, *args):
+    """`git -C repo <args>`; a missing git or a hung call reads as exit code 1 with the error on stderr."""
+    try:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(args, 1, "", str(e))
+
+
+def digest_apply_ready(repo: Path) -> str | None:
+    """None when digest_auto may edit and commit in repo: its own git work tree, on a branch, clean outside scrum/, with
+    tests/test_contracts.py. Else the reason its obvious proposals are queued instead."""
+    top = git_run(repo, "rev-parse", "--show-toplevel")
+    if top.returncode or os.path.realpath(top.stdout.strip()) != os.path.realpath(repo):
+        return "not a git checkout"
+    if git_run(repo, "symbolic-ref", "-q", "HEAD").returncode:
+        return "detached HEAD"
+    status = git_run(repo, "status", "--porcelain", "--", ".", ":(exclude)scrum")
+    if status.returncode or status.stdout.strip():
+        return "uncommitted changes"
+    if not (Path(repo) / "tests" / "test_contracts.py").is_file():
+        return "no contract tests"
+    return None
+
+
+def digest_contract_ok(repo):
+    try:
+        return subprocess.run(DIGEST_CONTRACT_TESTS, cwd=repo, capture_output=True, timeout=600,
+                              stdin=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def digest_mark_applied(root, digest_id, pids):
+    """Set these still-pending proposals to applied; the last decision in the digest trims it, as in digest_decide."""
+    path = root / "digests" / digest_id / "proposals.json"
+    with DIGEST_LOCK:
+        data, raw = read_proposals(path)
+        for entry in raw:
+            if (v := valid_proposal(entry)) and v["id"] in pids and v["status"] == "pending":
+                entry["status"] = "applied"
+        tmp = path.with_name("proposals.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+        if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
+            board.cmd_digest_trim(root, digest_id)
+
+
+def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[dict], list[dict], str | None]:
+    """Apply one repo's obvious edit proposals in place, running the contract tests after each, then commit the ones that
+    passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
+    to-queue entry carries the reason it wasn't applied, and nothing of it is left written."""
+    repo = repo_of(props[0]["target"])[0]
+    entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "obvious_reason")} | ({"reason": why} if why else {})
+    if why := digest_apply_ready(repo):
+        return [], [entry(p, why) for p in props], None
+    done, queued = [], []  # done: (proposal, path relative to repo, original bytes)
+    for p in props:
+        target = Path(p["target"])
+        try:
+            orig = target.read_bytes()
+            text = orig.decode()
+        except (OSError, UnicodeDecodeError):
+            orig, text = b"", ""
+        if (n := text.count(p["old"])) != 1:
+            queued.append(entry(p, f"old text found {n} times"))
+            continue
+        try:
+            target.write_bytes(text.replace(p["old"], p["new"], 1).encode())  # in place: keeps a symlink
+        except OSError as e:
+            queued.append(entry(p, f"write failed: {e}"))
+            continue
+        if not digest_contract_ok(repo):
+            target.write_bytes(orig)
+            queued.append(entry(p, "contract tests failed"))
+            continue
+        done.append((p, repo_of(p["target"])[1], orig))
+    order = {p["id"]: i for i, p in enumerate(props)}
+    if not done:
+        return [], queued, None
+    scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel, _ in done))
+    pids = ", ".join(p["id"] for p, _, _ in done)
+    lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel, _ in done)
+
+    def undo(why):
+        for p, _, orig in reversed(done):  # reversed: two proposals on one file restore to its first bytes
+            Path(p["target"]).write_bytes(orig)
+        git_run(repo, "restore", "--staged", "--", *files)
+        return [], sorted(queued + [entry(p, why) for p, _, _ in done], key=lambda q: order[q["id"]])
+
+    try:
+        job_id = board.cmd_new(scrum, f"Apply digest {digest_id} {pids}")
+        (scrum / "jobs" / job_id / "feature.md").write_text(f"Apply digest {digest_id} obvious proposals:\n\n{lines}")
+        board.cmd_set(scrum, job_id, ["lane=lilguy"])
+    except (OSError, SystemExit) as e:
+        return (*undo(f"board job failed: {e}"), None)
+    r = git_run(repo, "add", "--", *files)
+    if not r.returncode:
+        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] Apply digest {digest_id} {pids}\n\n{lines}", "--", *files)
+    if r.returncode:
+        first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
+        applied, queued = undo(f"commit failed: {first}")
+        board.cmd_set(scrum, job_id, ["stage=needs-human", f"reason=digest apply: git commit failed: {first}"])
+        return applied, queued, job_id
+    digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
+    board.cmd_set(scrum, job_id, ["stage=done"])
+    return [entry(p) for p, _, _ in done], queued, job_id
+
+
 def digest_auto(root, digest_id):
-    """Approve each pending proposal the digester marked obvious and that passes digest_target_auto_ok; the rest stay
-    pending for Trevor, with the digester's reason or the re-check's."""
-    out = {"approved": [], "human": []}
+    """Apply each pending edit proposal the digester marked obvious and that passes digest_target_auto_ok (digest_apply),
+    queueing a backlog item through digest_decide for any it can't apply; the rest stay pending for Trevor, with the
+    digester's reason or the re-check's."""
+    out = {"applied": [], "queued": [], "human": [], "job": None}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
     path = root / "digests" / digest_id / "proposals.json"
+    by_repo = {}
     for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
         reason = "new skill" if p["kind"] == "skill" else digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
         if p["obvious"] and reason is None:
-            code, res = digest_decide(root, digest_id, p["id"], "approve")
+            by_repo.setdefault(repo_of(p["target"])[0], []).append(p)
+        else:
+            out["human"].append({"id": p["id"], "reason": reason})
+    for props in by_repo.values():
+        applied, to_queue, job_id = digest_apply(root, digest_id, props)
+        out["applied"] += applied
+        out["job"] = out["job"] or job_id
+        for q in to_queue:
+            code, res = digest_decide(root, digest_id, q["id"], "approve")
             if code == 200:
-                out["approved"].append({"id": p["id"], "target": p["target"], "obvious_reason": p["obvious_reason"]})
-                continue
-            reason = res["error"]
-        out["human"].append({"id": p["id"], "reason": reason})
+                out["queued"].append(q)
+            else:
+                out["human"].append({"id": q["id"], "reason": res["error"]})
     return out
 
 
@@ -2020,10 +2208,11 @@ class Handler(BaseHTTPRequestHandler):
             if op == "move":
                 kwargs["delta"] = body.get("delta")
             return 200, board.backlog_op(root, op, **kwargs)
-        if rest == "/backlog/run":
+        if rest in ("/backlog/run", "/backlog/run-all"):
             askme = body.get("askme")
             if askme is not None and (type(askme) is not int or askme not in (1, 2, 3)):  # bool is an int subclass; reject it
                 raise SystemExit("askme must be 1, 2, 3 or null")
+        if rest == "/backlog/run":
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
@@ -2036,8 +2225,9 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "/backlog/run-all":  # interactive, like askme: triage, then every open item as a job
             if all(i["done"] for i in board.backlog_items(root)):
                 return 409, {"error": "backlog is empty"}
-            # ponytail: Terminal.app only, like discuss and askme
-            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, "/trevskills-scrum run-all"),
+            # ponytail: Terminal.app only, like discuss and askme. With askme the session asks for every child before any starts.
+            cmd = "/trevskills-scrum run-all" + (f" askme {askme}" if askme else "")
+            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, cmd),
                                   "Run all opened in a new Terminal window.")])
         if rest == "/digest":
             return digest_now(project, root)
@@ -2066,8 +2256,8 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": new_id, "reopened_from": job_id}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
-        if action == "resume":  # only a job the watchdog flagged; never one stopped for any other reason
-            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.STALLED) \
+        if action == "resume":  # only a job stopped for a reason whose card offers Resume (board.RESUMABLE)
+            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.RESUMABLE) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
             if refusal := resume_refusal(root, job):
@@ -2102,7 +2292,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
-    p.add_argument("--digest-auto", metavar="NNN", help="auto-approve this digest's obvious proposals, print JSON and exit")
+    p.add_argument("--digest-auto", metavar="NNN", help="apply (or queue) this digest's obvious proposals, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
     p.add_argument("--dir", type=Path, default=Path("scrum"),
