@@ -713,6 +713,17 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.jobs()[1]["title"], "L" * 60)
         self.assertTrue((self.root / "backlog.md").read_text().startswith("# Backlog\n- [ ] Blocked {needs #aaaa}\n"))
 
+    def test_cloud_claim_skips_item_parked_on_human_setup(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Parked {setup: add the API key}\n- [ ] Free\n")
+        (self.root / "backlog-specs").mkdir()
+        for t, f in (("Parked", "p.py"), ("Free", "f.py")):
+            self.spec_file(t).write_text(f"## Likely files\n- `{f}`\n")
+        out = board.cmd_cloud_claim(self.root, 5)
+        self.assertEqual(out, {"claimed": [{"id": "001-free", "feature": "Free"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] Parked {setup: add the API key}\n- [x] Free → 001-free\n")
+
     def test_cloud_claim_skips_item_overlapping_earlier_pick(self):
         self.cloud_backlog([("A", ["a.py"]), ("B", ["a.py", "b.py"]), ("C", ["c.py"])])
         out = board.cmd_cloud_claim(self.root, 3)

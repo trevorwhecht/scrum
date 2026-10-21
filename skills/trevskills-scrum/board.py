@@ -5,12 +5,14 @@
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
-  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite as a
-                                   new job, print {"id","feature"}
-  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits, has no
-                                   pre-written spec with Likely files, or shares a Likely file with an earlier pick or a
-                                   cloud/build job; print {"claimed": [{"id","feature"}, ...]}
-  board.py backlog-add "<item>"... append "- [ ] <item>" lines to backlog.md, then estimate each in the background
+  board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
+                                   no {setup: …} Human setup as a new job, print {"id","feature"}
+  board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
+                                   (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
+                                   Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
+  board.py backlog-add [--setup "<step>; <step>"] "<item>"...  append "- [ ] <item>" lines to backlog.md (--setup adds a
+                                   " {setup: step; step}" marker: next and runall-start skip the item until Trevor clicks
+                                   Setup done), then estimate each in the background
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
@@ -45,7 +47,7 @@
                                    by ~/.claude/usage.json), print
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
-                                   depends_on; items waiting on an outside job stay open), print {"id","children"}
+                                   depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
                                    (id null = nothing to claim); `ready <id>` then schedules them
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
@@ -205,11 +207,12 @@ def cmd_new(root, title, job_id=None):
         return add_job(root, board, title, job_id)
 
 
-# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} → 003-id <!-- why -->"; points, the id and needs markers, the job
-# and the estimate's reason are optional. An item's text excludes the markers, so its spec_path never changes. ---
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} {setup: step; step} → 003-id <!-- why -->"; points, the id, needs
+# and setup markers, the job and the estimate's reason are optional. An item's text excludes the markers, so its spec_path
+# never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
-                     r"(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+                     r"(?: \{setup: ([^{}]*)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
@@ -226,10 +229,11 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if m := ITEM_RE.match(line):
-            done, pts, text, item_id, needs, job, why = m.groups()
+            done, pts, text, item_id, needs, setup, job, why = m.groups()
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
-                          "id": item_id, "needs": needs.replace("#", "").split() if needs else []})
+                          "id": item_id, "needs": needs.replace("#", "").split() if needs else [],
+                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else []})
     return lines, items
 
 
@@ -237,6 +241,7 @@ def format_item(item):
     return (f"- [{'x' if item['done'] else ' '}] " + (f"[{item['points']}] " if item["points"] else "") + item["text"]
             + (f" {{#{item['id']}}}" if item.get("id") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
+            + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
 
 
@@ -255,6 +260,17 @@ def waiting_on(item, items, board):
     stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
     blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
     return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
+
+
+def setup_steps(raw):
+    """A Human setup checklist "step; step" as its list of steps: split on ";", braces removed, trimmed, empties dropped.
+    Raises when no step is left or the checklist would not fit on one backlog line."""
+    steps = [s for s in (clean(part.replace("{", "").replace("}", ""), None) for part in str(raw or "").split(";")) if s]
+    if not steps:
+        raise SystemExit("setup checklist is empty")
+    if len("; ".join(steps)) > ITEM_MAX:
+        raise SystemExit(f"setup checklist is longer than {ITEM_MAX} characters")
+    return steps
 
 
 def write_backlog(root, lines):
@@ -281,8 +297,9 @@ def check_points(points):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
-    """add / edit / delete / move one backlog item under the board lock. Returns the new item list."""
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None):
+    """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
+    add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -291,7 +308,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             if points is not KEEP:
                 check_points(points)
             lines.append(format_item({"done": False, "points": None if points is KEEP else points,
-                                      "text": clean(text, ITEM_MAX), "job": None, "why": None}))
+                                      "text": clean(text, ITEM_MAX), "job": None, "why": None,
+                                      "setup": None if setup is None else setup_steps(setup)}))
         elif op == "edit":
             item = pick(items, index)
             old = item["text"]
@@ -316,6 +334,13 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0):
             b = next((items[j] for j in step if not items[j]["done"]), None)
             if b:
                 lines[a["line"]], lines[b["line"]] = lines[b["line"]], lines[a["line"]]
+        elif op == "setup-done":
+            item = pick(items, index)
+            if item["done"] or not item["setup"]:
+                raise SystemExit(f"backlog item {index} has no Human setup")
+            line = lines[item["line"]]
+            m = ITEM_RE.match(line)  # cut just the marker, so the rest of the line stays byte for byte
+            lines[item["line"]] = line[:m.start(6) - len(" {setup: ")] + line[m.end(6) + 1:]
         else:
             raise SystemExit(f"unknown backlog op {op!r}")
         write_backlog(root, lines)
@@ -366,13 +391,15 @@ def cmd_next(root, index=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in items if not i["done"] and not waiting_on(i, items, board)), None)
+            item = next((i for i in items if not i["done"] and not i["setup"] and not waiting_on(i, items, board)), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
             item = pick(items, index)
             if item["done"]:
                 raise SystemExit(f"backlog item {index} is already claimed")
+            if item["setup"]:
+                raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
         job_id = add_job(root, board, item["text"][:60])
@@ -384,7 +411,7 @@ def cmd_next(root, index=None):
 
 def cmd_cloud_claim(root, n) -> dict:
     """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
-    An item is skipped (left open) when it waits on a prerequisite, has no pre-written spec with readable Likely files,
+    An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
     or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build. A cloud or
     build job with no readable Likely files may touch anything, so it blocks every item."""
     if n < 1:
@@ -402,7 +429,7 @@ def cmd_cloud_claim(root, n) -> dict:
         for item in items:
             if blocked_all or len(claimed) >= n:
                 break
-            if item["done"] or waiting_on(item, items, board):
+            if item["done"] or item["setup"] or waiting_on(item, items, board):
                 continue
             spec = spec_path(root, item["text"])
             files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
@@ -523,12 +550,15 @@ def projects():
     return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
 
 
-def cmd_backlog_add(root, items):
-    """Append each non-empty item; returns the texts as stored."""
+def cmd_backlog_add(root, items, setup=None):
+    """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
+    texts as stored. An empty checklist adds nothing."""
+    if setup is not None:
+        setup_steps(setup)
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item)
+            backlog_op(root, "add", text=item, setup=setup)
             added.append(clean(item, ITEM_MAX))
     return added
 
@@ -1007,7 +1037,8 @@ def cmd_triage_apply(root, triage_id):
                     text = clean(e["text"], ITEM_MAX)
                     own = {i["id"] for i in got if i["id"]}
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
-                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own))}
+                            "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
+                            "setup": list(dict.fromkeys(st for i in got for st in i["setup"]))}  # still waits on setup
                     merged.append(item)
                     remap.update((n, item) for n in own)
                     for i in got:
@@ -1288,10 +1319,11 @@ def cmd_plan_apply(root, parent_id, fix=False):
 def cmd_runall_start(root):
     """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
-    whose item needs another item claimed here depends_on that sibling's child."""
+    whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
+    open, and so does every item that needs it."""
     with locked_board(root) as board:
         lines, items = read_backlog(root)
-        held = set()  # indexes of open items left open
+        held = {i["index"] for i in items if not i["done"] and i["setup"]}  # indexes of open items left open
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)
@@ -1943,7 +1975,9 @@ def main(argv=None):
     sub.add_parser("sync").add_argument("id")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("cloud-claim").add_argument("n", type=int)
-    sub.add_parser("backlog-add").add_argument("items", nargs="+")
+    ba = sub.add_parser("backlog-add")
+    ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
+    ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
@@ -2070,7 +2104,7 @@ def main(argv=None):
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items))
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup))
 
 
 def spawn_estimates(root, texts):
