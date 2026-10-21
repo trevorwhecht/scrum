@@ -36,6 +36,9 @@
                                    (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
                                    else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
+                                   --incremental) or full review, write round-N's carried-forward or UI/UX and security
+                                   skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
@@ -880,6 +883,114 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)}
 
+
+# --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
+# and skip files before any spawn; behaviour-preserving move of the old prose, so every rule here is SKILL.md's.
+SECURITY_RES = tuple(re.compile(p, re.I) for p in (
+    r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing"
+    r"|checkout|stripe|webhook|secret|credential",  # Fast lane sensitive-path regex
+    r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$",  # Merge schema guard regex
+    r"(^|/)\.env",
+    r"(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|go\.mod"
+    r"|Cargo\.toml)$",  # manifest regex
+    r"(^|/)api/|(^|/)route\.[cm]?[jt]sx?$",  # API regex
+))
+CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n"
+UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
+SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
+
+
+def ui_globs(root):
+    """project.md's `- UI globs:` entries; None when the file or line is missing, empty or `none`."""
+    try:
+        text = (Path(root) / "project.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if m := re.match(r"^\s*-\s*UI globs:(.*)$", line):
+            globs = [g.strip("`") for g in m[1].split() if g.strip("`")]
+            return None if not globs or globs == ["none"] else globs
+    return None
+
+
+def glob_match(path, globs):
+    """First-run setup's matching: `*.ext` is a suffix, `dir/` a directory path component, anything else an exact path."""
+    for g in globs:
+        if g.startswith("*."):
+            if path.endswith(g[1:]):
+                return True
+        elif g.endswith("/"):
+            if ("/" + g) in ("/" + path):
+                return True
+        elif path == g:
+            return True
+    return False
+
+
+def _names(wt, *args):
+    """git diff --name-only <args> as a set of paths; None when the diff can't be read."""
+    try:
+        return set(_git(wt, "diff", "--name-only", *args, "--").decode().splitlines())
+    except (ValueError, OSError, UnicodeDecodeError, subprocess.SubprocessError):
+        return None
+
+
+def _incremental_since(prev, wt, base):
+    """(SINCE, round-(N-1) verdicts) when an incremental re-review holds, else None (the full-review fallback)."""
+    try:
+        since = (prev / "head.txt").read_text(encoding="utf-8", errors="replace").strip()
+        if not since or since.startswith("-"):
+            return None
+        _git(wt, "rev-parse", "--verify", "--quiet", f"{since}^{{commit}}")
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+    verdicts = {r: first_word(prev / f"review-{r}.md", ("PASS", "CHANGES")) for r in REVIEWERS}
+    if any(v not in ("PASS", "CHANGES") for v in verdicts.values()):
+        return None  # a re-review would have no findings to check
+    fix, seen = _names(wt, since, "HEAD"), _names(wt, f"{base}...{since}")
+    if fix is None or seen is None or not fix <= seen:
+        return None  # the fix touched a file the earlier reviews never saw
+    return since, verdicts
+
+
+def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
+    """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
+    (incremental) or UI/UX and security skip files (full); never writes board.json."""
+    job = live(read_board(root), check_id(job_id))
+    wt, base = job.get("worktree"), job.get("base")
+    if not wt or not base:
+        raise SystemExit(f"job {job_id} has no {'worktree' if not wt else 'base'} on the board")
+    try:
+        n = int(job.get("round") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 1:
+        raise SystemExit(f"job {job_id} has no round on the board")
+    rd = Path(root) / "jobs" / job_id / f"round-{n}"
+    inc = _incremental_since(rd.parent / f"round-{n - 1}", wt, base) if incremental and n >= 2 \
+        and not base.startswith("-") else None
+    if inc:
+        since, verdicts = inc
+        rd.mkdir(parents=True, exist_ok=True)
+        for r in REVIEWERS:
+            if verdicts[r] == "PASS":
+                (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
+        return {"spawn": [r for r in REVIEWERS if verdicts[r] == "CHANGES"], "since": since}
+    spawn = list(REVIEWERS)
+    files = None if base.startswith("-") else _names(wt, f"{base}...HEAD")
+    if files is not None:
+        skips = {}
+        globs = ui_globs(root)
+        if globs and not any(glob_match(f, globs) for f in files):
+            skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        if not any(rx.search(f) for f in files for rx in SECURITY_RES):
+            skips["security"] = SECURITY_SKIP
+        if skips:
+            rd.mkdir(parents=True, exist_ok=True)
+        for r, text in skips.items():
+            (rd / f"review-{r}.md").write_text(text, encoding="utf-8")
+        spawn = [r for r in REVIEWERS if r not in skips]
+    return {"spawn": spawn, "since": None}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
@@ -2022,6 +2133,9 @@ def main(argv=None):
     cl.add_argument("id")
     cl.add_argument("holder")
     cl.add_argument("--wait", type=int, default=540)
+    rp = sub.add_parser("review-plan")
+    rp.add_argument("id")
+    rp.add_argument("--incremental", action="store_true")
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
@@ -2099,6 +2213,8 @@ def main(argv=None):
         print(json.dumps(cmd_chain_lock(a.dir, a.id, a.holder, a.wait)))
     elif a.cmd == "chain-unlock":
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
+    elif a.cmd == "review-plan":
+        print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
