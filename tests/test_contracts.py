@@ -1876,13 +1876,14 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
         clean = merge[merge.index("7. **Clean up:**"):]
         step = clean[clean.index("roadmap-next $ID"):clean.index("**Digest check")]
+        self.assertIn("When it prints `null`, do **Roadmap lane** step 6 (**Roadmap done**)", step)
+        lane = self.lane("roadmap")
+        done = lane[lane.index("6. **Roadmap done**"):]
         for phrase in ("B roadmap-show", "`current` is `null`", "grep -q '^- \\[ \\] ' \"$F/backlog.md\"",
-                       'nohup claude -p "/trevskills-scrum run-all"', "-run-all.log",
-                       "empty backlog starts nothing", "Run all started: runs/<LOG>"):
-            self.assertIn(phrase, step)
-        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step)
-        self.assertIn('nohup claude -p "/trevskills-scrum run-all" "${MODEL[@]}" --permission-mode acceptEdits', step)
-        self.assertNotIn('${OM:+', step)
+                       "**BigBoy lane** step 3's start block, launching `run-all` instead of `start <child>`",
+                       "`<timestamp>-run-all.log`", "the prompt is `/trevskills-scrum run-all`",
+                       "no `B set <child> runlog=` line", "empty backlog starts nothing", "Run all started: runs/<LOG>"):
+            self.assertIn(phrase, done, phrase)
 
     def test_no_sound_clip_committed(self):
         out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
