@@ -146,6 +146,106 @@ class JobModal(unittest.TestCase):
         self.assertIn("Date.now() - staleAt(job) > STALE_MS", card)
         self.assertNotIn("Date.parse(job.updatedAt)", card)
 
+    # --- closed questions (board.py ask): option buttons ---
+    ASKED = {"key": "p/020-q", "project": "p", "id": "020-q", "title": "Asked", "stage": "needs-human", "worktree": "/w",
+             "reason": "review: CHANGES after 3 rounds. Fix: pick one.", "updatedAt": "2026-01-01T00:00:00Z"}
+    OPTIONS = [{"key": "c", "label": "Drop <it>", "command": "abort 020-q"},
+               {"key": "a", "label": "Ship it", "command": "approve 020-q"},
+               {"key": "b", "label": "Redo", "command": 'rework 020-q "again"'}]
+    TODAY_ACTIONS = (
+        '<div class="waiting" role="status"\n    data-agent-hint="This job stopped and needs Trevor. The first line is what is '
+        'wrong; the second is the exact fix.">\n    <b>Waiting on you</b><p>review: CHANGES after 3 rounds.</p><p>Pick one.</p>'
+        '</div><form data-act="approve">\n      \n      <button class="btn primary" type="submit">Approve &amp; merge</button>'
+        '</form><form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the '
+        'builder change?" aria-label="Feedback for the builder"></textarea>\n      <button class="btn" type="submit" '
+        'data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window '
+        'that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree '
+        'on.">Discuss first</button>\n      <button class="btn" type="submit">Send back to builder</button></form>'
+        '<form data-act="ask"><button class="btn" type="submit" data-agent-hint="Opens a new interactive Claude session in '
+        "the job's worktree (the repo's main checkout once that is gone), preloaded with the paths of the job's feature, "
+        "spec, build, round and decision files and its board entry, to answer questions about the job.\">Ask Claude"
+        '</button></form><form data-act="abort">\n    <label hidden><input type="checkbox" name="requeue"> Put back in '
+        'backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button></form>'
+        '<p class="error" role="alert"></p>')
+    TODAY_CARD = (
+        '<button class="card human" data-key="p/020-q">\n    <span class="tag" style="--h:279">p</span><span class="lanechip">'
+        'standard</span><span class="id">020-q</span><span class="title">Asked</span>\n    \n    \n    \n    \n    <span '
+        'class="bar human" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="10" aria-label="Estimated '
+        'progress" title="~10% (estimate)"><span style="width:10%"></span></span>\n    \n    <span class="reason">review: '
+        'CHANGES after 3 rounds.</span>\n    \n    \n    \n    \n    \n    <span class="meta">T</span>\n  </button>')
+
+    def card_js(self, tail):
+        """Run tail in node over dashboard.html's top-level helpers, optionsRow, card and answer(), with $, post and poll
+        stubbed: post calls land in `posted`, poll calls in `polls`. Prints what tail logs."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        src = (text[text.index("const STAGES = "):text.index("function roadmapLookup(")]
+               + text[text.index("const splitReason = "):text.index("const waitingBanner = ")]
+               + text[text.index("function card(job)"):text.index("function digestCard(")]
+               + text[text.index("const ofJob = "):text.index("// answer() end")])
+        src = src.replace("const $ = id => document.getElementById(id);", "const $ = id => stub;") \
+            .replace("const post = (url, body) =>", "const realPost = (url, body) =>")
+        script = ("const window = {}, document = {activeElement: null};\nconst stub = {open: false, dataset: {}, "
+                  "querySelector: () => null, querySelectorAll: () => []};\nDate.prototype.toLocaleTimeString = () => 'T';\n"
+                  "const posted = [], polls = [];\nlet postFails = null;\n"
+                  "const post = async (url, body) => { posted.push([url, body]); if (postFails) throw new Error(postFails); return {}; };\n"
+                  "const poll = async () => { polls.push(1); };\nconst renderActions = () => {};\n"
+                  f"{src}\n(async () => {{ {tail} }})();")
+        return [json.loads(l) for l in subprocess.run([node, "-e", script], capture_output=True, text=True,
+                                                      check=True).stdout.splitlines()]
+
+    def test_no_options_unchanged(self):
+        for extra in ({}, {"options": []}):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.actions_html({**self.ASKED, **extra}), self.TODAY_ACTIONS)
+                self.assertEqual(self.card_js(f"console.log(JSON.stringify(card({json.dumps({**self.ASKED, **extra})})));"),
+                                 [self.TODAY_CARD])
+
+    def test_options_replace_needs_human_row(self):
+        html = self.actions_html({**self.ASKED, "question": "Which way?", "options": self.OPTIONS,
+                                  "reason": "stalled in build: x. Fix: click Resume."})
+        self.assertIn('<span class="reason">Which way?</span>', html)
+        self.assertEqual(re.findall(r'<button class="btn tall" type="button" data-answer="(\w)">([^<]*)</button>', html),
+                         [("a", "Ship it"), ("b", "Redo"), ("c", "Drop &lt;it&gt;")])
+        for gone in ('data-act="resume"', 'data-act="approve"', "Discuss first", "Send back to builder"):
+            self.assertNotIn(gone, html)
+        for kept in (">Ask Claude</button>", ">Abort job</button>"):
+            self.assertIn(kept, html)
+        with_term = self.actions_html({**self.ASKED, "tty": "ttys001", "options": self.OPTIONS})
+        self.assertIn(">Open terminal</button>", with_term)
+        self.assertIn('<span class="reason">review: CHANGES after 3 rounds.</span>', with_term)  # no question: the problem line
+
+    def test_option_buttons_post_answer(self):
+        job = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}
+        [html] = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")
+        self.assertTrue(html.startswith('<div class="card human" data-key="p/020-q" tabindex="0" role="button">'), html)
+        self.assertTrue(html.endswith("</div>"), html)
+        self.assertEqual(re.findall(r"<button[^>]*>", html),
+                         ['<button class="btn tall" type="button" data-answer="a">',
+                          '<button class="btn tall" type="button" data-answer="b">',
+                          '<button class="btn tall" type="button" data-answer="c">'])
+        self.assertIn('<span class="reason">Which way?</span>', html)
+        self.assertNotIn("review: CHANGES after 3 rounds.", html)  # the question replaces the reason line
+        setup = f"jobs = [{json.dumps(job)}];\nconst show = () => console.log(JSON.stringify([posted, polls.length, optionsRow(jobs[0])]));\n"
+        approve = self.card_js(setup + 'await answer("p/020-q", "a"); show();')
+        self.assertEqual(approve[0][:2], [[["api/p/p/jobs/020-q/answer", {"key": "a"}]], 1])
+        armed = self.card_js(setup + 'await answer("p/020-q", "c"); show(); await answer("p/020-q", "c"); show();')
+        self.assertEqual(armed[0][:2], [[], 0])  # the first click on an abort option only arms it
+        self.assertIn('<button class="btn tall danger" type="button" data-answer="c">Confirm: Drop &lt;it&gt;</button>', armed[0][2])
+        self.assertEqual(armed[1][:2], [[["api/p/p/jobs/020-q/answer", {"key": "c"}]], 1])
+        self.assertNotIn("Confirm:", armed[1][2])
+        failed = self.card_js(setup + 'postFails = "job isn\'t waiting <now>"; await answer("p/020-q", "b"); show();')
+        self.assertEqual(failed[0][1], 0)
+        self.assertIn('<p class="error" role="alert">job isn&#39;t waiting &lt;now&gt;</p>', failed[0][2])
+        self.assertNotIn(" disabled", failed[0][2])  # re-enabled
+        text = DASHBOARD.read_text()
+        opener = text[text.rindex('$("board").addEventListener("click", e => {'):]
+        self.assertIn('if (e.target.closest("button[data-answer]")) return;', opener)
+        new = text[text.index("const answerState = "):text.index("const waitingBanner = ")] \
+            + text[text.index("const ofJob = "):text.index("// answer() end")]
+        self.assertIsNone(re.search(r"[^.\w](window\.)?(confirm|alert)\(", new))
 
 if __name__ == "__main__":
     unittest.main()
