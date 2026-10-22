@@ -409,24 +409,106 @@ def respawn_exited(project, root):
     return flagged
 
 
+def once(fn):
+    """fn(), called on first use only: one `ps` scan per tick, and none when nothing needs it."""
+    cache = []
+    return lambda: cache[0] if cache else (cache.append(fn()) or cache[0])
+
+
+def sweep_parents(project, root, jobs, alive=None):
+    """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
+    parent with no child in progress: close a runall whose children all finished (a bigboy is left for its own final
+    review), else start its waiting children when no child session is alive and no chaining session holds the lock."""
+    alive = alive or once(lambda: board.session_alive_fn())
+    by_id = {j["id"]: j for j in jobs}
+    for p in jobs:
+        if p.get("stage") != "running" or p.get("lane") not in ("runall", "bigboy") or not p.get("children"):
+            continue
+        kids = [by_id[k] for k in p["children"] if k in by_id]
+        if any(k.get("stage") not in board.IDLE for k in kids):
+            continue
+        if all(k.get("stage") in ("done", "aborted") for k in kids):
+            if p["lane"] == "runall":
+                board.cmd_set(root, p["id"], ["stage=done", "reason="], expect="running")
+            continue
+        if not any(k.get("stage") == "waiting" for k in kids) or (root / "jobs" / p["id"] / ".chain.lock").exists() \
+                or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids):
+            continue
+        start_ready(project, root, p["id"])
+
+
+AUTO_CONTINUE_RE = re.compile(r"^- Auto continue: *(\d+)\s*$", re.M)
+LAST_BUSY: set[str] = set()  # projects with in-flight work on the previous tick: the one that just finished goes first
+
+
+def auto_continue(root: Path) -> int | None:
+    """The `- Auto continue: <n>` line of scrum/project.md, or None (missing, malformed, or no readable file)."""
+    try:
+        m = AUTO_CONTINUE_RE.search((root / "project.md").read_text())
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return None
+    return int(m.group(1)) if m else None
+
+
+def claimable(root: Path) -> bool:
+    """A backlog line `next` could claim: open, no Human setup, no open prerequisite."""
+    return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
+
+
+def auto_continue_tick(busy: dict[str, bool]) -> None:
+    """Start one headless run-all across opted-in projects when none of them has work in flight, no auto-started
+    run-all is still running, and usage is not over pace. The project that just finished goes first, then lowest n.
+    A project missing from busy (its sweep failed this tick) is never a target."""
+    global LAST_BUSY
+    last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
+    opted = []
+    for project, repo in board.projects().items():
+        n = auto_continue(repo / "scrum")
+        if n is not None:
+            opted.append((project, repo / "scrum", n))
+    if any(busy.get(p) or running(p, "run-all") for p, _, _ in opted) \
+            or board.pace_cap(board.read_usage(), time.time(), None) is not None:
+        return
+    for project, root, _ in sorted(opted, key=lambda o: (o[0] not in last, o[2])):  # stable: ties keep projects() order
+        if project not in busy:
+            continue
+        try:
+            if claimable(root):
+                spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
+                return
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
-    whatever siblings are now ready, then auto-resume the stalled ones, then poll its cloud jobs (cloud_tick). One
-    project's failure never stops the others."""
+    whatever siblings are now ready, then restart or close idle parents (sweep_parents), auto-resume the stalled
+    ones, and poll its cloud jobs (cloud_tick). Last, auto_continue_tick. One project's failure never stops the others."""
+    busy, alive = {}, once(lambda: board.session_alive_fn())
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
             respawn_exited(project, root)
             flagged = set(board.cmd_watchdog(root))
             if not (root / "board.json").exists():
+                busy[project] = False
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
+            busy[project] = any(j.get("stage") not in board.IDLE for j in jobs)
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
+            try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll
+                sweep_parents(project, root, jobs, alive)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             auto_resume(project, root, jobs)
             cloud_tick(project, root, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+    try:
+        auto_continue_tick(busy)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
 
 
 def watchdog_loop():
