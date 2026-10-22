@@ -44,6 +44,11 @@ class DashboardMobile390Css(unittest.TestCase):
         self.assertIn("min-height:44px", close)
         self.assertIn("min-width:44px", close)
 
+    def test_backlog_row_buttons_44px(self):
+        row = decls(split(css())[0], "#blList .btn")
+        self.assertIn("min-height:44px", row)
+        self.assertIn("min-width:44px", row)
+
 
 if __name__ == "__main__":
     unittest.main()
