@@ -1115,16 +1115,78 @@ class ServeTest(unittest.TestCase):
             self.assertEqual([argv[0], *argv[2:4]], ["-p", "--model", "sonnet"])
             self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
 
+    NO_CLAUDE = {"5h": None, "weekly": None, "5h_resets_at": None, "weekly_resets_at": None, "as_of": None}
+
     def test_routing_status_endpoint(self):
         fixed = {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}
         with mock.patch.object(self.serve.route, "status", return_value=fixed) as status, \
+                mock.patch.object(self.serve.route, "loaded_models", return_value=["qwen3:8b"]), \
                 mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.req("GET", "/api/routing-status"),
-                             (200, {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}))
+                             (200, {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None,
+                                    "claude": self.NO_CLAUDE, "jev": {"today": 0, "last": None}, "ollama_models": ["qwen3:8b"]}))
             self.assertEqual(self.req("GET", "/api/routing-status", headers={"Host": "evil.example"})[0], 403)
         self.assertEqual(status.call_count, 1)
         run.assert_not_called()
         popen.assert_not_called()
+
+    def routing_with_usage(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            usage = Path(d) / "usage.json"
+            if text is not None:
+                usage.write_text(text)
+            with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
+                    mock.patch.object(self.serve.route, "status", return_value={"codex": {"5h": None, "weekly": None}, "ollama": "down"}), \
+                    mock.patch.object(self.serve.route, "loaded_models", return_value=[]):
+                return self.req("GET", "/api/routing-status")
+
+    def test_routing_status_includes_claude_and_jev(self):
+        now = time.time()
+        usage = {"written_at": 1700000000, "rate_limits": {
+            "five_hour": {"used_percentage": 37.5, "resets_at": 4102444800},
+            "seven_day": {"used_percentage": 81, "resets_at": 1000}}}  # the weekly window already reset
+        job = self.root / "jobs" / "990-jev"
+        job.mkdir()
+        self.addCleanup(shutil.rmtree, job)
+        today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        (job / "jev.log").write_text(f"{today}T00:00:01\tmodel\tq\t{{}}\topus\t0.10\n")
+        code, data = self.routing_with_usage(json.dumps(usage))
+        self.assertEqual(code, 200)
+        self.assertEqual(data["claude"], {"5h": 37.5, "weekly": None, "5h_resets_at": 4102444800, "weekly_resets_at": None,
+                                          "as_of": 1700000000})
+        self.assertEqual(data["jev"], {"today": 1, "last": f"{today}T00:00:01"})
+        self.assertEqual(data["ollama_models"], [])
+        self.assertEqual(data["ollama"], "down")
+
+    def test_routing_status_claude_missing_or_malformed(self):
+        for text in (None, "not json", '{"written_at": 1}'):
+            with self.subTest(text=text):
+                self.assertEqual(self.routing_with_usage(text)[0], 200)
+                self.assertEqual(self.routing_with_usage(text)[1]["claude"], self.NO_CLAUDE)
+
+    def test_jev_usage(self):
+        now = datetime(2026, 10, 22, 15, 0).timestamp()
+        yesterday = datetime(2026, 10, 21, 23, 59).timestamp()
+        with tempfile.TemporaryDirectory() as d:
+            a, b, empty = Path(d) / "a", Path(d) / "b", Path(d) / "empty"
+            (empty / "scrum" / "jobs").mkdir(parents=True)
+            old = a / "scrum" / "jobs" / "001-old" / "jev.log"
+            new = b / "scrum" / "jobs" / "002-new" / "jev.log"
+            junk = b / "scrum" / "jobs" / "003-junk" / "jev.log"
+            only_junk = Path(d) / "c" / "scrum" / "jobs" / "004-junk" / "jev.log"
+            for f in (old, new, junk, only_junk):
+                f.parent.mkdir(parents=True)
+            old.write_text("2026-10-21T23:58:00\tmodel\tq\t{}\topus\t0.20\n")
+            new.write_text("2026-10-22T09:00:00\tmodel\tq\t{}\topus\t0.20\n2026-10-22T14:30:00\tmodel\tq\t{}\tsonnet\t0.30\n")
+            junk.write_text("garbage with no tabs\n\n")
+            only_junk.write_text("not-a-date\tmodel\n")
+            os.utime(old, (yesterday, yesterday))
+            for f in (new, junk):
+                os.utime(f, (now - 60, now - 60))
+            self.assertEqual(self.serve.jev_usage([a, b, empty], now), {"today": 2, "last": "2026-10-22T14:30:00"})
+            self.assertEqual(self.serve.jev_usage([a], now), {"today": 0, "last": "2026-10-21T23:58:00"})
+            self.assertEqual(self.serve.jev_usage([Path(d) / "c", empty], now), {"today": 0, "last": None})
+            self.assertEqual(self.serve.jev_usage([], now), {"today": 0, "last": None})
 
     def test_board_json_routed_flag(self):
         stages = {"routed-active": "build", "routed-done": "done", "routed-aborted": "aborted", "plain-done": "done", "plain": "spec"}

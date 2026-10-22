@@ -642,6 +642,50 @@ def estimate(root, text, local_only=False):
     return False
 
 
+def claude_usage(now):
+    """Claude's 5h and weekly used % and resets from usage.json (board.py statusline), whatever its age. A window
+    whose reset is past reads null, as route.codex_quota treats an expired window."""
+    out = dict.fromkeys(("5h", "weekly", "5h_resets_at", "weekly_resets_at", "as_of"))
+    usage = board.read_usage() or {}
+    limits = usage.get("rate_limits")
+    if not isinstance(limits, dict):
+        return out
+    out["as_of"] = usage["written_at"] if board.is_num(usage.get("written_at")) else None
+    for key, window in (("5h", "five_hour"), ("weekly", "seven_day")):
+        w = limits.get(window)
+        used, resets = (w.get("used_percentage"), w.get("resets_at")) if isinstance(w, dict) else (None, None)
+        if board.is_num(resets) and resets < now:
+            continue
+        out[key] = used if board.is_num(used) else None
+        out[f"{key}_resets_at"] = resets if board.is_num(resets) else None
+    return out
+
+
+def jev_usage(repos, now):
+    """Jev calls logged today (local date) across every repo's scrum/jobs/*/jev.log, and the newest call's timestamp.
+    A file last written before local midnight holds no call from today, so only its lines' timestamps are read."""
+    day = datetime.fromtimestamp(now)
+    today, midnight = day.strftime("%Y-%m-%d"), day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    count, last = 0, None
+    # ponytail: rereads every jev.log each 60 s refresh; cache by (path, mtime) if job counts grow into the thousands
+    for repo in repos:
+        for log in Path(repo).glob("scrum/jobs/*/jev.log"):
+            try:
+                fresh = log.stat().st_mtime >= midnight
+                lines = log.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                ts = line.split("\t", 1)[0]
+                try:
+                    datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+                last = ts if last is None or ts > last else last
+                count += fresh and ts.startswith(today)
+    return {"today": count, "last": last}
+
+
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 ITEM = re.compile(r"(\s*)-\s+(.+)")
 AGENT_LOCK = threading.Lock()
@@ -2326,7 +2370,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/projects":
             return self.send_json(200, [{"name": name} for name in board.projects()])
         if path == "/api/routing-status":  # the header spans every project, so no scrum dir
-            return self.send_json(200, route.status())
+            t = time.time()
+            return self.send_json(200, {**route.status(), "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t),
+                                        "ollama_models": route.loaded_models()})
         if path == "/api/runs":
             with RUNS_LOCK:
                 return self.send_json(200, [{"project": k.rsplit("/", 1)[0], "id": k.rsplit("/", 1)[1], "action": r["action"],

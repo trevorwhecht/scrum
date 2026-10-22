@@ -8,13 +8,12 @@ BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
 
 
 def node_eval(fn, args):
-    """Run dashboard.html's esc and `fn` in node over each argument; return the list of results."""
+    """Run dashboard.html's one-line helpers esc, pct and when, and `fn`, in node over each argument; return the results."""
     node = shutil.which("node")
     if not node:
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
-    start = text.index("const esc = ")
-    esc = text[start:text.index("\n", start)]
+    esc = "\n".join(text[i:text.index("\n", i)] for i in (text.index(f"const {h} = ") for h in ("esc", "pct", "when")))
     start = text.index(f"function {fn}(")
     body = text[start:text.index("\n}\n", start) + 2]
     script = f"{esc}\n{body}\nconsole.log(JSON.stringify({json.dumps(args)}.map(a => {fn}(a))));"
@@ -53,12 +52,43 @@ class RouteTags(unittest.TestCase):
 class RoutingText(unittest.TestCase):
     def test_readout(self):
         self.assertEqual(node_eval("routingText", [
-            {"codex": {"5h": 42, "weekly": 61.4}, "ollama": "up"},
+            {"claude": {"5h": 12.6, "weekly": None}, "codex": {"5h": 42, "weekly": 61.4}, "ollama": "up"},
             {"codex": {"5h": None, "weekly": None}, "ollama": "down"},
             {"ollama": "up"}]), [
-            "Codex 5h 42% · wk 61% · Ollama up",
-            "Codex 5h — · wk — · Ollama down",
-            "Codex 5h — · wk — · Ollama up"])
+            "Claude 5h 13% · wk — · Codex 5h 42% · wk 61% · Ollama up",
+            "Claude 5h — · wk — · Codex 5h — · wk — · Ollama down",
+            "Claude 5h — · wk — · Codex 5h — · wk — · Ollama up"])
+
+
+class UsageRows(unittest.TestCase):
+    def rows(self, statuses):
+        with mock.patch.dict(os.environ, TZ="UTC"):  # node renders local time; pin it
+            return node_eval("usageRows", statuses)
+
+    def test_full_status(self):
+        s = {"claude": {"5h": 37.5, "weekly": 81, "5h_resets_at": 1761148800, "weekly_resets_at": None, "as_of": 1761140700},
+             "codex": {"5h": 42, "weekly": 61.4}, "ollama": "up", "ollama_models": ["qwen3:8b", "gemma3:4b"],
+             "jev": {"today": 3, "last": "2026-10-22T14:30:00"}}
+        self.assertEqual(self.rows([s]), [
+            '<tr><th scope="row">Claude</th><td title="resets 2025-10-22 16:00">38%</td><td>81%</td><td>2025-10-22 13:45</td></tr>'
+            '<tr><th scope="row">Codex</th><td>42%</td><td>61%</td><td>—</td></tr>'
+            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>3 today · last 2026-10-22 14:30</td></tr>'
+            '<tr><th scope="row">Ollama</th><td>—</td><td>—</td><td>up · qwen3:8b, gemma3:4b</td></tr>'])
+
+    def test_empty_status_renders_dashes(self):
+        got = self.rows([{}])[0]
+        self.assertEqual(got,
+            '<tr><th scope="row">Claude</th><td>—</td><td>—</td><td>—</td></tr>'
+            '<tr><th scope="row">Codex</th><td>—</td><td>—</td><td>—</td></tr>'
+            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>— today · last —</td></tr>'
+            '<tr><th scope="row">Ollama</th><td>—</td><td>—</td><td>down</td></tr>')
+        for word in ("undefined", "null", "NaN", "Infinity"):
+            self.assertNotIn(word, got)
+
+    def test_model_names_are_escaped(self):
+        got = self.rows([{"ollama": "up", "ollama_models": ["<script>alert(1)</script>"]}])[0]
+        self.assertIn("<td>up · &lt;script&gt;alert(1)&lt;/script&gt;</td>", got)
+        self.assertNotIn("<script>", got)
 
 
 # Drives the real dashboard in headless Chromium against a real serve.py. Prints one JSON line: {"skip": why} when
