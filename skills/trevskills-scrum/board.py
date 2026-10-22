@@ -1108,7 +1108,7 @@ def cmd_move_ratio(root: Path, job_id: str) -> dict:
         if base.startswith("-"):
             raise ValueError(f"bad base {base!r}")
         pins = [a for c in MOVE_COLORS for a in ("-c", c)]
-        out = _git(wt, *pins, "diff", "--no-ext-diff", "--color=always", "--color-moved=plain", f"{base}...HEAD", "--")
+        out = _git(wt, *pins, "diff", "--no-ext-diff", "--color=always", "--color-moved=plain", "--color-moved-ws=no", f"{base}...HEAD", "--")
         added = moved = 0
         for line in out.splitlines():
             if line.startswith(MOVED_SGR):

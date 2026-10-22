@@ -3233,6 +3233,14 @@ class MoveRatioTest(unittest.TestCase):
         self.move()
         self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
 
+    def test_ignores_user_color_moved_ws(self):
+        self.git("config", "diff.colorMovedWS", "allow-indentation-change")
+        indented = "".join("    " + l for l in self.BLOCK.splitlines(True))
+        self.commit({"a.py": "# a\n# end a\n", "b.py": "# b\n" + indented})
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 0, "ratio": 0.0}))
+        self.move()  # overwrites b.py with the verbatim block; base...HEAD now shows only the plain move
+        self.assertEqual(self.run_cli(), (0, {"added": 20, "moved": 20, "ratio": 1.0}))
+
     def test_no_added_lines_is_zero(self):
         self.commit({"a.py": "# a\n# end a\n"})
         self.assertEqual(self.run_cli(), (0, {"added": 0, "moved": 0, "ratio": 0.0}))
