@@ -1773,6 +1773,7 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
+    pid = (caller_claude_pid() if given["tty"] else None) if "tty" in given else None  # ps before the lock, never under it
     if given.get("stage") == "done":
         # Read without the lock so `gh` never runs while holding it; only one orchestrator marks a given job done,
         # so the read-then-write race is accepted.
@@ -1798,6 +1799,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             if key == "waiting":
                 value = clean(value, 200)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        if "tty" in given:
+            job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
@@ -2038,6 +2041,26 @@ def caller_tty():
     return "??"
 
 
+def caller_claude_pid():
+    """The pid of the nearest claude ancestor (at most 10 up), so `set tty=` and the hook know which session they are.
+    None when no ancestor is claude or ps fails; never raises."""
+    pid = os.getppid()
+    try:
+        for _ in range(10):
+            out = subprocess.run(["ps", "-o", "ppid=,command=", "-p", str(pid)], capture_output=True, text=True,
+                                 timeout=2).stdout.strip().split(None, 1)
+            if len(out) != 2:
+                return None
+            if _is_claude(out[1]):
+                return pid
+            if not out[0].isdigit() or int(out[0]) <= 1:
+                return None
+            pid = int(out[0])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def waiting_text(event):
     """The `waiting` value a hook event sets, None for an event that clears it, KEEP for one that changes nothing."""
     name, tool, inp = event.get("hook_event_name"), event.get("tool_name"), event.get("tool_input") or {}
@@ -2061,8 +2084,8 @@ class _Gone(Exception):
     """The matched job changed under the lock; leave the board unwritten."""
 
 
-def cmd_hook(event, tty):
-    """Set or clear `waiting` on the active job recorded on this tty (newest updatedAt across every registered repo).
+def cmd_hook(event, tty, pid=None):
+    """Set or clear `waiting` on the active job recorded on this claude pid, or on this tty when the job has no pid (newest updatedAt across every registered repo).
     Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
     if event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "AskUserQuestion" and notifier_disabled():
         play(sound("question"))  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
@@ -2070,13 +2093,16 @@ def cmd_hook(event, tty):
     if text is KEEP or not SHAPES["tty"].fullmatch(tty or ""):
         return
     text = clean(text, 200) if text else None
+    # A job with a recorded claude pid is this session's only by pid: macOS reuses ttys, so a later chat on the same
+    # tty must not write into a dead job. A job without one (recorded before pids were) still matches by tty.
+    mine = lambda job: job.get("pid") == pid if job.get("pid") else job.get("tty") == tty
     match = None
     for repo in read_registry():
         root = Path(repo) / "scrum"
         try:
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             for job in jobs:
-                if job.get("tty") == tty and job.get("stage") in ACTIVE and (
+                if mine(job) and job.get("stage") in ACTIVE and (
                         match is None or str(job.get("updatedAt")) > str(match[1].get("updatedAt"))):
                     match = (root, job)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -2086,7 +2112,7 @@ def cmd_hook(event, tty):
     try:
         with locked_board(match[0]) as board:
             job = next((j for j in board["jobs"] if j.get("id") == match[1].get("id")), None)
-            if not job or job.get("tty") != tty or job.get("stage") not in ACTIVE or (text is None and job.get("waiting") is None):
+            if not job or not mine(job) or job.get("stage") not in ACTIVE or (text is None and job.get("waiting") is None):
                 raise _Gone
             job.update(waiting=text, updatedAt=now())
     except _Gone:
@@ -2128,19 +2154,22 @@ def _is_claude(command):
 
 
 def session_alive_fn():
-    """One `ps` scan; a job is alive when a claude process line has its id or runs on its recorded tty.
-    When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
+    """One `ps` scan; a job is alive when a claude process line has its id, or when its recorded claude pid is live
+    (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
     try:
-        r = subprocess.run(["ps", "-axo", "tty=,command="], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return lambda job: True
     out = r.stdout or ""
     if r.returncode != 0 or not out.strip():  # denied (a sandboxed call) or empty: unknown, never "all dead"
         return lambda job: True
-    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 1) + [""])[1])]  # drop the tty field
-    ttys = {l.split(None, 1)[0] for l in lines if l}
-    # ponytail: a reused tty or an id inside another command reads as alive; an accepted miss, never a false flag
-    return lambda job: (job.get("tty") or "") in ttys or any(job["id"] in l for l in lines)
+    lines = [l.strip() for l in out.splitlines() if _is_claude((l.split(None, 2) + ["", ""])[2])]  # drop pid and tty
+    pids = {int(l.split()[0]) for l in lines if l.split()[0].isdigit()}
+    ttys = {l.split()[1] for l in lines if len(l.split()) > 1}
+    # ponytail: a reused tty (pid-less jobs only), a recycled claude pid, or an id inside another command reads as
+    # alive; an accepted miss, never a false flag
+    return lambda job: any(job["id"] in l for l in lines) or (
+        job["pid"] in pids if job.get("pid") else (job.get("tty") or "") in ttys)
 
 
 def stalled_since(job, cutoff):
@@ -2448,7 +2477,7 @@ def main(argv=None):
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
         try:
-            cmd_hook(json.loads(sys.stdin.read()), caller_tty())
+            cmd_hook(json.loads(sys.stdin.read()), caller_tty(), caller_claude_pid())
         except (Exception, SystemExit):
             pass
         return 0
