@@ -1666,7 +1666,8 @@ def cmd_ready(root, parent_id):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
             human = [k["id"] for k in kids if k["stage"] == "needs-human"]
-            waits = human or [k["id"] for k in kids if k.get("setup") == "pending"]
+            waits = human or [k["id"] for k in kids
+                           if k.get("setup") == "pending" and k["stage"] not in ("done", "aborted")]
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
             if waits:  # every action is on a child, so the parent keeps running and names them
                 new = "running", WAITING_ON + ", ".join(waits)

@@ -650,6 +650,30 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {d2}"))
         play.assert_not_called()
 
+    def test_bigboy_aborted_setup_pending_child_still_blocks_with_resume(self):
+        # A stale setup=pending on an aborted or done child is not "waiting on you".
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done", "setup=pending"])
+        board.cmd_set(self.root, c2, ["setup=pending"])
+        board.cmd_abort(self.root, c2, requeue=False)
+        board.cmd_set(self.root, c3, ["stage=done"])
+        with mock.patch.object(board, "play") as play:
+            board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual(p["stage"], "needs-human")
+        self.assertTrue(p["reason"].startswith(f"bigboy blocked: {c2}. Fix: click Resume"), p["reason"])
+        self.assertEqual(play.call_count, 1)
+        # A live waiting child with setup=pending keeps the parent running and named.
+        parent, (d1, d2, d3, d4, d5) = self.five()
+        board.cmd_ready(self.root, parent)
+        for k in (d1, d2, d3):
+            board.cmd_set(self.root, k, ["stage=done"])
+        board.cmd_set(self.root, d4, ["setup=pending"])
+        board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {d4}"))
+
     def test_ready_parent_waits_on_needs_human_children(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
         board.cmd_ready(self.root, parent)
