@@ -2085,8 +2085,8 @@ class _Gone(Exception):
 
 
 def cmd_hook(event, tty, pid=None):
-    """Set or clear `waiting` on the active job recorded on this claude pid, or on this tty when the job has no pid (newest updatedAt across every registered repo).
-    Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
+    """Set or clear `waiting` on the active job recorded on this claude pid, or on this tty when the job has no pid
+    (newest updatedAt across every registered repo). Writes nothing when no job matches or a clear finds it already clear, so PostToolUse stays cheap."""
     if event.get("hook_event_name") == "PreToolUse" and event.get("tool_name") == "AskUserQuestion" and notifier_disabled():
         play(sound("question"))  # the notifier skips silenced (scrum-launched) sessions, so the question sound comes from here
     text = waiting_text(event)
@@ -2155,7 +2155,8 @@ def _is_claude(command):
 
 def session_alive_fn():
     """One `ps` scan; a job is alive when a claude process line has its id, or when its recorded claude pid is live
-    (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as alive, so the watchdog never flags on a guess."""
+    (a job with no pid: when a claude process runs on its recorded tty). When ps can't be read, every job counts as
+    alive, so the watchdog never flags on a guess."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
