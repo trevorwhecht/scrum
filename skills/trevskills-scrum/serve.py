@@ -272,6 +272,7 @@ def answer_job(project, root, job, jobs, key):
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+STALL_RESUMED: set[str] = set()  # "project/child id/stage": the one non-limit resume a Run-all/BigBoy child gets per stage
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
 RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
@@ -312,8 +313,9 @@ def limit_reset(root, job):
 
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
-    that line names, else every 30 min; at most 12 tries per job. A job stalled for any other reason, or paused
-    by Trevor, is left on the board. A refused restart costs nothing."""
+    that line names, else every 30 min; at most 12 tries per job. A Run-all/BigBoy child of a running parent stalled
+    for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
+    is left on the board. A refused restart costs nothing."""
     now = time.time()
     for job in jobs:
         reason = job.get("reason") or ""
@@ -326,6 +328,13 @@ def auto_resume(project, root, jobs):
             continue
         hit, reset = limit_reset(root, job)
         if not hit:
+            m = re.match(rf"{board.STALLED}(\w+):", reason)
+            parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
+            once_key = f"{key}/{m.group(1) if m else ''}"
+            if m and parent and parent.get("stage") == "running" and parent.get("lane") in ("runall", "bigboy") \
+                    and once_key not in STALL_RESUMED and resume_refusal(root, job) is None:
+                STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
+                resume_job(project, root, job, jobs)
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
@@ -362,6 +371,24 @@ def cloud_tick(project, root, jobs, now=None):
 
 
 EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
+ORPHANED = "no session picked the job up in {stage}. Fix: click Resume."
+
+
+def flag_stalled(root, job, msg):
+    """Under the board lock, move job from its WATCHED stage to needs-human `stalled in <stage>: <msg>` (msg may use
+    {stage}), so a `resume` session accepts it. False when the job is gone or its stage moved on meanwhile."""
+    stage = job["stage"]
+    try:
+        with board.locked_board(root) as b:
+            live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+            if not live or live.get("stage") != stage:
+                raise board._Gone
+            live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {msg.format(stage=stage)}",
+                        updatedAt=board.now())
+            job.update(live)
+    except board._Gone:
+        return False
+    return True
 
 
 def respawn_exited(project, root):
@@ -384,19 +411,9 @@ def respawn_exited(project, root):
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
         if alive(job):
             continue  # another session (e.g. a Terminal) has the job; look again next tick
-        stage = job["stage"]
-        try:
-            with board.locked_board(root) as b:
-                live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
-                if not live or live.get("stage") != stage:
-                    raise board._Gone
-                live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {EXITED.format(stage=stage)}",
-                            updatedAt=board.now())
-                job.update(live)
-        except board._Gone:
-            run["handled"] = True
-            continue
         run["handled"] = True
+        if not flag_stalled(root, job, EXITED):
+            continue
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(root, job):
             board.play(board.sound("needs-human"))
@@ -415,16 +432,47 @@ def once(fn):
     return lambda: cache[0] if cache else (cache.append(fn()) or cache[0])
 
 
+ORPHAN_MINUTES = 3  # fixed, not a setting: long enough for a just-claimed child's session to show up in ps
+ORPHAN_RESPAWN: dict[str, str] = {}  # "project/child id" -> stage it was last respawned in
+# ponytail: in-memory once-guards (this and STALL_RESUMED); a serve.py restart allows one more attempt per child
+
+
+def respawn_orphans(project, root, p, kids, alive):
+    """Start (or resume, once it has a spec and a worktree) each child of running parent p that sits in a WATCHED
+    stage with no session for ORPHAN_MINUTES: a chaining session claimed it and ended before spawning it. Once per
+    child per stage. alive() (the ps scan) runs only for a child already past the cutoff. True when it spawned."""
+    spawned = False
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
+    for kid in kids:
+        key, stage = f"{project}/{kid['id']}", kid.get("stage")
+        if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" \
+                or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
+                or running(project, kid["id"]) or alive()(kid):
+            continue
+        action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
+        if action == "resume":  # `resume` only accepts a needs-human job with a stalled reason
+            if not flag_stalled(root, kid, ORPHANED):
+                continue
+            STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
+        ORPHAN_RESPAWN[key] = stage
+        spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
+        spawned = True
+    return spawned
+
+
 def sweep_parents(project, root, jobs, alive=None):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
-    parent with no child in progress: close a runall whose children all finished (a bigboy is left for its own final
-    review), else start its waiting children when no child session is alive and no chaining session holds the lock."""
+    parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
+    child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
+    start its waiting children when no child session is alive and no chaining session holds the lock."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
         if p.get("stage") != "running" or p.get("lane") not in ("runall", "bigboy") or not p.get("children"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
+        if not (root / "jobs" / p["id"] / ".chain.lock").exists() and respawn_orphans(project, root, p, kids, alive):
+            continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
         if any(k.get("stage") not in board.IDLE for k in kids):
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):

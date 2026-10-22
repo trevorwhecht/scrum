@@ -3697,7 +3697,7 @@ class AutoResumeTest(unittest.TestCase):
     def setUp(self):
         import serve
         self.serve = serve
-        serve.AUTO_RESUME.clear()
+        serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
         self.jobs = []
         for jid, text in [("limit", "You've hit your limit \u00b7 resets 2am (America/Los_Angeles)"),
@@ -3756,6 +3756,39 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), ["kid"])
         self.assertEqual(s.AUTO_RESUME["p/kid"][0], 1)
         self.assertNotIn("p/lil", s.AUTO_RESUME)
+
+    def run_child(self, parent_stage="running", lane="runall", reason="stalled in build: no board update for 30 min "
+                  "and no live session. Fix: click Resume."):
+        """A Run-all/BigBoy-style parent and one child stalled for a non-limit reason (its log names no limit)."""
+        (self.root / "runs" / "kid.log").write_text("Traceback: something else broke")
+        self.jobs = [{"id": "par", "stage": parent_stage, "lane": lane, "reason": None, "children": ["kid"]},
+                     {"id": "kid", "stage": "needs-human", "parent": "par", "reason": reason, "runlog": "runs/kid.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+
+    def test_stalled_run_child_resumed_once_without_limit(self):
+        for lane in ("runall", "bigboy"):
+            with self.subTest(lane=lane):
+                self.serve.STALL_RESUMED.clear()
+                self.run_child(lane=lane)
+                with mock.patch.object(self.serve, "resume_refusal", return_value="can't resume yet: sib. Fix: x"):
+                    self.assertEqual(self.sweep(), [], "a refusal spends nothing")
+                self.assertEqual(self.sweep(), ["kid"])
+                self.assertEqual(self.sweep(), [], "same stage: once only")
+                self.jobs[1]["reason"] = "stalled in check: no board update for 30 min and no live session. Fix: x"
+                self.assertEqual(self.sweep(), ["kid"], "a new stage earns one more")
+                self.assertEqual(self.sweep(), [])
+                self.assertNotIn("p/kid", self.serve.AUTO_RESUME, "the limit schedule is untouched")
+
+    def test_non_limit_stall_outside_run_not_resumed(self):
+        for case, kw in (("parent not running", {"parent_stage": "needs-human"}), ("standard lane", {"lane": "standard"}),
+                         ("paused", {"reason": "stalled in build: paused by Trevor"})):
+            with self.subTest(case=case):
+                self.run_child(**kw)
+                self.assertEqual(self.sweep(), [])
+        self.jobs = [j for j in self.jobs if j["id"] == "crash"]  # no parent at all
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.serve.STALL_RESUMED, set())
+
 
 
 class CloudPollTest(unittest.TestCase):
@@ -3946,6 +3979,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json"))  # no usage pacing
         env.start(); self.addCleanup(env.stop)
         serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
+        serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("idle/")])
 
     def write(self, parent, kids, lane="runall"):
@@ -4042,6 +4076,54 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual((self.root / "board.json").read_text(), before)
         spawn.assert_not_called()
         ready.assert_not_called()
+
+    def orphan(self, parent_lane="runall", parent="running", minutes=4, **fields):
+        """A parent with child 002-claimed in spec, updatedAt `minutes` old, plus `fields`, and sibling 003-wait."""
+        self.write(parent, {"002-claimed": "spec", "003-wait": "waiting"}, lane=parent_lane)
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][1].update(updatedAt=(datetime.now().astimezone() - timedelta(minutes=minutes)).isoformat(), **fields)
+        (self.root / "board.json").write_text(json.dumps(data))
+
+    def spawned(self, **kw):
+        return [c.args[2:] for c in self.tick(**kw)[0].call_args_list]
+
+    def test_claimed_child_with_spec_and_worktree_gets_resumed(self):
+        (self.root / "jobs" / "002-claimed").mkdir()
+        (self.root / "jobs" / "002-claimed" / "spec.md").write_text("# x\n")
+        self.orphan(worktree="/tmp/wt-002")
+        self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
+        kid = self.job("002-claimed")  # `resume` refuses a job that is not needs-human with a stalled reason
+        self.assertEqual(kid["stage"], "needs-human")
+        self.assertTrue(kid["reason"].startswith("stalled in spec: no session picked the job up"), kid["reason"])
+        self.assertEqual(self.job("003-wait")["stage"], "waiting")
+        self.serve.ORPHAN_RESPAWN.clear()
+        self.orphan(worktree=None)  # spec.md but no worktree yet
+        self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
+
+    def test_orphaned_child_respawned_at_most_once_per_stage(self):
+        self.orphan()
+        self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
+        self.assertEqual(self.spawned(), [], "still orphaned in spec: no second spawn")
+        self.orphan(stage="build")
+        self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
+        self.assertEqual(self.spawned(), [])
+
+    def test_orphan_respawn_skips(self):
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        cases = [("fresh", {"minutes": 2}, {}), ("alive", {}, {"alive": lambda job: job["id"] == "002-claimed"}),
+                 ("running", {}, {"running": lambda p, j: j == "002-claimed"}), ("chain lock", {}, {}),
+                 ("parent not running", {"parent": "needs-human"}, {}), ("standard lane", {"parent_lane": "standard"}, {}),
+                 ("waiting question", {"waiting": {"question": "x?"}}, {}), ("lilguy", {"lane": "lilguy"}, {}),
+                 ("merging", {"stage": "merging"}, {}), ("cloud", {"stage": "cloud"}, {})]
+        for case, kw, tick_kw in cases:
+            with self.subTest(case=case):
+                self.serve.ORPHAN_RESPAWN.clear()
+                self.orphan(**kw)
+                if case == "chain lock":
+                    lock.parent.mkdir(exist_ok=True); lock.write_text("002-claimed")
+                self.assertEqual(self.spawned(**tick_kw), [])
+                lock.unlink(missing_ok=True)
+                self.assertEqual(self.job("003-wait")["stage"], "waiting")
 
 
 class AutoContinueTest(unittest.TestCase):
