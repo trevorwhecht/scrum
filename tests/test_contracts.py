@@ -1507,6 +1507,17 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("stops the BigBoy for Trevor", reviewer)
         self.assertIn("each gap line is filed as its own backlog item, so write each one self-contained", reviewer)
 
+    def test_bigboy_unreadable_review_files_rerun(self):
+        bigboy = self.lane("bigboy")
+        step7 = bigboy[bigboy.index("7. **Final BigBoy review.**"):]
+        line = next(l for l in step7.splitlines() if "still missing or unreadable" in l)
+        self.assertNotIn("treat it as GAPS with no fix ticket", step7)
+        for phrase in ("B set $P stage=done reason='merged + gaps: bigboy review unreadable'",
+                       "B roadmap-insert <p> <s> standard 're-run final review of $P'",
+                       'B backlog-add "re-run final review of $P (gap of $P)"', "B roadmap-next $P"):
+            self.assertIn(phrase, line, phrase)
+        self.assertNotIn("plan-apply $P --fix", line)
+
     def test_resume_reentry_per_reason(self):
         text = self.rules()
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
