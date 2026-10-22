@@ -377,8 +377,10 @@ class ServeTest(unittest.TestCase):
         (broken / "scrum" / "board.json").write_text("{not json")
         projects = {"broken": broken, "repo": self.root.parent}  # the broken one first: its error must not stop the sweep
         with mock.patch.object(b, "projects", return_value=projects), \
-                mock.patch.object(b, "session_alive_fn", return_value=lambda job: False):
+                mock.patch.object(b, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as err:
             self.serve.watchdog_tick()
+        self.assertIn("watchdog: broken: board.json is not valid JSON", err.getvalue())
         self.assertEqual(self.stage_of(a)["stage"], "needs-human")
         self.assertTrue(self.stage_of(a)["reason"].startswith("stalled in review: "))
         self.assertEqual(self.stage_of(c)["stage"], "spec")

@@ -29,9 +29,12 @@ class FakeOllama(BaseHTTPRequestHandler):
 
     def do_GET(self):
         time.sleep(type(self).delay)
-        self.send_response(type(self).status)
-        self.end_headers()
-        self.wfile.write(type(self).body)
+        try:
+            self.send_response(type(self).status)
+            self.end_headers()
+            self.wfile.write(type(self).body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client timed out and hung up; that is the point of the delay test
 
     def log_message(self, *args):
         pass
