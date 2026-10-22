@@ -4092,6 +4092,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
         (self.root / "jobs" / "002-claimed" / "spec.md").write_text("# x\n")
         self.orphan(worktree="/tmp/wt-002")
         self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
+        kid = self.job("002-claimed")  # `resume` refuses a job that is not needs-human with a stalled reason
+        self.assertEqual(kid["stage"], "needs-human")
+        self.assertTrue(kid["reason"].startswith("stalled in spec: no session picked the job up"), kid["reason"])
+        self.assertEqual(self.job("003-wait")["stage"], "waiting")
         self.serve.ORPHAN_RESPAWN.clear()
         self.orphan(worktree=None)  # spec.md but no worktree yet
         self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
