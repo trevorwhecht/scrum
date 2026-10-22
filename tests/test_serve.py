@@ -389,8 +389,8 @@ class ServeTest(unittest.TestCase):
         b = self.serve.board
         stalled, blocked, active = (b.cmd_new(self.root, t) for t in ("Resume me", "Blocked one", "Active one"))
         b.cmd_set(self.root, stalled, ["stage=needs-human",
-                                       "reason=stalled in check: no board update for 30 min and no live session. Fix: click Resume."])
-        b.cmd_set(self.root, blocked, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+                                       "reason=stalled in check: no board update for 30 min and no live session. Fix: click Resume."], internal=True)
+        b.cmd_set(self.root, blocked, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         b.cmd_set(self.root, active, ["stage=check"])
         for job_id in (blocked, active):
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/resume", {})[0], 409, job_id)
@@ -629,7 +629,7 @@ class ServeTest(unittest.TestCase):
     def test_approve_only_for_needs_human_and_passes_migration_confirmation(self):
         job_id = self.serve.board.cmd_new(self.root, "refunds")
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/approve", {})[0], 409)  # stage is spec
-        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — prisma/schema.prisma"])
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — prisma/schema.prisma"], internal=True)
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/approve", {"migrated": True})[0], 202)
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum approve {job_id}" in a and "migrate" in a
                                                   for c in self.calls() for a in c)))
@@ -640,14 +640,14 @@ class ServeTest(unittest.TestCase):
 
     def test_rework_needs_feedback(self):
         job_id = self.serve.board.cmd_new(self.root, "rework me")
-        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"])
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "  "})[0], 400)
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "use the existing helper"})[0], 202)
         self.assertEqual(self.req("POST", "/api/p/repo/jobs/..%2F..%2Fx/rework", {"feedback": "x"})[0], 400)
 
     def test_abort_stops_running_job_and_can_requeue(self):
         job_id = self.serve.board.cmd_new(self.root, "abort me")
-        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"])
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "try again"})[0], 202)
         self.assertTrue(self.serve.running("repo", job_id))
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/abort", {"requeue": True})[0], 200)
@@ -783,7 +783,7 @@ class ServeTest(unittest.TestCase):
     # --- pause / play ---
     def test_pause_endpoint_kills_fake_run_and_marks_paused(self):
         job_id = self.serve.board.cmd_new(self.root, "pause me")
-        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"])
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "try again"})[0], 202)
         self.assertTrue(self.serve.running("repo", job_id))
         self.serve.board.cmd_set(self.root, job_id, ["stage=build", "reason="])  # what the rework session does first
@@ -895,7 +895,7 @@ class ServeTest(unittest.TestCase):
     def job(self, title, *pairs):
         job_id = self.serve.board.cmd_new(self.root, title)
         if pairs:
-            self.serve.board.cmd_set(self.root, job_id, list(pairs))
+            self.serve.board.cmd_set(self.root, job_id, list(pairs), internal=True)
         return job_id
 
     def patch_board(self, job_id, **fields):
@@ -995,7 +995,7 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {})[0], 409)  # not needs-human
-            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"])
+            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
             code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": "it's'; rm -rf ~"})
         self.assertEqual(code, 200, out)
         argv = run.call_args.args[0]
@@ -1327,7 +1327,7 @@ class ServeTest(unittest.TestCase):
     def test_activity_line_pr_and_done(self):
         job_id = self.job("pr", "stage=merging", "pr=https://x/1")
         self.assertEqual(self.activity_of(job_id)["text"], "CI running")
-        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human"])
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human"], internal=True)
         self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
         self.serve.board.cmd_set(self.root, job_id, ["stage=done"])
         self.assertIsNone(self.activity_of(job_id))
@@ -3565,7 +3565,12 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(len(runs()), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
         self.assertEqual(job["stage"], "needs-human")
-        self.assertTrue(job["reason"].startswith("digest apply: git commit failed"), job["reason"])
+        self.assertTrue(job["reason"].startswith("digest apply: git commit failed: hook says no"), job["reason"])
+        self.assertEqual(job["question"], job["reason"])
+        self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
+                         [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
+        [line] = (self.scrum / "questions.log").read_text().splitlines()
+        self.assertEqual(json.loads(line)["job"], job["id"])
         self.assertEqual(self.head_count(), 1)
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
         self.assertEqual(self.statuses(), ["queued", "queued"])

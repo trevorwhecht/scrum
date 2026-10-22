@@ -2,7 +2,8 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null)
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null);
+                                   stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
                                    closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
@@ -1755,10 +1756,14 @@ def merge_refusal(job: dict) -> str | None:
     return f"not done: could not confirm PR {pr} is merged: {why}"
 
 
-def cmd_set(root, job_id, pairs, unpause=False, expect=None):
+def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
     `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses. expect: write only while the
-    job is still in that stage (checked under the lock), else raise SystemExit and write nothing."""
+    job is still in that stage (checked under the lock), else raise SystemExit and write nothing. stage=needs-human is
+    refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
+    if "stage=needs-human" in pairs and not internal:
+        raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command": '
+                         "set never parks a job at needs-human")
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
     given = dict(pair.partition("=")[::2] for pair in pairs)
@@ -1994,7 +1999,8 @@ def cmd_cloud_sync(root: Path) -> dict:
                 _cloud_abort(root, job_id, url, abort[0], reason)
             else:
                 worktree = cloud_worktree(repo, job_id) if wants_worktree else None
-                cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud")
+                cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
+                        internal=True)
         except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
             print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
             continue

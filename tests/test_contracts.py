@@ -444,7 +444,7 @@ class ContractTest(unittest.TestCase):
         lilguy = self.lane("lilguy")
         check = self.section(lilguy, "4. **Check.**", "5. **Land.**")
         for phrase in (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$", "Hard stop: agent rules",
-                       "run /trevskills-commitpush yourself"):
+                       "run /trevskills-commitpush yourself", "B ask $ID 'Hard stop: agent rules"):
             self.assertIn(phrase, check, phrase)
 
     def test_skill_clean_round_skips_approver(self):
@@ -595,7 +595,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("OBSOLETE:", text)
         new_job = text[text.index("## New job"):]
-        self.assertNotIn('stage=needs-human reason="obsolete:', new_job)
+        self.assertNotIn("B ask $ID 'obsolete:", new_job)
         self.assertIn("B abort $ID --reason 'obsolete:", new_job)
         self.assertLess(new_job.index("B abort $ID --reason"), new_job.index("git worktree add"))
         step = next(l for l in new_job.splitlines() if "**Obsolete:**" in l)
@@ -1277,10 +1277,12 @@ class ContractTest(unittest.TestCase):
 
     def test_done_refusal_fallback_in_skill(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        line = ("If `B set ... stage=done` refuses, run `B set $ID stage=needs-human reason='<its error, quotes stripped>. "
-                "Fix: merge the PR on GitHub, then click Approve & merge.'` and stop.")
-        self.assertIn(line, self.section(text, "7. **Clean up:**", "## Resuming the builder"))
-        self.assertIn(line, self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
+        line = ("If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the PR on GitHub "
+                "before you retry.' --a ")
+        self.assertIn(line + '"Retry=approve $ID" --b "Abort=abort $ID"` and stop.',
+                      self.section(text, "7. **Clean up:**", "## Resuming the builder"))
+        self.assertIn(line + "'Retry=shell: gh pr view <pr url> --json state' --b \"Abort=abort $ID\"` and stop.",
+                      self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
 
     def test_done_only_when_live(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1328,46 +1330,93 @@ class ContractTest(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         self.assertEqual(json.loads(out), [c[1] for c in cases])
 
-    def test_skill_every_needs_human_reason_has_fix(self):
-        text = self.rules()  # SKILL.md plus lanes/*.md: every needs-human reason the orchestrator can write
-        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
-        self.assertGreaterEqual(len(reasons), 29)  # every needs-human reason left after the Abort-only ones went
-        self.assertEqual(len(reasons), text.count('stage=needs-human reason="') + text.count("stage=needs-human reason='"))
-        for reason in reasons:
-            self.assertIn(" Fix: ", reason, reason)
-            self.assertNotIn("`", reason, reason)
-        for phrase in ("Fix: click Approve & merge; it runs /trevskills-migrate first.",
-                       "Fix: review the diff, then click Approve & merge.",
-                       "approver output unreadable. Fix: click Discuss first.",
-                       "Every needs-human reason is"):
-            self.assertIn(phrase, text, phrase)
+    def ask_options(self, span):
+        """The option commands of one `B ask ...` code span, with the id placeholders filled by a sample id."""
+        import shlex
+        for ph in ("$ID", "$P", "<id>", "<P>"):
+            span = span.replace(ph, "123-sample")
+        words = shlex.split(span)
+        return [words[i + 1].partition("=")[2] for i, w in enumerate(words) if w in ("--a", "--b", "--c")]
 
-    def test_no_abort_only_needs_human_reason(self):
-        text = self.rules()  # SKILL.md plus lanes/*.md: every needs-human reason the orchestrator can write
-        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
-        self.assertEqual([r for r in reasons if "Abort" in r], [])
-        self.assertIn("Every needs-human reason is `<what is wrong>. Fix: <exact fix>`, with no double quotes or "
-                      "backticks. A job goes needs-human only when its card offers Approve, Resume or Send back; a stop "
-                      "whose only fix is Abort is handled by the agents instead.", text)
-        # Every string literal in board.py (adjacent literals and f-strings joined, as Python joins them).
-        import ast
-        tree = ast.parse((ROOT / "skills" / "trevskills-scrum" / "board.py").read_text())
-        joined = lambda n: "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in n.values)
-        literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)] \
-            + [joined(n) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)]
-        fixes = [s.split("Fix:", 1)[1] for s in literals if "Fix:" in s]
-        self.assertGreaterEqual(len(fixes), 3)
-        self.assertEqual([f for f in fixes if "Abort" in f], [])
+    def test_no_free_text_needs_human(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+        import board
+        skill = ROOT / "skills" / "trevskills-scrum"
+        files = [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md")), skill / "serve.py",
+                 *sorted((ROOT / "agents").glob("*.md"))]
+        for f in files:
+            self.assertNotIn("stage=needs-human", f.read_text(), f.name)
+        spans = re.findall(r"`(B ask [^`]+)`", self.rules())
+        self.assertGreaterEqual(len(spans), 30)  # every former free-text park, now a closed question
+        for span in spans:
+            commands = self.ask_options(span)
+            self.assertIn(len(commands), (2, 3), span)
+            for command in commands:
+                self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
+        text = self.rules()
+        self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
+        self.assertIn("`B set` refuses the needs-human stage.", text)
+        self.assertNotIn("Every needs-human reason is", text)
+        # Prefix-dependent readers (board.RESUMABLE, serve.py CLOUD_HOME, cloud.md) still match the asked questions.
+        for prefix in ("'Hard stop: schema — ", "'Hard stop: agent rules — ", "'bigboy off track: ",
+                       '"bigboy review: main not updated', '"Base branch line', "'Base branch <BB>", "'blocked: "):
+            self.assertTrue(any(prefix in sp for sp in spans), prefix)
+
+    def test_merge_main_checkout_self_heal(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Routing")
+        guard = self.section(merge, "**Main checkout guard", "2. Run `B set $ID stage=merging`")
+        for phrase in ("run project.md's Test command (its `- Test:` line; `none` or missing counts as a fail) in `$REPO`",
+                       "invoke `/trevskills-commitpush` via the Skill tool in `$REPO`", "continue the merge",
+                       """--a "Keep=resume $ID" --b 'Discard=shell: git checkout -- <the files>'""",
+                       '--a "Resume=resume $ID" --b "Abort=abort $ID"',
+                       "Never stash, clean or switch branches in the main checkout on your own",
+                       "Only the Discard option Trevor picks throws anything away."):
+            self.assertIn(phrase, guard, phrase)
+        self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
+
+    def test_merge_agent_rules_self_heal(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Routing")
+        start = merge.index("**Agent rules guard")
+        guard = merge[start:merge.index("\n", start)]
+        for phrase in ("named in `$F/jobs/$ID/feature.md` or in spec.md's `## Likely files`",
+                       "`python3 -m unittest tests.test_contracts` passes in `$WT`, continue without a human",
+                       "`B ask $ID 'Hard stop: agent rules — <first matching file>;",
+                       '--a "Merge anyway=approve $ID"',
+                       """--b 'Send back=rework <id> "<files outside the ticket> are outside the ticket""",
+                       "self-heal included"):
+            self.assertIn(phrase, guard, phrase)
+        self.assertLess(guard.index("human-approval.md"), guard.index("in-ticket self-heal"))
+        self.assertLess(guard.index("B digest-verify"), guard.index("in-ticket self-heal"))
+        step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
+        self.assertIn("agent rules guard (with its in-ticket self-heal)", step6)
+
+    def test_merge_conflicts_ask_after_two(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step5 = self.section(text, "5. **Conflicts.**", "6. **Merge:**")
+        self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
+                      "$DEFAULT after 2 tries.\" --a \"Requeue=abort $ID --requeue\" --b \"Abort=abort $ID\"` and stop.", step5)
+        for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
+            self.assertIn(phrase, step5, phrase)
+
+    def test_stop_rules_trigger_on_ask(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("4. **Stop rule.** Whenever this session runs `B ask` for a job, or auto-aborts it", self.lane("roadmap"))
+        self.assertIn("6. **After a child stops.** When a child's run runs `B ask` for it or auto-aborts it", self.lane("bigboy"))
+        self.assertIn("every time this run runs `B ask` for the child, also run **BigBoy lane** step 6", text)
+        self.assertIn("Every time this run runs `B ask` for a job, also apply the **Roadmap lane** stop rule", text)
 
     def test_auto_requeue_stops(self):
-        text = self.rules()  # SKILL.md plus lanes/*.md: every needs-human reason the orchestrator can write
-        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
+        text = self.rules()  # SKILL.md plus lanes/*.md: every question the orchestrator can ask
+        reasons = re.findall(r"`B ask ([^`]+)`", text)
         for phrase in ("spec writer produced nothing", "planner output unreadable: <error line>",
                        "debugger output unreadable", "digest proposal <NNN> <PID> not found in proposals.json",
                        "claude --cloud did not start: <last line of OUT>", "cloud PR closed without merging"):
             self.assertIn(f"B abort $ID --requeue --reason 'requeue: {phrase}'", text, phrase)
             self.assertEqual([r for r in reasons if phrase in r], [], phrase)
-        rule = self.section(text, "Every needs-human reason is", "\n1. ")
+        rule = self.section(text, "**Every stop is a closed question.**", "\n1. ")
         for phrase in ("without `--requeue`", "**BigBoy lane** step 6", "`B roadmap-stop`"):
             self.assertIn(phrase, rule, phrase)
         cloud = self.lane("cloud")
@@ -1385,10 +1434,10 @@ class ContractTest(unittest.TestCase):
         self.assertIn("B abort $ID --reason 'looks already fixed: no repro — <line 2>'", debug)
         self.assertIn("B abort $ID --reason 'looks already fixed: repro passes on <short HEAD> — see repro-before.md'", debug)
         self.assertIn("auto-closed as looks already fixed", debug)
-        reasons = [d or s for d, s in re.findall(r'''stage=needs-human reason=(?:"([^"]*)"|'([^']*)')''', text)]
+        reasons = re.findall(r"`B ask \$ID '([^']*)'", text + debug)
         for gone in ("debug: no repro", "debug: repro does not fail"):
             self.assertEqual([r for r in reasons if r.startswith(gone)], [], gone)
-        self.assertIn("reason='debug: blocked — <line 2>. Fix: click Discuss first.'", debug)
+        self.assertIn("B ask $ID 'debug: blocked — <line 2>' --a \"Re-diagnose=rework $ID", debug)
 
     def test_bigboy_gaps_filed_not_stopped(self):
         text = self.rules()
@@ -1417,7 +1466,10 @@ class ContractTest(unittest.TestCase):
         # an older `bigboy blocked` fallback names no aborted child: Resume must not discard its waiting children
         self.assertIn("only the `waiting` children that depend (directly or through another `waiting` child) on an "
                       "aborted sibling", resume)
-        self.assertIn("If none do, set the same reason again and stop.", resume)
+        self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Resume=resume <id>\" --b \"Abort=abort <id>\"`", resume)
+        for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",
+                       "find the step whose `B ask` wrote the question"):
+            self.assertIn(phrase, resume, phrase)
         step6 = next(l for l in text.splitlines() if l.startswith("6. **After a child stops.**"))
         self.assertIn("If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` "
                       "instead. Otherwise **start** each id in `ready`", step6)
@@ -1766,16 +1818,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
         for phrase in ("`lane` is `debug`", "after CI fix", "Repro test untouched",
-                       "reason='debug: checks fail after CI fix — <first failing check>. Fix: click Send back to "
-                       "builder with what to change.'"):
+                       "B ask $ID 'debug: checks fail after CI fix — <first failing check>' --a \"Send back=rework $ID"):
             self.assertIn(phrase, step6, phrase)
         self.assertLess(step6.index("after CI fix"), step6.index("gh pr merge"))
 
     def test_merge_gh_missing_fix_installs_first(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
-        self.assertIn("GitHub CLI is not installed or not signed in; branch scrum/$ID is local only. Fix: run brew "
-                      "install gh, then gh auth login in Terminal, then click Approve & merge.", merge)
+        self.assertIn("GitHub CLI is not installed or not signed in; branch scrum/$ID is local only. Run brew "
+                      "install gh, then gh auth login, before you retry.\" --a \"Retry=approve $ID\"", merge)
         self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
 
 
@@ -2012,7 +2063,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, sync, phrase)
         self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum approve $ID" --model sonnet '
                       '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', rule)
-        self.assertLess(sync.index("stage=needs-human pr=<url> base="), sync.index("nohup claude -p"))
+        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("nohup claude -p"))
         # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)

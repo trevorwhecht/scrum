@@ -79,6 +79,20 @@ class BoardTest(unittest.TestCase):
             board.cmd_set(self.root, job_id, ["stage=shipping"])
         self.assertEqual(self.jobs()[0]["stage"], "spec")
 
+    def test_set_refuses_needs_human(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        before = (self.root / "board.json").read_text()
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=x. Fix: y"])
+        self.assertTrue(str(e.exception).startswith("use board.py ask"), e.exception)
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", job_id, "reason=z", "stage=needs-human"])
+        self.assertTrue(str(e.exception).startswith("use board.py ask"), e.exception)
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        board.cmd_set(self.root, job_id, ["stage=review", "reason=r"])  # every other stage still sets
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", "r"))
+
     def test_set_tty_term_runlog_stored(self):
         job_id = board.cmd_new(self.root, "x")
         out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id,
@@ -543,7 +557,7 @@ class BoardTest(unittest.TestCase):
         for k in (c1, c2, c4):
             self.spec(k, f"src/{k}.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
-        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         board.cmd_set(self.root, c2, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c4])
         self.assertEqual((self.child(parent)["stage"], self.child(c3)["stage"]), ("running", "waiting"))
@@ -551,7 +565,7 @@ class BoardTest(unittest.TestCase):
     def test_ready_marks_parent_blocked(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
         board.cmd_ready(self.root, parent)
-        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         board.cmd_abort(self.root, c2, requeue=False)
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
@@ -587,7 +601,7 @@ class BoardTest(unittest.TestCase):
         parent, (d1, d2, d3, d4, d5) = self.five()
         board.cmd_ready(self.root, parent)
         board.cmd_abort(self.root, d1, requeue=False)
-        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         with mock.patch.object(board, "play") as play:
             board.cmd_ready(self.root, parent)
         p = self.child(parent)
@@ -597,8 +611,8 @@ class BoardTest(unittest.TestCase):
     def test_ready_parent_waits_on_needs_human_children(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
         board.cmd_ready(self.root, parent)
-        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
-        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         with mock.patch.object(board, "play") as play:
             out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"], out["all_merged"]), ([], 0, False))
@@ -628,8 +642,8 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
         parent, (d1, d2, d3, d4, d5) = self.five()
         board.cmd_ready(self.root, parent)
-        board.cmd_set(self.root, d1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
-        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, d1, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
+        board.cmd_set(self.root, d2, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         board.cmd_ready(self.root, parent)
         self.assertEqual(self.child(parent)["reason"], f"waiting on you in: {d1}, {d2}")
         board.cmd_set(self.root, d2, ["stage=build", "reason="])  # Send back to builder: in progress, nothing new ready
@@ -640,29 +654,29 @@ class BoardTest(unittest.TestCase):
     def test_ready_recovers_legacy_blocked_parent(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
         board.cmd_ready(self.root, parent)
-        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"])
-        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"])
-        board.cmd_set(self.root, parent, ["stage=needs-human", f"reason=bigboy blocked: {c1}, {c2}. Fix: y"])
+        board.cmd_set(self.root, c1, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
+        board.cmd_set(self.root, c2, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
+        board.cmd_set(self.root, parent, ["stage=needs-human", f"reason=bigboy blocked: {c1}, {c2}. Fix: y"], internal=True)
         with mock.patch.object(board, "play") as play:
             board.cmd_ready(self.root, parent)
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 002-part-1, 003-part-2"))
         play.assert_not_called()
-        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy blocked: old. Fix: y"])
+        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy blocked: old. Fix: y"], internal=True)
         board.cmd_set(self.root, c1, ["stage=build", "reason="])
         board.cmd_ready(self.root, parent)
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
         rparent, (a, b) = self.runall(2)
         board.cmd_ready(self.root, rparent)
-        board.cmd_set(self.root, rparent, ["stage=needs-human", "reason=run-all blocked: x. Fix: y"])
+        board.cmd_set(self.root, rparent, ["stage=needs-human", "reason=run-all blocked: x. Fix: y"], internal=True)
         board.cmd_ready(self.root, rparent)  # a is in progress
         p = self.child(rparent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
     def test_ready_leaves_other_parent_stops_alone(self):
         parent, kids = self.three()
-        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy off track: x. Fix: y"])
+        board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy off track: x. Fix: y"], internal=True)
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy off track: x. Fix: y"))
@@ -671,7 +685,7 @@ class BoardTest(unittest.TestCase):
     def test_ready_recovers_chain_lock_parent(self):
         parent, (c1, c2, c3) = self.three()
         board.cmd_set(self.root, parent, ["stage=needs-human", "reason=bigboy chain lock held by 005-x. Fix: wait, "
-                                          "or clear the lock and click Run now on a waiting child."])
+                                          "or clear the lock and click Run now on a waiting child."], internal=True)
         with mock.patch.object(board, "play") as play:
             out = board.cmd_ready(self.root, parent)
         self.assertEqual(out["ready"], ["002-part-1"])
@@ -704,10 +718,10 @@ class BoardTest(unittest.TestCase):
             job = board.cmd_new(self.root, "noisy")
             board.cmd_set(self.root, job, ["stage=build"])
             play.assert_not_called()
-            board.cmd_set(self.root, job, ["stage=needs-human", "reason=x"])
+            board.cmd_set(self.root, job, ["stage=needs-human", "reason=x"], internal=True)
             play.assert_called_once_with(clip)
             play.reset_mock()
-            board.cmd_set(self.root, job, ["stage=needs-human"])  # already there: no sound
+            board.cmd_set(self.root, job, ["stage=needs-human"], internal=True)  # already there: no sound
             play.assert_not_called()
             board.cmd_set(self.root, job, ["stage=done"])
             play.assert_called_once_with("/clips/done")
@@ -729,7 +743,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.child(job)["stage"], "done")
         seen = []  # the sound starts after the board is written and the lock released
         with mock.patch.object(board, "play", lambda p: seen.append(self.child(job)["stage"])):
-            board.cmd_set(self.root, job, ["stage=needs-human"])
+            board.cmd_set(self.root, job, ["stage=needs-human"], internal=True)
         self.assertEqual(seen, ["needs-human"])
 
     def test_play_is_detached_and_muted_by_env(self):
@@ -1023,7 +1037,7 @@ class BoardTest(unittest.TestCase):
     def test_runall_ready_parent_waits_and_resumes(self):
         parent, (a, b, c) = self.runall(3)
         board.cmd_ready(self.root, parent)
-        board.cmd_set(self.root, a, ["stage=needs-human", "reason=blocked: x. Fix: y"])
+        board.cmd_set(self.root, a, ["stage=needs-human", "reason=blocked: x. Fix: y"], internal=True)
         board.cmd_abort(self.root, b, requeue=False)
         board.cmd_set(self.root, c, ["stage=done"])
         with mock.patch.object(board, "play") as play:
@@ -1128,12 +1142,12 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         self.write(f"{job_id}/spec.md", "# spec")
         self.write(f"{job_id}/feature.md", "x")
-        board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=obsolete: done"])
+        board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=obsolete: done"], internal=True)
         self.assertEqual(self.jobs()[0]["files"], ["feature.md", "spec.md"])
         (self.root / "jobs" / job_id / "spec.md").unlink()
         (self.root / "jobs" / job_id / "feature.md").unlink()
         (self.root / "jobs" / job_id).rmdir()
-        board.cmd_set(self.root, job_id, ["stage=needs-human"])  # missing folder: still succeeds
+        board.cmd_set(self.root, job_id, ["stage=needs-human"], internal=True)  # missing folder: still succeeds
         self.assertEqual(self.jobs()[0]["files"], [])
 
     def test_diverged_flag_set_and_cleared(self):
@@ -1463,7 +1477,7 @@ class BoardTest(unittest.TestCase):
             if stage == "aborted":
                 board.cmd_abort(self.root, job_id, requeue=False)
             else:
-                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                board.cmd_set(self.root, job_id, [f"stage={stage}"], internal=True)
             before = (self.root / "board.json").read_text()
             with self.assertRaises(SystemExit) as e:
                 board.cmd_pause(self.root, job_id)
@@ -1596,7 +1610,7 @@ class BoardTest(unittest.TestCase):
             if stage == "aborted":
                 board.cmd_abort(self.root, job_id, requeue=False)
             else:
-                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                board.cmd_set(self.root, job_id, [f"stage={stage}"], internal=True)
             ids.append(job_id)
         return ids
 
@@ -1777,7 +1791,7 @@ class BoardTest(unittest.TestCase):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
         # No parent: never blocked.
         solo = board.cmd_new(self.root, "Solo")
-        board.cmd_set(self.root, solo, stalled)
+        board.cmd_set(self.root, solo, stalled, internal=True)
         self.assertIsNone(board.resume_blocker(self.root, solo))
         # BigBoy, no cap: a, b, c parallel; d parallel=no.
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4, parallel="no — big"),
@@ -1787,7 +1801,7 @@ class BoardTest(unittest.TestCase):
         self.spec(b, "src/b.py")
         self.spec(c, "src/c.py", "src/shared.py")
         self.spec(d, "src/d.py")
-        board.cmd_set(self.root, a, stalled)
+        board.cmd_set(self.root, a, stalled, internal=True)
         # No sibling in progress (all waiting/needs-human).
         self.assertIsNone(board.resume_blocker(self.root, a))
         # Disjoint parallel sibling in progress.
@@ -1818,7 +1832,7 @@ class BoardTest(unittest.TestCase):
         _, kids = self.runall(5)
         for i, k in enumerate(kids):
             self.spec(k, f"src/r{i}.py")
-        board.cmd_set(self.root, kids[0], stalled)
+        board.cmd_set(self.root, kids[0], stalled, internal=True)
         for k in kids[1:4]:
             board.cmd_set(self.root, k, ["stage=build"])
         text = board.resume_blocker(self.root, kids[0])
@@ -1834,7 +1848,7 @@ class BoardTest(unittest.TestCase):
             text = board.resume_blocker(self.root, kids[0])
             self.assertEqual((text, text.ids), ("2 siblings in progress (cap 1)", kids[1:3]))
             board.cmd_set(self.root, b, ["stage=build"])
-            board.cmd_set(self.root, a, stalled)
+            board.cmd_set(self.root, a, stalled, internal=True)
             text = board.resume_blocker(self.root, a)
             self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
@@ -2301,7 +2315,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.get(self.job)["waiting"], "reply needed")
 
     def test_hook_ignores_inactive_and_other_tty(self):
-        board.cmd_set(self.root, self.old, ["stage=needs-human"])
+        board.cmd_set(self.root, self.old, ["stage=needs-human"], internal=True)
         board.cmd_set(self.root, self.job, ["tty=ttys005"])
         done = board.cmd_new(self.root, "done job")
         board.cmd_set(self.root, done, ["stage=done", "tty=ttys004"])
@@ -2581,7 +2595,7 @@ class CloudSyncTest(unittest.TestCase):
         self.assertEqual(self.get(), before)
 
     def test_no_cloud_job_calls_no_gh(self):
-        board.cmd_set(self.root, self.job, ["stage=needs-human"])
+        board.cmd_set(self.root, self.job, ["stage=needs-human"], internal=True)
         with self.gh([self.pr()]):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "error": None})
         self.assertEqual(self.calls, [])
