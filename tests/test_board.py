@@ -9,6 +9,13 @@ os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
+CALLER_CLAUDE_PID = board.caller_claude_pid  # the real one; fixtures patch it so the test runner's claude is never recorded
+
+
+def no_claude_pid(test):
+    patch = mock.patch.object(board, "caller_claude_pid", return_value=None)
+    patch.start()
+    test.addCleanup(patch.stop)
 
 
 class BoardTest(unittest.TestCase):
@@ -21,6 +28,7 @@ class BoardTest(unittest.TestCase):
         usage = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})  # no pacing
         usage.start()
         self.addCleanup(usage.stop)
+        no_claude_pid(self)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -103,6 +111,40 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["tty=", "term=", "runlog="])
         job = self.jobs()[0]
         self.assertEqual((job["tty"], job["term"], job["runlog"]), (None, None, None))
+
+    def test_set_tty_records_claude_pid(self):
+        # pid -> "ppid command", as `ps -o ppid=,command=` prints it; board.py's parent is 100, a shell under claude 40
+        table = {100: "   50 python3 board.py set", 50: "   40 /bin/zsh -c B set", 40: "    1 /Users/t/.local/bin/claude --resume"}
+        ps = lambda args, **kw: subprocess.CompletedProcess(args, 0, table.get(int(args[-1]), "") + "\n", "")
+        job_id = board.cmd_new(self.root, "x")
+        with mock.patch.object(board, "caller_claude_pid", CALLER_CLAUDE_PID), \
+                mock.patch.object(board.os, "getppid", return_value=100), mock.patch.object(board.subprocess, "run", ps):
+            board.cmd_set(self.root, job_id, ["tty=ttys004"])
+            self.assertEqual(self.jobs()[0]["pid"], 40)
+            board.cmd_set(self.root, job_id, ["stage=build", "waiting=x"])  # no tty: pid untouched
+            self.assertEqual(self.jobs()[0]["pid"], 40)
+            board.cmd_set(self.root, job_id, ["tty="])
+            self.assertIsNone(self.jobs()[0]["pid"])
+            table[40] = "    1 /bin/login"  # no claude ancestor
+            board.cmd_set(self.root, job_id, ["tty=ttys004"])
+            self.assertIsNone(self.jobs()[0]["pid"])
+            table[40] = "    1 /Users/t/.local/bin/claude"
+            board.cmd_set(self.root, job_id, ["tty=ttys004"])
+            self.assertEqual(self.jobs()[0]["pid"], 40)
+            with mock.patch.object(board.subprocess, "run", side_effect=OSError("no ps")):
+                board.cmd_set(self.root, job_id, ["tty=ttys005"])
+            self.assertEqual((self.jobs()[0]["tty"], self.jobs()[0]["pid"]), ("ttys005", None))
+            with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 2)):
+                board.cmd_set(self.root, job_id, ["tty=ttys004"])
+            self.assertIsNone(self.jobs()[0]["pid"])
+            table.update({n: f"{n + 1} /bin/zsh" for n in range(100, 200)})  # claude more than 10 up is not found
+            calls = []
+            with mock.patch.object(board.subprocess, "run", lambda a, **kw: calls.append(a) or ps(a, **kw)):
+                board.cmd_set(self.root, job_id, ["tty=ttys004"])
+            self.assertIsNone(self.jobs()[0]["pid"])
+            self.assertLessEqual(len(calls), 10)
+        with self.assertRaisesRegex(SystemExit, "bad field"):
+            board.cmd_set(self.root, job_id, ["pid=40"])
 
     def test_set_waiting_stored_and_cleared(self):
         job_id = board.cmd_new(self.root, "x")
@@ -1878,12 +1920,12 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.get(job_id)["cloud"], url)
 
     def test_session_alive_ignores_claude_dir_paths(self):
-        lines = ("??      node /Users/t/onewitharts/.claude/worktrees/scrum-024-x/node_modules/.bin/next dev -p 3024\n"
-                 "ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
-                 "ttys004 /Users/t/.local/bin/claude --resume\n"
-                 "??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
-                 "??      python3 local/run.py claude -p /trevskills-scrum start 009-local\n"
-                 "??      node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js start 010-node\n")
+        lines = ("  301 ??      node /Users/t/onewitharts/.claude/worktrees/scrum-024-x/node_modules/.bin/next dev -p 3024\n"
+                 "  302 ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
+                 "  303 ttys004 /Users/t/.local/bin/claude --resume\n"
+                 "  304 ??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
+                 "  305 ??      python3 local/run.py claude -p /trevskills-scrum start 009-local\n"
+                 "  306 ??      node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js start 010-node\n")
         ps = mock.Mock(stdout=lines, returncode=0)
         with mock.patch.object(board.subprocess, "run", return_value=ps):
             alive = board.session_alive_fn()
@@ -1899,24 +1941,42 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.cmd_watchdog(self.root), [job_id])
 
     def test_session_alive_matches_id_or_tty_and_fails_safe(self):
-        lines = ("ttys003 -zsh\n"
-                 "ttys004 /Users/t/.local/bin/claude --resume\n"
-                 "??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
-                 "??      python3 runner.py 007-plain-python\n")
+        lines = ("  301 ttys003 -zsh\n"
+                 "  302 ttys004 /Users/t/.local/bin/claude --resume\n"
+                 "  303 ??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
+                 "  304 ??      python3 runner.py 007-plain-python\n")
         with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=lines, returncode=0)) as run:
             alive = board.session_alive_fn()
             self.assertTrue(alive({"id": "005-headless", "tty": None}))
             self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004"}))
+            self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004", "pid": None}))
             self.assertFalse(alive({"id": "007-plain-python"}))
             self.assertFalse(alive({"id": "008-shell-only", "tty": "ttys003"}))
         self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "tty=,command="])
+        self.assertEqual(run.call_args.args[0], ["ps", "-axo", "pid=,tty=,command="])
         for err in (OSError("no ps"), subprocess.TimeoutExpired("ps", 5)):
             with mock.patch.object(board.subprocess, "run", side_effect=err):
                 self.assertTrue(board.session_alive_fn()({"id": "007-plain-python", "tty": None}))
         denied = subprocess.CompletedProcess(["ps"], 1, stdout="", stderr="ps: Operation not permitted\n")
         with mock.patch.object(board.subprocess, "run", return_value=denied):  # e.g. a sandboxed Bash call
             self.assertTrue(board.session_alive_fn()({"id": "007-plain-python", "tty": None}))
+
+    def test_session_alive_pid_beats_reused_tty(self):
+        reused = ("  222 ttys004 /Users/t/.local/bin/claude\n"  # a later chat on the dead job's tty
+                  "  333 ttys005 -zsh\n")
+        job = {"id": "014-x", "tty": "ttys004", "pid": 111}
+        ps = lambda out: mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout=out, returncode=0))
+        with ps(reused):
+            self.assertFalse(board.session_alive_fn()(job))
+            self.assertTrue(board.session_alive_fn()({"id": "015-old", "tty": "ttys004"}))  # no pid: tty, as before
+        with ps(reused + "  111 ttys004 /Users/t/.local/bin/claude --resume\n"):
+            self.assertTrue(board.session_alive_fn()(job))
+        with ps(reused + "  111 ttys004 /bin/zsh\n"):  # pid 111 recycled into a non-claude process
+            self.assertFalse(board.session_alive_fn()(job))
+        job_id = self.aged("Dead on a reused tty", 31, stage="build", tty="ttys004", pid=111)
+        with ps(reused):
+            self.assertEqual(board.cmd_watchdog(self.root), [job_id])
+        self.assertEqual(next(j for j in self.jobs() if j["id"] == job_id)["stage"], "needs-human")
 
     def test_watchdog_cli_prints_flagged(self):
         run = lambda: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "watchdog"],
@@ -2195,6 +2255,7 @@ class HookTest(unittest.TestCase):
         guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
         guard.start()
         self.addCleanup(guard.stop)
+        no_claude_pid(self)
         self.old = board.cmd_new(self.root, "older job")  # same tty, older: never the one picked
         board.cmd_set(self.root, self.old, ["stage=review", "tty=ttys004"])
         self.patch(self.old, updatedAt="2000-01-01T00:00:00+00:00")
@@ -2213,10 +2274,10 @@ class HookTest(unittest.TestCase):
     def get(self, job_id):
         return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
 
-    def hook(self, stdin, tty="ttys004"):
+    def hook(self, stdin, tty="ttys004", pid=None):
         out = io.StringIO()
         with mock.patch.object(board, "caller_tty", return_value=tty), mock.patch("sys.stdin", io.StringIO(stdin)), \
-                redirect_stdout(out):
+                mock.patch.object(board, "caller_claude_pid", return_value=pid), redirect_stdout(out):
             code = board.main(["hook"])
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue(), "")
@@ -2278,11 +2339,11 @@ class HookTest(unittest.TestCase):
         self.assertEqual(path.stat().st_mtime, 1_000_000)
         self.assertEqual(self.get(self.job)["updatedAt"], "2001-01-01T00:00:00+00:00")
 
-    def assert_untouched(self, stdin, tty="ttys004"):
+    def assert_untouched(self, stdin, tty="ttys004", pid=None):
         path = self.root / "board.json"
         before = path.read_text()
         os.utime(path, (1_000_000, 1_000_000))
-        self.hook(stdin, tty)
+        self.hook(stdin, tty, pid)
         self.assertEqual(path.read_text(), before)
         self.assertEqual(path.stat().st_mtime, 1_000_000)
 
@@ -2323,6 +2384,33 @@ class HookTest(unittest.TestCase):
         self.hook(json.dumps({"hook_event_name": "Stop"}), "ttys005")
         self.assertEqual(self.get(self.job)["waiting"], "reply needed")
         self.assertNotIn("waiting", self.get(self.old))
+
+
+    def test_hook_skips_reused_tty_with_other_pid(self):
+        stop = json.dumps({"hook_event_name": "Stop", "last_assistant_message": "hi"})
+        self.patch(self.old, stage="done")
+        self.patch(self.job, pid=111, updatedAt="2001-01-01T00:00:00+00:00")
+        self.assert_untouched(stop, pid=222)  # a later chat on the dead job's tty
+        self.assert_untouched(stop, pid=None)  # caller's pid unknown: a job with a pid never matches
+        self.hook(stop, pid=111)
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed: hi")
+        self.assertNotEqual(self.get(self.job)["updatedAt"], "2001-01-01T00:00:00+00:00")
+        legacy = board.cmd_new(self.root, "no pid")
+        board.cmd_set(self.root, legacy, ["stage=build", "tty=ttys004"])
+        self.patch(legacy, updatedAt="2002-01-01T00:00:00+00:00")
+        self.patch(self.job, updatedAt="2001-01-01T00:00:00+00:00")
+        self.hook(json.dumps({"hook_event_name": "Stop"}), pid=222)  # pid-less job still matches by tty
+        self.assertEqual(self.get(legacy)["waiting"], "reply needed")
+        self.assertEqual(self.get(self.job)["waiting"], "reply needed: hi")
+        # under the lock: the job's pid changed between the scan and the write
+        real = board.locked_board
+        def swap(root):
+            self.patch(legacy, pid=999)
+            return real(root)
+        self.patch(legacy, waiting=None)
+        with mock.patch.object(board, "locked_board", swap):
+            self.hook(json.dumps({"hook_event_name": "Stop"}), pid=222)
+        self.assertIsNone(self.get(legacy)["waiting"])
 
 
 class DigestVerifyTest(unittest.TestCase):
