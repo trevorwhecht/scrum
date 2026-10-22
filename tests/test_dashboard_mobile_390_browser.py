@@ -84,7 +84,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
              "worktree": str(repo), "tty": "ttys001", "files": FILES}]}))
         registry = Path(self.tmp.name) / "projects.json"
         registry.write_text(json.dumps([str(repo)]))
-        patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(user), CLAUDE_MANAGED_DIR=str(managed), SCRUM_REGISTRY=str(registry))
+        patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(user), CLAUDE_MANAGED_DIR=str(managed), SCRUM_REGISTRY=str(registry),
+                                  SCRUM_USAGE=str(home / "no-usage.json"))
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
@@ -92,6 +93,9 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
                                                                          "claude_exhausted_until": None})
         status.start()
         self.addCleanup(status.stop)
+        models = mock.patch.object(serve.route, "loaded_models", return_value=[])
+        models.start()
+        self.addCleanup(models.stop)
         self.server = serve.make_server(0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -112,7 +116,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_fits_390px(self):
         got = self.browse("header")
-        self.assertEqual(got["routing"], "Codex 5h 42% · wk 17% · Ollama down", got)
+        self.assertEqual(got["routing"], "Claude 5h — · wk — · Codex 5h 42% · wk 17% · Ollama down", got)
         self.assertIn(PROJECT, got["options"], got)
         self.assertGreaterEqual(len(PROJECT), 30)
         self.assertLessEqual(got["scrollWidth"], 390, got)
