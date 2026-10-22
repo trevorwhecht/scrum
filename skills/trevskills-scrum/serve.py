@@ -272,6 +272,7 @@ def answer_job(project, root, job, jobs, key):
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+STALL_RESUMED: set[str] = set()  # "project/child id/stage": the one non-limit resume a Run-all/BigBoy child gets per stage
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
 RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
@@ -312,8 +313,9 @@ def limit_reset(root, job):
 
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
-    that line names, else every 30 min; at most 12 tries per job. A job stalled for any other reason, or paused
-    by Trevor, is left on the board. A refused restart costs nothing."""
+    that line names, else every 30 min; at most 12 tries per job. A Run-all/BigBoy child of a running parent stalled
+    for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
+    is left on the board. A refused restart costs nothing."""
     now = time.time()
     for job in jobs:
         reason = job.get("reason") or ""
@@ -326,6 +328,13 @@ def auto_resume(project, root, jobs):
             continue
         hit, reset = limit_reset(root, job)
         if not hit:
+            m = re.match(rf"{board.STALLED}(\w+):", reason)
+            parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
+            once_key = f"{key}/{m.group(1) if m else ''}"
+            if m and parent and parent.get("stage") == "running" and parent.get("lane") in ("runall", "bigboy") \
+                    and once_key not in STALL_RESUMED and resume_refusal(root, job) is None:
+                STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
+                resume_job(project, root, job, jobs)
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
@@ -415,16 +424,40 @@ def once(fn):
     return lambda: cache[0] if cache else (cache.append(fn()) or cache[0])
 
 
+ORPHAN_MINUTES = 3  # fixed, not a setting: long enough for a just-claimed child's session to show up in ps
+ORPHAN_RESPAWN: dict[str, str] = {}  # "project/child id" -> stage it was last respawned in
+# ponytail: in-memory once-guards (this and STALL_RESUMED); a serve.py restart allows one more attempt per child
+
+
+def respawn_orphans(project, root, p, kids, alive):
+    """Start (or resume, once it has a spec and a worktree) each child of running parent p that sits in a WATCHED
+    stage with no session for ORPHAN_MINUTES: a chaining session claimed it and ended before spawning it. Once per
+    child per stage. alive() (the ps scan) runs only for a child already past the cutoff."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
+    for kid in kids:
+        key, stage = f"{project}/{kid['id']}", kid.get("stage")
+        if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" \
+                or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
+                or running(project, kid["id"]) or alive()(kid):
+            continue
+        action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
+        ORPHAN_RESPAWN[key] = stage
+        spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
+
+
 def sweep_parents(project, root, jobs, alive=None):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
-    parent with no child in progress: close a runall whose children all finished (a bigboy is left for its own final
-    review), else start its waiting children when no child session is alive and no chaining session holds the lock."""
+    parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
+    child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
+    start its waiting children when no child session is alive and no chaining session holds the lock."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
         if p.get("stage") != "running" or p.get("lane") not in ("runall", "bigboy") or not p.get("children"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
+        if not (root / "jobs" / p["id"] / ".chain.lock").exists():
+            respawn_orphans(project, root, p, kids, alive)
         if any(k.get("stage") not in board.IDLE for k in kids):
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):
