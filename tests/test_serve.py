@@ -4046,7 +4046,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: when no opted-in project has work in flight, the watchdog starts one
-    headless run-all, in the project that just finished, else the lowest n, unless usage is over pace."""
+    headless run-all, in the project that just finished, else the most recently active, else the lowest n, unless usage
+    is over pace."""
 
     def setUp(self):
         import serve
@@ -4063,7 +4064,7 @@ class AutoContinueTest(unittest.TestCase):
         (root / "jobs").mkdir(parents=True)
         (root / "project.md").write_text("# Project\n- Test: x\n" + (f"- Auto continue: {n}\n" if n is not None else ""))
         (root / "backlog.md").write_text("# Backlog\n" + backlog)
-        (root / "board.json").write_text(json.dumps({"jobs": [dict(j, updatedAt=self.board.now(), reason=None)
+        (root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j, "reason": None}
                                                               for j in jobs]}))
         self.projects[name] = root.parent
         return root
@@ -4107,6 +4108,12 @@ class AutoContinueTest(unittest.TestCase):
     def test_starts_lowest_n(self):
         self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
         self.assertEqual(self.tick(), self.started("b"), "lowest n; b before c in projects() order")
+
+    def test_most_recent_activity_beats_n(self):
+        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-01-01T00:00:00+00:00"}])
+        self.project("b", n=5, jobs=[{"id": "001-y", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
+        self.project("c", n=1)
+        self.assertEqual(self.tick(), self.started("b"), "newest board activity first; an empty board comes last")
 
     def test_prefers_just_finished_project(self):
         self.project("a", n=1); self.project("b", n=5)

@@ -450,6 +450,15 @@ def auto_continue(root: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def last_active(root: Path) -> float:
+    """Epoch of the newest job updatedAt on board.json, 0 when there is none or it can't be read."""
+    try:
+        jobs = json.loads((root / "board.json").read_text()).get("jobs", [])
+        return max((datetime.fromisoformat(j["updatedAt"]).timestamp() for j in jobs if j.get("updatedAt")), default=0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
 def claimable(root: Path) -> bool:
     """A backlog line `next` could claim: open, no Human setup, no open prerequisite."""
     return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
@@ -457,7 +466,8 @@ def claimable(root: Path) -> bool:
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """Start one headless run-all across opted-in projects when none of them has work in flight, no auto-started
-    run-all is still running, and usage is not over pace. The project that just finished goes first, then lowest n.
+    run-all is still running, and usage is not over pace. The project that just finished goes first, then the most
+    recent board activity, then lowest n.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -465,11 +475,11 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     for project, repo in board.projects().items():
         n = auto_continue(repo / "scrum")
         if n is not None:
-            opted.append((project, repo / "scrum", n))
-    if any(busy.get(p) or running(p, "run-all") for p, _, _ in opted) \
+            opted.append((project, repo / "scrum", n, last_active(repo / "scrum")))
+    if any(busy.get(p) or running(p, "run-all") for p, *_ in opted) \
             or board.pace_cap(board.read_usage(), time.time(), None) is not None:
         return
-    for project, root, _ in sorted(opted, key=lambda o: (o[0] not in last, o[2])):  # stable: ties keep projects() order
+    for project, root, *_ in sorted(opted, key=lambda o: (o[0] not in last, -o[3], o[2])):  # stable: ties keep projects() order
         if project not in busy:
             continue
         try:
