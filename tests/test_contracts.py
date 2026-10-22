@@ -569,6 +569,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn("review-e2e.md", review)
         self.assertIn("review-e2e.md", check)
         self.assertIn("never spawns `scrum-review-e2e`", text)
+        self.assertTrue(any("rm -f" in l and "review-e2e.md" in l for l in review.splitlines()))
+
+    def test_fast_lane_deletes_stale_e2e_review(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Debug lane")
+        self.assertIn("review-e2e.md", fast)
+        self.assertIn("rm -f", fast)
 
     def test_spec_writer_exits_early_on_bigboy(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
