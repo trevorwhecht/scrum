@@ -4,8 +4,7 @@ This repo IS the scrum. `install.sh` symlinks `skills/trevskills-scrum`, `skills
 `agents/scrum-*.md` and `codex/AGENTS.md` into `~/.claude` / `~/.codex`, so the main checkout is live:
 never leave it dirty, and land changes with `/trevskills-commitpush` or the pipeline.
 
-- Test: `python3 -m unittest discover -s tests` (stdlib only, ~725 tests, ~90 s). Expected stderr noise, not a
-  failure: one `watchdog: broken: board.json is not valid JSON` line and a `BrokenPipeError` from `tests/test_route.py`.
+- Test: `python3 -m unittest discover -s tests` (stdlib only, ~725 tests, ~90 s).
 - `tests/test_contracts.py` pins exact agent and SKILL.md wording: `self.section(text, "## A", "## B")` slices a
   heading range and `assertIn(phrase, ...)` checks phrases. Before rewording an agent or SKILL.md line, grep the
   phrase there and change both in the same commit. `FIRST_LINE` pins each agent's first output line.
