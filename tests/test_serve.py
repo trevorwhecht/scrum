@@ -3932,3 +3932,228 @@ class ExitedRunSweepTest(unittest.TestCase):
         self.assertEqual(self.job("kid")["stage"], "needs-human")
         self.assertEqual(self.job("kid")["reason"], self.STALLED)
         self.assertEqual(self.job("sib")["stage"], "build")
+
+
+class WatchdogIdleParentTest(unittest.TestCase):
+    """watchdog_tick restarts a running Run-all/BigBoy parent whose children all sit idle with one waiting (a child
+    skipped its chaining step), and closes a Run-all parent whose children all finished."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.repo = Path(tempfile.mkdtemp()); self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json"))  # no usage pacing
+        env.start(); self.addCleanup(env.stop)
+        serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
+        self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("idle/")])
+
+    def write(self, parent, kids, lane="runall"):
+        """parent stage, {child id: stage}."""
+        jobs = [{"id": "001-par", "stage": parent, "lane": lane, "children": list(kids)}]
+        jobs += [{"id": k, "stage": st, "parent": "001-par"} for k, st in kids.items()]
+        for j in jobs:
+            j.update(updatedAt=self.board.now(), reason=None)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+
+    def job(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def tick(self, alive=lambda job: False, running=None):
+        s = self.serve
+        run = mock.patch.object(s, "running", side_effect=running) if running else mock.patch.object(s, "running", return_value=False)
+        with mock.patch.object(self.board, "projects", return_value={"idle": self.repo}), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive) as ps, \
+                mock.patch.object(s, "spawn") as spawn, run, \
+                mock.patch.object(self.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}), \
+                mock.patch.object(s, "start_ready", wraps=s.start_ready) as ready:
+            s.watchdog_tick()
+        return spawn, ready, ps
+
+    def check_starts(self, lane):
+        self.write("running", {"002-done": "done", "003-wait": "waiting"}, lane=lane)
+        spawn, ready, ps = self.tick()
+        self.assertEqual([c.args for c in ready.call_args_list], [("idle", self.root, "001-par")])
+        self.assertEqual(self.job("003-wait")["stage"], "spec")
+        self.assertEqual([c.args for c in spawn.call_args_list],
+                         [("idle", self.root, "003-wait", "start", "/trevskills-scrum start 003-wait")])
+        self.assertEqual(ps.call_count, 1)
+
+    def test_idle_runall_parent_starts_waiting_child(self):
+        self.check_starts("runall")
+
+    def test_idle_bigboy_parent_starts_waiting_child(self):
+        self.check_starts("bigboy")
+
+    def assert_no_start(self, ps_calls=None):
+        spawn, ready, ps = self.tick(**getattr(self, "tick_kw", {}))
+        ready.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("003-wait")["stage"], "waiting")
+        if ps_calls is not None:
+            self.assertEqual(ps.call_count, ps_calls)
+
+    def test_skips_child_in_progress(self):
+        for stage in ("build", "merging", "cloud"):
+            with self.subTest(stage=stage):
+                self.write("running", {"002-busy": stage, "003-wait": "waiting"})
+                self.assert_no_start(ps_calls=0)  # no candidate parent, no ps scan
+
+    def test_skips_live_child_session(self):
+        self.write("running", {"002-done": "done", "003-wait": "waiting"})
+        self.tick_kw = {"alive": lambda job: job["id"] == "002-done"}  # the done child is still chaining
+        self.assert_no_start()
+        self.tick_kw = {"running": lambda p, j: j == "002-done"}  # a dashboard-started session
+        self.assert_no_start()
+
+    def test_skips_chain_lock(self):
+        self.write("running", {"002-done": "done", "003-wait": "waiting"})
+        (self.root / "jobs" / "001-par").mkdir()
+        (self.root / "jobs" / "001-par" / ".chain.lock").write_text("002-done")
+        self.assert_no_start()
+
+    def test_skips_parent_not_running(self):
+        for stage, reason in (("needs-human", "bigboy blocked: x. Fix: y"),
+                              ("needs-human", "stalled in running: paused by Trevor")):
+            with self.subTest(reason=reason):
+                self.write(stage, {"002-done": "done", "003-wait": "waiting"})
+                data = json.loads((self.root / "board.json").read_text()); data["jobs"][0]["reason"] = reason
+                (self.root / "board.json").write_text(json.dumps(data))
+                self.assert_no_start()
+
+    def test_skips_no_waiting_child(self):
+        self.write("running", {"002-done": "done", "003-wait": "needs-human"})
+        spawn, ready, _ = self.tick()
+        ready.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("001-par")["stage"], "running")
+
+    def test_finished_runall_parent_goes_done(self):
+        self.write("running", {"002-done": "done", "003-gone": "aborted"})
+        with mock.patch.object(self.board, "merge_refusal", return_value=None):
+            spawn, ready, _ = self.tick()
+        self.assertEqual((self.job("001-par")["stage"], self.job("001-par")["reason"]), ("done", None))
+        spawn.assert_not_called()
+
+    def test_finished_bigboy_parent_left_alone(self):
+        self.write("running", {"002-done": "done", "003-gone": "aborted"}, lane="bigboy")
+        before = (self.root / "board.json").read_text()
+        spawn, ready, _ = self.tick()
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        spawn.assert_not_called()
+        ready.assert_not_called()
+
+
+class AutoContinueTest(unittest.TestCase):
+    """`- Auto continue: <n>` in project.md: when no opted-in project has work in flight, the watchdog starts one
+    headless run-all, in the project that just finished, else the lowest n, unless usage is over pace."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.base = Path(tempfile.mkdtemp())
+        self.usage = self.base / "usage.json"
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
+        env.start(); self.addCleanup(env.stop)
+        serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
+        self.projects = {}
+
+    def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=()):
+        root = self.base / name / "scrum"
+        (root / "jobs").mkdir(parents=True)
+        (root / "project.md").write_text("# Project\n- Test: x\n" + (f"- Auto continue: {n}\n" if n is not None else ""))
+        (root / "backlog.md").write_text("# Backlog\n" + backlog)
+        (root / "board.json").write_text(json.dumps({"jobs": [dict(j, updatedAt=self.board.now(), reason=None)
+                                                              for j in jobs]}))
+        self.projects[name] = root.parent
+        return root
+
+    def tick(self, running=lambda p, j: False):
+        s = self.serve
+        with mock.patch.object(self.board, "projects", return_value=self.projects), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(s, "running", side_effect=running), mock.patch.object(s, "spawn") as spawn:
+            s.watchdog_tick()
+        return [c.args for c in spawn.call_args_list]
+
+    def started(self, name):
+        return [(name, self.base / name / "scrum", "run-all", "run-all", "/trevskills-scrum run-all")]
+
+    def parse(self, text):
+        root = self.base / "parse"
+        root.mkdir(exist_ok=True)
+        (root / "project.md").write_text(text)
+        return self.serve.auto_continue(root)
+
+    def test_parse_value(self):
+        self.assertEqual(self.parse("# P\n- Stack: x\n- Auto continue: 2\n- Lint: none\n"), 2)
+
+    def test_parse_missing_line(self):
+        self.assertIsNone(self.parse("# P\n- Stack: x\n"))
+
+    def test_parse_non_numeric(self):
+        self.assertIsNone(self.parse("- Auto continue: abc\n"))
+
+    def test_parse_blank(self):
+        self.assertIsNone(self.parse("- Auto continue: \n"))
+        self.assertIsNone(self.parse("- Auto continue:\n"))
+
+    def test_parse_missing_or_bad_file(self):
+        self.assertIsNone(self.serve.auto_continue(self.base / "nowhere"))
+        root = self.base / "latin"; root.mkdir()
+        (root / "project.md").write_bytes(b"- Auto continue: 1\n\xff\xfe caf\xe9\n")
+        self.assertIsNone(self.serve.auto_continue(root))
+
+    def test_starts_lowest_n(self):
+        self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
+        self.assertEqual(self.tick(), self.started("b"), "lowest n; b before c in projects() order")
+
+    def test_prefers_just_finished_project(self):
+        self.project("a", n=1); self.project("b", n=5)
+        self.serve.LAST_BUSY.add("b")
+        self.assertEqual(self.tick(), self.started("b"))
+
+    def test_just_finished_without_claimable_falls_back(self):
+        self.project("a", n=1); self.project("b", n=5, backlog="- [x] Claimed → 001-x\n")
+        self.serve.LAST_BUSY.add("b")
+        self.assertEqual(self.tick(), self.started("a"))
+
+    def test_no_start_in_flight(self):
+        self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.serve.LAST_BUSY, {"b"})
+        self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
+                                     {"id": "002-k", "stage": "needs-human", "parent": "001-p"}])
+        del self.projects["b"]
+        self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
+
+    def test_no_start_while_auto_run_all_running(self):
+        self.project("a", n=1); self.project("b", n=2)
+        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), [])
+
+    def test_no_start_over_pace(self):
+        self.project("a", n=1)
+        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %: pace_cap gives 2, not None
+        self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+        self.assertEqual(self.tick(), [])
+        self.usage.write_text(json.dumps({"written_at": now - 3600, "rate_limits": {  # stale: no pacing
+            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+        self.assertEqual(self.tick(), self.started("a"))
+
+    def test_no_start_without_claimable(self):
+        self.project("a", n=1, backlog="- [x] Claimed → 001-x\n- [ ] Needs setup {setup: add key}\n"
+                                        "- [ ] Blocked {needs #ab12}\n- [ ] Prereq {#ab12} {setup: do it}\n")
+        self.assertEqual(self.tick(), [])
+
+    def test_no_start_unopted_project(self):
+        self.project("a"); self.project("b", n=1, backlog="")
+        self.assertEqual(self.tick(), [])
+
+    def test_one_bad_project_does_not_block_others(self):
+        bad = self.project("bad", n=1)
+        (bad / "board.json").write_text("{not json")
+        self.project("good", n=2)
+        with mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+            self.assertEqual(self.tick(), self.started("good"))
+        self.assertTrue(e.getvalue().startswith("watchdog: bad: "), e.getvalue())
