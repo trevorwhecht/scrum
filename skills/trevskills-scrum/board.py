@@ -940,8 +940,14 @@ def ui_globs(root):
     return None
 
 
+SERVER_ONLY_RE = re.compile(r"(^|/)app/api/|(^|/)route\.(ts|js|tsx)$")
+
+
 def glob_match(path, globs):
-    """First-run setup's matching: `*.ext` is a suffix, `dir/` a directory path component, anything else an exact path."""
+    """First-run setup's matching: `*.ext` is a suffix, `dir/` a directory path component, anything else an exact path.
+    A server-only path (an `api/` directly under `app/`, or a `route.ts|js|tsx` basename) is never UI, whatever the globs."""
+    if SERVER_ONLY_RE.search(path):
+        return False
     for g in globs:
         if g.startswith("*."):
             if path.endswith(g[1:]):

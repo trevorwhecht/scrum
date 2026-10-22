@@ -1260,6 +1260,53 @@ class ContractTest(unittest.TestCase):
         self.assertIn("visible", rule)
         for phrase in ("absent", "expected change", "Rendered: blocked", "never REWORK or ESCALATE for the render"):
             self.assertIn(phrase, rule, phrase)
+        for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
+                       "Hard stop: render — UI not rendered"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertNotIn("Hard stop: blocked — UI not rendered", text)
+        stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
+        for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>"):
+            self.assertIn(phrase, stop, phrase)
+
+    def test_reviewers_no_rendered_change_answer(self):
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            for phrase in ("Rendered: n/a — no rendered change: <one line why, naming the files>", "JSX", "className",
+                           "lint-disable", "open no `DEV_URL`"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+            template = next(l for l in text.splitlines()
+                            if l.strip().startswith("Rendered:") and "Rendered: no — <reason>" in l)
+            self.assertIn("Rendered: n/a — no rendered change", template, name)
+            para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
+            self.assertIn("Never PASS a UI diff you did not render unless it is Rendered: blocked or Rendered: n/a", para, name)
+
+    def test_ui_glob_matching_excludes_server_only(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        setup = self.section(text, "### First-run setup", "## Commands")
+        matching = next(l for l in setup.splitlines() if "Matching:" in l)
+        for phrase in ("an `api/` path component directly under `app/`", "`route.ts`, `route.js` or `route.tsx`",
+                       "is never UI", "a diff matching only such paths has no UI files"):
+            self.assertIn(phrase, matching, phrase)
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            intro = next(l for l in text.splitlines() if l.startswith("**Render the real page.**"))
+            self.assertIn("matching rules are in the orchestrator's First-run setup", intro, name)
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in approver.splitlines() if l.startswith("**UI must be rendered.**"))
+        self.assertIn("matching rules are in the orchestrator's First-run setup", rule)
+
+    def test_approve_maps_render_stop(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        approve = self.section(text, "## Approve", "## Merge")
+        self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' "
+                      "--a \"Approve & merge=approve $ID\" --b \"Send back=rework $ID \\\"render the changed page and "
+                      "see the change, or write Rendered: n/a when nothing on screen changed\\\"\" --c \"Abort=abort $ID\"`",
+                      approve)
+        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --a \"Send back="
+                      "rework $ID \\\"make the most reasonable call on the blocker in decision.md and record it as a "
+                      "Ruling in build.md\\\"\" --b \"Abort=abort $ID\"`", approve)
+        rule = self.section(text, "**Every stop is a closed question.**", "\n1. ")
+        self.assertIn("`Hard stop: render`", rule)
 
     def test_merge_guards_main_checkout_before_merge(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
