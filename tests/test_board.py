@@ -2930,6 +2930,15 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
         self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
 
+    def test_review_plan_skips_ui_for_server_only_paths(self):
+        self.project("app/ *.tsx")
+        self.commit("src/app/api/a/route.ts", "export const GET = 1\n")
+        self.commit("src/app/api/b/handler.ts", "export const h = 1\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["security", "code"])
+        self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+        self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
     def test_review_plan_ui_runs_when_html_changed(self):
         self.commit("web/page.html", "<p>x</p>\n")
         out = board.cmd_review_plan(self.root, self.job)
@@ -3266,6 +3275,10 @@ class RouteCheckTest(unittest.TestCase):
         self.commit({"src/app/page.tsx": "x\n", "mycomponents/y.py": "y\n"})
         self.assertIsNone(self.route()["promote"])
 
+    def test_route_check_server_only_paths_not_ui_file(self):
+        (self.root / "project.md").write_text("- UI globs: app/ *.tsx\n")
+        self.assertIsNone(self.promote({"src/app/api/a/route.ts": "x\n", "src/app/api/b/handler.ts": "y\n"}))
+
     def test_route_check_ui_globs_none_matches_nothing(self):
         (self.root / "project.md").write_text("- UI globs: none\n")
         self.assertIsNone(self.promote({"web/index.html": "<p>\n"}))
@@ -3460,6 +3473,17 @@ class RouteCheckTest(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), want_std)
+
+    def test_glob_match_excludes_server_only_paths(self):
+        for path in ("src/app/api/x/route.ts", "app/api/y.ts", "app/api/z.tsx", "src/app/(shop)/cart/route.tsx",
+                     "lib/route.js", "route.ts"):
+            for globs in (["app/"], ["*.ts"], ["*.tsx"], ["*.js"], [path]):
+                self.assertFalse(board.glob_match(path, globs), f"{path} {globs}")
+        self.assertTrue(board.glob_match("src/app/page.tsx", ["app/"]))
+        self.assertTrue(board.glob_match("src/myapp/api/x.tsx", ["*.tsx"]))
+        self.assertTrue(board.glob_match("app/apiary/page.tsx", ["app/"]))
+        self.assertTrue(board.glob_match("app/x/api/page.tsx", ["app/"]))
+        self.assertTrue(board.glob_match("src/router.ts", ["*.ts"]))
 
     def test_ui_globs_and_glob_match(self):
         self.assertEqual(board.ui_globs(self.root), ["*.html", "components/", "app/page.tsx"])
