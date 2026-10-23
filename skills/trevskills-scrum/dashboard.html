@@ -82,6 +82,7 @@ body:has(dialog[open]){overflow:hidden}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
+.sentback:empty{display:none}.sentback h3{font-size:13px;margin:8px 0 4px}.sentback ul{margin:0;padding-left:18px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .error{font-size:12px;color:var(--human);margin:0}
 .error:empty{display:none}
 #actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
@@ -366,6 +367,32 @@ const childLinks = job => !job.children?.length ? "" : `<div class="kids">${job.
     : `<form data-act="goto" data-key="${esc(k.key)}"><button class="btn tall kid${needsYou(k) ? " human" : ""}" type="submit">${esc(k.ticket || "Child")} <span class="id">${esc(k.id)}</span> ${esc(k.stage)}</button></form>`;
 }).join("")}</div>`;
 const jobTitle = job => `<span class="id">${esc(job.id)}</span> ${esc(job.title || job.id)}`;
+// "4:21 PM", built by hand so every engine gives the same text (serve.py writes outcome times the same way).
+const clock = d => `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "AM" : "PM"}`;
+// A live /api/runs entry (dashboard run or Discuss session): "Rework running since 4:21 PM".
+const runLine = run => `${run.action.charAt(0).toUpperCase()}${run.action.slice(1)} running since ${clock(new Date(run.started * 1000))}`;
+// serve.py's record_outcomes line: what the last dashboard run did when it left a needs-human job where it was.
+const outcomeLine = (job, tag, cls) => job.stage === "needs-human" && job.outcome ? `<${tag} class="${cls}" role="status">${esc(job.outcome)}</${tag}>` : "";
+// Approve & merge drops whatever is in the feedback box, so arming it says so.
+const feedbackWarning = text => (text || "").trim() ? '<span class="error" role="alert">You typed feedback. Send it back instead?</span>' : "";
+// rework.md entries (SKILL.md rework: `## <ISO date>` then the feedback), newest first. Text before the first heading is skipped.
+function reworkEntries(md) {
+  const out = [];
+  for (const line of String(md ?? "").split(/\r?\n/)) {
+    if (line.startsWith("## ")) out.push({at: line.slice(3).trim(), text: ""});
+    else if (out.length) out[out.length - 1].text += line + "\n";
+  }
+  return out.map(e => ({...e, text: e.text.trim()})).reverse();
+}
+const sentAt = at => isNaN(new Date(at)) ? at : when(at);  // a heading that is no date shows as written
+// The modal's Sent back list, from reworkMd (filled by loadRework); the wrapper is always there so a late fetch can fill it.
+const reworkMd = {};
+const reworkList = job => {
+  if (job.stage !== "needs-human" || !(job.files || []).includes("rework.md")) return "";
+  const rows = reworkEntries(reworkMd[job.key]);
+  return `<div class="sentback">${!rows.length ? "" : `<h3>Sent back</h3><ul>${rows.map(r =>
+    `<li><span class="note">${esc(sentAt(r.at))}</span> ${esc(r.text)}</li>`).join("")}</ul>`}</div>`;
+};
 // When anything last happened: the board update or serve.py's newest activity event (run log, worktree files...).
 const staleAt = job => Math.max(Date.parse(job.updatedAt), (job.activity?.at || 0) * 1000);
 // Card meta "P1/2 · S2/10" for a roadmap job, "" for every other job. roadmapLookup() rebuilds it each poll.
@@ -424,12 +451,12 @@ function card(job) {
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
     ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
-    ${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
+    ${outcomeLine(job, "span", "meta")}${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
     ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
-    ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
+    ${run?.alive ? `<span class="running">${esc(runLine(run))}</span>` : ""}
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
       : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
@@ -527,6 +554,7 @@ async function poll() {
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
       if (openJob) renderDiverged(openJob);
+      if (openJob) loadRework(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
     if ($("digest").open) loadDigests();
@@ -568,6 +596,7 @@ function open(job) {
   if (!askState[job.key]?.pending) delete askState[job.key];
   renderActions(job);
   renderDiverged(job);
+  loadRework(job);
   if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
@@ -605,6 +634,17 @@ async function renderDiverged(job) {
   if ($("viewer").dataset.key !== job.key) return;
   el.innerHTML = !items.length ? "" : `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
     <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
+}
+
+// Fetches the open needs-human job's rework.md into reworkMd and swaps only the Sent back list, so typed feedback stays.
+async function loadRework(job) {
+  if (job.stage !== "needs-human" || !(job.files || []).includes("rework.md")) return;
+  const md = await fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/rework.md`, {cache: "no-store"})
+    .then(r => r.ok ? r.text() : "").catch(() => "");
+  if (md === reworkMd[job.key]) return;
+  reworkMd[job.key] = md;
+  const box = $("viewer").dataset.key === job.key && $("actions").querySelector(".sentback");
+  if (box) box.outerHTML = reworkList(job);
 }
 
 // Abort works on any unfinished job: it stops a dashboard-started run and marks the job aborted (code is kept).
@@ -701,11 +741,13 @@ const waitingBanner = job => {
 };
 
 function renderActions(job) {
-  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
-  const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
+  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + waitingBanner(job);
+  const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
   const err = '<p class="error" role="alert"></p>', kids = waitingNote(job, "note") + childLinks(job);
-  if (run?.alive) return el.innerHTML = banner + kids + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
-  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
+  // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
+  const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
+  if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
   if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
@@ -718,7 +760,7 @@ function renderActions(job) {
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + termForm(job) + askForm(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + termForm(job) + askForm(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
@@ -728,7 +770,10 @@ $("actions").addEventListener("submit", async e => {
   if (act === "terminal") return openTerminal(key);
   if (act === "ask") return askClaude(key);
   if (act === "goto") { const linked = jobs.find(j => j.key === form.dataset.key); if (linked) open(linked); return; }
-  if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
+  if (act === "approve" && !form.dataset.armed) {
+    form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main";
+    btn.insertAdjacentHTML("afterend", feedbackWarning($("actions").querySelector('textarea[name="feedback"]')?.value)); return;
+  }
   if (act === "abort" && !form.dataset.armed) {
     form.dataset.armed = "1"; form.querySelector("label").hidden = false;
     btn.textContent = "Confirm abort"; btn.className = "btn danger"; return;
