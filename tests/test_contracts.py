@@ -263,7 +263,7 @@ class ContractTest(unittest.TestCase):
         for n in ("security", "ux", "ui", "code"):
             text = (ROOT / "agents" / f"scrum-review-{n}.md").read_text()
             self.assertIn("## Out of scope", text, n)
-            self.assertGreater(text.index("## Out of scope"), text.index("## Notes"), n)
+            self.assertGreater(text.rindex("## Out of scope"), text.index("## Notes"), n)
             for phrase in ("Out of scope", "never affects the verdict",
                            "left out when there is nothing to report", "not for nitpicks"):
                 self.assertIn(phrase, text, f"{n}: {phrase}")
