@@ -489,6 +489,7 @@ def sweep_parents(project, root, jobs, alive=None):
 
 
 AUTO_CONTINUE_RE = re.compile(r"^- Auto continue: *(\d+)\s*$", re.M)
+FOCUS_RE = re.compile(r"^- Focus: *yes\s*$", re.M | re.I)
 LAST_BUSY: set[str] = set()  # projects with in-flight work on the previous tick: the one that just finished goes first
 
 
@@ -499,6 +500,14 @@ def auto_continue(root: Path) -> int | None:
     except (OSError, ValueError):  # missing, or not UTF-8
         return None
     return int(m.group(1)) if m else None
+
+
+def focus(root: Path) -> bool:
+    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable)."""
+    try:
+        return bool(FOCUS_RE.search((root / "project.md").read_text()))
+    except (OSError, ValueError):
+        return False
 
 
 def last_active(root: Path) -> float:
@@ -527,6 +536,8 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
         n = auto_continue(repo / "scrum")
         if n is not None:
             opted.append((project, repo / "scrum", n, last_active(repo / "scrum")))
+    if any(focus(root) for _, root, *_ in opted):  # a Focus project is the only target and the only busy gate
+        opted = [o for o in opted if focus(o[1])]
     if any(busy.get(p) or running(p, "run-all") for p, *_ in opted) \
             or board.pace_cap(board.read_usage(), time.time(), None) is not None:
         return

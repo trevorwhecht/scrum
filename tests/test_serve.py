@@ -4226,10 +4226,11 @@ class AutoContinueTest(unittest.TestCase):
         serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
         self.projects = {}
 
-    def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=()):
+    def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=(), focus=False):
         root = self.base / name / "scrum"
         (root / "jobs").mkdir(parents=True)
-        (root / "project.md").write_text("# Project\n- Test: x\n" + (f"- Auto continue: {n}\n" if n is not None else ""))
+        (root / "project.md").write_text("# Project\n- Test: x\n" + (f"- Auto continue: {n}\n" if n is not None else "")
+                                           + ("- Focus: yes\n" if focus else ""))
         (root / "backlog.md").write_text("# Backlog\n" + backlog)
         (root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j, "reason": None}
                                                               for j in jobs]}))
@@ -4271,6 +4272,43 @@ class AutoContinueTest(unittest.TestCase):
         root = self.base / "latin"; root.mkdir()
         (root / "project.md").write_bytes(b"- Auto continue: 1\n\xff\xfe caf\xe9\n")
         self.assertIsNone(self.serve.auto_continue(root))
+
+    def test_focus_parse(self):
+        for text in ("- Focus: yes\n", "- focus: YES\n", "- Focus:yes\n"):
+            self.assertTrue(self.focus(text), text)
+        for text in ("# P\n", "- Focus: no\n", "- Focus: yesterday\n", "- Focus:\n"):
+            self.assertFalse(self.focus(text), text)
+        self.assertFalse(self.serve.focus(self.base / "nowhere"))
+        root = self.base / "latin2"; root.mkdir()
+        (root / "project.md").write_bytes(b"- Focus: yes\n\xff\xfe caf\xe9\n")
+        self.assertFalse(self.serve.focus(root))
+
+    def focus(self, text):
+        root = self.base / "fparse"
+        root.mkdir(exist_ok=True)
+        (root / "project.md").write_text(text)
+        return self.serve.focus(root)
+
+    def test_focus_beats_recency(self):
+        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
+        self.project("b", n=5, focus=True)
+        self.assertEqual(self.tick(), self.started("b"))
+
+    def test_busy_non_focus_does_not_block_focus(self):
+        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5, focus=True)
+        self.assertEqual(self.tick(running=lambda p, j: p == "a"), self.started("b"))
+
+    def test_non_focus_never_started(self):
+        self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        self.serve.LAST_BUSY.add("a")
+        self.assertEqual(self.tick(), [], "focus has nothing claimable")
+        (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-y", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
+        self.assertEqual(self.tick(), [], "busy focus blocks the start")
+
+    def test_focus_without_opt_in_ignored(self):
+        self.project("a", n=1); self.project("b", focus=True)
+        self.assertEqual(self.tick(), self.started("a"))
 
     def test_starts_lowest_n(self):
         self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
