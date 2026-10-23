@@ -74,6 +74,10 @@
                                    its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
                                    re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
                                    error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
+  board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
+                                   "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
+                                   Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
+                                   board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
@@ -2588,6 +2592,11 @@ def main(argv=None):
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
+    sp = sub.add_parser("spawn")
+    sp.add_argument("id")
+    sp.add_argument("action")
+    sp.add_argument("prompt", nargs="?")
+    sp.add_argument("--model")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
@@ -2674,6 +2683,9 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "spawn":
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
+        print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
@@ -2688,6 +2700,58 @@ def spawn_estimates(root, texts):
         subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
                           "--dir", str(Path(root).resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# Started from the app icon, PATH can be bare, so look in the usual install spots too. Tests set SCRUM_CLAUDE.
+CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
+    (str(p) for p in (Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path.home() / ".claude/local/claude")
+     if p.exists()), "claude")
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
+SPAWN_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # job ids plus run-all, digest, research-<hash>; it names the log file
+SPAWN_ACTION_RE = re.compile(r"[a-z-]+")
+
+
+def orchestrator_model(root: Path) -> str | None:
+    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
+    Missing, blank or malformed values give `sonnet`."""
+    try:
+        text = (root / "project.md").read_text()
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return "sonnet"
+    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    if value.lower() == "inherit":
+        return None
+    return value if MODEL_RE.fullmatch(value) else "sonnet"
+
+
+def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
+          model: str | None = None) -> tuple[subprocess.Popen, str]:
+    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog.
+    start/resume get `--model <Orchestrator model>` unless `model` is given. Returns (proc, log path relative to root)."""
+    if not SPAWN_ID_RE.fullmatch(job_id):
+        raise SystemExit(f"bad spawn id {job_id!r}")
+    if not SPAWN_ACTION_RE.fullmatch(action):
+        raise SystemExit(f"bad spawn action {action!r}")
+    if model is not None and not MODEL_RE.fullmatch(model):
+        raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
+    if model is None and action in ("start", "resume"):
+        model = orchestrator_model(root)
+    prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
+    logs = root / "runs"
+    logs.mkdir(exist_ok=True)
+    log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
+    with open(log, "w") as fh:
+        proc = subprocess.Popen(argv, cwd=root.parent,
+                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    try:  # the Open terminal button tails this; a job that isn't on the board (run-all, digest) has no row to set
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
+    except SystemExit:
+        pass
+    return proc, f"runs/{log.name}"
 
 
 if __name__ == "__main__":

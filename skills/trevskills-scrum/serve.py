@@ -28,7 +28,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fnmatch, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fnmatch, hashlib, json, os, re, shlex, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,10 +40,7 @@ sys.path.insert(0, str(HERE.parent.parent / "local"))  # HERE is resolved, so th
 import board  # noqa: E402
 import route  # noqa: E402
 
-# Started from the app icon, PATH can be bare, so look in the usual install spots too. Tests set SCRUM_CLAUDE.
-CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
-    (str(p) for p in (Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path.home() / ".claude/local/claude")
-     if p.exists()), "claude")
+CLAUDE = board.CLAUDE  # the cloud estimate and terminal launches; board.spawn reads board.CLAUDE
 LOCAL = {"localhost", "127.0.0.1"}
 TYPES = {".json": "application/json", ".md": "text/markdown; charset=utf-8", ".log": "text/plain; charset=utf-8",
          ".html": "text/html; charset=utf-8"}
@@ -119,43 +116,13 @@ def kill_session(project, root, job_id):
             pass
 
 
-MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
-
-
-def orchestrator_model(root: Path) -> str | None:
-    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
-    Missing, blank or malformed values give `sonnet`."""
-    try:
-        text = (root / "project.md").read_text()
-    except (OSError, ValueError):  # missing, or not UTF-8
-        return "sonnet"
-    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
-    value = m.group(1).strip() if m else ""
-    if value.lower() == "inherit":
-        return None
-    return value if MODEL_RE.fullmatch(value) else "sonnet"
-
-
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
-    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/. The dashboard shows it as running.
-    start/resume orchestrator sessions also get `--model <Orchestrator model>`. Returns the log path relative to root."""
-    logs = root / "runs"
-    logs.mkdir(exist_ok=True)
-    log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
-    model = orchestrator_model(root) if action in ("start", "resume") else None
-    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
-    with open(log, "w") as fh:
-        proc = subprocess.Popen(argv, cwd=root.parent,
-                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
-                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    """board.spawn (detached `claude -p`, runs/ log, runlog=), plus the RUNS entry the dashboard shows as running;
+    it covers a job that isn't on the board. Returns the log path relative to root."""
+    proc, log = board.spawn(root, job_id, action, prompt, flags)
     with RUNS_LOCK:
-        RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
-    try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
-    except SystemExit:
-        pass
-    return f"runs/{log.name}"
+        RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log}
+    return log
 
 
 def setup_done(project, root, job_id):

@@ -1982,23 +1982,40 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_child_start_silences_notifier(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        self.assertIn('CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>"', step3)
-        self.assertIn('--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', step3)
+        self.assertIn("run `B spawn <child> start`", step3)
+        self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
-                       "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
+        for phrase in ("run `B spawn <child> start`", "adds `--model` from the `- Orchestrator model:` line",
+                       "blank, missing or malformed gives `sonnet`", "`inherit` drops it",
+                       '`claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits`'):
             self.assertIn(phrase, step3, phrase)
-        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step3)
-        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits', step3)
+        for gone in ("OM=", "MODEL=(", "nohup"):
+            self.assertNotIn(gone, step3, gone)
         setup = self.section(text, "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]
         doc = doc[:doc.index("\n\n")]
         for phrase in ("`sonnet`", "`inherit`", "headless", "start", "resume"):
             self.assertIn(phrase, doc, phrase)
+
+    def test_session_launch_goes_through_b_spawn(self):
+        """One headless launcher: the shell `nohup claude -p` copies broke under zsh, so every caller runs B spawn."""
+        step3 = self.section(self.lane("bigboy"), "3. **Start.**", "4. **Spec refresh**")
+        self.assertIn("run `B spawn <child> start`", step3)
+        roadmap = self.lane("roadmap")
+        done = roadmap[roadmap.index("6. **Roadmap done**"):]
+        self.assertIn("`B spawn run-all run-all '/trevskills-scrum run-all'`", done)
+        cloud = self.lane("cloud")
+        rule = cloud[cloud.index("**Schema auto-migrate.**"):]
+        self.assertIn("`B spawn $ID approve --model sonnet`", rule)
+        skill = ROOT / "skills" / "trevskills-scrum"
+        for f in [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]:
+            self.assertNotIn("nohup claude -p", f.read_text(), f.name)
+        for gone in ("OM=", "MODEL=("):
+            self.assertNotIn(gone, self.lane("bigboy"), gone)
 
     def h2(self, text, heading):
         start = text.index(f"\n{heading}\n")
@@ -2086,9 +2103,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         lane = self.lane("roadmap")
         done = lane[lane.index("6. **Roadmap done**"):]
         for phrase in ("B roadmap-show", "`current` is `null`", "grep -q '^- \\[ \\] ' \"$F/backlog.md\"",
-                       "**BigBoy lane** step 3's start block, launching `run-all` instead of `start <child>`",
-                       "`<timestamp>-run-all.log`", "the prompt is `/trevskills-scrum run-all`",
-                       "no `B set <child> runlog=` line", "empty backlog starts nothing", "Run all started: runs/<LOG>"):
+                       "`B spawn run-all run-all '/trevskills-scrum run-all'`", "so it sets no `runlog`",
+                       "empty backlog starts nothing", "Report `Run all started: <log>`"):
             self.assertIn(phrase, done, phrase)
 
     def test_no_sound_clip_committed(self):
@@ -2210,9 +2226,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "Trevor chose this unattended path on purpose", "every refusal still apply",
                        "never edit any agent's `model:` line"):
             self.assertIn(phrase, sync, phrase)
-        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum approve $ID" --model sonnet '
-                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', rule)
-        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("nohup claude -p"))
+        self.assertIn("start a detached local approve with `B spawn $ID approve --model sonnet`", rule)
+        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("B spawn $ID approve"))
         # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)

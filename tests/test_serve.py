@@ -43,7 +43,7 @@ class ServeTest(unittest.TestCase):
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
                           SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
-        serve.CLAUDE = str(stub)  # another test class may have imported serve first
+        serve.CLAUDE = serve.board.CLAUDE = str(stub)  # another test class may have imported serve or board first
         cls.serve = serve
         cls.root = base / "repo" / "scrum"
         (cls.root / "jobs").mkdir(parents=True)
@@ -2981,7 +2981,9 @@ class AiResearchTest(unittest.TestCase):
 
     def setUp(self):
         AiSettingsTest.setUp(self)
-        self.serve.CLAUDE = "claude-stub"
+        patcher = mock.patch.object(self.serve.board, "CLAUDE", "claude-stub")  # spawn launches board.CLAUDE
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.runs, self.real_home = self.reg / "scrum" / "runs", self.serve.research_home
         patcher = mock.patch.object(self.serve, "research_home", lambda: ("reg", self.reg / "scrum"))
         patcher.start()

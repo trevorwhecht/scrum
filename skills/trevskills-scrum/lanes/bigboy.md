@@ -13,16 +13,7 @@ Applies only to a job whose `lane` on the board is `bigboy` or `runall` (the **p
 2. **Child specs, startable children only.** Spawn one `scrum-spec-writer` per child whose `depends_on` is empty, **in ONE message**, in the background, and wait for all of them (see **Routing**: each child is routed on its own, and local ones run as background subprocesses alongside the cloud ones). Each prompt is the New job step 3 prompt with `JOB_DIR=$F/jobs/<child>`. Every other child gets its spec in its own `start` session (step 4 runs New job step 3 when `spec.md` is missing); until then a child with no spec.md runs alone, which is the accepted cost. Then, for each child spawned for here:
    - **Obsolete:** if its `spec.md` starts with `OBSOLETE:`, run `B abort <child> --reason 'obsolete: <rest of that line, single quotes stripped>'`. Its dependents never become ready.
    - **Lane:** otherwise run New job step 3c with `ID=<child>` (`Lane: bigboy` counts as `standard`). A child without a `spec.md` is fine: its own `start` writes it.
-3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run detached from the main checkout, logging to `scrum/runs/`:
-   ```bash
-   mkdir -p "$F/runs"; LOG="$(date +%Y%m%d-%H%M%S)-start-<child>.log"
-   OM=$(sed -n 's/^- Orchestrator model: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')
-   case "$OM" in [Ii][Nn][Hh][Ee][Rr][Ii][Tt]) OM= ;; ""|*[!A-Za-z0-9._-]*) OM=sonnet ;; esac
-   MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")
-   (cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)
-   B set <child> runlog=runs/$LOG
-   ```
-   `OM` is the `- Orchestrator model:` line (see Setup): blank, missing or malformed gives `sonnet`, and `inherit` drops `--model`. `MODEL` is an array on purpose: zsh never word-splits `${OM:+--model "$OM"}`, so that form passes one word and `claude` dies with `unknown option`.
+3. **Start.** Run `B ready $ID` and **start** each id in `ready`. To start a child (here, in step 5 and in step 6), run `B spawn <child> start`. It starts `claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits` detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`, adds `--model` from the `- Orchestrator model:` line (see Setup: blank, missing or malformed gives `sonnet`, and `inherit` drops it), logs to `scrum/runs/`, and sets the child's `runlog=runs/<log>`.
    This session is then done with the parent: each child chains the next from its own Merge step 7. Give the final report.
 4. **Spec refresh** (in the child's own `start` session, after New job step 2). For each id in the child's `depends_on`, list the files its PR changed: `gh pr diff <that job's pr> --name-only`. Compare them, as exact paths, with the backtick-quoted paths under `## Likely files` in the child's `spec.md`. If `spec.md` is missing, run New job step 3 as usual. If any path overlaps, run New job step 3 with the extra prompt line `Refresh spec.md: dependencies <ids> merged and changed <files>.`, then step 3b and 3c. Otherwise skip step 3 (3b and 3c ran in step 2). Then continue at New job step 4.
 5. **Chaining** (Merge step 7, after `stage=done`, for a job with a `parent`). Sub-steps 1-2 run under P's chain lock, so two children that merge close together never write the same `track-N.md`, rewrite the same waiting child, or claim a child mid-rewrite:
