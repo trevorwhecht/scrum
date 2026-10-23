@@ -2291,6 +2291,7 @@ def cmd_watchdog(root, alive=None):
                 else:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
                                f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
+                    roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
             if not flagged and not requeued:
                 raise _Gone
@@ -2468,18 +2469,40 @@ def cmd_roadmap_insert(root, p, after, kind, request):
     return {"p": p, "s": after + 1, "kind": kind, "request": request}
 
 
+def roadmap_stop_locked(root, job_id, reason, parent=None):
+    """Under the caller's board lock: mark the step of job_id (else of parent) stopped and log the reason.
+    False, changing nothing, when there is no roadmap.md, no such step, or the step is done.
+    SystemExit when roadmap.md is malformed."""
+    got = read_roadmap(root)
+    if got is None:
+        return False
+    lines, rm = got
+    hit = roadmap_job_step(rm, job_id) or (parent and roadmap_job_step(rm, parent))
+    if not hit or hit[1]["status"] == "done":
+        return False
+    ph, st = hit
+    st["status"] = "stopped"
+    lines[st["line"]] = format_step(st)
+    roadmap_log(lines, ph["n"], st["n"], f"stopped: {reason}")
+    write_roadmap(root, lines)
+    return True
+
+
+def roadmap_stall_locked(root, job):
+    """A stalled job (just flagged needs-human) stops its roadmap step; a roadmap problem never undoes the flag."""
+    try:
+        roadmap_stop_locked(root, job["id"], f"{job['id']} {job['reason']}", job.get("parent"))
+    except SystemExit as e:
+        print(f"watchdog: roadmap: {e}", file=sys.stderr, flush=True)
+
+
 def cmd_roadmap_stop(root, job_id, reason):
     """Mark job_id's step stopped (needs a human) and log the reason."""
     with locked_board(root):
         lines, rm = roadmap_locked(root)
-        hit = roadmap_job_step(rm, job_id)
-        if hit is None:
+        if roadmap_job_step(rm, job_id) is None:
             raise SystemExit(f"job {job_id!r} is in no roadmap.md step")
-        ph, st = hit
-        st["status"] = "stopped"
-        lines[st["line"]] = format_step(st)
-        roadmap_log(lines, ph["n"], st["n"], f"stopped: {reason}")
-        write_roadmap(root, lines)
+        roadmap_stop_locked(root, job_id, reason)
 
 
 def main(argv=None):

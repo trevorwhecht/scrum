@@ -388,6 +388,7 @@ def flag_stalled(root, job, msg):
                 raise board._Gone
             live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {msg.format(stage=stage)}",
                         updatedAt=board.now())
+            board.roadmap_stall_locked(root, live)
             job.update(live)
     except board._Gone:
         return False
