@@ -2186,8 +2186,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('"$src/install.sh"', setup)
         self.assertNotIn("cp ", setup)  # one source of truth: links, never copies
         readme = (ROOT / "README.md").read_text()
-        for phrase in ("## Cloud lane", "cloud/setup.sh", "Trusted", "- Cloud environment: env_", "list_environments"):
+        for phrase in ("## Cloud lane", "cloud/setup.sh", "Trusted", "- Cloud environment: env_", "list_environments", "Playwright"):
             self.assertIn(phrase, readme, phrase)
+
+    def test_cloud_setup_installs_browser_unless_skipped(self):
+        setup = (ROOT / "cloud" / "setup.sh").read_text()
+        for phrase in ('require("playwright")', "npm install -g playwright", "npx playwright install chromium", "SCRUM_SKIP_BROWSER"):
+            self.assertIn(phrase, setup, phrase)
 
     def test_dashboard_shows_cloud_stage_and_link(self):
         text = DASHBOARD.read_text()

@@ -80,7 +80,7 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 Set up the cloud environment once:
 
 1. At claude.ai/code, open the environment menu and add an environment named `scrum`, with network access **Trusted**.
-2. Setup script: `curl -fsSL https://raw.githubusercontent.com/trevorwhecht/scrum/main/cloud/setup.sh | bash` (or paste [cloud/setup.sh](cloud/setup.sh)). It clones this repo to `~/scrum` and runs `install.sh`, so the session loads the same skill and agents through symlinks, never a copy. Add the project's own setup after it, such as `service postgresql start` when its tests need Postgres.
+2. Setup script: `curl -fsSL https://raw.githubusercontent.com/trevorwhecht/scrum/main/cloud/setup.sh | bash` (or paste [cloud/setup.sh](cloud/setup.sh)). It clones this repo to `~/scrum` and runs `install.sh`, so the session loads the same skill and agents through symlinks, never a copy; it also installs Playwright and Chromium for the dashboard browser tests. Add the project's own setup after it, such as `service postgresql start` when its tests need Postgres.
 3. Environment variables: whatever the project's tests need from `.env` (cloud sessions have no `.env`).
 4. Copy the environment's id (`env_...`). If the settings page doesn't show it, ask any cloud session to run its `list_environments` tool. Add `- Cloud environment: env_...` to the project's `scrum/project.md`. Without that line, `claude --cloud` uses your default environment.
 

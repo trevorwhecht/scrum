@@ -32,7 +32,7 @@ class InstallTest(unittest.TestCase):
             git("clone", "-q", "--bare", str(ROOT), str(t / "origin.git"))
             git("clone", "-q", str(t / "origin.git"), str(t / "src"))
             env = {**os.environ, "HOME": str(t / "home"), "SCRUM_SRC": str(t / "src"),
-                   "CLAUDE_HOME": str(t / "home" / ".claude"), "CODEX_HOME": str(t / "home" / ".codex")}
+                   "CLAUDE_HOME": str(t / "home" / ".claude"), "CODEX_HOME": str(t / "home" / ".codex"), "SCRUM_SKIP_BROWSER": "1"}
             setup = lambda: subprocess.run(["bash", str(ROOT / "cloud" / "setup.sh")], env=env, capture_output=True, text=True)
             first = setup()
             self.assertEqual(first.returncode, 0, first.stderr)
