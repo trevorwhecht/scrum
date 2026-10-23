@@ -7,7 +7,7 @@ DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scru
 HARNESS = """
 const node = extra => ({style: {}, dataset: {}, hidden: false, innerHTML: "", textContent: "", querySelector: () => null,
   on: {}, addEventListener(t, f) { this.on[t] = f; }, ...extra});
-const tabs = ["all", "fast", "standard", "debug", "bigboy", "maintenance"].map(k => ({dataset: {tab: k}, attrs: {},
+const tabs = ["all", "fast", "standard", "debug", "bigboy", "roadmap", "maintenance"].map(k => ({dataset: {tab: k}, attrs: {},
   setAttribute(n, v) { this.attrs[n] = String(v); }, focus() {}, closest() { return this; }}));
 const els = {flow: node(), agZoom: node(), agZoomOut: node(), agZoomIn: node(),
   pipeTabs: node({querySelectorAll: () => tabs, querySelector: s => tabs.find(b => s.includes(`"${b.dataset.tab}"`))})};
@@ -22,6 +22,9 @@ on.keydown({key: "ArrowRight"}); snap();                                // -> De
 on.keydown({key: "ArrowLeft"}); on.keydown({key: "ArrowLeft"}); snap(); // -> Fast
 setTab("standard", true); snap();                                       // dashed "-> Standard" link in the chart
 setTab("bigboy", true); snap();                                         // "Children" link
+on.keydown({key: "ArrowRight"}); snap();                                // -> Roadmap
+on.keydown({key: "ArrowRight"}); snap();                                // -> Maintenance
+setTab("roadmap", true); snap();                                        // back to Roadmap
 console.log(JSON.stringify(seen));
 """
 
@@ -35,9 +38,9 @@ class PipelineTabsTest(unittest.TestCase):
         src = text[text.index("const ORCH = "):text.index("function showAgents(")]
         out = subprocess.run([node, "-e", HARNESS + src + SCENARIO], capture_output=True, text=True, check=True).stdout
         got = json.loads(out)
-        self.assertEqual([g["tab"] for g in got], ["all", "standard", "debug", "fast", "standard", "bigboy"])
+        self.assertEqual([g["tab"] for g in got], ["all", "standard", "debug", "fast", "standard", "bigboy", "roadmap", "maintenance", "roadmap"])
         for g in got:
-            want = {k: "0" if k == g["tab"] else "-1" for k in ("all", "fast", "standard", "debug", "bigboy", "maintenance")}
+            want = {k: "0" if k == g["tab"] else "-1" for k in ("all", "fast", "standard", "debug", "bigboy", "roadmap", "maintenance")}
             self.assertEqual(g["tabindex"], want, g["tab"])
 
 

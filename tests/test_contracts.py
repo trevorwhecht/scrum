@@ -1787,9 +1787,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "standard": ["scrum-spec-writer", "scrum-builder", *reviews, "scrum-approver"],
             "debug": ["scrum-spec-writer", "scrum-debugger", "scrum-builder", *reviews, "scrum-approver"],
             "bigboy": ["scrum-planner", "scrum-spec-writer", "scrum-tracker", "scrum-bigboy-reviewer"],
+            "roadmap": [],
         })
         self.assertEqual(got["m"], {"Run all": ["scrum-triager"], "Digest": ["scrum-digest-reader", "scrum-digester"]})
-        self.assertEqual(got["last"], {"fast": "PR / merge", "standard": "PR / merge", "debug": "PR / merge", "bigboy": "Fix ticket"})
+        self.assertEqual(got["last"], {"fast": "PR / merge", "standard": "PR / merge", "debug": "PR / merge", "bigboy": "Fix ticket",
+                                       "roadmap": "Next step"})
 
     def test_dashboard_bigboy_cards(self):
         node = shutil.which("node")
