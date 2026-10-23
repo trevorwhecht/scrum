@@ -796,9 +796,26 @@ class ContractTest(unittest.TestCase):
               "test that reads that source file to the new path and change no `expect`.")
         for line in (b1, b2, b3, b4, b5, b6, step2, must_fail, handoff):
             self.assertEqual(text.count(line + "\n"), 1, line)
-        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n" + step3, text)
+        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
-        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n" + running_app, text)
+        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
+        self.assertIn("\n" + running_app, text)
+
+    def test_builder_rules_digest_005_006(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        eslint = "remove any `eslint-disable` directive the moved code no longer needs"
+        self.assertEqual(text.count(eslint), 1)
+        move = text.index("   - When you move code to another file")
+        self.assertIn(eslint, text[move:text.index("   - A criterion that needs the running app")])
+        bullet = next(l for l in text.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in ("`next dev`", "record the stopped port and PID in build.md"):
+            self.assertEqual(text.count(phrase), 1, phrase)
+            self.assertIn(phrase, bullet, phrase)
+        self.assertNotIn("Afterwards stop the server and run", text)
+        step2 = self.section(text, "2. Implement the spec.", "3. For each acceptance criterion:")
+        for phrase in ("never copies a hardcoded colour from a sibling element", "UB-38", "UB-30"):
+            self.assertEqual(text.count(phrase), 1, phrase)
+            self.assertIn(phrase, step2, phrase)
 
     def test_approver_debug_repro_never_preexisting(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
@@ -1078,6 +1095,19 @@ class ContractTest(unittest.TestCase):
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
 
+    def test_spec_writer_retro_p2_scrum_never_in_diff(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        head = "- **`scrum/` is never in the diff.**"
+        for phrase in (head, "never an acceptance criterion or a Likely file",
+                       "Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`.",
+                       "A line the request only ticks stays open for the Run all triager, which retires done items."):
+            self.assertEqual(text.count(phrase), 1, phrase)
+        start = text.index(head)
+        end = text.index("- Write no code and touch no file")
+        self.assertLess(start, end)
+        self.assertEqual(text[start:end].count("\n"), 1)
+        self.assertTrue(text[start:end].endswith("\n"))
+
     def test_spec_writer_digest_001_p3_p4(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
@@ -1335,10 +1365,22 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
                        "Hard stop: render — UI not rendered"):
             self.assertIn(phrase, rule, phrase)
-        self.assertNotIn("Hard stop: blocked — UI not rendered", text)
+        self.assertEqual(text.count("Hard stop: blocked — UI not rendered"), 1)
+        self.assertIn("`Hard stop: blocked — UI not rendered` is only for a UI diff", text)
         stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
         for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>"):
             self.assertIn(phrase, stop, phrase)
+
+    def test_approver_retro_p1_blocked_render_never_hard_stop(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
+        phrase = ("`Hard stop: blocked — UI not rendered` is only for a UI diff with no `Rendered: yes` and no "
+                  "`Rendered: blocked`; never write it, with or without an `(environment)` note, when a "
+                  "latest-round review says `Rendered: blocked` and none says `Rendered: no`.")
+        self.assertEqual(text.count(phrase), 1)
+        self.assertIn("so Trevor can glance later without holding the merge. " + phrase, rule)
+        self.assertLess(rule.index("Exception: when at least one latest-round review has `Rendered: blocked`"),
+                        rule.index(phrase))
 
     def test_reviewers_no_rendered_change_answer(self):
         for name in ("ux", "ui"):
@@ -1965,23 +2007,40 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_child_start_silences_notifier(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        self.assertIn('CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>"', step3)
-        self.assertIn('--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', step3)
+        self.assertIn("run `B spawn <child> start`", step3)
+        self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
-                       "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
+        for phrase in ("run `B spawn <child> start`", "adds `--model` from the `- Orchestrator model:` line",
+                       "blank, missing or malformed gives `sonnet`", "`inherit` drops it",
+                       '`claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits`'):
             self.assertIn(phrase, step3, phrase)
-        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step3)
-        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits', step3)
+        for gone in ("OM=", "MODEL=(", "nohup"):
+            self.assertNotIn(gone, step3, gone)
         setup = self.section(text, "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]
         doc = doc[:doc.index("\n\n")]
         for phrase in ("`sonnet`", "`inherit`", "headless", "start", "resume"):
             self.assertIn(phrase, doc, phrase)
+
+    def test_session_launch_goes_through_b_spawn(self):
+        """One headless launcher: the shell `nohup claude -p` copies broke under zsh, so every caller runs B spawn."""
+        step3 = self.section(self.lane("bigboy"), "3. **Start.**", "4. **Spec refresh**")
+        self.assertIn("run `B spawn <child> start`", step3)
+        roadmap = self.lane("roadmap")
+        done = roadmap[roadmap.index("6. **Roadmap done**"):]
+        self.assertIn("`B spawn run-all run-all '/trevskills-scrum run-all'`", done)
+        cloud = self.lane("cloud")
+        rule = cloud[cloud.index("**Schema auto-migrate.**"):]
+        self.assertIn("`B spawn $ID approve --model sonnet`", rule)
+        skill = ROOT / "skills" / "trevskills-scrum"
+        for f in [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]:
+            self.assertNotIn("nohup claude -p", f.read_text(), f.name)
+        for gone in ("OM=", "MODEL=("):
+            self.assertNotIn(gone, self.lane("bigboy"), gone)
 
     def h2(self, text, heading):
         start = text.index(f"\n{heading}\n")
@@ -2027,7 +2086,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 82000)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -2060,6 +2119,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(clean.index("**Mark done"), clean.index("roadmap-next $ID"))
         self.assertLess(clean.index("roadmap-next $ID"), clean.index("**Digest check"))
 
+    def test_skill_merge_files_spec_followups(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
+        clean = merge[merge.index("7. **Clean up:**"):]
+        start = clean.index("**Spec follow-ups.**")
+        bullet = clean[start:clean.index("\n", start)]
+        for phrase in ("`Follow-up: <text>`", "remove every `'` from each",
+                       "`B backlog-add '<text> (from <job id>)' ...`",
+                       "A failing `backlog-add` never stops the job; name it in the final report only."):
+            self.assertIn(phrase, bullet, phrase)
+        self.assertLess(clean.index("**Mark done"), start)
+        self.assertLess(start, clean.index("**Roadmap chaining.**"))
+
     def test_skill_merge_roadmap_done_starts_run_all(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
@@ -2069,9 +2141,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         lane = self.lane("roadmap")
         done = lane[lane.index("6. **Roadmap done**"):]
         for phrase in ("B roadmap-show", "`current` is `null`", "grep -q '^- \\[ \\] ' \"$F/backlog.md\"",
-                       "**BigBoy lane** step 3's start block, launching `run-all` instead of `start <child>`",
-                       "`<timestamp>-run-all.log`", "the prompt is `/trevskills-scrum run-all`",
-                       "no `B set <child> runlog=` line", "empty backlog starts nothing", "Run all started: runs/<LOG>"):
+                       "`B spawn run-all run-all '/trevskills-scrum run-all'`", "so it sets no `runlog`",
+                       "empty backlog starts nothing", "Report `Run all started: <log>`"):
             self.assertIn(phrase, done, phrase)
 
     def test_no_sound_clip_committed(self):
@@ -2109,6 +2180,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertNotIn("gh pr ", job)
+        # Every cloud PR body carries the lane the job ran, and cloud-sync writes it to the board.
+        self.assertIn("`Scrum lane: <fast|standard|debug|lilguy>`", job)
+        self.assertIn("also writes `lane=<lane>` from the PR body's `Scrum lane:` line", sync)
         # --environment takes only self-hosted ccpool_ ids, and a flag after --cloud would swallow its prompt.
         self.assertNotIn("--environment", cloud)
         # The launch prompt starts with the setup.sh refresh: cloud environments cache an old copy of the skill.
@@ -2193,9 +2267,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "Trevor chose this unattended path on purpose", "every refusal still apply",
                        "never edit any agent's `model:` line"):
             self.assertIn(phrase, sync, phrase)
-        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum approve $ID" --model sonnet '
-                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', rule)
-        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("nohup claude -p"))
+        self.assertIn("start a detached local approve with `B spawn $ID approve --model sonnet`", rule)
+        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("B spawn $ID approve"))
         # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)

@@ -1,4 +1,4 @@
-import hashlib, io, json, os, subprocess, sys, tempfile, unittest
+import hashlib, io, json, os, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -1836,6 +1836,30 @@ class BoardTest(unittest.TestCase):
     def get(self, job_id):
         return next(j for j in self.jobs() if j["id"] == job_id)
 
+    def test_watchdog_skips_limit_held_job(self):
+        held = self.aged("Held review", 120, stage="review", limitResetAt=1_800_000_000)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.get(held)["stage"], self.get(held)["limitResetAt"]), ("review", 1_800_000_000))
+        plain = self.aged("Plain review", 120, stage="review")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
+    def test_limit_hold_cleared_on_stage_change_and_pause(self):
+        def held(title):
+            return self.aged(title, 1, stage="build", limitResetAt=1_800_000_000)
+        kept = held("Kept")
+        board.cmd_set(self.root, kept, ["round=1"])
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+        moved = held("Moved")
+        board.cmd_set(self.root, moved, ["stage=merging"])
+        self.assertNotIn("limitResetAt", self.get(moved))
+        paused = held("Paused")
+        board.cmd_pause(self.root, paused)
+        self.assertNotIn("limitResetAt", self.get(paused))
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", kept, "limitResetAt=1"])
+        self.assertTrue(str(e.exception).startswith("bad field 'limitResetAt=1'"), str(e.exception))
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
         old = self.get(job_id)["updatedAt"]
@@ -1971,6 +1995,23 @@ class BoardTest(unittest.TestCase):
             text = board.resume_blocker(self.root, a)
             self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
+
+    def test_live_sessions_count_as_busy_siblings(self):
+        """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so
+        one sweep cannot resume or claim past the cap."""
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        parent, kids = self.runall(6)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/l{i}.py")
+        for k in kids[:4]:
+            board.cmd_set(self.root, k, stalled, internal=True)
+        self.assertIsNone(board.resume_blocker(self.root, kids[0]))
+        text = board.resume_blocker(self.root, kids[0], live={kids[1], kids[2], kids[3]})
+        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
+        self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
+        out = board.cmd_ready(self.root, parent, live={kids[0], kids[1], kids[2]})
+        self.assertEqual(out["ready"], [], "3 live resumes fill the cap")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[4:6])
 
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):
@@ -2377,6 +2418,131 @@ class BoardTest(unittest.TestCase):
                      "Set PRIVATE KEY in the vault", "TOKEN: see docs", ""):
             with self.subTest(text=text):
                 self.assertFalse(board.secret_filter(text))
+
+
+class SpawnTest(unittest.TestCase):
+    """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
+    STUB = """import json, os, sys
+st, null = os.fstat(0), os.stat(os.devnull)
+rec = {"argv": sys.argv[1:], "cwd": os.getcwd(), "notifier": os.environ.get("CLAUDE_NOTIFIER_DISABLE"),
+       "new_session": os.getsid(0) == os.getpid(), "stdin_devnull": (st.st_dev, st.st_ino) == (null.st_dev, null.st_ino)}
+with open(os.environ["STUB_OUT"], "a") as fh:
+    fh.write(json.dumps(rec) + "\\n")
+print("stub out")
+print("stub err", file=sys.stderr)
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.root, self.out = base / "repo", base / "repo" / "scrum", base / "calls.jsonl"
+        self.root.mkdir(parents=True)
+        self.stub = base / "claude"
+        self.stub.write_text(f"#!{sys.executable}\n" + self.STUB)
+        self.stub.chmod(0o755)
+        for patch in (mock.patch.object(board, "CLAUDE", str(self.stub)),
+                      mock.patch.dict(os.environ, {"STUB_OUT": str(self.out), "SCRUM_CLAUDE": str(self.stub)})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        no_claude_pid(self)
+
+    def records(self, n=1):
+        for _ in range(200):
+            lines = self.out.read_text().splitlines() if self.out.exists() else []
+            if len(lines) >= n:
+                return [json.loads(l) for l in lines]
+            time.sleep(0.05)
+        self.fail(f"stub ran {len(lines)} times, expected {n}")
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "spawn", *args],
+                              capture_output=True, text=True, env={**os.environ, "CLAUDE_NOTIFIER_DISABLE": ""})
+
+    def argv(self, action, prompt="/p", model=None):
+        """The stub's argv (after the binary) for one in-process spawn."""
+        self.out.unlink(missing_ok=True)
+        proc, _ = board.spawn(self.root, "999-not-a-job", action, prompt, model=model)
+        proc.wait(timeout=10)
+        return self.records()[0]["argv"]
+
+    def test_spawn_argv_log_and_env(self):
+        out = self.cli("123-some-job", "start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        line = json.loads(out.stdout)
+        self.assertEqual(set(line), {"log", "pid"})
+        self.assertRegex(line["log"], r"^runs/\d{8}-\d{6}-start-123-some-job\.log$")
+        self.assertIsInstance(line["pid"], int)
+        rec = self.records()[0]
+        self.assertEqual(rec["argv"], ["-p", "/trevskills-scrum start 123-some-job", "--model", "sonnet",
+                                       "--permission-mode", "acceptEdits"])
+        self.assertEqual(os.path.realpath(rec["cwd"]), os.path.realpath(self.repo))
+        self.assertEqual(rec["notifier"], "1")
+        self.assertTrue(rec["new_session"])
+        self.assertTrue(rec["stdin_devnull"])
+        log = self.root / line["log"]
+        for _ in range(200):
+            if "stub err" in log.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn("stub out", log.read_text())
+        self.assertIn("stub err", log.read_text())
+        out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
+                                                      "--permission-mode", "acceptEdits"])
+
+    def test_spawn_model_selection(self):
+        project = self.root / "project.md"
+        plain = ["-p", "/p", "--permission-mode", "acceptEdits"]
+        for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: inherit\n", None),
+                            ("- Orchestrator model: Inherit\n", None), ("- Orchestrator model: so net; rm\n", "sonnet"),
+                            ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
+                            ("- Stack: Python\n", "sonnet")):
+            project.write_text("# Project profile\n" + line)
+            for action in ("start", "resume"):
+                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits"]
+                self.assertEqual(self.argv(action), expect, (line, action))
+            self.assertEqual(self.argv("approve"), plain, line)
+        project.write_text("- Orchestrator model: opus\n")
+        self.assertEqual(self.argv("approve", model="sonnet"),
+                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits"])
+        self.assertEqual(self.argv("start", model="haiku"),
+                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits"])
+        for bad in ("so net", "$(touch x)", "", "-x y"):
+            with self.assertRaises(SystemExit, msg=bad):
+                board.spawn(self.root, "999-not-a-job", "approve", "/p", model=bad)
+        logs = sorted((self.root / "runs").iterdir())
+        out = self.cli("999-not-a-job", "digest", "--model", "so net")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(sorted((self.root / "runs").iterdir()), logs)  # nothing started, no log
+
+    def test_spawn_sets_runlog(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["tty=ttys004"])
+        proc, log = board.spawn(self.root, job_id, "resume")
+        proc.wait(timeout=10)
+        job = json.loads((self.root / "board.json").read_text())["jobs"][0]
+        self.assertEqual(job["runlog"], log)
+        self.assertRegex(log, rf"^runs/\d{{8}}-\d{{6}}-resume-{job_id}\.log$")
+        self.assertIsNone(job["tty"])
+        self.assertEqual(self.records()[0]["argv"][:2], ["-p", f"/trevskills-scrum resume {job_id}"])
+
+    def test_spawn_unknown_job_still_starts(self):
+        out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits"])
+
+    def test_spawn_rejects_bad_id_or_action(self):
+        for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),
+                               ("001-ok", "St"), ("001-ok", "st art"), ("001-ok", "a/b"), ("001-ok", "")):
+            with self.assertRaises(SystemExit, msg=(job_id, action)):
+                board.spawn(self.root, job_id, action)
+        out = self.cli("../escape", "start")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse((self.root / "runs").exists())
+        self.assertFalse(self.out.exists())
 
 
 class HookTest(unittest.TestCase):
@@ -2864,6 +3030,53 @@ class CloudSyncTest(unittest.TestCase):
         with self.gh([self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")]), mock.patch("sys.stderr", io.StringIO()):
             self.assertEqual(board.cmd_cloud_sync(self.root)["moved"], [])
         self.assertEqual(self.get()["stage"], "cloud")
+
+    def merged(self, body):
+        return self.pr(state="closed", merged_at="2026-10-01T00:00:00Z", body=body)
+
+    def test_cloud_sync_merged_records_lane(self):
+        with self.gh([self.merged("Summary\n\nScrum lane: fast\n")]):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("done", "fast"))
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # the lane costs no extra gh call
+
+    def test_cloud_sync_no_lane_line_leaves_lane_unset(self):
+        for body in (None, "Summary only\nlane: fast\n"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    board.cmd_cloud_sync(self.root)
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_unknown_lane_ignored(self):
+        for body in ("Scrum lane: turbo", "Scrum lane: bigboy", "Scrum lane:", "Scrum lane: fastest", "x Scrum lane: fast"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    out = board.cmd_cloud_sync(self.root)
+                self.assertEqual(out["moved"][0]["state"], "MERGED")
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_needs_human_and_abort_record_lane(self):
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: debug")
+        comments = [{"user": self.TREV, "body": "Hard stop: schema first\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=None):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("needs-human", "debug"))
+
+        self.setUp()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: fast")
+        comments = [{"user": self.TREV, "body": "requeue: spec writer produced nothing\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "ABORTED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "fast"))
+
+        self.setUp()
+        with self.gh([self.pr(state="closed", body="Scrum lane: standard")]):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "CLOSED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "standard"))
 
     def backlog_texts(self):
         return [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]

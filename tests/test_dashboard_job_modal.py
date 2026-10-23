@@ -197,6 +197,22 @@ class JobModal(unittest.TestCase):
         return [json.loads(l) for l in subprocess.run([node, "-e", script], capture_output=True, text=True,
                                                       check=True).stdout.splitlines()]
 
+    def test_card_limit_hold_badge(self):
+        old = "new Date(Date.now() - 2 * 3600 * 1000).toISOString()"
+        base = '{key: "p/030-h", project: "p", id: "030-h", title: "Held", stage: "build", reason: null'
+        [held, plain, human, stamp] = self.card_js(
+            f"for (const extra of [', limitResetAt: 1800000000', '', ', stage: \"needs-human\", limitResetAt: 1800000000'])"
+            f" console.log(JSON.stringify(card(eval(`({base}, updatedAt: {old}${{extra}}}})`))));"
+            " console.log(JSON.stringify(when(1800000000)));")
+        self.assertIn(f'<span class="badge">waiting for reset {stamp}</span>', held)
+        self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        self.assertNotIn("stale since", held)
+        self.assertIn("stale since", plain)  # the same 2-hour-old card without the hold is stale
+        for html in (plain, human):
+            self.assertNotIn("waiting for reset", html)
+        text = DASHBOARD.read_text()
+        self.assertIn("Date.now() - staleAt(job) > STALE_MS", text[text.index("function card(job)"):text.index("function digestCard(")])
+
     def test_no_options_unchanged(self):
         for extra in ({}, {"options": []}):
             with self.subTest(extra=extra):

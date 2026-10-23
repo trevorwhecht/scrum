@@ -56,7 +56,7 @@ class RunOutcomeTest(unittest.TestCase):
         stub = Path(self.tmp.name) / "claude"
         stub.write_text("#!/bin/sh\nprintf '\\n  \\n## Can not merge: SKILL.md is over its size budget.\\nDetails.\\n'\n")
         stub.chmod(0o755)
-        with mock.patch.object(serve, "CLAUDE", str(stub)):
+        with mock.patch.object(serve.board, "CLAUDE", str(stub)):  # spawn launches board.CLAUDE
             serve.approve_job("repo", self.root, job_id)
         self.addCleanup(lambda: serve.RUNS.pop(f"repo/{job_id}", None))
         run = serve.RUNS[f"repo/{job_id}"]
