@@ -205,7 +205,7 @@ def approve_job(project, root, job_id, migrated=False):
 
 def rework_job(project, root, job_id, feedback):
     """The Send back button, and a `rework` answer."""
-    feedback = board.clean(feedback or "")
+    feedback = board.clean(feedback or "", board.ITEM_MAX)
     if not feedback:
         raise SystemExit("feedback is empty")
     spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
@@ -2576,7 +2576,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "approve":
             approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
-            note = board.clean(body.get("feedback") or "")
+            note = board.clean(body.get("feedback") or "", board.ITEM_MAX)
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
             code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, prompt),

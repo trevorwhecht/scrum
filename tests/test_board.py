@@ -1663,6 +1663,14 @@ class BoardTest(unittest.TestCase):
         newer = board.cmd_reopen(self.root, long, "x" * 100)
         self.assertEqual(next(j for j in self.jobs() if j["id"] == newer)["title"], "Reopen 003: " + "x" * 48)
 
+    def test_reopen_keeps_long_note_whole(self):
+        note = ("Still wraps on mobile. " * 66)[:1499] + "."  # 1,500 chars
+        self.assertEqual(len(note), 1500)
+        old = board.cmd_new(self.root, "Wide one")
+        board.cmd_set(self.root, old, ["stage=done", "reason=merged"])
+        new = board.cmd_reopen(self.root, old, note)
+        self.assertEqual((self.root / "jobs" / new / "feature.md").read_text().splitlines()[0], note)
+
     def test_reopen_feature_carries_context(self):
         old = board.cmd_new(self.root, "Done one")
         board.cmd_set(self.root, old, ["stage=done", "pr=https://github.com/x/y/pull/9"])

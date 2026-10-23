@@ -732,6 +732,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "use the existing helper"})[0], 202)
         self.assertEqual(self.req("POST", "/api/p/repo/jobs/..%2F..%2Fx/rework", {"feedback": "x"})[0], 400)
 
+    def test_rework_keeps_long_feedback_whole(self):
+        feedback = ("Don't touch the header. " * 63)[:1499] + "!"  # 1,500 chars, cut at no word edge
+        self.assertEqual(len(feedback), 1500)
+        for sent, kept in ((feedback, feedback), ("y" * 2500, "y" * 2000)):
+            job_id = self.serve.board.cmd_new(self.root, "long rework")
+            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": sent})[0], 202)
+            self.assertEqual(spawn.call_args.args[4], f'/trevskills-scrum rework {job_id} "{kept}"')
+
     def test_abort_stops_running_job_and_can_requeue(self):
         job_id = self.serve.board.cmd_new(self.root, "abort me")
         self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
@@ -804,6 +814,15 @@ class ServeTest(unittest.TestCase):
         m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
         self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
                          [(job_id, "rework", f'/trevskills-scrum rework {job_id} "use the existing helper"')])
+
+    def test_answer_dispatch_rework_keeps_long_text(self):
+        text = ("Use the shared helper. " * 66)[:1499] + "."  # 1,500 chars
+        self.assertEqual(len(text), 1500)
+        job_id = self.asked(f'rework 77 "{text}"')
+        code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Rework", "command": f'rework 77 "{text}"'})
+        self.assertEqual(code, 202, out)
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "rework", f'/trevskills-scrum rework {job_id} "{text}"')])
 
     def test_answer_dispatch_abort(self):
         for command, requeue in (("abort 77", False), ("abort 77 --requeue", True)):
@@ -1092,6 +1111,17 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
         popen.assert_not_called()
         self.assertFalse(self.serve.running("repo", job_id))
+
+    def test_discuss_keeps_long_note_whole(self):
+        note = ("Ask about the header. " * 70)[:1499] + "?"  # 1,500 chars
+        self.assertEqual(len(note), 1500)
+        job_id = self.job("discuss long")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": note})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(run.call_args.args[0][-1], f'/trevskills-scrum discuss {job_id} "{note}"')
 
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
