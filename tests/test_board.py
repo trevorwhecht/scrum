@@ -2134,6 +2134,71 @@ class BoardTest(unittest.TestCase):
         self.assertIn(f"- [~] S2 bigboy {self.J2}:", self.rm_text())
         self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + rf"P1 S2 started: {self.J2}$")
 
+    STALL = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+
+    def test_watchdog_stall_logs_roadmap_step(self):
+        self.roadmap()
+        board.cmd_new(self.root, "Quote builder part 2", self.J2)
+        self.aged("Unrelated", 5, stage="build")
+        for _ in range(2):  # stall, resume via roadmap-link, stall again: two Log lines
+            data = json.loads((self.root / "board.json").read_text())
+            next(j for j in data["jobs"] if j["id"] == self.J2).update(stage="build", updatedAt="2026-01-01T00:00:00+00:00")
+            (self.root / "board.json").write_text(json.dumps(data))
+            self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [self.J2])
+            self.assertEqual(self.get(self.J2)["stage"], "needs-human")
+            self.assertIn(f"- [!] S2 bigboy {self.J2}:", self.rm_text())
+            self.assertRegex(self.rm_text().splitlines()[-1],
+                             self.LOG_RE + rf"P1 S2 stopped: {self.J2} stalled in build: no board update for 30 min "
+                             r"and no live session\. Fix: click Resume\.$")
+            board.cmd_roadmap_link(self.root, 1, 2, self.J2)
+            self.assertIn(f"- [~] S2 bigboy {self.J2}:", self.rm_text())
+        logs = (board.md_section(self.rm_text(), "Log") or "").strip().splitlines()
+        stops = [line for line in logs if f"stopped: {self.J2} {self.STALL}" in line]
+        self.assertEqual(len(stops), 2)
+        self.assertEqual(len(logs), 5)  # the seed line + (stopped, started) twice
+
+    def test_watchdog_stall_of_child_logs_parent_step(self):
+        self.roadmap()
+        child = self.aged("Child fix", 45, stage="build", parent=self.J2)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [child])
+        self.assertIn(f"- [!] S2 bigboy {self.J2}:", self.rm_text())
+        logs = (board.md_section(self.rm_text(), "Log") or "").strip().splitlines()
+        self.assertEqual(len(logs), 2)
+        self.assertRegex(logs[1], self.LOG_RE + rf"P1 S2 stopped: {child} stalled in build: ")
+
+    def test_watchdog_stall_roadmap_missing_or_malformed(self):
+        import contextlib, io
+        cases = [(None, {}), (self.ROADMAP, {}), (self.ROADMAP.replace("[~] S2", "[x] S2"), {"parent": self.J2}),
+                 (self.ROADMAP.replace("[~] S2", "[x] S2"), {"id": self.J2}), ("# not a roadmap\n", {"parent": self.J2})]
+        for text, how in cases:
+            with self.subTest(text=text and text[:20], how=how):
+                (self.root / "roadmap.md").unlink(missing_ok=True)
+                if text is not None:
+                    self.roadmap(text)
+                if "id" in how:
+                    (self.root / "board.json").unlink(missing_ok=True)
+                    board.cmd_new(self.root, "J2", self.J2)
+                    data = json.loads((self.root / "board.json").read_text())
+                    data["jobs"][0].update(stage="review", updatedAt="2026-01-01T00:00:00+00:00")
+                    (self.root / "board.json").write_text(json.dumps(data))
+                    job_id = self.J2
+                else:
+                    job_id = self.aged("Stuck", 45, stage="review", **how)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [job_id])
+                self.assertEqual(self.get(job_id)["stage"], "needs-human")
+                self.assertTrue(self.get(job_id)["reason"].startswith("stalled in review: "))
+                if text is None:
+                    self.assertFalse((self.root / "roadmap.md").exists())
+                else:
+                    self.assertEqual(self.rm_text(), text)
+                if text and text.startswith("# not"):
+                    self.assertEqual(err.getvalue(),
+                                     "watchdog: roadmap: roadmap.md line 1: first line must be 'ROADMAP: <name>'\n")
+                else:
+                    self.assertEqual(err.getvalue(), "")
+
     def test_roadmap_link_unknown_step_errors(self):
         self.roadmap()
         for args in ((9, 1, "030-x"), (1, 9, "030-x"), (1, 3, "Bad Id"), (1, 3, "../030-x")):

@@ -68,5 +68,31 @@ class ExitedRunTest(unittest.TestCase):
         self.assertTrue(self.job(job_id)["reason"].startswith("stalled in build: session exited"))
 
 
+    def test_exited_roadmap_job_logs_roadmap_step(self):
+        step_job, child = "017-step-job", "018-child-fix"
+        (self.root / "roadmap.md").write_text("ROADMAP: x\n## P1 A\n- [~] S1 standard 017-step-job: a\n"
+                                              "- [~] S2 bigboy 019-other: b\n\n## Log\n- 2026-10-15 09:12 P1 S1 x\n")
+        board.cmd_new(self.root, "Step job", step_job)
+        board.cmd_new(self.root, "Child", child)
+        self.edit_job(step_job, stage="build", reason=None)
+        self.edit_job(child, stage="check", reason=None, parent="019-other")
+        dead = mock.Mock()
+        dead.poll.return_value = 0
+        for jid in (step_job, child):
+            serve.RUNS[f"repo/{jid}"] = {"action": "start", "started": time.time(), "proc": dead, "log": "runs/x.log"}
+            self.addCleanup(lambda k=f"repo/{jid}": serve.RUNS.pop(k, None))
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(serve, "resume_job") as resume:
+            self.assertEqual(sorted(serve.respawn_exited("repo", self.root)), [step_job, child])
+        self.assertEqual(sorted(c.args[2]["id"] for c in resume.call_args_list), [step_job, child])
+        text = (self.root / "roadmap.md").read_text()
+        self.assertIn("- [!] S1 standard 017-step-job: a\n- [!] S2 bigboy 019-other: b\n", text)
+        logs = text.split("## Log\n")[1].strip().splitlines()
+        self.assertEqual(len(logs), 3)
+        self.assertRegex(logs[1] if "P1 S1" in logs[1] else logs[2], r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} P1 S1 stopped: "
+                         r"017-step-job stalled in build: session exited while the job was still in build\. ")
+        self.assertRegex(logs[2] if "P1 S2" in logs[2] else logs[1], r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} P1 S2 stopped: "
+                         r"018-child-fix stalled in check: session exited while the job was still in check\. ")
+
 if __name__ == "__main__":
     unittest.main()

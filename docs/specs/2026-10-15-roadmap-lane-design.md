@@ -12,6 +12,11 @@ A roadmap strings bigboys and standard jobs into ordered phases, chains them wit
    - Cards of roadmap jobs get one meta line `P1/2 · S2/10`: above `T3/5 merged` on a bigboy card, in front of `T2 of <parent>` on a child card (`P1/2 · S2/10 · T2 of 017-...`), alone on a standard step card.
    - The lane chip is unchanged. Jobs outside a roadmap look exactly as today.
 
+## Retro decisions (onewitharts cleanup roadmap, 2026-10-21)
+
+- **An environment-blocked render is never a stop.** When every review and the check pass and the only gap is a reviewer's `Rendered: blocked`, the job merges with a manual check; the chain keeps moving. S2 lost 12h10m of 14h54m to two such stops (047, 048).
+- **No silent stall.** Every stall of a roadmap job or its child writes a `## Log` line and marks the step `[!]`, including a watchdog flag or an exited session that serve.py handles. 051 sat 5h32m with no log line.
+
 ## roadmap.md
 
 One per project at `scrum/roadmap.md` (gitignored like the rest of `scrum/`). Plain markdown a human can edit:
