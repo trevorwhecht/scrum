@@ -968,6 +968,30 @@ class ServeTest(unittest.TestCase):
                          [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
         self.assertEqual(self.stage_of(w)["stage"], "spec")
 
+    def test_play_on_parent_paused_in_review_resumes_parent_session(self):
+        b = self.serve.board
+        parent, kid = b.cmd_new(self.root, "Review parent"), b.cmd_new(self.root, "Done kid")
+        self.edit_job(parent, lane="bigboy", stage="review", children=[kid])
+        self.edit_job(kid, parent=parent, stage="done")
+        b.cmd_pause(self.root, parent)
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                         [(parent, "resume", f"/trevskills-scrum resume {parent}")])
+        self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["paused"]), ("review", True),
+                         "its resume session clears the pause with B set --unpause stage=review")
+
+    def test_flag_stalled_and_hold_limited_leave_a_paused_job(self):
+        b, s = self.serve.board, self.serve
+        job_id = b.cmd_new(self.root, "paused meanwhile")
+        b.cmd_set(self.root, job_id, ["stage=build"])
+        seen = dict(self.stage_of(job_id))  # read before the pause, as a sweep would
+        b.cmd_pause(self.root, job_id)
+        before = (self.root / "board.json").read_text()
+        self.assertFalse(s.flag_stalled(self.root, dict(seen), "no live session"))
+        self.assertFalse(s.hold_limited(self.root, dict(seen), 1_700_000_000))
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
     def test_play_on_paused_parent_resumes_at_most_the_cap(self):
         b, s = self.serve.board, self.serve
         parent = b.cmd_new(self.root, "Capped parent")

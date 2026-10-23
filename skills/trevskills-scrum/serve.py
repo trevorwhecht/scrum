@@ -159,7 +159,7 @@ def resume_job(project, root, job, jobs):
     paused parent resumes its paused children up to the cap and starts whatever is ready instead. A child over the cap
     is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees."""
     job_id = job["id"]
-    if job.get("children") and job.get("paused"):
+    if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
             kid = next((j for j in jobs if j["id"] == k), None)
@@ -413,7 +413,7 @@ def flag_stalled(root, job, msg):
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
-            if not live or live.get("stage") != stage:
+            if not live or live.get("stage") != stage or live.get("paused"):  # paused meanwhile: Trevor holds it
                 raise board._Gone
             live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {msg.format(stage=stage)}",
                         updatedAt=board.now())
@@ -433,7 +433,7 @@ def hold_limited(root, job, reset, stage=None):
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
-            if not live or live.get("stage") != job["stage"]:
+            if not live or live.get("stage") != job["stage"] or live.get("paused"):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
     except board._Gone:
