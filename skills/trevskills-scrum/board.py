@@ -496,6 +496,7 @@ def abort_job(root, job, requeue, reason):
     folder = Path(root) / "jobs" / job["id"]
     feature = folder / "feature.md"
     job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    job.pop("paused", None)  # an aborted job is never played
     if not requeue:
         return
     lines, items = read_backlog(root)

@@ -1541,6 +1541,15 @@ class BoardTest(unittest.TestCase):
             self.assertIn("was aborted", str(e.exception))
         self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
+    def test_abort_clears_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        board.cmd_abort(self.root, job_id, requeue=False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertNotIn("paused", job)
+
     def test_abort_requeues_full_feature_text(self):
         job_id = board.cmd_new(self.root, "Short title")
         (self.root / "jobs" / job_id / "feature.md").write_text("Short title\nwith the full details on line two\n")

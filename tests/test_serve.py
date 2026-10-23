@@ -4050,6 +4050,12 @@ class AutoResumeTest(unittest.TestCase):
                 self.assertEqual(self.sweep(), [])
                 self.assertNotIn("p/kid", self.serve.AUTO_RESUME, "the limit schedule is untouched")
 
+    def test_paused_parent_does_not_retry_stalled_child(self):
+        self.run_child()
+        self.jobs[0].update(paused=True, reason="stalled in running: paused by Trevor. Fix: click Play.")
+        self.assertEqual(self.sweep(), [], "a paused parent keeps stage running but restarts no child")
+        self.assertEqual(self.serve.STALL_RESUMED, set())
+
     def test_non_limit_stall_outside_run_not_resumed(self):
         for case, kw in (("parent not running", {"parent_stage": "needs-human"}), ("standard lane", {"lane": "standard"}),
                          ("paused", {"reason": "stalled in build: paused by Trevor", "stage": "build", "paused": True})):

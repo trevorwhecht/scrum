@@ -336,7 +336,8 @@ def auto_resume(project, root, jobs):
             m = re.match(rf"{board.STALLED}(\w+):", reason)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             once_key = f"{key}/{m.group(1) if m else ''}"
-            if m and parent and parent.get("stage") == "running" and parent.get("lane") in ("runall", "bigboy") \
+            if m and parent and parent.get("stage") == "running" and not parent.get("paused") \
+                    and parent.get("lane") in ("runall", "bigboy") \
                     and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
                 STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
