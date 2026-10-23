@@ -152,6 +152,18 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
 
+    def test_code_reviewer_checks_codex_binary_first(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("command -v codex", "codex: skipped — codex not installed", "make no router call"):
+            self.assertIn(phrase, text, phrase)
+        self.assertLess(text.index("command -v codex"), text.index('route.py" codex-review --job'))
+        self.assertEqual(text.count("codex-review skip none 0 skipped"), 1)
+
+    def test_code_reviewer_demotes_out_of_scope_codex_findings(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        for phrase in ("Codex never reads spec.md", "`Out:`", "scrum/backlog.md", "never `[blocking]`"):
+            self.assertIn(phrase, text, phrase)
+
     def test_codex_block_local_runner_is_shell_agnostic(self):
         import os, tempfile
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
