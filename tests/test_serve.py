@@ -43,7 +43,7 @@ class ServeTest(unittest.TestCase):
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
                           SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
-        serve.CLAUDE = str(stub)  # another test class may have imported serve first
+        serve.CLAUDE = serve.board.CLAUDE = str(stub)  # another test class may have imported serve or board first
         cls.serve = serve
         cls.root = base / "repo" / "scrum"
         (cls.root / "jobs").mkdir(parents=True)
@@ -2981,7 +2981,9 @@ class AiResearchTest(unittest.TestCase):
 
     def setUp(self):
         AiSettingsTest.setUp(self)
-        self.serve.CLAUDE = "claude-stub"
+        patcher = mock.patch.object(self.serve.board, "CLAUDE", "claude-stub")  # spawn launches board.CLAUDE
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.runs, self.real_home = self.reg / "scrum" / "runs", self.serve.research_home
         patcher = mock.patch.object(self.serve, "research_home", lambda: ("reg", self.reg / "scrum"))
         patcher.start()
@@ -3934,6 +3936,35 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(s.AUTO_RESUME["p/kid"][0], 1)
         self.assertNotIn("p/lil", s.AUTO_RESUME)
 
+    def test_auto_resume_held_job_waits_for_reset_and_slot(self):
+        s, T = self.serve, 1_800_000_000
+        def hold():
+            self.jobs = [{"id": "held", "stage": "build", "reason": None, "limitResetAt": T, "updatedAt": "2026-01-01T00:00:00+00:00"}]
+            (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        def at(t, refusal=None):
+            with mock.patch.object(s.time, "time", return_value=t), \
+                    mock.patch.object(s, "resume_refusal", return_value=refusal):
+                return self.sweep()
+        def live():
+            return json.loads((self.root / "board.json").read_text())["jobs"][0]
+        hold()
+        self.assertEqual(at(T + 60), [], "before the reset + 120 s")
+        self.assertEqual((live()["stage"], live()["limitResetAt"]), ("build", T))
+        self.assertEqual(at(T + 121, refusal="can't resume yet: sib. Fix: x"), [], "a sibling holds the slot")
+        self.assertEqual((live()["stage"], live()["limitResetAt"]), ("build", T))
+        self.assertNotIn("p/held", s.AUTO_RESUME, "a refusal spends no try")
+        self.assertEqual(at(T + 121), ["held"])
+        self.assertEqual((live()["stage"], live()["reason"]),
+                         ("needs-human", "stalled in build: usage limit reset. Fix: click Resume."))
+        self.assertNotIn("limitResetAt", live())
+        self.assertEqual(s.AUTO_RESUME["p/held"][0], 1)
+        hold()
+        s.AUTO_RESUME["p/held"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(at(T + 121), [], "capped")
+        self.assertEqual(live()["stage"], "needs-human")
+        self.assertTrue(live()["reason"].startswith("stalled in build: "), live()["reason"])
+        self.assertNotIn("limitResetAt", live())
+
     def run_child(self, parent_stage="running", lane="runall", reason="stalled in build: no board update for 30 min "
                   "and no live session. Fix: click Resume."):
         """A Run-all/BigBoy-style parent and one child stalled for a non-limit reason (its log names no limit)."""
@@ -4305,6 +4336,14 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.orphan(stage="build")
         self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
         self.assertEqual(self.spawned(), [])
+
+    def test_respawn_orphans_skips_limit_held_child(self):
+        (self.root / "jobs" / "002-claimed").mkdir()
+        (self.root / "jobs" / "002-claimed" / "spec.md").write_text("# x\n")
+        self.orphan(minutes=10, stage="build", worktree="/tmp/wt-002", limitResetAt=1_800_000_000)
+        self.assertEqual(self.spawned(), [])
+        kid = self.job("002-claimed")
+        self.assertEqual((kid["stage"], kid["reason"], kid["limitResetAt"]), ("build", None, 1_800_000_000))
 
     def test_orphan_respawn_skips(self):
         lock = self.root / "jobs" / "001-par" / ".chain.lock"
