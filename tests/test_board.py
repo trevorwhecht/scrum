@@ -3086,6 +3086,48 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertEqual(out["spawn"], ["ux", "ui", "code"])
         self.assertFalse((self.rdir(1) / "review-ui.md").exists())
 
+    # --- non-ASCII paths and stale skip files ---
+    def test_review_plan_security_runs_on_non_ascii_api_path(self):
+        self.commit("src/café/api/x.py", "x = 1\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertIn("security", out["spawn"])
+        self.assertFalse((self.rdir(1) / "review-security.md").exists())
+
+    def test_review_plan_ui_runs_on_non_ascii_html_path(self):
+        self.commit("pages/café.html", "<p>x</p>\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_rerun_removes_stale_skip_for_spawned_roles(self):
+        self.commit("src/a.py", "a = 2\n")
+        board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(self.files(1), ["review-security.md", "review-ui.md", "review-ux.md"])
+        self.commit("index.html", "<p>x</p>\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
+        self.assertEqual(self.read(1, "security"), self.SEC_SKIP)
+
+    def test_review_plan_full_rerun_removes_carried_forward_files(self):
+        self.round_one(self.MIXED)
+        self.commit("src/a.py", "a = 3\n")
+        board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(self.files(2), ["review-ui.md", "review-ux.md"])
+        self.commit("index.html", "<p>x</p>\n")
+        self.commit("app/api/x.py", "x = 1\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["security", "ux", "ui", "code"])
+        self.assertEqual(self.files(2), [])
+
+    def test_review_plan_keeps_real_review_for_spawned_role(self):
+        self.commit("index.html", "<p>x</p>\n")
+        self.rdir(1).mkdir(parents=True)
+        (self.rdir(1) / "review-ui.md").write_text("VERDICT: CHANGES\nreal finding\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertIn("ui", out["spawn"])
+        self.assertEqual(self.read(1, "ui"), "VERDICT: CHANGES\nreal finding\n")
+
     # --- AC 4 ---
     def test_review_plan_security_skip_when_no_sensitive_files(self):
         self.commit("src/a.py", "a = 2\n")

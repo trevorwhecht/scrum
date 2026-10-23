@@ -963,9 +963,24 @@ def glob_match(path, globs):
 def _names(wt, *args):
     """git diff --name-only <args> as a set of paths; None when the diff can't be read."""
     try:
-        return set(_git(wt, "diff", "--name-only", *args, "--").decode().splitlines())
+        return set(_git(wt, "-c", "core.quotePath=false", "diff", "--name-only", *args, "--").decode().splitlines())
     except (ValueError, OSError, UnicodeDecodeError, subprocess.SubprocessError):
         return None
+
+
+ORCH_REVIEW_RE = re.compile(
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP)) + "|" + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+
+
+def _drop_stale(rd, spawn):
+    """Delete an earlier run's skip or carried-forward file for each spawned role; real review output stays."""
+    for r in spawn:
+        p = rd / f"review-{r}.md"
+        try:
+            if ORCH_REVIEW_RE.fullmatch(p.read_text(encoding="utf-8")):
+                p.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
 
 
 def _incremental_since(prev, wt, base):
@@ -1008,7 +1023,9 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         for r in REVIEWERS:
             if verdicts[r] == "PASS":
                 (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
-        return {"spawn": [r for r in REVIEWERS if verdicts[r] == "CHANGES"], "since": since}
+        spawn = [r for r in REVIEWERS if verdicts[r] == "CHANGES"]
+        _drop_stale(rd, spawn)
+        return {"spawn": spawn, "since": since}
     spawn = list(REVIEWERS)
     files = None if base.startswith("-") else _names(wt, f"{base}...HEAD")
     if files is not None:
@@ -1023,6 +1040,7 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         for r, text in skips.items():
             (rd / f"review-{r}.md").write_text(text, encoding="utf-8")
         spawn = [r for r in REVIEWERS if r not in skips]
+    _drop_stale(rd, spawn)
     return {"spawn": spawn, "since": None}
 
 
