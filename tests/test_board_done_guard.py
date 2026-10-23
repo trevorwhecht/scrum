@@ -107,6 +107,20 @@ class DoneGuardTest(unittest.TestCase):
         self.assertEqual(self.stage(job_id), "done")
         self.assertFalse(self.marker.exists())
 
+    def test_done_refused_for_lilguy_with_worktree_and_no_pr(self):
+        self.fake_gh("echo OPEN")
+        job_id = board.cmd_new(self.root, "lil in worktree")
+        board.cmd_set(self.root, job_id, ["lane=lilguy", "worktree=/tmp/wt-lil"])
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_set(self.root, job_id, ["stage=done"])
+        self.assertEqual(str(e.exception.code), "not done: no PR recorded")
+        self.assertNotEqual(self.stage(job_id), "done")
+        board.cmd_set(self.root, job_id, [f"pr={PR}"])
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_set(self.root, job_id, ["stage=done"])
+        self.assertEqual(str(e.exception.code), f"not done: PR {PR} is OPEN, not merged")
+        self.assertNotEqual(self.stage(job_id), "done")
+
     def test_set_on_done_job_skips_check(self):
         self.fake_gh("echo MERGED")
         job_id = self.job_with_pr()

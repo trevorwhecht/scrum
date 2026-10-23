@@ -20,8 +20,10 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
 - Local routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
-- A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` always stops at the Merge
-  agent-rules guard for Trevor unless it is exactly an approved digest proposal. Specs need not restate this.
+- A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` stops at the Merge
+  agent-rules guard for Trevor unless it is an approved digest proposal, or the in-ticket self-heal clears it (every
+  changed rules file named in feature.md or spec.md's `## Likely files`, and `tests.test_contracts` passes). Specs need
+  not restate this.
   Batch rule edits; do not mix them into feature jobs.
 
 ## Git
