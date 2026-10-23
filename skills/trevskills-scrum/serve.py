@@ -59,6 +59,14 @@ def running(project, job_id):
         return bool(run and run["proc"].poll() is None)
 
 
+def live_ids(project):
+    """Ids of the project's jobs with a live dashboard session. A just-spawned resume still reads needs-human on the
+    board, so the cap checks count these as in progress too."""
+    with RUNS_LOCK:
+        return {key.split("/", 1)[1] for key, run in RUNS.items()
+                if key.startswith(f"{project}/") and run["proc"].poll() is None}
+
+
 def stop(project, job_id):
     """Terminate a dashboard-started run and everything it spawned (it runs in its own process group)."""
     with RUNS_LOCK:
@@ -131,7 +139,7 @@ def setup_done(project, root, job_id):
 
 def start_ready(project, root, parent_id):
     """Claim the parent's startable children and start each one headless. Returns cmd_ready's output."""
-    out = board.cmd_ready(root, parent_id)
+    out = board.cmd_ready(root, parent_id, live_ids(project))
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
     return out
@@ -139,13 +147,20 @@ def start_ready(project, root, parent_id):
 
 def resume_job(project, root, job, jobs):
     """Restart a watchdog-flagged job (the Resume button, and the auto-resume sweep). Play on a paused parent
-    resumes its paused children and starts whatever is ready instead."""
+    resumes its paused children up to the cap and starts whatever is ready instead. A child over the cap is unpaused
+    but left stalled, so the auto-resume sweep starts it once a slot frees."""
     job_id = job["id"]
     if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
             kid = next((j for j in jobs if j["id"] == k), None)
-            if kid and board.PAUSED_RE.match(kid.get("reason") or "") and not running(project, k):
+            if not kid or not board.PAUSED_RE.match(kid.get("reason") or "") or running(project, k):
+                continue
+            if resume_refusal(project, root, kid):
+                stage = kid["reason"][len(board.STALLED):].split(":")[0]
+                board.cmd_set(root, k, [f"reason={board.STALLED}{stage}: waiting for a free slot after Play. "
+                                        "Fix: click Resume."], unpause=True)
+            else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
         start_ready(project, root, job_id)
         return
@@ -156,12 +171,12 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
                  "/trevskills-commitpush, or discard it, then click Abort.")
 
 
-def resume_refusal(root, job):
+def resume_refusal(project, root, job):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. lilguy has no worktree or
     builder to resume; a Run-all/BigBoy child waits for the same cap and overlap rules `ready` applies to new claims."""
     if job.get("lane") == "lilguy":
         return LILGUY_RESUME
-    blocker = job.get("parent") and board.resume_blocker(root, job["id"])
+    blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
 
 
@@ -216,7 +231,7 @@ def answer_job(project, root, job, jobs, key):
         return 409, {"error": "job isn't waiting on that answer, or is already running"}
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
-    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(root, job)):
+    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job)):
         return 409, {"error": refusal}
     job_id = job["id"]
     picked = board.cmd_answer(root, job_id, key)
@@ -300,14 +315,14 @@ def auto_resume(project, root, jobs):
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             once_key = f"{key}/{m.group(1) if m else ''}"
             if m and parent and parent.get("stage") == "running" and parent.get("lane") in ("runall", "bigboy") \
-                    and once_key not in STALL_RESUMED and resume_refusal(root, job) is None:
+                    and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
                 STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
             continue
-        if resume_refusal(root, job):  # a sibling holds its slot: retry next tick without spending a try
+        if resume_refusal(project, root, job):  # a sibling holds its slot: retry next tick without spending a try
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
@@ -387,7 +402,7 @@ def respawn_exited(project, root):
         if not flag_stalled(root, job, EXITED):
             continue
         flagged.append(job["id"])
-        if run.get("respawn") or resume_refusal(root, job):
+        if run.get("respawn") or resume_refusal(project, root, job):
             board.play(board.sound("needs-human"))
             continue
         resume_job(project, root, job, jobs)
@@ -2535,7 +2550,7 @@ class Handler(BaseHTTPRequestHandler):
             if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.RESUMABLE) \
                     or running(project, job_id):
                 return 409, {"error": "job isn't stalled, or is already running"}
-            if refusal := resume_refusal(root, job):
+            if refusal := resume_refusal(project, root, job):
                 return 409, {"error": refusal}
             resume_job(project, root, job, jobs)
             return 202, {"id": job_id, "action": action}

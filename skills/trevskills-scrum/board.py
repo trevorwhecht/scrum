@@ -1620,9 +1620,10 @@ class Blocker(str):
         return self
 
 
-def resume_blocker(root, job_id):
+def resume_blocker(root, job_id, live=()):
     """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s cap and overlap rules
-    (slot_conflict) against its in-progress siblings. Reads the board without writing or claiming anything."""
+    (slot_conflict) against its in-progress siblings: any not IDLE, plus the ids in `live` (serve.py's running
+    sessions, which still read needs-human until they write the board). Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     job = jobs.get(job_id)
@@ -1635,7 +1636,7 @@ def resume_blocker(root, job_id):
     spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
         if (jobs_dir / k["id"] / "spec.md").is_file() else ""
     files = {k["id"]: likely_files(spec(k)) for k in kids}
-    busy = [k for k in kids if k["stage"] not in IDLE and k["id"] != job_id]
+    busy = [k for k in kids if (k["stage"] not in IDLE or k["id"] in live) and k["id"] != job_id]
     if not busy:
         return None
     hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
@@ -1655,8 +1656,9 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
-def cmd_ready(root, parent_id):
-    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
+def cmd_ready(root, parent_id, live=()):
+    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
+    `live` ids count as in progress whatever their stage (see resume_blocker)."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -1674,7 +1676,7 @@ def cmd_ready(root, parent_id):
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
-        busy = [k for k in kids if k["stage"] not in IDLE]
+        busy = [k for k in kids if k["stage"] not in IDLE or k["id"] in live]
         cap = slot_cap(runall)
         ready = []
         for k in kids if parent["stage"] == "running" or legacy else []:
@@ -2743,7 +2745,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     with open(log, "w") as fh:
         proc = subprocess.Popen(argv, cwd=root.parent,
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))  # board.py plays scrum's sounds
+                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
     try:  # the Open terminal button tails this; a job that isn't on the board (run-all, digest) has no row to set
         cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
     except SystemExit:

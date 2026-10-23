@@ -1956,6 +1956,23 @@ class BoardTest(unittest.TestCase):
             self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
 
+    def test_live_sessions_count_as_busy_siblings(self):
+        """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so
+        one sweep cannot resume or claim past the cap."""
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        parent, kids = self.runall(6)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/l{i}.py")
+        for k in kids[:4]:
+            board.cmd_set(self.root, k, stalled, internal=True)
+        self.assertIsNone(board.resume_blocker(self.root, kids[0]))
+        text = board.resume_blocker(self.root, kids[0], live={kids[1], kids[2], kids[3]})
+        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
+        self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
+        out = board.cmd_ready(self.root, parent, live={kids[0], kids[1], kids[2]})
+        self.assertEqual(out["ready"], [], "3 live resumes fill the cap")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[4:6])
+
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):
         self.assertEqual(board.cmd_new(self.root, "From the Mac", "042-from-the-mac"), "042-from-the-mac")

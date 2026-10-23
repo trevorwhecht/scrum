@@ -946,6 +946,32 @@ class ServeTest(unittest.TestCase):
                          [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
         self.assertEqual(self.stage_of(w)["stage"], "spec")
 
+    def test_play_on_paused_parent_resumes_at_most_the_cap(self):
+        b, s = self.serve.board, self.serve
+        parent = b.cmd_new(self.root, "Capped parent")
+        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(5)]
+        self.edit_job(parent, lane="runall", stage="running", children=kids)
+        for i, k in enumerate(kids):
+            self.edit_job(k, parent=parent, stage="build", parallel=True)
+            (self.root / "jobs" / k).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/cap{i}.py`: why\n")
+        b.cmd_pause(self.root, parent)
+
+        def fake_spawn(project, root, jid, action, prompt, flags=()):
+            proc = mock.Mock(); proc.poll.return_value = None
+            with s.RUNS_LOCK:
+                s.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/y.log"}
+
+        self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in kids])
+        with mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:3], "a just-spawned resume holds its slot")
+        for k in kids[3:]:
+            job = self.stage_of(k)
+            self.assertEqual(job["stage"], "needs-human")
+            self.assertTrue(job["reason"].startswith("stalled in build: "), job["reason"])
+            self.assertIsNone(b.PAUSED_RE.match(job["reason"]), "no longer paused, so auto_resume takes it when a slot frees")
+
     def test_activity_picks_newest_of_runlog_worktree_and_board(self):
         wt = Path(self.tmp.name) / "wt-newest"
         (wt / "src").mkdir(parents=True)
@@ -1005,6 +1031,8 @@ class ServeTest(unittest.TestCase):
             self.serve.spawn("repo", self.root, "999-not-on-board", "start", "x")  # failure is ignored
         self.addCleanup(lambda: [self.serve.RUNS.pop(f"repo/{i}", None) for i in (job_id, "999-not-on-board")])
         self.assertEqual(popen.call_count, 2)
+        self.assertEqual(popen.call_args.kwargs["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"], "0",
+                         "a headless orchestrator waiting on a background builder is never killed")
         job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
         self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
