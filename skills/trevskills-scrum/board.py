@@ -36,6 +36,8 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
+  board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
+                                   and whether a cheaper lane would have done (read-only; Digest step 1)
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
@@ -804,6 +806,68 @@ def cmd_digest_trim(root, digest_id):
     return trimmed
 
 
+# --- pipeline-fit: per-job routing facts for the digest reader's ## Pipeline fit section. Read-only. ---
+FAST_STUB = "Skipped by orchestrator: fast lane."
+
+
+def _real_review(p):
+    """True when p is a review a reviewer wrote, not an orchestrator skip or carried-forward stub."""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return not ORCH_REVIEW_RE.fullmatch(text) and FAST_STUB not in text
+
+
+def _fit_diff(root, job):
+    """(added, deleted, files) from the worktree, else the PR's REST totals; (None, None, None) when unreadable."""
+    if job.get("worktree") and Path(job["worktree"]).is_dir():
+        diff = _route_diff(job)
+        if diff is None or any(a is None for a, _, _ in diff[0]):
+            return None, None, None
+        rows, names = diff
+        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names)
+    m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", job.get("pr") or "")
+    if not m:
+        return None, None, None
+    try:
+        pr = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}")
+        out = tuple(pr[k] for k in ("additions", "deletions", "changed_files"))
+    except (GhError, TypeError, KeyError):
+        return None, None, None
+    return out if all(type(v) is int for v in out) else (None, None, None)
+
+
+def cmd_pipeline_fit(root, digest_id: str) -> dict:
+    """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
+    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed."""
+    d = Path(root) / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
+        raise SystemExit(f"no digest {digest_id!r}")
+    listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
+    jobs = {j["id"]: j for j in read_board(root)["jobs"]}
+    out = []
+    for job_id in listed:
+        job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
+        lane = job.get("lane") or "standard"
+        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+        agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
+        agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
+                                                           for n in rounds)]
+        agents += ["approver"] if (folder / "decision.md").is_file() else []
+        verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
+                             for r in REVIEWERS} for n in rounds}
+        added, deleted, files = _fit_diff(root, job)
+        size = None if added is None else added + deleted
+        over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES)
+        fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+        out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
+                    "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
+                    "fit": fit})
+    return {"digest": str(digest_id), "jobs": out}
+
+
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
 # the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
 CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
@@ -919,6 +983,7 @@ ENV_RE = re.compile(r"(^|/)\.env")
 SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
                           r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
 FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
+LILGUY_MAX_LINES, LILGUY_MAX_FILES = 30, 3
 
 
 # --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
@@ -2572,6 +2637,7 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
+    sub.add_parser("pipeline-fit").add_argument("digest")
     dv = sub.add_parser("digest-verify")
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
@@ -2659,6 +2725,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_start(a.dir)))
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
+    elif a.cmd == "pipeline-fit":
+        print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))

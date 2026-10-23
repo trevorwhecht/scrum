@@ -899,7 +899,8 @@ class ContractTest(unittest.TestCase):
                        "`scrum-level`", "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
-                       "Opus-built", "promote", "avg fix rounds"):
+                       "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
+                       "Cheapest lane:"):
             self.assertIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
@@ -909,7 +910,8 @@ class ContractTest(unittest.TestCase):
                        "at least 5 local runs", "at least 3 local runs", "more than one third", "codex-review",
                        '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "(unanimous)",
-                       "pick not unanimous"):
+                       "pick not unanimous", "## Pipeline fit", "count toward the at-most-8 cap",
+                       "threshold or routing edits"):
             self.assertIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
@@ -919,7 +921,7 @@ class ContractTest(unittest.TestCase):
         digest = self.section(text, "## Digest", "## Final report")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
                        "error.md", "B digest-trim", "no remote", "--digest-auto", "ROUTING=", "local/routing.json",
-                       "realpath ~/.claude/skills/trevskills-scrum", '"applied"', '"queued"', "queued: <reason>"):
+                       "realpath ~/.claude/skills/trevskills-scrum", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
             self.assertIn(phrase, digest, phrase)
         self.assertNotIn("only ever queues a repo backlog item", digest)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
