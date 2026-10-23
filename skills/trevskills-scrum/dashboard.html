@@ -9,7 +9,7 @@
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1c1b19;--muted:#76736b;--line:#e3e0d8;--accent:#2457d6;
   --pass:#1e8449;--changes:#c4520f;--invalid:#7a3fd6;--human:#d32f2f;--pending:#c8c4ba;
-  --p1:#1e8449;--p2:#2f9e6a;--p3:#1f8fa6;--p5:#d4a514;--p8:#d9661a;--p13:#c0392b}
+  --p1:#1e8449;--p2:#2f9e6a;--p3:#1f8fa6;--p5:#d4a514;--p8:#d9661a;--p13:#c0392b;--roadmap:var(--p5)}
 @media (prefers-color-scheme:dark){:root{--bg:#131312;--card:#1d1c1a;--ink:#ecebe6;--muted:#9b978e;--line:#2f2d2a;--pending:#55524c}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -21,9 +21,6 @@ h1{font-size:16px;margin:0}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
 .usage td:nth-child(2),.usage td:nth-child(3),.usage thead th:nth-child(2),.usage thead th:nth-child(3){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
-#roadmaps{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:0 16px 12px}#roadmaps:empty{display:none}
-.rm{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;min-width:0}
-.rm>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rm>span+span{color:var(--muted)}.rm b{color:var(--human);font-weight:inherit}
 .col h2 span{white-space:nowrap}
 .col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
 .col.human h2{color:var(--human)}
@@ -31,6 +28,9 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
 .card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
 .card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
+.card.roadmap{border:2px solid var(--roadmap);box-shadow:0 0 0 3px color-mix(in srgb,var(--roadmap) 15%,transparent)}
+.card.roadmap .lanechip{color:var(--roadmap);border-color:var(--roadmap)}.card.roadmap:hover,.card.roadmap:focus-visible{border-color:var(--accent)}
+.card.roadmap .line{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card.roadmap b{color:var(--human);font-weight:inherit}
 .id{font:12px ui-monospace,monospace;color:var(--muted)}
 .title{display:block;margin:2px 0 4px;font-weight:600}
 .row{display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin-top:4px}
@@ -206,7 +206,6 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
-<section id="roadmaps" aria-label="Roadmaps"></section>
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -392,17 +391,22 @@ function roadmapLookup(all) {
   for (const j of all) if (j.parent && !out[j.key] && out[`${j.project}/${j.parent}`]) out[j.key] = out[`${j.project}/${j.parent}`];
   return out;
 }
-// Per-project banner: where the roadmap is, what runs next, and what blocks it. No roadmap = no element.
-function roadmapBanner(p) {
+// Per-project roadmap card: where the roadmap is, the current step, what runs next, and what blocks it. No roadmap = "".
+// A <button>, so Enter and Space open it; the board click handler sends data-roadmap to openRoadmap().
+function roadmapCard(p) {
   const rm = roadmaps[p], cur = rm?.current;
   if (!rm) return "";
-  const ph = cur && rm.phases.find(x => x.n === cur.p), n = rm.next, b = rm.blocker;
-  const row1 = `${p} roadmap · ${cur ? `P${cur.p}/${rm.phases.length} ${ph.title} · S${cur.s}/${ph.steps.length}` : "done"}`;
+  const ph = cur && rm.phases.find(x => x.n === cur.p), st = ph?.steps.find(x => x.n === cur.s), n = rm.next, b = rm.blocker;
   const next = `next: ${n ? `${n.p !== cur?.p ? `P${n.p} ` : ""}S${n.s} ${n.request}` : "none"}`;
   const block = b ? `${b.job} ${b.reason}`.trim() : "none";
-  return `<div class="rm"><span title="${esc(row1)}">${esc(row1)}</span>${cur
-    ? `<span title="${esc(`${next} · blocker: ${block}`)}">${esc(next)} · blocker: ${b ? `<b>${esc(block)}</b>` : "none"}</span>` : ""}</div>`;
+  // Each line is one row that ellipsizes; the full text stays in its title.
+  const line = (text, cls = "meta", html = esc(text)) => `<span class="${cls} line" title="${esc(text)}">${html}</span>`;
+  return `<button class="card roadmap" data-roadmap="${esc(p)}">${tag(p)}<span class="lanechip">roadmap</span>${line(rm.name, "title")}
+    ${line(cur ? `P${cur.p}/${rm.phases.length} ${ph?.title ?? ""} · S${cur.s}/${ph?.steps.length ?? 0}` : "done")}
+    ${cur ? line(st?.request ?? "") + line(next) + line(`blocker: ${block}`, "meta", `blocker: ${b ? `<b>${esc(block)}</b>` : "none"}`) : ""}</button>`;
 }
+// Projects whose roadmap card is visible: the project filter applies, and only All pipelines or roadmap show it.
+const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
 function card(job) {
   const human = job.stage === "needs-human" || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
@@ -450,17 +454,17 @@ let doneShown = DONE_STEP;
 const newestFirst = (a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
 
 function render() {
-  const list = shown(), dcards = digestCards();
-  const cols = [...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
-  const count = s => list.filter(j => colOf(j) === s).length + (s === "needs-human" ? dcards.length : 0);
-  // Roadmap banners follow the project filter only: a banner is per project, not per job.
-  $("roadmaps").innerHTML = projects.filter(p => !filter || p === filter).map(roadmapBanner).join("");
+  const list = shown(), dcards = digestCards(), rcards = roadmapShown().map(roadmapCard);
+  // The roadmap column leads the board, and only while it holds a card.
+  const cols = [...(rcards.length ? ["roadmap"] : []), ...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
+  const count = s => s === "roadmap" ? rcards.length : list.filter(j => colOf(j) === s).length + (s === "needs-human" ? dcards.length : 0);
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
+  const rmFocused = document.activeElement?.matches?.("#board [data-roadmap]") && document.activeElement.dataset.roadmap;
   const optFocused = document.activeElement?.matches?.("#board [data-answer]") && [document.activeElement.closest(".card").dataset.key, document.activeElement.dataset.answer];
   $("board").innerHTML = cols.map(stage => {
-    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : "";
+    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : stage === "roadmap" ? rcards.join("") : "";
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
     const more = inCol.length < all.length ? `<button class="btn tall more" type="button" data-more>Load more</button>` : "";
     return `<section class="col${stage === "needs-human" ? " human" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
@@ -468,6 +472,7 @@ function render() {
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
   if (optFocused) focusOption($("board"), ...optFocused);
+  if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus();
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
   $("status").textContent = projects.length
@@ -537,7 +542,7 @@ $("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; s
 
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
-  const url = `p/${enc(job.project)}/jobs/${enc(job.id)}/${file.split("/").map(enc).join("/")}`;
+  const url = `${job.base ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
   try {
     const res = await fetch(url, {cache: "no-store"});
     if (!res.ok) throw new Error(`${res.status}`);
@@ -565,6 +570,21 @@ function open(job) {
   if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
+}
+
+// The roadmap card's viewer: the project's roadmap.md, rendered by show(), with no job actions. The key is never a
+// board job key (those are project/id), so a poll leaves #actions and #diverged empty.
+const roadmapDoc = p => ({key: `${p}#roadmap`, project: p, id: "roadmap", base: `p/${enc(p)}/`});
+function openRoadmap(p) {
+  const rm = roadmaps[p];
+  if (!rm) return;
+  const doc = roadmapDoc(p);
+  $("viewer").dataset.key = doc.key;
+  $("viewerTitle").textContent = rm.name;
+  $("tabs").innerHTML = tag(p) + '<button data-file="roadmap.md" aria-pressed="false">roadmap.md</button><button class="close" aria-label="Close">✕</button>';
+  $("doc").innerHTML = $("actions").innerHTML = $("diverged").innerHTML = "";
+  if (!$("viewer").open) $("viewer").showModal();
+  show(doc, "roadmap.md");
 }
 
 // Diverged bullets are read from the served files, not board.json; a file that fails to load is skipped.
@@ -978,7 +998,10 @@ const PIPELINES = {
   bigboy: ["scrum-planner", {agent: "scrum-spec-writer", note: "per child"},
     {step: "Children", note: "each runs its own pipeline", links: ["fast", "standard", "debug"], hint: "Each child ticket runs as its own job, in its own pipeline, with its own PR."},
     {agent: "scrum-tracker", note: "after each child merge"}, "scrum-bigboy-reviewer",
-    {step: "Fix ticket", note: "one, on gaps", hint: "When the final review finds gaps, one FIX ticket is added to the backlog."}]};
+    {step: "Fix ticket", note: "one, on gaps", hint: "When the final review finds gaps, one FIX ticket is added to the backlog."}],
+  roadmap: [{step: "Draft", note: "roadmap.md · you approve once", hint: "/trevskills-scrum roadmap <brief> drafts roadmap.md as ordered phases of bigboy and standard steps; Trevor approves the draft once."},
+    {step: "Steps", note: "one job per step", links: ["standard", "bigboy"], hint: "Each step runs as its own standard or bigboy job and stops only where that job would stop."},
+    {step: "Next step", note: "after each merge", hint: "After a step's job merges, the next todo step starts with no prompt. A step stopped on needs-human shows as the roadmap's blocker."}]};
 const MAINTENANCE = {
   "Run all": ["scrum-triager", {step: "Jobs", note: "backlog, one by one", hint: "After triage every open backlog item runs as a job, one after another."}],
   "Digest": ["scrum-digest-reader", "scrum-digester", {step: "Digest dialog", note: "you decide", hint: "Each proposed edit waits in the Digest dialog for Approve or Reject."}]};
@@ -986,7 +1009,7 @@ const MAINTENANCE = {
 const LOOPS = {fast: ["scrum-review-code", "changes", "When the code review asks for CHANGES, the job goes back to the builder for another round."],
   standard: ["scrum-approver", "changes · rework", "When the approver decides CHANGES or REWORK, the job goes back to the builder for another round."]};
 LOOPS.debug = LOOPS.standard;
-const TABS = {all: "All", fast: "Fast", standard: "Standard", debug: "Debug", bigboy: "BigBoy", maintenance: "Maintenance"};
+const TABS = {all: "All", fast: "Fast", standard: "Standard", debug: "Debug", bigboy: "BigBoy", roadmap: "Roadmap", maintenance: "Maintenance"};
 const ZOOMS = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150];
 let agents = [], skills = null;
 let adding = null;  // skill whose add POST is in flight; renderSkills() locks the picker while set
@@ -1437,12 +1460,13 @@ $("board").addEventListener("keydown", e => {  // a div card (one with option bu
 $("board").addEventListener("click", e => {
   if (e.target.closest("button[data-answer]")) return;
   const el = e.target.closest(".card");
+  if (el?.dataset.roadmap) return openRoadmap(el.dataset.roadmap);
   const job = el && jobs.find(j => j.key === el.dataset.key);
   if (job) open(job);
 });
 $("tabs").addEventListener("click", e => {
-  const b = e.target.closest("button[data-file]");
-  const job = b && jobs.find(j => j.key === $("viewer").dataset.key);
+  const b = e.target.closest("button[data-file]"), key = $("viewer").dataset.key;
+  const job = b && (jobs.find(j => j.key === key) || (key.endsWith("#roadmap") ? roadmapDoc(key.slice(0, -8)) : null));
   if (job) show(job, b.dataset.file);
 });
 document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e => {
