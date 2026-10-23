@@ -1152,6 +1152,20 @@ class ContractTest(unittest.TestCase):
         self.assertIn("- Base branch: <branch>", detect)
         self.assertNotIn("Base branch", self.section(detect, "```markdown", "\n```\n"))
 
+    def test_skill_test_sign_in_line(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        detect = self.section(text, "4. Detect the project", "5. Tell the user")
+        self.assertIn("- Test sign-in: <account> — credentials in <where>", detect)
+        self.assertNotIn("Test sign-in", self.section(detect, "```markdown", "\n```\n"))
+        para = detect[detect.index("`- Test sign-in:"):]
+        para = para[:para.index("\n\n")]
+        for phrase in ("scrum-review-ui", "scrum-review-ux", "never holds a password or token",
+                       "only when the repo's CLAUDE.md/AGENTS.md, rules files, README, seed script or e2e config already names a test account"):
+            self.assertIn(phrase, para, phrase)
+        tell = self.section(text, "5. Tell the user", "## Commands")
+        self.assertIn("Test sign-in", tell)
+        self.assertIn("never waits", tell)
+
     def test_restart_commands_are_allow_listed(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
@@ -2044,7 +2058,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 82000)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
