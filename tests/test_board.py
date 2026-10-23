@@ -3643,6 +3643,102 @@ class ReviewPlanTest(unittest.TestCase):
                 board.cmd_review_plan(self.root, self.job)
             self.assertEqual(self.files(1), [])
 
+    # --- deletion-dominated diffs (job 242) ---
+    DEL_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+
+    def big_base(self, files):
+        """Commit files in the worktree and make that commit the job's base, so later deletions are in the diff."""
+        for rel, text in files.items():
+            p = self.wt / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(text) if isinstance(text, bytes) else p.write_text(text)
+            self.git(self.wt, "add", rel)
+        self.git(self.wt, "commit", "-q", "-m", "big base")
+        self.git(self.wt, "branch", "-f", "bigbase")
+        board.cmd_set(self.root, self.job, ["base=bigbase"])
+
+    def delete(self, *rels):
+        self.git(self.wt, "rm", "-q", *rels)
+        self.git(self.wt, "commit", "-q", "-m", "delete")
+
+    def test_review_plan_deletion_dominated_skips_ui_ux(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100, "src/big.py": "x = 1\n" * 100})
+        self.delete("src/big.py")
+        self.commit("web/page.html", "<p>x</p>\n" * 9 + "<p>new</p>\n")  # +1 -91 on a UI file
+        for globs in ("*.html", None):
+            with self.subTest(globs=globs):
+                self.project(globs)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out, {"spawn": ["code"], "since": None})
+                self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+                self.assertEqual(self.read(1, "ux"), self.DEL_SKIP)
+                self.assertEqual(self.read(1, "security"), self.SEC_SKIP)
+        with self.subTest("no UI file: UI_SKIP wins"):
+            self.project("*.css")
+            out = board.cmd_review_plan(self.root, self.job)
+            self.assertEqual(out["spawn"], ["code"])
+            self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+            self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
+    def test_review_plan_deletion_skip_boundary_is_90pct(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 10})
+        self.commit("web/page.html", "<p>x</p>\n" + "<p>new</p>\n")  # +1 -9: exactly 90%
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["code"])
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+
+    def test_review_plan_deletion_dominated_keeps_security_on_sensitive_path(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 50, "src/auth.py": "x = 1\n" * 50})
+        self.delete("src/auth.py")
+        self.commit("web/page.html", "<p>new</p>\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["security", "code"], "since": None})
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.assertFalse((self.rdir(1) / "review-security.md").exists())
+
+    def test_review_plan_80pct_deletion_unchanged(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 10})
+        self.commit("web/page.html", "<p>x</p>\n" * 2 + "<p>a</p>\n<p>b</p>\n")  # +2 -8: 80%
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_deletion_skip_ignores_binary(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        (self.wt / "img.bin").write_bytes(b"\x00\x01\xff" * 10)
+        self.git(self.wt, "add", "img.bin")
+        self.git(self.wt, "commit", "-q", "-m", "binary")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), ["review-security.md"])
+        board.cmd_set(self.root, self.job, ["base=no-such-branch"])
+        (self.rdir(1) / "review-security.md").unlink()
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), [])
+
+    def test_review_plan_rerun_removes_stale_deletion_skip(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.assertFalse(board._real_review(self.rdir(1) / "review-ui.md"))
+        self.commit("src/more.py", "y = 1\n" * 100)  # +101 -100: no longer deletion-dominated
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_incremental_never_deletion_skips(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        since = self.round_one({"security": "PASS", "ux": "CHANGES", "ui": "CHANGES", "code": "PASS"})
+        self.commit("src/a.py", "a = 3\n")
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["ux", "ui"], "since": since})
+        self.assertEqual(self.files(2), ["review-code.md", "review-security.md"])
+        self.assertEqual(self.read(2, "code"), self.CARRIED)
+
     # --- AC 7 ---
     def test_review_plan_cli_prints_json(self):
         since = self.round_one(self.MIXED)
@@ -3924,6 +4020,51 @@ class RouteCheckTest(unittest.TestCase):
         self.git("reset", "-q", "--hard", "main")
         self.commit({"x/auth.py": "x\n", "x.html": "x\n"})
         self.assertEqual(self.route()["promote"], "UI file x.html")
+
+    # --- deletions (job 242) ---
+    def big_base(self, files):
+        """Commit files on the work branch and make that commit the job's base, so later deletions are in the diff."""
+        self.commit(files)
+        self.git("branch", "-f", "bigbase")
+        board.cmd_set(self.root, self.job, ["base=bigbase"])
+
+    def delete(self, *rels):
+        self.git("rm", "-q", *rels)
+        self.git("commit", "-q", "-m", "delete")
+
+    def test_route_check_deletions_stay_fast(self):
+        self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(8)})
+        self.delete(*(f"src/f{i}.py" for i in range(7)))
+        self.assertIsNone(self.promote({"src/f7.py": "y\n" * 5}))  # +5 -400 over 8 files, 1 with an added line
+
+    def test_route_check_promotes_on_120_added_lines(self):
+        self.big_base({"src/old.py": "x\n" * 300})
+        self.delete("src/old.py")
+        self.assertEqual(self.promote({"src/a.py": "x\n" * 120}), "diff over 100 lines (120)")
+
+    def test_route_check_promotes_on_deleted_schema_path(self):
+        for rel, want in (("prisma/schema.prisma", "schema path prisma/schema.prisma"), (".env.example", "env file .env.example"),
+                          ("web/index.html", "UI file web/index.html"), ("src/auth.py", "sensitive path src/auth.py")):
+            with self.subTest(rel):
+                self.git("reset", "-q", "--hard", "main")
+                self.big_base({rel: "x\n"})
+                self.delete(rel)
+                self.assertEqual(self.promote({"src/util.py": "x = 1\n"}), want)
+
+    def test_route_check_clean_round_with_deletion_skips(self):
+        self.big_base({"src/old.py": "x\n" * 95, "src/auth_old.py": "x\n"})
+        self.delete("src/old.py")
+        self.commit({"src/util.py": "x\n" * 5})  # +5 -95
+        d = self.jd / "round-1"
+        d.mkdir(parents=True)
+        (d / "check.md").write_text("CHECK: PASS\n")
+        (d / "review-code.md").write_text("VERDICT: PASS\nok\n")
+        for r in ("ui", "ux"):
+            (d / f"review-{r}.md").write_text("VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n")
+        (d / "review-security.md").write_text("VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n")
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+        self.delete("src/auth_old.py")
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
 
     # --- 2nd check failure ---
     def test_route_check_promotes_on_second_check_fail(self):
