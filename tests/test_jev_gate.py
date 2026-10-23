@@ -6,7 +6,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "trevskills-scrum"
 sys.path.insert(0, str(SKILL))
-import jev  # noqa: E402
+import board, jev  # noqa: E402
 
 REAL_ASK = jev.ask
 
@@ -123,6 +123,15 @@ class JevGateTest(unittest.TestCase):
                         out, f = self.gate(step, "new item text", ask)
                     self.assertEqual(out, want)
                     self.assertEqual((f[1], f[3], f[4]), (step, raw, want))
+
+    def test_decide_fails_before_jev_call_logs_dash(self):
+        (self.job / "feature.md").mkdir()  # exists but unreadable as text
+        out, f = self.gate("model")
+        self.assertEqual((out, f[1:5]), ("opus", ["model", "-", "IsADirectoryError", "opus"]))
+        with mock.patch.object(board, "read_backlog", side_effect=OSError("denied")):
+            out, f = self.gate("dupe", "new item text")
+        self.assertEqual((out, f[1:5]), ("add", ["dupe", "-", "OSError", "add"]))
+        self.assertEqual(self.sent, [])
 
     def test_model_cutoffs(self):
         (self.job / "feature.md").write_text("# Feature\nAdd a button")
