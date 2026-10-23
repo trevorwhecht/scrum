@@ -2044,6 +2044,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
 
+    def test_watchdog_flags_lilguy_with_worktree(self):
+        wt = self.aged("Lil in worktree", 45, stage="build", lane="lilguy", worktree="/tmp/wt-lil")
+        here = self.aged("Lil in checkout", 45, stage="build", lane="lilguy")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [wt])
+        self.assertEqual(self.get(wt)["stage"], "needs-human")
+        self.assertTrue(self.get(wt)["reason"].startswith("stalled in build"), self.get(wt)["reason"])
+        self.assertEqual(self.get(here)["stage"], "build")
+
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
         # No parent: never blocked.
@@ -4315,6 +4323,49 @@ class RouteCheckTest(unittest.TestCase):
         self.round(1, check="FAIL")
         self.assertFalse(self.route(clean_start=True)["approver_sonnet"])
 
+    # --- lilguy promotion (job 244) ---
+    def lilguy(self, files, feature="Tiny change\n", **kw):
+        board.cmd_set(self.root, self.job, ["lane=lilguy"])
+        (self.jd / "feature.md").write_text(feature)
+        if files:
+            self.commit(files)
+        return self.route(**kw)["promote"]
+
+    def test_route_check_lilguy_30_lines_stays(self):
+        self.assertIsNone(self.lilguy({"src/a.py": "x\n" * 20, "src/b.py": "y\n" * 5, "src/c.py": "z\n" * 5}))
+
+    def test_route_check_lilguy_31_lines_promotes(self):
+        self.assertEqual(self.lilguy({"src/a.py": "x\n" * 31}), "diff over 30 added lines (31)")
+
+    def test_route_check_lilguy_4_files_promotes(self):
+        self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(4)}), "more than 3 files with added lines (4)")
+
+    def test_route_check_lilguy_deletions_dont_count(self):
+        self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(5)})
+        self.git("rm", "-q", "src/f0.py", "src/f1.py", "src/f2.py")
+        self.commit({"src/f3.py": "y\n" * 5 + "x\n" * 45, "src/f4.py": "z\n" * 5 + "x\n" * 10})
+        # +10 -200 over 5 files, 2 with added lines
+        self.assertIsNone(self.lilguy({}))
+
+    def test_route_check_lilguy_rules_file_outside_ticket_promotes(self):
+        self.assertEqual(self.lilguy({"skills/trevskills-scrum/SKILL.md": "x\n"}),
+                         "rules file skills/trevskills-scrum/SKILL.md not in feature.md")
+        (self.jd / "feature.md").write_text("Edit skills/trevskills-scrum/SKILL.md wording\n")
+        self.assertIsNone(self.route()["promote"])
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"agents/scrum-builder.md": "x\n"})
+        (self.jd / "feature.md").write_text("Edit SKILL.md and scrum-builder.md\n")
+        self.assertEqual(self.route()["promote"], "rules file agents/scrum-builder.md not in feature.md")
+        (self.jd / "feature.md").write_text("Edit every agents/*.md file\n")
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_lilguy_check_fails_3(self):
+        self.round(1, check="FAIL")
+        self.assertIsNone(self.lilguy({"src/a.py": "x\n"}, check_fails=2))
+        self.assertEqual(self.route(check_fails=3)["promote"], "check failed 3 times")
+        board.cmd_set(self.root, self.job, ["worktree="])
+        self.assertIsNone(self.route(check_fails=3)["promote"])  # lilguy in the main checkout: no promotion
+
     # --- can't tell ---
     def test_route_check_unreadable_diff_is_conservative(self):
         self.commit({"src/util.py": "x\n"})
@@ -4357,6 +4408,108 @@ class RouteCheckTest(unittest.TestCase):
             self.assertTrue(board.glob_match(path, globs), path)
         for path in ("a.ts", "mycomponents/x.py", "src/app/layout.ts", "app/layout.js", "components"):
             self.assertFalse(board.glob_match(path, globs), path)
+
+
+class LilguyFitTest(unittest.TestCase):
+    """board.py lilguy-fit: whether a new job is tiny and safe enough for Lilguy Worktree mode."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.job = board.cmd_new(self.root, "Tweak a label")
+        self.jd = self.root / "jobs" / self.job
+        (self.jd / "feature.md").write_text("Tweak the dashboard label text\n")
+
+    def points(self, pts):
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] [5] Other item\n- [ ] [{pts}] Tweak a label → {self.job}\n")
+
+    def jev(self, *raws):
+        (self.jd / "jev.log").write_text("".join(f"2026-10-23T10:00:00\tmodel\tHow hard\t{r}\tsonnet\t0.10\n" for r in raws))
+
+    def fit(self):
+        return board.cmd_lilguy_fit(self.root, self.job)
+
+    def test_lilguy_fit_points_1_passes(self):
+        self.points(1)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "lilguy-fit", self.job])
+        self.assertIn(code, (0, None))
+        got = json.loads(out.getvalue())
+        self.assertEqual(set(got), {"fit", "why"})
+        self.assertIs(got["fit"], True)
+        self.assertEqual(out.getvalue().count("\n"), 1)
+
+    def test_lilguy_fit_points_1_naming_skill_md_passes(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Reword SKILL.md, agents/scrum-builder.md and lanes/lilguy.md\n")
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_points_2_fails(self):
+        self.points(2)
+        self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_jev_confident_low_score_passes(self):
+        self.jev('{"type":"score","score":2.8,"confidence":0.9}', '{"type":"score","score":1.2,"confidence":0.79}')
+        self.assertIs(self.fit()["fit"], True)
+        self.jev('{"type":"score","score":1.2,"confidence":0.79}', '{"type":"score","score":2.8,"confidence":0.9}')
+        self.assertIs(self.fit()["fit"], False)  # the last model line decides
+
+    def test_lilguy_fit_jev_low_confidence_fails(self):
+        self.jev('{"type":"score","score":1.2,"confidence":0.69}')
+        self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_missing_confidence_fails(self):
+        for raw in ('{"type":"score","score":1.2}', '{"type":"score","score":1.2,"confidence":"0.9"}', "JevError", "-"):
+            with self.subTest(raw):
+                self.jev(raw)
+                self.assertIs(self.fit()["fit"], False)
+        (self.jd / "jev.log").write_text('2026-10-23T10:00:00\treview\tq\t{"score":0.1,"confidence":0.99}\tskip\t0.1\n')
+        self.assertIs(self.fit()["fit"], False)  # no model line
+
+    def test_lilguy_fit_missing_jevlog_fails(self):
+        self.assertIs(self.fit()["fit"], False)
+        self.points(1)
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_promoted_job_stays_put(self):
+        self.points(1)
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+        board.cmd_set(self.root, self.job, ["lane=lilguy"])
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_hard_stop_word_fails(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the Payment total on the receipt\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("Payment", got["why"])
+        for text in ("Read the API key from config", "Load .env.local first", "Fix the LOGIN button", "Bump the env vars"):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(text + "\n")
+                self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_author_is_not_auth(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the author name and the OAuthor badge\n")
+        self.assertIs(self.fit()["fit"], True)
+        (self.jd / "feature.md").write_text("Show the author name next to auth status\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("auth", got["why"])
+
+    def test_lilguy_fit_unknown_job_exits(self):
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "lilguy-fit", "999-nope"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("999-nope", r.stderr)
+        with self.assertRaises(SystemExit):
+            board.cmd_lilguy_fit(self.root, "999-nope")
 
 
 class PipelineFitTest(unittest.TestCase):

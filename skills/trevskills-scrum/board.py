@@ -50,8 +50,11 @@
                                    skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
+  board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
+                                   answer score < 1.5 at confidence >= 0.7) with no hard-stop word in feature.md
+                                   (SKILL.md New job step 3's Lilguy route)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
-                                   Fast lane promotion trigger (or null), whether a PASS round is a clean round, and
+                                   Fast or Lilguy Worktree mode promotion trigger (or null), whether a PASS round is a clean round, and
                                    whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
@@ -1169,6 +1172,20 @@ def _promote_trigger(rows, names):
     return None
 
 
+def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
+    """The first Lilguy Worktree mode promotion trigger the diff hits, else None. Deleted lines never count."""
+    if binary := next((p for a, _, p in rows if a is None), None):
+        return f"binary file {binary}"
+    if (lines := sum(a for a, _, _ in rows)) > LILGUY_MAX_LINES:
+        return f"diff over {LILGUY_MAX_LINES} added lines ({lines})"
+    if (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
+        return f"more than {LILGUY_MAX_FILES} files with added lines ({files})"
+    for p in names:
+        if RULES_RE.search(p) and p not in feature_text and f"{p.rpartition('/')[0]}/*.md" not in feature_text:
+            return f"rules file {p} not in feature.md"
+    return None
+
+
 def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool = False) -> dict:
     """{"promote", "clean_round", "approver_sonnet"} for the job's latest round. Whatever can't be read counts against
     the shortcut: an unreadable diff promotes a passed fast job and gives neither a clean round nor a Sonnet approver."""
@@ -1190,6 +1207,11 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
         promote = _promote_trigger(*diff) if diff else "diff unreadable"
+    elif lane == "lilguy" and job.get("worktree"):
+        feature = d / "feature.md"
+        feature = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
+        promote = "check failed 3 times" if check_fails >= 3 else \
+            _lilguy_trigger(*diff, feature) if diff else "diff unreadable"
     spec = d / "spec.md"
     hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
         if spec.is_file() else None
@@ -1200,6 +1222,53 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
         and not blocked and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
     return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
+
+
+# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, or Jev confident it is trivial) and no hard-stop
+# word in feature.md. Anything unreadable counts as not tiny.
+LILGUY_HARD_STOP_RE = re.compile(
+    r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
+    r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
+    r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
+LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
+
+
+def _jev_model(folder: Path) -> dict | None:
+    """The raw JSON answer of the last `model` line in folder/jev.log (fields: time, step, question, raw, decision,
+    seconds), or None when there is no such line or it isn't a JSON object."""
+    try:
+        lines = (folder / "jev.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    fields = next((f for f in (l.split("\t") for l in reversed(lines)) if len(f) > 3 and f[1] == "model"), None)
+    try:
+        raw = json.loads(fields[3]) if fields else None
+    except ValueError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def cmd_lilguy_fit(root, job_id: str) -> dict:
+    """{"fit", "why"}: fit only for a job on no lane (or lilguy) that is tiny by backlog points or by Jev, with no
+    LILGUY_HARD_STOP_RE word in its feature.md."""
+    job = find(read_board(root), check_id(job_id))
+    lane = job.get("lane")
+    if lane and lane != "lilguy":
+        return {"fit": False, "why": f"already on {lane} lane"}
+    folder = Path(root) / "jobs" / job_id
+    feature = folder / "feature.md"
+    if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
+        return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
+    item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+    if item and item["points"] == 1:
+        return {"fit": True, "why": "backlog item is 1 point"}
+    raw = _jev_model(folder) or {}
+    score, conf = raw.get("score"), raw.get("confidence")
+    if is_num(score) and is_num(conf) and score < LILGUY_JEV_MAX_SCORE and conf >= LILGUY_JEV_MIN_CONFIDENCE:
+        return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
+    pts = f"{item['points']} points" if item and item["points"] else "no points"
+    jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
+    return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
@@ -1880,12 +1949,18 @@ def cmd_chain_unlock(root, parent_id, holder):
     return {"released": False}
 
 
+def lilguy_in_checkout(job: dict) -> bool:
+    """True for a manual lilguy job: it runs in the main checkout with no worktree, builder or PR to wait on. A lilguy
+    job with a worktree (Lilguy lane Worktree mode) is a normal PR job."""
+    return job.get("lane") == "lilguy" and not job.get("worktree")
+
+
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
-    (bigboy/runall) or lilguy lane."""
+    (bigboy/runall) lane or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall", "lilguy") else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
@@ -2439,10 +2514,10 @@ def cmd_watchdog(root, alive=None):
     flagged, requeued = [], []
     try:
         with locked_board(root) as board:
-            # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
+            # a lilguy job in the main checkout has no pipeline to resume: no worktree or builder.
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and not j.get("paused") and j.get("lane") != "lilguy" and not j.get("limitResetAt")
+                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
                      and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
@@ -2727,6 +2802,7 @@ def main(argv=None):
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
     sub.add_parser("move-ratio").add_argument("id")
+    sub.add_parser("lilguy-fit").add_argument("id")
     rc = sub.add_parser("route-check")
     rc.add_argument("id")
     rc.add_argument("--check-fails", type=int, default=0)
@@ -2819,6 +2895,8 @@ def main(argv=None):
         out = cmd_move_ratio(a.dir, a.id)
         print(json.dumps(out))
         return 1 if out.get("ok") is False else 0
+    elif a.cmd == "lilguy-fit":
+        print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
     elif a.cmd == "route-check":
         print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":
