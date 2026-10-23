@@ -298,10 +298,14 @@ def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
     that line names, else every 30 min; at most 12 tries per job. A Run-all/BigBoy child of a running parent stalled
     for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
-    is left on the board. A refused restart costs nothing."""
+    is left on the board. A refused restart costs nothing. A job respawn_exited held in its stage (limitResetAt) is
+    resumed 120 s after that reset, under the same slot cap and try counter."""
     now = time.time()
     for job in jobs:
         reason = job.get("reason") or ""
+        if job.get("limitResetAt") and job["stage"] in board.WATCHED:
+            resume_held(project, root, job, jobs, now)
+            continue
         if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
                 or job.get("lane") == "lilguy" or running(project, job["id"]):
             continue
@@ -326,6 +330,23 @@ def auto_resume(project, root, jobs):
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
+
+
+def resume_held(project, root, job, jobs, now):
+    """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then flag it stalled (`resume` only
+    accepts that) and resume it; at AUTO_RESUME_MAX tries it is flagged for Trevor instead."""
+    key = f"{project}/{job['id']}"
+    tries = AUTO_RESUME.get(key, [0, 0.0])[0]
+    if now < job["limitResetAt"] + 120 or running(project, job["id"]):
+        return
+    if tries >= AUTO_RESUME_MAX:
+        if flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes. Fix: click Resume."):
+            board.play(board.sound("needs-human"))
+        return
+    if resume_refusal(project, root, job) or not flag_stalled(root, job, LIMIT_RESET):
+        return  # a sibling holds its slot, or the job moved on: no try spent
+    AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
+    resume_job(project, root, job, jobs)
 
 
 CLOUD_EVERY = 600  # seconds between one project's cloud-sync polls; fixed, not a setting
@@ -358,6 +379,7 @@ def cloud_tick(project, root, jobs, now=None):
 
 EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
 ORPHANED = "no session picked the job up in {stage}. Fix: click Resume."
+LIMIT_RESET = "usage limit reset. Fix: click Resume."
 
 
 def flag_stalled(root, job, msg):
@@ -371,8 +393,24 @@ def flag_stalled(root, job, msg):
                 raise board._Gone
             live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {msg.format(stage=stage)}",
                         updatedAt=board.now())
+            live.pop("limitResetAt", None)
             board.roadmap_stall_locked(root, live)
             job.update(live)
+    except board._Gone:
+        return False
+    job.pop("limitResetAt", None)  # job.update(live) keeps keys live no longer has
+    return True
+
+
+def hold_limited(root, job, reset):
+    """Under the board lock, keep a usage-limit-killed job in its stage with limitResetAt = reset (epoch seconds);
+    auto_resume restarts it after the reset. False when the job is gone or its stage moved on meanwhile."""
+    try:
+        with board.locked_board(root) as b:
+            live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+            if not live or live.get("stage") != job["stage"]:
+                raise board._Gone
+            live.update(limitResetAt=reset, updatedAt=board.now())
     except board._Gone:
         return False
     return True
@@ -381,7 +419,8 @@ def flag_stalled(root, job, msg):
 def respawn_exited(project, root):
     """A dashboard-started `claude -p` start/resume run that exited while its job is still in a WATCHED stage (it
     ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run that was itself that respawn,
-    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. Returns the flagged ids."""
+    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. A run killed by the usage limit
+    is held in its stage instead (hold_limited): no flag, no sound, no respawn. Returns the flagged ids."""
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and r.get("action") in ("start", "resume")
                 and not r.get("handled") and r["proc"].poll() is not None]
@@ -399,6 +438,11 @@ def respawn_exited(project, root):
         if alive(job):
             continue  # another session (e.g. a Terminal) has the job; look again next tick
         run["handled"] = True
+        hit, reset = limit_reset(root, job)
+        if hit:  # a reset already past (or none named) waits AUTO_RESUME_EVERY, so a resume never loops every tick
+            now = time.time()
+            hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY)
+            continue
         if not flag_stalled(root, job, EXITED):
             continue
         flagged.append(job["id"])
@@ -432,7 +476,7 @@ def respawn_orphans(project, root, p, kids, alive):
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
-        if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" \
+        if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
                 or running(project, kid["id"]) or alive()(kid):
             continue

@@ -1831,6 +1831,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         if "tty" in given:
             job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
+        if job["stage"] != was:
+            job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
@@ -2244,6 +2246,7 @@ def cmd_pause(root, job_id):
         hit = [job] + [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k]["stage"] in PAUSABLE]
         for j in hit:
             j.update(stage="needs-human", reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+            j.pop("limitResetAt", None)
         return [j["id"] for j in hit]
 
 
@@ -2290,8 +2293,9 @@ def cmd_watchdog(root, alive=None):
     try:
         with locked_board(root) as board:
             # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
+            # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
+                     and j.get("lane") != "lilguy" and not j.get("limitResetAt") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
                 if alive(job):

@@ -1820,6 +1820,30 @@ class BoardTest(unittest.TestCase):
     def get(self, job_id):
         return next(j for j in self.jobs() if j["id"] == job_id)
 
+    def test_watchdog_skips_limit_held_job(self):
+        held = self.aged("Held review", 120, stage="review", limitResetAt=1_800_000_000)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.get(held)["stage"], self.get(held)["limitResetAt"]), ("review", 1_800_000_000))
+        plain = self.aged("Plain review", 120, stage="review")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
+    def test_limit_hold_cleared_on_stage_change_and_pause(self):
+        def held(title):
+            return self.aged(title, 1, stage="build", limitResetAt=1_800_000_000)
+        kept = held("Kept")
+        board.cmd_set(self.root, kept, ["round=1"])
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+        moved = held("Moved")
+        board.cmd_set(self.root, moved, ["stage=merging"])
+        self.assertNotIn("limitResetAt", self.get(moved))
+        paused = held("Paused")
+        board.cmd_pause(self.root, paused)
+        self.assertNotIn("limitResetAt", self.get(paused))
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", kept, "limitResetAt=1"])
+        self.assertTrue(str(e.exception).startswith("bad field 'limitResetAt=1'"), str(e.exception))
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
         old = self.get(job_id)["updatedAt"]
