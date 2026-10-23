@@ -796,9 +796,26 @@ class ContractTest(unittest.TestCase):
               "test that reads that source file to the new path and change no `expect`.")
         for line in (b1, b2, b3, b4, b5, b6, step2, must_fail, handoff):
             self.assertEqual(text.count(line + "\n"), 1, line)
-        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n" + step3, text)
+        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
-        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n" + running_app, text)
+        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
+        self.assertIn("\n" + running_app, text)
+
+    def test_builder_rules_digest_005_006(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        eslint = "remove any `eslint-disable` directive the moved code no longer needs"
+        self.assertEqual(text.count(eslint), 1)
+        move = text.index("   - When you move code to another file")
+        self.assertIn(eslint, text[move:text.index("   - A criterion that needs the running app")])
+        bullet = next(l for l in text.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in ("`next dev`", "record the stopped port and PID in build.md"):
+            self.assertEqual(text.count(phrase), 1, phrase)
+            self.assertIn(phrase, bullet, phrase)
+        self.assertNotIn("Afterwards stop the server and run", text)
+        step2 = self.section(text, "2. Implement the spec.", "3. For each acceptance criterion:")
+        for phrase in ("never copies a hardcoded colour from a sibling element", "UB-38", "UB-30"):
+            self.assertEqual(text.count(phrase), 1, phrase)
+            self.assertIn(phrase, step2, phrase)
 
     def test_approver_debug_repro_never_preexisting(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
