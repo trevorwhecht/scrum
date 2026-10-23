@@ -3979,16 +3979,10 @@ class RouteCheckTest(unittest.TestCase):
     def test_route_check_promotes_on_env_file(self):
         self.assertEqual(self.promote({".env.example": "A=1\n"}), "env file .env.example")
 
-    def test_route_check_promotes_on_ui_file(self):
-        self.assertEqual(self.promote({"web/index.html": "<p>\n"}), "UI file web/index.html")
-
-    def test_route_check_promotes_on_ui_directory_and_exact_path(self):
-        self.assertEqual(self.promote({"src/components/x.py": "x\n"}), "UI file src/components/x.py")
+    def test_route_check_ui_file_stays_fast(self):
+        self.assertIsNone(self.promote({"web/index.html": "<p>\n", "src/util.py": "x = 1\n"}))
         self.git("reset", "-q", "--hard", "main")
-        self.commit({"app/page.tsx": "x\n"})
-        self.assertEqual(self.route()["promote"], "UI file app/page.tsx")
-        self.git("reset", "-q", "--hard", "main")
-        self.commit({"src/app/page.tsx": "x\n", "mycomponents/y.py": "y\n"})
+        self.commit({"src/components/x.py": "x\n", "app/page.tsx": "x\n"})
         self.assertIsNone(self.route()["promote"])
 
     def test_route_check_server_only_paths_not_ui_file(self):
@@ -4011,7 +4005,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertIsNone(self.route()["promote"])
 
     def test_route_check_trigger_order(self):
-        # binary before size, size before file count, count before paths, schema before env/UI/sensitive
+        # binary before size, size before file count, count before paths, schema before env/sensitive; a UI file never promotes
         self.assertEqual(self.promote({"a.bin": b"\x00\xff", "src/a.py": "x\n" * 200}), "binary file a.bin")
         self.git("reset", "-q", "--hard", "main")
         self.commit({**{f"f{i}.py": "x\n" for i in range(5)}, "big.py": "x\n" * 200})
@@ -4027,7 +4021,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.route()["promote"], "env file .env")
         self.git("reset", "-q", "--hard", "main")
         self.commit({"x/auth.py": "x\n", "x.html": "x\n"})
-        self.assertEqual(self.route()["promote"], "UI file x.html")
+        self.assertEqual(self.route()["promote"], "sensitive path x/auth.py")
 
     # --- deletions (job 242) ---
     def big_base(self, files):
@@ -4052,7 +4046,7 @@ class RouteCheckTest(unittest.TestCase):
 
     def test_route_check_promotes_on_deleted_schema_path(self):
         for rel, want in (("prisma/schema.prisma", "schema path prisma/schema.prisma"), (".env.example", "env file .env.example"),
-                          ("web/index.html", "UI file web/index.html"), ("src/auth.py", "sensitive path src/auth.py")):
+                          ("web/index.html", None), ("src/auth.py", "sensitive path src/auth.py")):
             with self.subTest(rel):
                 self.git("reset", "-q", "--hard", "main")
                 self.big_base({rel: "x\n"})
