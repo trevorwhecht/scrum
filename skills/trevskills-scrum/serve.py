@@ -181,10 +181,10 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 
 
 def resume_refusal(project, root, job):
-    """Why the Resume button / auto-resume must not restart this stalled job, or None. lilguy has no worktree or
-    builder to resume; no job resumes while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy
+    """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
+    checkout has no worktree or builder to resume; no job resumes while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy
     child also waits for the same cap and overlap rules `ready` applies to new claims."""
-    if job.get("lane") == "lilguy":
+    if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     live, cap = board.live_sessions(), board.slot_cap(True)
     if live >= cap:
@@ -322,7 +322,7 @@ def auto_resume(project, root, jobs):
             busy = resume_held(project, root, job, jobs, now) or busy
             continue
         if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
-                or job.get("lane") == "lilguy" or running(project, job["id"]):
+                or board.lilguy_in_checkout(job) or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
@@ -458,7 +458,7 @@ def respawn_exited(project, root):
     alive, flagged = None, []
     for key, run in runs:
         job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
-        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or job.get("lane") == "lilguy":
+        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or board.lilguy_in_checkout(job):
             run["handled"] = True
             continue
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage

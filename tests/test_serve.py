@@ -539,6 +539,15 @@ class ServeTest(unittest.TestCase):
             spawn.assert_not_called()
             self.assertEqual((self.stage_of(lil)["stage"], self.stage_of(lil)["reason"]), ("needs-human", reason))
 
+    def test_resume_allows_lilguy_with_worktree(self):
+        b = self.serve.board
+        reason = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+        lil = b.cmd_new(self.root, "Lil in worktree")
+        self.edit_job(lil, lane="lilguy", worktree="/tmp/wt-lil", stage="needs-human", reason=reason)
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {}), (202, {"id": lil, "action": "resume"}))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(lil, "resume", f"/trevskills-scrum resume {lil}")])
+
     def test_resume_child_waits_for_overlapping_sibling(self):
         b = self.serve.board
         reason = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
