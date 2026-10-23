@@ -2849,6 +2849,53 @@ class CloudSyncTest(unittest.TestCase):
             self.assertEqual(board.cmd_cloud_sync(self.root)["moved"], [])
         self.assertEqual(self.get()["stage"], "cloud")
 
+    def merged(self, body):
+        return self.pr(state="closed", merged_at="2026-10-01T00:00:00Z", body=body)
+
+    def test_cloud_sync_merged_records_lane(self):
+        with self.gh([self.merged("Summary\n\nScrum lane: fast\n")]):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("done", "fast"))
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # the lane costs no extra gh call
+
+    def test_cloud_sync_no_lane_line_leaves_lane_unset(self):
+        for body in (None, "Summary only\nlane: fast\n"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    board.cmd_cloud_sync(self.root)
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_unknown_lane_ignored(self):
+        for body in ("Scrum lane: turbo", "Scrum lane: bigboy", "Scrum lane:", "Scrum lane: fastest", "x Scrum lane: fast"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    out = board.cmd_cloud_sync(self.root)
+                self.assertEqual(out["moved"][0]["state"], "MERGED")
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_needs_human_and_abort_record_lane(self):
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: debug")
+        comments = [{"user": self.TREV, "body": "Hard stop: schema first\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=None):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("needs-human", "debug"))
+
+        self.setUp()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: fast")
+        comments = [{"user": self.TREV, "body": "requeue: spec writer produced nothing\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "ABORTED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "fast"))
+
+        self.setUp()
+        with self.gh([self.pr(state="closed", body="Scrum lane: standard")]):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "CLOSED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "standard"))
+
     def backlog_texts(self):
         return [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
 

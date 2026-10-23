@@ -2126,6 +2126,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertNotIn("gh pr ", job)
+        # Every cloud PR body carries the lane the job ran, and cloud-sync writes it to the board.
+        self.assertIn("`Scrum lane: <fast|standard|debug|lilguy>`", job)
+        self.assertIn("also writes `lane=<lane>` from the PR body's `Scrum lane:` line", sync)
         # --environment takes only self-hosted ccpool_ ids, and a flag after --cloud would swallow its prompt.
         self.assertNotIn("--environment", cloud)
         # The launch prompt starts with the setup.sh refresh: cloud environments cache an old copy of the skill.
