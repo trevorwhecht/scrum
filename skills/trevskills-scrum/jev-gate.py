@@ -26,14 +26,16 @@ LEVELS = ["trivial edit", "small contained change", "multi-file change with new 
 USAGE = f"usage: jev-gate.py <{'|'.join(STEPS)}> <job-dir>"
 
 
-def decide(step, job):
-    """(question, raw answer, decision); question and raw are '-' when no Jev call was made."""
+def decide(step, job, asked):
+    """(question, raw answer, decision); question and raw are '-' when no Jev call was made.
+    asked gets the question appended just before each Jev call, so main() can tell if one started."""
     q, cut, _ = STEPS[step]
     if step == "model":
         f = job / "feature.md"
         text = f.read_text() if f.exists() else ""
         if not text.strip():
             return "-", "-", "opus"
+        asked.append(q)
         v, raw = jev.score(text, q, LEVELS)
         return q, raw, "sonnet" if v < cut else "opus"
     stdin = sys.stdin.read().strip()
@@ -43,9 +45,11 @@ def decide(step, job):
         items = [i["text"] for i in board.read_backlog(job.parent.parent)[1] if not i["done"]]
         if not items or not stdin:
             return "-", "-", "add"
+        asked.append(q)
         scores = jev.rank(stdin, items, q)
         top = max(range(len(items)), key=scores.__getitem__)
         return q, scores, f"dupe {items[top]}" if scores[top] >= cut else "add"
+    asked.append(q)
     v, raw = jev.noul(stdin, q)
     if step == "approver":
         return q, raw, "sonnet" if v < cut else "opus"
@@ -59,11 +63,12 @@ def main(argv=None):
         return 2
     step, job = argv[0], Path(argv[1])
     start = time.monotonic()
+    asked = []
     try:
-        q, raw, decision = decide(step, job)
+        q, raw, decision = decide(step, job, asked)
         raw = raw if isinstance(raw, str) else json.dumps(raw, separators=(",", ":"))
     except Exception as e:  # the gate never fails the caller
-        q, raw, decision = STEPS[step][0], type(e).__name__, STEPS[step][2]
+        q, raw, decision = asked[0] if asked else "-", type(e).__name__, STEPS[step][2]
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     safe = lambda s: re.sub(r"[\t\r\n]", " ", s.replace(key, "***") if key else s)
     decision = safe(decision)
