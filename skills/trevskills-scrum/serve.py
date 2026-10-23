@@ -657,6 +657,35 @@ def estimate(root, text, local_only=False):
     return False
 
 
+# Screenshots dropped on the Backlog add input: saved under scrum/attachments/ and referenced as
+# "[screenshot: <absolute path>]" in the item text, so the path reaches feature.md and agents Read it.
+ATTACH_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+ATTACH_MAX = 10 * 1024 * 1024
+
+
+def save_attachment(root, data, mime):
+    """Decode one base64 image and write it to root/attachments/<sha1[:12]>.<ext>; the same bytes land on the same file.
+    The name is a content hash, never the dropped file's name, so nothing from the client reaches the path."""
+    if mime not in ATTACH_TYPES:
+        raise SystemExit("Only images can be attached")
+    try:
+        raw = base64.b64decode(data, validate=True) if isinstance(data, str) else b""
+    except ValueError:  # binascii.Error
+        raise SystemExit("image data is not valid base64")
+    if not raw:
+        raise SystemExit("image data is empty")
+    if len(raw) > ATTACH_MAX:
+        raise SystemExit("image is larger than 10 MB")
+    folder = Path(root).resolve() / "attachments"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{hashlib.sha1(raw).hexdigest()[:12]}.{ATTACH_TYPES[mime]}"
+    if not path.exists():
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(raw)
+        os.replace(tmp, path)
+    return {"path": str(path)}
+
+
 def claude_usage(now):
     """Claude's 5h and weekly used % and resets from usage.json (board.py statusline), whatever its age. A window
     whose reset is past reads null, as route.codex_quota treats an expired window."""
@@ -2449,7 +2478,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -2469,13 +2498,16 @@ class Handler(BaseHTTPRequestHandler):
         return 200, read_agent(target)
 
     def route(self, project, root, rest, body):
+        if rest == "/attachments":
+            return 200, save_attachment(root, body.get("data"), body.get("type"))
         if rest == "/manual-checks":  # tick only: open -> done
             return 200, board.manual_tick(root, body.get("index"))
         if rest == "/backlog":
             op = body.get("op")
-            if op == "add":
-                items = board.backlog_op(root, "add", text=body.get("text"))
-                threading.Thread(target=estimate, args=(root, items[-1]["text"]), daemon=True).start()
+            if op == "add":  # points picked by hand skip the paid estimate
+                items = board.backlog_op(root, "add", text=body.get("text"), **({"points": body["points"]} if "points" in body else {}))
+                if items[-1]["points"] is None:
+                    threading.Thread(target=estimate, args=(root, items[-1]["text"]), daemon=True).start()
                 return 200, items
             kwargs = {"index": body.get("index")}
             if op == "edit":
