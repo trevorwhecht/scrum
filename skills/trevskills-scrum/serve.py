@@ -47,7 +47,9 @@ CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
 LOCAL = {"localhost", "127.0.0.1"}
 TYPES = {".json": "application/json", ".md": "text/markdown; charset=utf-8", ".log": "text/plain; charset=utf-8",
          ".html": "text/html; charset=utf-8"}
-RUNS, RUNS_LOCK = {}, threading.Lock()  # "project/job id" -> {"action", "started", "proc", "log"}
+RUNS, RUNS_LOCK = {}, threading.Lock()  # "project/job id" -> {"action", "started", "proc", "log"[, "reason"]}
+DISCUSSES = {}  # "project/job id" -> time Discuss was clicked; listed in /api/runs while its claude process lives
+DISCUSS_GRACE = 60  # seconds a fresh click stays listed before ps must show its claude process (Terminal startup)
 ESTIMATE_LOOK = "Look only at what you need (CLAUDE.md, the files the item would touch). Do not change anything."
 ESTIMATE_PROMPT = """You are estimating one backlog item for the repository in the current directory.
 """ + ESTIMATE_LOOK + """
@@ -135,15 +137,22 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
     model = orchestrator_model(root) if action in ("start", "resume") else None
+    reason = None
+    if action in ("approve", "rework"):  # record_outcomes compares against this: same reason = nothing changed
+        try:
+            reason = board.find(board.read_board(root), job_id).get("reason")
+        except (SystemExit, OSError, ValueError):
+            pass
     argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
     with open(log, "w") as fh:
         proc = subprocess.Popen(argv, cwd=root.parent,
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
                                 env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))  # board.py plays scrum's sounds
     with RUNS_LOCK:
-        RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}"}
+        RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": f"runs/{log.name}",
+                                       **({"reason": reason} if action in ("approve", "rework") else {})}
     try:  # the Open terminal button tails this; the RUNS entry above covers a job that isn't on the board
-        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
+        board.cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return f"runs/{log.name}"
@@ -553,6 +562,68 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
 
 
+def outcome_line(root, run, code):
+    """`Approve refused at 4:21 PM: <first log line>. Nothing changed.` (exit > 0: `failed (exit N)`)."""
+    log = root / run["log"]
+    try:
+        text, at = log.read_text(errors="replace"), log.stat().st_mtime  # the log's last write is the run's end
+    except OSError:
+        text, at = "", time.time()
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    msg = first.lstrip("#*- \t").rstrip().rstrip(".")[:160]
+    how = "refused" if code == 0 else f"failed (exit {code})"
+    return f"{run['action'].capitalize()} {how} at {datetime.fromtimestamp(at):%-I:%M %p}{': ' + msg if msg else ''}. Nothing changed."
+
+
+def record_outcomes(project, root):
+    """A dashboard approve/rework run that exited (code >= 0) and left its job needs-human with the reason it had at
+    spawn: write the job's `outcome` line. Each exited run is looked at once. Returns the ids written."""
+    with RUNS_LOCK:
+        runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and "reason" in r
+                and not r.get("outcome_done") and r["proc"].poll() is not None]
+    written = []
+    for key, run in runs:
+        run["outcome_done"] = True
+        code = run["proc"].poll()
+        if code < 0:  # stopped by Pause/Abort; the Last run line already says so
+            continue
+        line = board.clean(outcome_line(root, run, code), 300)
+        try:
+            with board.locked_board(root) as b:
+                job = board.find(b, key.split("/", 1)[1])
+                if job["stage"] == "needs-human" and job.get("reason") == run["reason"]:
+                    job.update(outcome=line, updatedAt=board.now())
+                    written.append(job["id"])
+        except (SystemExit, OSError, ValueError):
+            continue
+    return written
+
+
+def discuss_runs():
+    """/api/runs entries for live Discuss sessions. One ps scan, only while a Discuss click is tracked."""
+    with RUNS_LOCK:
+        tracked = dict(DISCUSSES)
+    if not tracked:
+        return []
+    try:
+        out = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True, timeout=5).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    cmds = [l for l in out.splitlines() if "claude" in l]
+    # ponytail: matches by job id only, like the ps half of kill_session; add the lsof cwd check if ids collide across projects
+    listed = []
+    for key, started in tracked.items():
+        match = re.compile(rf"/trevskills-scrum discuss {re.escape(key.rsplit('/', 1)[1])}(\s|$)")
+        if any(match.search(c) for c in cmds) or time.time() - started < DISCUSS_GRACE:
+            listed.append({"project": key.rsplit("/", 1)[0], "id": key.rsplit("/", 1)[1], "action": "discuss",
+                           "started": started, "log": None, "alive": True, "exit": None})
+        else:
+            with RUNS_LOCK:
+                if DISCUSSES.get(key) == started:
+                    del DISCUSSES[key]
+    return listed
+
+
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
     whatever siblings are now ready, then restart or close idle parents (sweep_parents), auto-resume the stalled
@@ -562,6 +633,7 @@ def watchdog_tick():
         try:
             root = repo / "scrum"
             respawn_exited(project, root)
+            record_outcomes(project, root)
             flagged = set(board.cmd_watchdog(root))
             if not (root / "board.json").exists():
                 busy[project] = False
@@ -2418,10 +2490,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {**route.status(), "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t),
                                         "ollama_models": route.loaded_models()})
         if path == "/api/runs":
+            discusses = discuss_runs()
             with RUNS_LOCK:
                 return self.send_json(200, [{"project": k.rsplit("/", 1)[0], "id": k.rsplit("/", 1)[1], "action": r["action"],
                                              "started": r["started"], "log": r["log"], "alive": r["proc"].poll() is None,
-                                             "exit": r["proc"].poll()} for k, r in RUNS.items()])
+                                             "exit": r["proc"].poll()} for k, r in RUNS.items()] + discusses)
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
@@ -2452,6 +2525,7 @@ class Handler(BaseHTTPRequestHandler):
             if target.startswith(os.path.realpath(root) + os.sep) and Path(target).suffix in (".json", ".md", ".log") \
                     and os.path.isfile(target):
                 if target == os.path.realpath(root / "board.json"):
+                    record_outcomes(project, root)
                     try:
                         return self.send_json(200, board_with_activity(root))
                     except ValueError:
@@ -2579,8 +2653,12 @@ class Handler(BaseHTTPRequestHandler):
             note = board.clean(body.get("feedback") or "")
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
+            clicked = time.time()
             code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, prompt),
                                        "Discussion opened in a new Terminal window.")])
+            if code == 200:
+                with RUNS_LOCK:
+                    DISCUSSES[f"{project}/{job_id}"] = clicked
             return code, {"id": job_id, **obj} if code == 200 else obj
         else:
             rework_job(project, root, job_id, body.get("feedback"))
