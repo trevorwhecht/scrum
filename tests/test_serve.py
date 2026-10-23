@@ -1,4 +1,5 @@
 import json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -733,6 +734,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "use the existing helper"})[0], 202)
         self.assertEqual(self.req("POST", "/api/p/repo/jobs/..%2F..%2Fx/rework", {"feedback": "x"})[0], 400)
 
+    def test_rework_keeps_long_feedback_whole(self):
+        feedback = ("Don't touch the header. " * 63)[:1499] + "!"  # 1,500 chars, cut at no word edge
+        self.assertEqual(len(feedback), 1500)
+        for sent, kept in ((feedback, feedback), ("y" * 2500, "y" * 2000)):
+            job_id = self.serve.board.cmd_new(self.root, "long rework")
+            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": sent})[0], 202)
+            self.assertEqual(spawn.call_args.args[4], f'/trevskills-scrum rework {job_id} "{kept}"')
+
     def test_abort_stops_running_job_and_can_requeue(self):
         job_id = self.serve.board.cmd_new(self.root, "abort me")
         self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
@@ -805,6 +816,15 @@ class ServeTest(unittest.TestCase):
         m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
         self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
                          [(job_id, "rework", f'/trevskills-scrum rework {job_id} "use the existing helper"')])
+
+    def test_answer_dispatch_rework_keeps_long_text(self):
+        text = ("Use the shared helper. " * 66)[:1499] + "."  # 1,500 chars
+        self.assertEqual(len(text), 1500)
+        job_id = self.asked(f'rework 77 "{text}"')
+        code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Rework", "command": f'rework 77 "{text}"'})
+        self.assertEqual(code, 202, out)
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "rework", f'/trevskills-scrum rework {job_id} "{text}"')])
 
     def test_answer_dispatch_abort(self):
         for command, requeue in (("abort 77", False), ("abort 77 --requeue", True)):
@@ -1170,6 +1190,17 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
         popen.assert_not_called()
         self.assertFalse(self.serve.running("repo", job_id))
+
+    def test_discuss_keeps_long_note_whole(self):
+        note = ("Ask about the header. " * 70)[:1499] + "?"  # 1,500 chars
+        self.assertEqual(len(note), 1500)
+        job_id = self.job("discuss long")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": note})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(run.call_args.args[0][-1], f'/trevskills-scrum discuss {job_id} "{note}"')
 
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
@@ -4488,6 +4519,42 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 lock.unlink(missing_ok=True)
                 self.assertEqual(self.job("003-wait")["stage"], "waiting")
 
+    def test_stale_chain_lock_does_not_block(self):
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        lock.parent.mkdir(); stale = time.time() - 1801  # just past board.CHAIN_LOCK_STALE: a crashed chaining session
+        self.write("running", {"002-done": "done", "003-wait": "waiting"})
+        lock.write_text("002-done"); os.utime(lock, (stale, stale))
+        self.assertEqual(self.spawned(), [("003-wait", "start", "/trevskills-scrum start 003-wait")])
+        self.orphan()
+        lock.write_text("002-claimed"); os.utime(lock, (stale, stale))
+        self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
+
+    def test_orphan_blocked_by_resume_blocker_stays_eligible(self):
+        for case in ("overlap", "slot cap 1"):
+            with self.subTest(case=case):
+                self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear()
+                shared = "src/shared.py" if case == "overlap" else "src/{}.py"
+                for jid in ("002-claimed", "003-sib"):
+                    (self.root / "jobs" / jid).mkdir(exist_ok=True)
+                    (self.root / "jobs" / jid / "spec.md").write_text(
+                        f"# x\n## Likely files\n- `{shared.format(jid)}`: why\n")
+                self.write("running", {"002-claimed": "spec", "003-sib": "build"})
+                data = json.loads((self.root / "board.json").read_text())
+                old = (datetime.now().astimezone() - timedelta(minutes=4)).isoformat()
+                data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
+                data["jobs"][2].update(parallel=True)
+                (self.root / "board.json").write_text(json.dumps(data))
+                with mock.patch.object(self.board, "slot_cap", return_value=1) if case == "slot cap 1" else nullcontext():
+                    self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
+                    kid = self.job("002-claimed")
+                    self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
+                    self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
+                    self.assertNotIn("idle/002-claimed/spec", self.serve.STALL_RESUMED)
+                    data["jobs"][2]["stage"] = "done"  # the sibling leaves its in-progress stage
+                    (self.root / "board.json").write_text(json.dumps(data))
+                    self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
+                    self.assertEqual(self.spawned(), [], "once per stage")
+
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: when no opted-in project has work in flight, the watchdog starts one
@@ -4531,6 +4598,40 @@ class AutoContinueTest(unittest.TestCase):
         root.mkdir(exist_ok=True)
         (root / "project.md").write_text(text)
         return self.serve.auto_continue(root)
+
+    def parent_jobs(self, kids, lane="bigboy", stage="running", children=True):
+        parent = {"id": "1-parent", "stage": stage, "lane": lane}
+        if children is True:
+            children = [f"{i+2}-kid" for i in range(len(kids))]
+        if children is not None:
+            parent["children"] = children
+        return [parent] + [{"id": f"{i+2}-kid", "stage": st, "parent": "1-parent"} for i, st in enumerate(kids)]
+
+    def test_finished_bigboy_parent_does_not_block_auto_continue(self):
+        self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", "aborted", "done"]))],
+                         [c[:3] for c in self.started("a")])
+
+    def test_unfinished_bigboy_parent_still_busy(self):
+        for st in ("build", "waiting", "needs-human"):
+            with self.subTest(st=st):
+                self.assertEqual(self.tick_run_all(self.parent_jobs(["done", st])), [])
+
+    def tick_run_all(self, jobs):
+        self.projects.clear()
+        shutil.rmtree(self.base / "a", ignore_errors=True)
+        self.project("a", 1, jobs=jobs)
+        with mock.patch.object(self.board, "pace_cap", return_value=None):
+            return [c for c in self.tick() if c[2] == "run-all"]
+
+    def test_only_running_bigboy_parent_is_excluded(self):
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], lane="runall")), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="review")), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="plan")), [])
+
+    def test_finished_bigboy_parent_edge_cases(self):
+        self.assertEqual(self.tick_run_all(self.parent_jobs([], children=[])), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], children=None)), [])
+        self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=["2-kid", "9-gone"]))), 1)
 
     def test_parse_value(self):
         self.assertEqual(self.parse("# P\n- Stack: x\n- Auto continue: 2\n- Lint: none\n"), 2)
@@ -4635,6 +4736,37 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1, backlog="- [x] Claimed → 001-x\n- [ ] Needs setup {setup: add key}\n"
                                         "- [ ] Blocked {needs #ab12}\n- [ ] Prereq {#ab12} {setup: do it}\n")
         self.assertEqual(self.tick(), [])
+
+    def limit_stalled(self, log):
+        """Opted-in project a with a claimable backlog and one job stalled in merging, its run log reading `log`.
+        merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage."""
+        self.serve.AUTO_RESUME.clear(); self.addCleanup(self.serve.AUTO_RESUME.clear)
+        root = self.base / "a" / "scrum"
+        if not root.exists():
+            self.project("a", n=1, jobs=[{"id": "001-x", "stage": "needs-human", "runlog": "runs/001-x.log"}])
+        data = json.loads((root / "board.json").read_text())
+        data["jobs"][0].update(stage="needs-human", reason="stalled in merging: no live session")
+        (root / "board.json").write_text(json.dumps(data))
+        (root / "runs").mkdir(exist_ok=True); (root / "runs" / "001-x.log").write_text(log)
+        return root
+
+    def test_limit_stalled_job_resumed_blocks_run_all(self):
+        root = self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.assertEqual(self.tick(), [("a", root, "001-x", "resume", "/trevskills-scrum resume 001-x")])
+
+    def test_limit_stalled_pending_counts_busy(self):
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=4102444800")  # the reset is years away
+        self.assertEqual(self.tick(), [], "deferred to the reset: no run-all beside it")
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.serve.AUTO_RESUME["a/001-x"] = [1, time.time() + 600]  # tried once, next try in 10 min
+        self.assertEqual(self.tick(), [], "between tries: no run-all beside it")
+
+    def test_exhausted_or_non_limit_stall_stays_idle(self):
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.serve.AUTO_RESUME["a/001-x"] = [self.serve.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.tick(), self.started("a"), "tries used up: left for Trevor, the project is idle")
+        self.limit_stalled("Traceback: something else broke")
+        self.assertEqual(self.tick(), self.started("a"), "no limit line: not auto-resumed, the project is idle")
 
     def test_no_start_unopted_project(self):
         self.project("a"); self.project("b", n=1, backlog="")

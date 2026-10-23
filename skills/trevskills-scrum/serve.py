@@ -203,7 +203,7 @@ def approve_job(project, root, job_id, migrated=False):
 
 def rework_job(project, root, job_id, feedback):
     """The Send back button, and a `rework` answer."""
-    feedback = board.clean(feedback or "")
+    feedback = board.clean(feedback or "", board.ITEM_MAX)
     if not feedback:
         raise SystemExit("feedback is empty")
     spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
@@ -315,21 +315,26 @@ def auto_resume(project, root, jobs):
     for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
     is left on the board. A refused restart costs nothing. A job held in its stage (limitResetAt) is resumed 120 s
     after that reset, under the same slot cap and try counter; a limit-killed job stalled in a WATCHED stage is moved
-    back to that stage and held the same way (as respawn_exited does)."""
-    now = time.time()
+    back to that stage and held the same way (as respawn_exited does). True when it resumed a job this tick or a
+    limit-stalled job is still in its auto-resume window (waiting for its reset, its next try or a free slot), so
+    watchdog_tick counts the project busy and auto continue starts no run-all beside it."""
+    now, busy = time.time(), False
     for job in jobs:
         reason = job.get("reason") or ""
         if job.get("paused"):
             continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
-            resume_held(project, root, job, jobs, now)
+            busy = resume_held(project, root, job, jobs, now) or busy
             continue
         if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) \
                 or job.get("lane") == "lilguy" or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
-        if tries >= AUTO_RESUME_MAX or now < due:
+        if tries >= AUTO_RESUME_MAX:
+            continue
+        if now < due:
+            busy = True
             continue
         hit, reset = limit_reset(root, job)
         if not hit:
@@ -341,7 +346,9 @@ def auto_resume(project, root, jobs):
                     and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
                 STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
+                busy = True
             continue
+        busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
         stage = re.match(rf"{board.STALLED}(\w+):", reason)
         if stage and stage.group(1) in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
@@ -354,23 +361,30 @@ def auto_resume(project, root, jobs):
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
+    return busy
 
 
 def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then flag it stalled (`resume` only
-    accepts that) and resume it; at AUTO_RESUME_MAX tries it is flagged for Trevor instead."""
+    accepts that) and resume it; at AUTO_RESUME_MAX tries it is flagged for Trevor instead. True when it resumed the
+    job or still waits for the reset or a slot."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
-    if now < job["limitResetAt"] + 120 or running(project, job["id"]):
-        return
+    if running(project, job["id"]):
+        return False
+    if now < job["limitResetAt"] + 120:
+        return True
     if tries >= AUTO_RESUME_MAX:
         if flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes. Fix: click Resume."):
             board.play(board.sound("needs-human"))
-        return
-    if resume_refusal(project, root, job) or not flag_stalled(root, job, LIMIT_RESET):
-        return  # a sibling holds its slot, or the job moved on: no try spent
+        return False
+    if resume_refusal(project, root, job):
+        return True  # a sibling holds its slot: no try spent
+    if not flag_stalled(root, job, LIMIT_RESET):
+        return False  # the job moved on
     AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
     resume_job(project, root, job, jobs)
+    return True
 
 
 CLOUD_EVERY = 600  # seconds between one project's cloud-sync polls; fixed, not a setting
@@ -505,8 +519,8 @@ def respawn_orphans(project, root, p, kids, alive):
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
                 or kid.get("paused") \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
-                or running(project, kid["id"]) or alive()(kid):
-            continue
+                or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
+            continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick
         action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
         if action == "resume":  # `resume` only accepts a needs-human job with a stalled reason
             if not flag_stalled(root, kid, ORPHANED):
@@ -516,6 +530,12 @@ def respawn_orphans(project, root, p, kids, alive):
         spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
         spawned = True
     return spawned
+
+
+def finished_bigboy(job, by_id):
+    """A running BigBoy parent whose every child on the board is done/aborted: it waits only for its final review."""
+    return job.get("lane") == "bigboy" and job.get("stage") == "running" and bool(job.get("children")) \
+        and all(by_id[k].get("stage") in ("done", "aborted") for k in job["children"] if k in by_id)
 
 
 def sweep_parents(project, root, jobs, alive=None):
@@ -530,15 +550,17 @@ def sweep_parents(project, root, jobs, alive=None):
                 or p.get("paused"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
-        if not (root / "jobs" / p["id"] / ".chain.lock").exists() and respawn_orphans(project, root, p, kids, alive):
+        if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive):
             continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
+            continue
+        if finished_bigboy(p, by_id):
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):
             if p["lane"] == "runall":
                 board.cmd_set(root, p["id"], ["stage=done", "reason="], expect="running")
             continue
-        if not any(k.get("stage") == "waiting" for k in kids) or (root / "jobs" / p["id"] / ".chain.lock").exists() \
+        if not any(k.get("stage") == "waiting" for k in kids) or board.chain_lock_live(root, p["id"]) \
                 or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids):
             continue
         start_ready(project, root, p["id"])
@@ -686,14 +708,15 @@ def watchdog_tick():
                 busy[project] = False
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
-            busy[project] = not all(board.idle(j) for j in jobs)
+            by_id = {j["id"]: j for j in jobs}
+            busy[project] = any(not board.idle(j) and not finished_bigboy(j, by_id) for j in jobs)
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll
                 sweep_parents(project, root, jobs, alive)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
-            auto_resume(project, root, jobs)
+            busy[project] = auto_resume(project, root, jobs) or busy[project]
             cloud_tick(project, root, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
@@ -2697,7 +2720,7 @@ class Handler(BaseHTTPRequestHandler):
         if action == "approve":
             approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
-            note = board.clean(body.get("feedback") or "")
+            note = board.clean(body.get("feedback") or "", board.ITEM_MAX)
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
             clicked = time.time()

@@ -1003,6 +1003,8 @@ SECURITY_RES = tuple(re.compile(p, re.I) for p in (
 CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n"
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
+DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+DELETION_MIN_RATIO = 0.9
 
 
 def ui_globs(root):
@@ -1047,7 +1049,8 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP)) + "|" + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP)) + "|"
+    + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
 
 
 def _drop_stale(rd, spawn):
@@ -1081,7 +1084,8 @@ def _incremental_since(prev, wt, base):
 
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
-    (incremental) or UI/UX and security skip files (full); never writes board.json."""
+    (incremental) or UI/UX (no UI file, or a deletion-dominated diff) and security skip files (full); never writes
+    board.json."""
     job = live(read_board(root), check_id(job_id))
     wt, base = job.get("worktree"), job.get("base")
     if not wt or not base:
@@ -1111,6 +1115,8 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         globs = ui_globs(root)
         if globs and not any(glob_match(f, globs) for f in files):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        elif _deletion_dominated((_route_diff(job) or ([], []))[0]):
+            skips.update(ui=DELETION_SKIP, ux=DELETION_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
@@ -1139,16 +1145,25 @@ def _route_diff(job):
     return None if names is None else (rows, sorted(n for n in names if n))
 
 
-def _promote_trigger(rows, names, globs):
+def _deletion_dominated(rows):
+    """True when at least DELETION_MIN_RATIO of the numstat rows' changed lines are deletions; False with no rows, a
+    binary row or no changed lines."""
+    if not rows or any(a is None for a, _, _ in rows):
+        return False
+    added, deleted = sum(a for a, _, _ in rows), sum(d for _, d, _ in rows)
+    return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
+
+
+def _promote_trigger(rows, names):
     """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
-    if (lines := sum(a + d for a, d, _ in rows)) > FAST_MAX_LINES:
+    if (lines := sum(a for a, _, _ in rows)) > FAST_MAX_LINES:  # size counts added lines only
         return f"diff over {FAST_MAX_LINES} lines ({lines})"
-    if len(names) > FAST_MAX_FILES:
-        return f"more than {FAST_MAX_FILES} files ({len(names)})"
+    if (files := len({p for a, _, p in rows if a})) > FAST_MAX_FILES:
+        return f"more than {FAST_MAX_FILES} files ({files})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
-                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
+                       ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
             return f"{label} {path}"
     return None
@@ -1174,7 +1189,7 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     if lane == "fast" and check == "FAIL" and check_fails >= 2:
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
-        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+        promote = _promote_trigger(*diff) if diff else "diff unreadable"
     spec = d / "spec.md"
     hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
         if spec.is_file() else None
@@ -1807,6 +1822,14 @@ def cmd_ready(root, parent_id, live=()):
 
 
 CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
+
+
+def chain_lock_live(root, parent_id) -> bool:
+    """True when jobs/<parent>/.chain.lock exists and is no older than CHAIN_LOCK_STALE (a crashed holder's lock is not)."""
+    try:
+        return time.time() - (Path(root) / "jobs" / parent_id / ".chain.lock").stat().st_mtime <= CHAIN_LOCK_STALE
+    except OSError:
+        return False
 
 
 def cmd_chain_lock(root, parent_id, holder, wait=540):
