@@ -588,6 +588,22 @@ class BoardTest(unittest.TestCase):
                               "--wait", "0"], capture_output=True, text=True)
         self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"acquired": False, "holder": "003-part-2"}))
 
+    def test_chain_lock_live(self):
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        lock.parent.mkdir(parents=True)
+        self.assertFalse(board.chain_lock_live(self.root, "001-par"), "no lock file")
+        lock.write_text("002-a")
+        self.assertTrue(board.chain_lock_live(self.root, "001-par"))
+        young = time.time() - 1700
+        os.utime(lock, (young, young))
+        self.assertTrue(board.chain_lock_live(self.root, "001-par"), "younger than 1800 s")
+        stale = time.time() - 1801
+        os.utime(lock, (stale, stale))
+        self.assertFalse(board.chain_lock_live(self.root, "001-par"), "older than 1800 s")
+        lock.write_text("002-a")
+        with mock.patch.object(Path, "stat", side_effect=FileNotFoundError):  # gone between the check and the stat
+            self.assertFalse(board.chain_lock_live(self.root, "001-par"))
+
     def test_chain_unlock_only_by_holder(self):
         parent, _ = self.three()
         lock = self.root / "jobs" / parent / ".chain.lock"
