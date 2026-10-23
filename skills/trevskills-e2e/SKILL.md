@@ -7,13 +7,13 @@ description: Cheap, repeatable Playwright E2E check. Replays the saved specs fir
 
 One E2E pass over a repo: replay what is saved, cover only what is new, and explain every failure. **No human is watching** when an agent runs this, so never ask questions; make the reasonable call and say so in the report.
 
-Inputs: the repo root (the current directory, or `WORKTREE` when an agent runs it) and an optional `BASE` (e.g. `origin/main`). Run every command from the repo root.
+Inputs: the repo root (the current directory, or `WORKTREE` when an agent runs it), an optional `BASE` (e.g. `origin/main`) and an optional `PROJECT` (the project profile path an agent was given). Run every command from the repo root.
 
 **The E2E/test directory** is `testDir` from `playwright.config.*` when there is one; otherwise `e2e/` when it exists, else `tests/`. New specs go there and nowhere else.
 
 ## 1. Find the E2E command
 
-1. Read the `- E2E:` line of `scrum/project.md`. When it is present and not `none`, that is the command.
+1. Read the `- E2E:` line of the `PROJECT` file when an agent supplied one. Only on a direct run with no `PROJECT`, read it from `scrum/project.md` (relative to the repo root). When the line is present and not `none`, that is the command.
 2. When the line is missing or `none`, and `package.json` has a `test:e2e` script, the command is `npm run test:e2e`.
 3. When there is neither, stop here. The whole report is the one line `E2E: no command`.
 
@@ -35,7 +35,7 @@ Only for a target route (or a new element on it) that no saved spec covers:
 1. When the repo has Playwright's generator agent output (from `npx playwright init-agents --loop=claude`, e.g. `.claude/agents/playwright-test-generator.md` or a `specs/` plan folder), use it: follow that generator's instructions for this route.
 2. Otherwise drive the page once yourself with Playwright (start the project's dev server on a free port when the config has no `webServer`) and note the roles, labels and test ids of the new elements.
 3. Save one spec file for the route in the E2E/test directory. It uses only `getByRole`, `getByLabel` or `data-testid` (`getByTestId`) locators, never CSS or XPath selectors, and asserts real page content (visible text, a value, a count), never only that the page loaded.
-4. Run that spec alone and fix it until it passes. Record it under `Specs added:`.
+4. Run that spec alone. When it fails because the spec itself is wrong (a locator or expected value that does not match what step 2 observed), fix the spec and run it again. When the spec is correct and still fails, keep it saved and send it through section 5 (retry once, then classify); with no pass on the retry it is a `real bug`, and the never-weaken rule in section 5 applies to it. Record it under `Specs added:`.
 
 Never install Playwright or run `init-agents` for the user; when Playwright is missing, report `Specs added: none (Playwright not installed)` and go on.
 
@@ -61,10 +61,10 @@ When a verdict is unclear, ask Jev a yes/no question, e.g. `This failure is caus
    printf '%s' "<context>" | python3 ~/.claude/scripts/jev-rank.py "<question>" --top 1
    ```
    The score is the first tab-separated field; `>= 0.7` means yes.
-2. Otherwise POST to `https://api.typesafe.ai/v1/systemone` with model `jev-latest` and one `noul` question, the way `jev-rank.py` does. Python reads the key from `TYPESAFE_API_KEY`, or else (macOS only) Keychain service `TypeSafe`, account `typesafe`, and sets the Authorization header itself. The script and the question travel in two single-quoted heredocs (script on fd 3, question on stdin: first line the question, the rest context), so neither the key nor the question touches a command line or a double-quoted shell string (paste it unindented so the `PY` and `Q` lines end the heredocs):
+2. Otherwise POST to `https://api.typesafe.ai/v1/systemone` with model `jev-latest` and one `noul` question, the way `jev-rank.py` does. Python reads the key from `TYPESAFE_API_KEY`, or else (macOS only) Keychain service `TypeSafe`, account `typesafe`, and sets the Authorization header itself. The script and the question travel in two single-quoted heredocs (script on fd 3, question on stdin: first line the question, the rest context), so neither the key nor the question touches a command line or a double-quoted shell string (paste it unindented so the `PY` and `JEV_Q_EOF` lines end the heredocs):
 
 ```bash
-python3 /dev/fd/3 3<<'PY' <<'Q'
+python3 /dev/fd/3 3<<'PY' <<'JEV_Q_EOF'
 import json, os, subprocess, sys, urllib.request
 question, _, context = sys.stdin.read().partition("\n")
 key = os.environ.get("TYPESAFE_API_KEY") or subprocess.run(
@@ -81,7 +81,7 @@ with urllib.request.urlopen(req, timeout=60) as r:
 PY
 <question>
 <context>
-Q
+JEV_Q_EOF
 ```
 
    The printed score `>= 0.7` means yes.

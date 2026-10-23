@@ -555,6 +555,19 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(any("never" in l and "key" in l for l in lines), "never-print-key rule")
         self.assertIn("api.typesafe.ai/v1/systemone", body)
         self.assertIn("E2E: no command", body)
+        # Agent runs read the E2E line from the PROJECT path; scrum/project.md is the direct-run fallback.
+        find = self.section(body, "## 1. Find the E2E command", "## 2. Map changed files")
+        self.assertIn("PROJECT", find)
+        self.assertIn("scrum/project.md", find)
+        # A correct new spec that fails goes through section 5, not an open-ended fix loop.
+        self.assertNotIn("until it passes", body)
+        cover = self.section(body, "## 4. Cover changed UI", "## 5. On failure")
+        self.assertIn("section 5", cover)
+        self.assertIn("real bug", cover)
+        # The question heredoc uses a terminator a context line cannot collide with.
+        self.assertIn("<<'JEV_Q_EOF'", body)
+        self.assertIn("\nJEV_Q_EOF\n", body)
+        self.assertNotIn("Q", body.splitlines())
 
     def test_e2e_agent_loads_skill(self):
         text = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
