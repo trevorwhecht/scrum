@@ -451,9 +451,9 @@ def hold_limited(root, job, reset):
 
 def respawn_exited(project, root):
     """A dashboard-started `claude -p` start/resume run that exited while its job is still in a WATCHED stage (it
-    ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run killed by the usage limit is
-    held in its stage instead (hold_limited), with no sound and no respawn; auto_resume restarts it after the reset. A run that was itself that respawn,
-    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. Returns the flagged ids."""
+    ended its turn mid-job): flag the job stalled, then respawn `resume` once. A run that was itself that respawn,
+    or a job resume_refusal blocks, is only flagged and left for Resume/auto_resume. A run killed by the usage limit
+    is held in its stage instead (hold_limited): no flag, no sound, no respawn. Returns the flagged ids."""
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and r.get("action") in ("start", "resume")
                 and not r.get("handled") and r["proc"].poll() is not None]
