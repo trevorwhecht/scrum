@@ -1,5 +1,5 @@
 import json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -896,8 +896,9 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {}), (200, {"id": job_id, "paused": [job_id]}))
         self.assertTrue(self.wait_for(lambda: not self.serve.running("repo", job_id)))
         job = self.stage_of(job_id)
-        self.assertEqual((job["stage"], job["reason"]), ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
-        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {})[0], 400)  # not in progress any more
+        self.assertEqual((job["stage"], job["paused"], job["reason"]),
+                         ("build", True, "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/pause", {})[0], 400)  # already paused
 
     def test_kill_session_falls_back_to_ps_match(self):
         repo = os.path.realpath(self.root.parent)
@@ -943,6 +944,7 @@ class ServeTest(unittest.TestCase):
         job_id = self.serve.board.cmd_new(self.root, "play me")
         self.serve.board.cmd_set(self.root, job_id, ["stage=check"])
         self.serve.board.cmd_pause(self.root, job_id)
+        self.assertEqual((self.stage_of(job_id)["stage"], self.stage_of(job_id)["paused"]), ("check", True))
         with mock.patch.object(self.serve, "spawn") as spawn:
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/resume", {}), (202, {"id": job_id, "action": "resume"}))
         spawn.assert_called_once()
@@ -961,6 +963,7 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})
         self.assertEqual(code, 202, out)
         self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["reason"]), ("running", None))
+        self.assertNotIn("paused", self.stage_of(parent))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list],
                          [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
         self.assertEqual(self.stage_of(w)["stage"], "spec")
@@ -989,7 +992,11 @@ class ServeTest(unittest.TestCase):
             job = self.stage_of(k)
             self.assertEqual(job["stage"], "needs-human")
             self.assertTrue(job["reason"].startswith("stalled in build: "), job["reason"])
-            self.assertIsNone(b.PAUSED_RE.match(job["reason"]), "no longer paused, so auto_resume takes it when a slot frees")
+            self.assertEqual(job["reason"], "stalled in build: waiting for a free slot after Play. Fix: click Resume.")
+            self.assertNotIn("paused", job, "no longer paused, so auto_resume takes it when a slot frees")
+        for k in kids[:3]:
+            self.assertEqual((self.stage_of(k)["stage"], self.stage_of(k)["paused"]), ("build", True),
+                             "its resume session clears the pause with B set --unpause")
 
     def test_activity_picks_newest_of_runlog_worktree_and_board(self):
         wt = Path(self.tmp.name) / "wt-newest"
@@ -3901,8 +3908,11 @@ class AutoResumeTest(unittest.TestCase):
         for jid, text in [("limit", "You've hit your limit \u00b7 resets 2am (America/Los_Angeles)"),
                           ("crash", "Traceback: something else broke"), ("paused", "hit your limit"), ("epoch", "rate_limit: rejected (five_hour) resets_at=1700000000")]:
             (self.root / "runs" / f"{jid}.log").write_text(text)
-            reason = "stalled in build: paused by Trevor" if jid == "paused" else "stalled in build: no live session"
-            self.jobs.append({"id": jid, "stage": "needs-human", "reason": reason, "runlog": f"runs/{jid}.log"})
+            # merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
+            job = {"id": jid, "stage": "needs-human", "reason": "stalled in merging: no live session", "runlog": f"runs/{jid}.log"}
+            if jid == "paused":
+                job.update(stage="merging", paused=True, reason="stalled in merging: paused by Trevor")
+            self.jobs.append(job)
 
     def sweep(self):
         s = self.serve
@@ -3931,7 +3941,7 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
         s = self.serve
-        stalled = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+        stalled = "stalled in merging: no board update for 30 min and no live session. Fix: click Resume."
         for jid in ("lil", "kid"):
             (self.root / "runs" / f"{jid}.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
             (self.root / "jobs" / jid).mkdir(parents=True)
@@ -3984,12 +3994,46 @@ class AutoResumeTest(unittest.TestCase):
         self.assertTrue(live()["reason"].startswith("stalled in build: "), live()["reason"])
         self.assertNotIn("limitResetAt", live())
 
+    def test_auto_resume_skips_paused_job(self):
+        s, T = self.serve, 1_700_000_000
+        (self.root / "runs" / "p.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
+        paused = "stalled in build: paused by Trevor. Fix: click Play."
+        self.jobs = [{"id": "pz", "stage": "build", "paused": True, "reason": paused, "runlog": "runs/p.log"},
+                     {"id": "ph", "stage": "review", "paused": True, "reason": paused, "runlog": "runs/p.log",
+                      "limitResetAt": T}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        before = (self.root / "board.json").read_text()
+        with mock.patch.object(s.time, "time", return_value=T + 3600):
+            self.assertEqual(self.sweep(), [])
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertEqual(s.AUTO_RESUME, {})
+
+    def test_auto_resume_holds_limit_stalled_job_in_its_stage(self):
+        s, now = self.serve, 1_800_000_000
+        logs = {"named": "hit your limit resets_at=1800003600", "none": "You've hit your limit",
+                "past": "rate_limit: rejected (five_hour) resets_at=1700000000", "crash": "Traceback: something else broke"}
+        self.jobs = []
+        for jid, text in logs.items():
+            (self.root / "runs" / f"{jid}.log").write_text(text)
+            self.jobs.append({"id": jid, "stage": "needs-human", "runlog": f"runs/{jid}.log",
+                              "reason": f"stalled in check: no live session ({jid}). Fix: click Resume."})
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=now), mock.patch.object(s.board, "play") as play:
+            self.assertEqual(self.sweep(), [])
+        play.assert_not_called()
+        live = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        for jid, reset in (("named", 1_800_003_600), ("none", 1_800_001_800), ("past", 1_800_001_800)):
+            self.assertEqual((live[jid]["stage"], live[jid]["limitResetAt"], live[jid]["reason"]),
+                             ("check", reset, f"stalled in check: no live session ({jid}). Fix: click Resume."), jid)
+        self.assertEqual(live["crash"]["stage"], "needs-human")
+        self.assertNotIn("limitResetAt", live["crash"])
+
     def run_child(self, parent_stage="running", lane="runall", reason="stalled in build: no board update for 30 min "
-                  "and no live session. Fix: click Resume."):
+                  "and no live session. Fix: click Resume.", **kid):
         """A Run-all/BigBoy-style parent and one child stalled for a non-limit reason (its log names no limit)."""
         (self.root / "runs" / "kid.log").write_text("Traceback: something else broke")
         self.jobs = [{"id": "par", "stage": parent_stage, "lane": lane, "reason": None, "children": ["kid"]},
-                     {"id": "kid", "stage": "needs-human", "parent": "par", "reason": reason, "runlog": "runs/kid.log"}]
+                     {"id": "kid", "stage": "needs-human", "parent": "par", "reason": reason, "runlog": "runs/kid.log", **kid}]
         (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
 
     def test_stalled_run_child_resumed_once_without_limit(self):
@@ -4008,7 +4052,7 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_non_limit_stall_outside_run_not_resumed(self):
         for case, kw in (("parent not running", {"parent_stage": "needs-human"}), ("standard lane", {"lane": "standard"}),
-                         ("paused", {"reason": "stalled in build: paused by Trevor"})):
+                         ("paused", {"reason": "stalled in build: paused by Trevor", "stage": "build", "paused": True})):
             with self.subTest(case=case):
                 self.run_child(**kw)
                 self.assertEqual(self.sweep(), [])
@@ -4215,6 +4259,22 @@ class ExitedRunSweepTest(unittest.TestCase):
         self.assertEqual(self.job("sib")["stage"], "build")
 
 
+    def test_respawn_exited_leaves_paused_job(self):
+        (self.root / "runs").mkdir()
+        (self.root / "runs" / "x.log").write_text("You've hit your limit")  # not even a limit hold
+        self.write([{"id": "pz", "stage": "build", "paused": True, "runlog": "runs/x.log",
+                     "reason": "stalled in build: paused by Trevor. Fix: click Play."}])
+        self.run_entry("pz", exit_code=-15)
+        before = (self.root / "board.json").read_text()
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.board, "play") as play:
+            self.assertEqual(self.serve.respawn_exited("p", self.root), [])
+        self.assertTrue(self.serve.RUNS["p/pz"]["handled"])
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        spawn.assert_not_called()
+        play.assert_not_called()
+
+
 class WatchdogIdleParentTest(unittest.TestCase):
     """watchdog_tick restarts a running Run-all/BigBoy parent whose children all sit idle with one waiting (a child
     skipped its chaining step), and closes a Run-all parent whose children all finished."""
@@ -4302,6 +4362,23 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 data = json.loads((self.root / "board.json").read_text()); data["jobs"][0]["reason"] = reason
                 (self.root / "board.json").write_text(json.dumps(data))
                 self.assert_no_start()
+
+    def test_sweep_parents_skips_paused_parent(self):
+        self.write("running", {"002-done": "done", "003-wait": "waiting"})
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][0].update(paused=True, reason="stalled in running: paused by Trevor. Fix: click Play.")
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assert_no_start()
+        self.assertEqual((self.job("001-par")["stage"], self.job("001-par")["paused"]), ("running", True))
+        # a paused child is idle (no slot, no orphan respawn): its waiting sibling starts, the paused one is left alone
+        old = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
+        self.write("running", {"002-kid": "build", "003-wait": "waiting"})
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][1].update(paused=True, updatedAt=old, reason="stalled in build: paused by Trevor. Fix: click Play.")
+        (self.root / "board.json").write_text(json.dumps(data))
+        spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("003-wait", "start")])
+        self.assertEqual((self.job("002-kid")["stage"], self.job("002-kid")["paused"]), ("build", True))
 
     def test_skips_no_waiting_child(self):
         self.write("running", {"002-done": "done", "003-wait": "needs-human"})

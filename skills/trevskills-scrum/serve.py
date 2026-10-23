@@ -155,20 +155,22 @@ def start_ready(project, root, parent_id):
 
 
 def resume_job(project, root, job, jobs):
-    """Restart a watchdog-flagged job (the Resume button, and the auto-resume sweep). Play on a paused parent
-    resumes its paused children up to the cap and starts whatever is ready instead. A child over the cap is unpaused
-    but left stalled, so the auto-resume sweep starts it once a slot frees."""
+    """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
+    paused parent resumes its paused children up to the cap and starts whatever is ready instead. A child over the cap
+    is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees."""
     job_id = job["id"]
-    if job.get("children") and job["reason"].startswith(f"{board.STALLED}running:"):
+    if job.get("children") and job.get("paused"):
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
         for k in job["children"]:
             kid = next((j for j in jobs if j["id"] == k), None)
-            if not kid or not board.PAUSED_RE.match(kid.get("reason") or "") or running(project, k):
+            if not kid or not kid.get("paused") or running(project, k):
                 continue
             if resume_refusal(project, root, kid):
-                stage = kid["reason"][len(board.STALLED):].split(":")[0]
-                board.cmd_set(root, k, [f"reason={board.STALLED}{stage}: waiting for a free slot after Play. "
-                                        "Fix: click Resume."], unpause=True)
+                with board.locked_board(root) as b:  # not cmd_set: it never parks at needs-human, and plays a sound
+                    live = board.find(b, k)
+                    live.pop("paused", None)
+                    live.update(stage="needs-human", updatedAt=board.now(), reason=f"{board.STALLED}{kid['stage']}: "
+                                "waiting for a free slot after Play. Fix: click Resume.")
             else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
         start_ready(project, root, job_id)
@@ -311,15 +313,18 @@ def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
     that line names, else every 30 min; at most 12 tries per job. A Run-all/BigBoy child of a running parent stalled
     for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
-    is left on the board. A refused restart costs nothing. A job respawn_exited held in its stage (limitResetAt) is
-    resumed 120 s after that reset, under the same slot cap and try counter."""
+    is left on the board. A refused restart costs nothing. A job held in its stage (limitResetAt) is resumed 120 s
+    after that reset, under the same slot cap and try counter; a limit-killed job stalled in a WATCHED stage is moved
+    back to that stage and held the same way (as respawn_exited does)."""
     now = time.time()
     for job in jobs:
         reason = job.get("reason") or ""
+        if job.get("paused"):
+            continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
             resume_held(project, root, job, jobs, now)
             continue
-        if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) or board.PAUSED_RE.match(reason) \
+        if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) \
                 or job.get("lane") == "lilguy" or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
@@ -335,6 +340,11 @@ def auto_resume(project, root, jobs):
                     and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
                 STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
+            continue
+        stage = re.match(rf"{board.STALLED}(\w+):", reason)
+        if stage and stage.group(1) in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
+            hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
+                         stage.group(1))
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
@@ -415,15 +425,16 @@ def flag_stalled(root, job, msg):
     return True
 
 
-def hold_limited(root, job, reset):
-    """Under the board lock, keep a usage-limit-killed job in its stage with limitResetAt = reset (epoch seconds);
-    auto_resume restarts it after the reset. False when the job is gone or its stage moved on meanwhile."""
+def hold_limited(root, job, reset, stage=None):
+    """Under the board lock, keep a usage-limit-killed job in its stage (or move it back to `stage`) with
+    limitResetAt = reset (epoch seconds); auto_resume restarts it after the reset. False when the job is gone or its
+    stage moved on meanwhile."""
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
             if not live or live.get("stage") != job["stage"]:
                 raise board._Gone
-            live.update(limitResetAt=reset, updatedAt=board.now())
+            live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
     except board._Gone:
         return False
     return True
@@ -444,7 +455,8 @@ def respawn_exited(project, root):
     alive, flagged = None, []
     for key, run in runs:
         job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
-        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or job.get("lane") == "lilguy":
+        if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or job.get("lane") == "lilguy" \
+                or job.get("paused"):
             run["handled"] = True
             continue
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
@@ -490,6 +502,7 @@ def respawn_orphans(project, root, p, kids, alive):
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
+                or kid.get("paused") \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
                 or running(project, kid["id"]) or alive()(kid):
             continue
@@ -512,12 +525,13 @@ def sweep_parents(project, root, jobs, alive=None):
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
-        if p.get("stage") != "running" or p.get("lane") not in ("runall", "bigboy") or not p.get("children"):
+        if p.get("stage") != "running" or p.get("lane") not in ("runall", "bigboy") or not p.get("children") \
+                or p.get("paused"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
         if not (root / "jobs" / p["id"] / ".chain.lock").exists() and respawn_orphans(project, root, p, kids, alive):
             continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
-        if any(k.get("stage") not in board.IDLE for k in kids):
+        if not all(board.idle(k) for k in kids):
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):
             if p["lane"] == "runall":
@@ -663,6 +677,7 @@ def watchdog_tick():
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
+            board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
             respawn_exited(project, root)
             record_outcomes(project, root)
             flagged = set(board.cmd_watchdog(root))
@@ -670,7 +685,7 @@ def watchdog_tick():
                 busy[project] = False
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
-            busy[project] = any(j.get("stage") not in board.IDLE for j in jobs)
+            busy[project] = not all(board.idle(j) for j in jobs)
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll
@@ -2668,9 +2683,9 @@ class Handler(BaseHTTPRequestHandler):
         job = next((j for j in jobs if j["id"] == job_id), None)
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"))
-        if action == "resume":  # only a job stopped for a reason whose card offers Resume (board.RESUMABLE)
-            if not job or job["stage"] != "needs-human" or not (job.get("reason") or "").startswith(board.RESUMABLE) \
-                    or running(project, job_id):
+        if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
+            if not job or running(project, job_id) or not (job.get("paused") or job["stage"] == "needs-human"
+                                                           and (job.get("reason") or "").startswith(board.RESUMABLE)):
                 return 409, {"error": "job isn't stalled, or is already running"}
             if refusal := resume_refusal(project, root, job):
                 return 409, {"error": refusal}

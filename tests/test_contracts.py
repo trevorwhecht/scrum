@@ -1627,6 +1627,17 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, line, phrase)
         self.assertNotIn("plan-apply $P --fix", line)
 
+    def test_pause_keeps_the_job_in_its_stage(self):
+        text = self.rules()
+        pause = next(l for l in text.splitlines() if l.startswith("**Pause:**"))
+        self.assertIn(pause, self.section(text, "## Setup", "## Commands"))
+        for phrase in ("the job stays in its stage with board `paused` true and reason `stalled in <stage>: paused by Trevor`",
+                       "fails with `was paused by Trevor`", "Only `B set --unpause` with a `stage=`"):
+            self.assertIn(phrase, pause, phrase)
+        self.assertNotIn("the job becomes `needs-human`", pause)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("The job must have board `paused` true, or be `needs-human` with a reason starting with", resume)
+
     def test_resume_reentry_per_reason(self):
         text = self.rules()
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
