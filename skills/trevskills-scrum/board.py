@@ -38,8 +38,9 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
-                                   (agents/scrum-*.md, SKILL.md) is exactly its feature.md's cited queued digest edits;
-                                   else exit 1 and print {"ok": false, "error"} (SKILL.md Merge's Agent rules guard).
+                                   (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
+                                   cited queued digest edits; else exit 1 and print {"ok": false, "error"}
+                                   (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
   board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
                                    --incremental) or full review, write round-N's carried-forward or UI/UX and security
