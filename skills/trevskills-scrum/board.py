@@ -850,7 +850,8 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
     for job_id in listed:
         job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
         lane = job.get("lane") or "standard"
-        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
+                        if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
         agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
         agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
                                                            for n in rounds)]
