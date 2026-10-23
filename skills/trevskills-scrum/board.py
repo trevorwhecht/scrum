@@ -1921,6 +1921,7 @@ CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's 
 CLOUD_LABEL = "scrum:needs-human"
 CLOUD_CLOSED = "requeue: cloud PR closed without merging"
 CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
+CLOUD_LANE = re.compile(r"^Scrum lane: (fast|standard|debug|lilguy)[ \t]*$", re.M)  # the PR body's lane line
 CLOUD_PENDING_HOURS = 24  # how long a moved job waits for its scrum-artifacts/<id> push; fixed, not a setting
 
 
@@ -2029,10 +2030,11 @@ def _cloud_plan(repo, job_id, prs):
     if not pr:
         return None
     url = pr.get("html_url") or ""
+    lane = [f"lane={m[1]}"] if (m := CLOUD_LANE.search(str(pr.get("body") or ""))) else []  # first line wins
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False, None
+        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None
     if pr.get("state") == "closed":
-        return "CLOSED", [f"pr={url}"], CLOUD_CLOSED, False, (True, None)
+        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None)
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -2047,21 +2049,24 @@ def _cloud_plan(repo, job_id, prs):
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
-        return "ABORTED", [f"pr={url}"], reason, False, (reason.startswith("requeue:"), number)
+        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number)
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True, None
+    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None
 
 
-def _cloud_abort(root, job_id, url, requeue, reason):
-    """Record pr= and abort a job still in stage cloud, atomically; requeue skips a BigBoy child (Auto-abort rule)."""
+def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
+    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically; requeue skips a BigBoy
+    child (Auto-abort rule)."""
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         if job["stage"] != "cloud":
             raise SystemExit(f"job {job_id} is {job['stage']}, not cloud; left alone")
         job["pr"] = url
+        if lane:
+            job["lane"] = lane
         abort_job(root, job, requeue and not job.get("parent"), reason)
 
 
@@ -2092,7 +2097,8 @@ def cmd_cloud_sync(root: Path) -> dict:
             if live(read_board(root), job_id)["stage"] != "cloud":
                 continue  # moved meanwhile: add no worktree for it
             if abort:
-                _cloud_abort(root, job_id, url, abort[0], reason)
+                lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
+                _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
                 worktree = cloud_worktree(repo, job_id) if wants_worktree else None
                 cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
