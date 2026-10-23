@@ -1,4 +1,4 @@
-import importlib.util, io, json, os, socket, subprocess, sys, tempfile, unittest, urllib.error
+import http.client, importlib.util, io, json, os, socket, subprocess, sys, tempfile, unittest, urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -196,6 +196,23 @@ class JevTest(unittest.TestCase):
         with self.assertRaises(jev.JevError) as e:
             jev.noul("s", "i")
         self.assertIn("nodename", str(e.exception))
+
+    def read_fails(self, exc):
+        class Bad(Resp):
+            def read(self, *a):
+                raise exc
+        self.urlopen(Bad())
+        with self.assertRaises(jev.JevError) as e:
+            jev.noul("s", "i")
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn("sk-secret-test", str(e.exception))
+        return str(e.exception)
+
+    def test_incomplete_read_raises(self):
+        self.assertIn("IncompleteRead", self.read_fails(http.client.IncompleteRead(b"partial")))
+
+    def test_connection_reset_raises(self):
+        self.assertIn("ConnectionResetError", self.read_fails(ConnectionResetError("reset sk-secret-test")))
 
     def test_key_never_in_output(self):
         paths = [
