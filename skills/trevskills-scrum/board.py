@@ -1812,6 +1812,14 @@ def cmd_ready(root, parent_id, live=()):
 CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
 
 
+def chain_lock_live(root, parent_id) -> bool:
+    """True when jobs/<parent>/.chain.lock exists and is no older than CHAIN_LOCK_STALE (a crashed holder's lock is not)."""
+    try:
+        return time.time() - (Path(root) / "jobs" / parent_id / ".chain.lock").stat().st_mtime <= CHAIN_LOCK_STALE
+    except OSError:
+        return False
+
+
 def cmd_chain_lock(root, parent_id, holder, wait=540):
     """Take jobs/<parent>/.chain.lock for holder, polling every 2 s for up to `wait` seconds.
     The same holder re-acquires (refreshing it); a lock older than CHAIN_LOCK_STALE is taken over."""

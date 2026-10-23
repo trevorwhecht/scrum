@@ -1,4 +1,5 @@
 import json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from unittest import mock
 from pathlib import Path
@@ -4411,6 +4412,42 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 lock.unlink(missing_ok=True)
                 self.assertEqual(self.job("003-wait")["stage"], "waiting")
 
+    def test_stale_chain_lock_does_not_block(self):
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        lock.parent.mkdir(); stale = time.time() - 1801  # just past board.CHAIN_LOCK_STALE: a crashed chaining session
+        self.write("running", {"002-done": "done", "003-wait": "waiting"})
+        lock.write_text("002-done"); os.utime(lock, (stale, stale))
+        self.assertEqual(self.spawned(), [("003-wait", "start", "/trevskills-scrum start 003-wait")])
+        self.orphan()
+        lock.write_text("002-claimed"); os.utime(lock, (stale, stale))
+        self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
+
+    def test_orphan_blocked_by_resume_blocker_stays_eligible(self):
+        for case in ("overlap", "slot cap 1"):
+            with self.subTest(case=case):
+                self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear()
+                shared = "src/shared.py" if case == "overlap" else "src/{}.py"
+                for jid in ("002-claimed", "003-sib"):
+                    (self.root / "jobs" / jid).mkdir(exist_ok=True)
+                    (self.root / "jobs" / jid / "spec.md").write_text(
+                        f"# x\n## Likely files\n- `{shared.format(jid)}`: why\n")
+                self.write("running", {"002-claimed": "spec", "003-sib": "build"})
+                data = json.loads((self.root / "board.json").read_text())
+                old = (datetime.now().astimezone() - timedelta(minutes=4)).isoformat()
+                data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
+                data["jobs"][2].update(parallel=True)
+                (self.root / "board.json").write_text(json.dumps(data))
+                with mock.patch.object(self.board, "slot_cap", return_value=1) if case == "slot cap 1" else nullcontext():
+                    self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
+                    kid = self.job("002-claimed")
+                    self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
+                    self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
+                    self.assertNotIn("idle/002-claimed/spec", self.serve.STALL_RESUMED)
+                    data["jobs"][2]["stage"] = "done"  # the sibling leaves its in-progress stage
+                    (self.root / "board.json").write_text(json.dumps(data))
+                    self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
+                    self.assertEqual(self.spawned(), [], "once per stage")
+
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: when no opted-in project has work in flight, the watchdog starts one
@@ -4558,6 +4595,36 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1, backlog="- [x] Claimed → 001-x\n- [ ] Needs setup {setup: add key}\n"
                                         "- [ ] Blocked {needs #ab12}\n- [ ] Prereq {#ab12} {setup: do it}\n")
         self.assertEqual(self.tick(), [])
+
+    def limit_stalled(self, log):
+        """Opted-in project a with a claimable backlog and one job stalled in build, its run log reading `log`."""
+        self.serve.AUTO_RESUME.clear(); self.addCleanup(self.serve.AUTO_RESUME.clear)
+        root = self.base / "a" / "scrum"
+        if not root.exists():
+            self.project("a", n=1, jobs=[{"id": "001-x", "stage": "needs-human", "runlog": "runs/001-x.log"}])
+        data = json.loads((root / "board.json").read_text())
+        data["jobs"][0].update(stage="needs-human", reason="stalled in build: no live session")
+        (root / "board.json").write_text(json.dumps(data))
+        (root / "runs").mkdir(exist_ok=True); (root / "runs" / "001-x.log").write_text(log)
+        return root
+
+    def test_limit_stalled_job_resumed_blocks_run_all(self):
+        root = self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.assertEqual(self.tick(), [("a", root, "001-x", "resume", "/trevskills-scrum resume 001-x")])
+
+    def test_limit_stalled_pending_counts_busy(self):
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=4102444800")  # the reset is years away
+        self.assertEqual(self.tick(), [], "deferred to the reset: no run-all beside it")
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.serve.AUTO_RESUME["a/001-x"] = [1, time.time() + 600]  # tried once, next try in 10 min
+        self.assertEqual(self.tick(), [], "between tries: no run-all beside it")
+
+    def test_exhausted_or_non_limit_stall_stays_idle(self):
+        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.serve.AUTO_RESUME["a/001-x"] = [self.serve.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.tick(), self.started("a"), "tries used up: left for Trevor, the project is idle")
+        self.limit_stalled("Traceback: something else broke")
+        self.assertEqual(self.tick(), self.started("a"), "no limit line: not auto-resumed, the project is idle")
 
     def test_no_start_unopted_project(self):
         self.project("a"); self.project("b", n=1, backlog="")
