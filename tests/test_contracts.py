@@ -1208,8 +1208,28 @@ class ContractTest(unittest.TestCase):
             template = next(l for l in text.splitlines()
                             if l.strip().startswith("Rendered:") and "Rendered: no — <reason>" in l)
             self.assertIn("Rendered: blocked — <env reason>", template, name)
-        ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
-        self.assertLess(ux.index("throwaway harness"), ux.index("Rendered: blocked — <env reason>"))
+            self.assertLess(text.index("throwaway harness"), text.index("Rendered: blocked — <env reason>"), name)
+            blocked = next(l for l in text.splitlines() if l.startswith("**Environment-blocked render.**"))
+            self.assertIn("**Environment-blocked render.** Only when the harness above also could not render the new "
+                          "element, and the environment, not the diff, stopped you", blocked, name)
+
+    def test_review_ux_ui_dev_lock_reuse(self):
+        stale = "Do not decline it as possibly stale."
+        collision = ("If a server you reused this way stops answering before you finish, its owner (often the other "
+                     "UI reviewer) stopped it: start your own fresh server from WORKTREE once, now that the lock is "
+                     "free, and carry on; never write `Rendered: no` or `Rendered: blocked` for that alone.")
+        wait = ("If your server is a Next.js dev server for WORKTREE and `JOB_DIR/round-ROUND/review-ui.md` or "
+                "`review-ux.md` (the other UI reviewer's file) is not written yet, wait up to 5 minutes for it "
+                "before you stop the server.")
+        for name in ("ux", "ui"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
+            self.assertIn("use that one. " + stale, step1, name)
+            self.assertLess(step1.index("holds WORKTREE's lock"), step1.index(stale), name)
+            self.assertIn(collision, step1, name)
+            step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
+            self.assertIn(wait, step4, name)
+            self.assertIn('rm -rf "$T"', step4, name)
 
     def test_ux_reviewer_renders_page(self):
         self.assert_reviewer_renders("ux")
@@ -1265,21 +1285,22 @@ class ContractTest(unittest.TestCase):
                    "component in a throwaway harness in `/tmp` with mock data at 390 px and 1440 px, and say so "
                    "in the `Rendered:` line. If you could not render or exercise the page, write "
                    "`Rendered: no — <reason>`;")
-        self.assertIn(harness, ux)
         self.assertIn(debt + "\n", ui)
         self.assertNotIn("UB-15", ui)
-        self.assertNotIn("throwaway harness", ui)
         for name, text in (("ux", ux), ("ui", ui)):
             self.assertEqual(text.count("pre-existing: <rule ID> — <where>"), 1, name)
             self.assertNotIn("- Judge new violations in this diff, not existing debt.\n", text, name)
-        self.assertEqual(ux.count("throwaway harness"), 1)
+            para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
+            self.assertIn(harness, para, name)
+            self.assertEqual(text.count("throwaway harness"), 1, name)
 
     def test_review_ux_ui_find_cloud_chromium(self):
         lookup = ("If that binary is missing, look for Chromium under `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` "
                   "(`ls -d \"${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}\"/chromium-*/chrome-linux/chrome`) "
                   "and use it with the same flags.")
-        never = ("Never write `Rendered: no` because Chrome is missing until the `/opt/pw-browsers` Chromium "
-                 "lookup in step 2 has also found nothing.")
+        never = ("Never write `Rendered: no` or `Rendered: blocked` because Chrome is missing or will not launch "
+                 "until the `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` Chromium lookup in step 2 has also "
+                 "found nothing or also failed to launch.")
         for name in ("scrum-review-ux.md", "scrum-review-ui.md"):
             text = (ROOT / "agents" / name).read_text()
             step2 = next(l for l in text.splitlines() if l.startswith("2. Open the page in headless Chrome"))
