@@ -934,6 +934,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [x] Alpha → 001-alpha\n- [x] Beta → 002-beta\n- [ ] Gamma\n")
         self.assertEqual([(j["id"], j["stage"]) for j in self.jobs()], [("001-alpha", "spec"), ("002-beta", "spec")])
+        self.assertEqual([j.get("cloudClaim") for j in self.jobs()], [True, True])
 
     def test_cloud_claim_cuts_title_to_60_and_skips_waiting_items(self):
         long = "L" * 70
@@ -986,6 +987,41 @@ class BoardTest(unittest.TestCase):
         before = (self.root / "backlog.md").read_text()
         self.assertEqual(board.cmd_cloud_claim(self.root, 2), {"claimed": []})
         self.assertEqual((self.root / "backlog.md").read_text(), before)
+
+    def test_cloud_claim_counts_own_unsent_claims_as_in_flight(self):
+        self.cloud_backlog([("A", ["a.py"]), ("B", ["b.py"]), ("C", ["a.py", "c.py"]), ("D", ["d.py"])])
+        first = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual([c["id"] for c in first["claimed"]], ["001-a", "002-b"])
+        second = board.cmd_cloud_claim(self.root, 2)
+        self.assertEqual(second, {"claimed": [{"id": "003-d", "feature": "D"}]})
+        self.assertTrue(self.spec_file("C").exists())
+        self.assertIn("- [ ] C\n", (self.root / "backlog.md").read_text())
+
+    def test_cloud_claim_ignores_local_spec_jobs(self):
+        self.cloud_backlog([("X item", ["x.py"])])
+        self.in_flight("010-local", "spec", ["x.py"])
+        out = board.cmd_cloud_claim(self.root, 1)
+        self.assertEqual([c["feature"] for c in out["claimed"]], ["X item"])
+
+    def test_cloud_claim_released_when_claim_leaves_spec(self):
+        for stage in ("aborted", "needs-human"):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.cloud_backlog([("X item", ["x.py"])])
+                self.in_flight("010-gone", stage, ["x.py"])
+                data = json.loads((self.root / "board.json").read_text())
+                data["jobs"][0]["cloudClaim"] = True
+                (self.root / "board.json").write_text(json.dumps(data))
+                out = board.cmd_cloud_claim(self.root, 1)
+                self.assertEqual([c["feature"] for c in out["claimed"]], ["X item"])
+
+    def test_cloud_claim_unsent_claim_without_spec_blocks_all(self):
+        self.cloud_backlog([("X item", ["x.py"])])
+        self.in_flight("010-unsent", "spec", None)
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][0]["cloudClaim"] = True
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(board.cmd_cloud_claim(self.root, 1), {"claimed": []})
 
     def test_cloud_claim_rejects_n_below_one(self):
         self.cloud_backlog([("A", ["a.py"])])
