@@ -99,7 +99,7 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #blRunAllAskme{display:flex;gap:4px}#blRunAllAskme[hidden]{display:none}
 #blTriage summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--muted);font-size:13px}
 #blTriageBody{font-size:13px;overflow-wrap:anywhere}
-#blAdd input{flex:1;min-width:0}
+#blAdd input{flex:1;min-width:0}#blAdd .pts{min-height:44px;flex:none}
 #blList{list-style:none;margin:0;padding:0}
 #blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
 #blList li input{flex:1;min-width:0}
@@ -193,7 +193,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#filter,#laneFilter{font-size:16px}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
   #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
@@ -211,7 +211,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
-    <form id="blAdd"><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item"><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
+    <form id="blAdd"><select name="points" class="pts px" aria-label="Difficulty points"></select><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
     <section id="blManual" hidden aria-labelledby="blManualTitle"><h3 id="blManualTitle">Manual checks</h3><ul id="blManualList"></ul></section>
@@ -257,6 +257,7 @@ const colOf = job => job.stage === "aborted" ? "done" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const PTS = [null, 1, 2, 3, 5, 8, 13];
+const ptsOptions = sel => PTS.map(p => `<option value="${p ?? ""}"${p === sel ? " selected" : ""}>${p ?? "?"}</option>`).join("");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const pct = v => typeof v === "number" && isFinite(v) ? `${Math.round(v)}%` : "—";
 // Epoch seconds or a local ISO string as local "YYYY-MM-DD HH:MM"; "—" for anything else.
@@ -816,7 +817,7 @@ function renderBacklog() {
   $("blRunAll").disabled = !open.length;
   $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}"${it.setup?.length ? ' class="setup"' : ""}>
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
-        ${PTS.map(p => `<option value="${p ?? ""}"${p === it.points ? " selected" : ""}>${p ?? "?"}</option>`).join("")}</select>
+        ${ptsOptions(it.points)}</select>
       <input type="text" value="${esc(it.text)}" maxlength="2000" aria-label="Item text">${needsTag(it, all)}
       <button class="btn icon" type="button" data-do="up" aria-label="Move up"${n === 0 ? " disabled" : ""}>↑</button>
       <button class="btn icon" type="button" data-do="down" aria-label="Move down"${n === open.length - 1 ? " disabled" : ""}>↓</button>
@@ -877,10 +878,48 @@ $("blRunAllAskme").addEventListener("click", e => {
   $("blRunAllAskme").querySelectorAll("button").forEach(x => x.disabled = true);
   backlogCall(url => post(`${url}/run-all`, askme ? {askme} : {}).then(() => $("backlog").close())).then(disarmRunAll);
 });
+// The add form's points pick: "?" leaves the item to the estimator, a number skips it.
+const paintPts = sel => sel.className = `pts p${sel.value || "x"}`;
+$("blAdd").points.innerHTML = ptsOptions(null);
+$("blAdd").points.addEventListener("change", e => paintPts(e.target));
 $("blAdd").addEventListener("submit", e => {
   e.preventDefault();
-  const input = e.target.text;
-  backlogCall(async url => { await post(url, {op: "add", text: input.value}); input.value = ""; });
+  const form = e.target, points = form.points.value;
+  backlogCall(async url => {
+    await post(url, {op: "add", text: form.text.value, ...(points && {points: +points})});
+    form.reset(); paintPts(form.points);
+  });
+});
+// Images dropped or pasted on the add input upload to scrum/attachments/ and append a [screenshot: path] token.
+const toBase64 = file => new Promise((ok, fail) => {
+  const r = new FileReader();
+  r.onload = () => ok(String(r.result).split(",")[1] || "");
+  r.onerror = () => fail(r.error);
+  r.readAsDataURL(file);
+});
+let uploads = 0;
+async function attachImages(files) {
+  const form = $("blAdd"), add = form.querySelector("button[type=submit]"), url = `api/p/${enc(blProject())}/attachments`;
+  $("blError").textContent = "";
+  for (const file of files) {
+    if (!file.type.startsWith("image/")) { $("blError").textContent = "Only images can be attached"; continue; }
+    uploads++; add.disabled = true;
+    try {
+      const {path} = await post(url, {data: await toBase64(file), type: file.type});
+      const text = form.text.value, token = `[screenshot: ${path}]`, next = text + (text ? " " : "") + token;
+      if (next.length > form.text.maxLength) $("blError").textContent = "Item is too long to add another screenshot";
+      else form.text.value = next;
+    } catch (err) { $("blError").textContent = err.message; }
+    finally { if (!--uploads) add.disabled = false; }
+  }
+}
+$("blAdd").text.addEventListener("dragover", e => e.preventDefault());
+$("blAdd").text.addEventListener("drop", e => {  // a text drag keeps the browser's own insert
+  if (e.dataTransfer?.files.length) { e.preventDefault(); attachImages([...e.dataTransfer.files]); }
+});
+$("blAdd").text.addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); attachImages(files); }
 });
 $("blList").addEventListener("click", e => {
   const b = e.target.closest("button[data-do]");

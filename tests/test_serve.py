@@ -261,6 +261,91 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "edit", "index": 0, "points": 4})[0], 400)
         self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "edit", "index": 0, "points": 8})[0], 200)
 
+    # --- screenshots dropped on the Backlog add input, and points picked before adding ---
+    def post_raw(self, path, body, headers=None):
+        """(status, parsed JSON body) for error responses too; req() drops the body of a non-2xx."""
+        h = {"Content-Type": "application/json"} | (headers or {})
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", headers=h,
+                                   data=json.dumps(body).encode())
+        try:
+            with urllib.request.urlopen(r) as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read() or b"null")
+
+    def keep_backlog(self):
+        path = self.root / "backlog.md"
+        self.addCleanup(path.write_text, path.read_text())
+        self.addCleanup(shutil.rmtree, self.root / "attachments", True)
+
+    def test_attachment_saved_by_content_hash(self):
+        self.keep_backlog()
+        shutil.rmtree(self.root / "attachments", ignore_errors=True)
+        png = b"\x89PNG\r\n\x1a\nfake image bytes"
+        import base64
+        name = "4c3100a6675a"  # first 12 hex chars of sha1(png)
+        body = {"data": base64.b64encode(png).decode(), "type": "image/png"}
+        code, out = self.post_raw("/api/p/repo/attachments", body)
+        want = str((self.root / "attachments" / f"{name}.png").resolve())
+        self.assertEqual((code, out), (200, {"path": want}))
+        self.assertEqual(Path(want).read_bytes(), png)
+        self.assertEqual(self.post_raw("/api/p/repo/attachments", body), (200, {"path": want}))
+        self.assertEqual(sorted(p.name for p in (self.root / "attachments").iterdir()), [f"{name}.png"])
+        for mime, ext in (("image/jpeg", "jpg"), ("image/gif", "gif"), ("image/webp", "webp")):
+            code, out = self.post_raw("/api/p/repo/attachments", {"data": base64.b64encode(b"x" + ext.encode()).decode(), "type": mime})
+            self.assertEqual(code, 200)
+            self.assertTrue(out["path"].endswith(f".{ext}"), out)
+
+    def test_attachment_rejects_bad_input(self):
+        self.keep_backlog()
+        shutil.rmtree(self.root / "attachments", ignore_errors=True)
+        import base64
+        good = base64.b64encode(b"img").decode()
+        big = base64.b64encode(b"\0" * (10 * 1024 * 1024 + 1)).decode()
+        for body in ({"data": good, "type": "text/plain"}, {"data": good}, {"data": "not base64!!", "type": "image/png"},
+                     {"data": "", "type": "image/png"}, {"type": "image/png"}, {"data": big, "type": "image/png"}):
+            code, out = self.post_raw("/api/p/repo/attachments", body)
+            self.assertEqual(code, 400, body.get("type"))
+            self.assertTrue(out.get("error"), out)
+        self.assertFalse((self.root / "attachments").exists() and any((self.root / "attachments").iterdir()))
+        self.assertEqual(self.post_raw("/api/p/nope/attachments", {"data": good, "type": "image/png"})[0], 404)
+        self.assertEqual(self.req("POST", "/api/p/repo/attachments", {"data": good, "type": "image/png"},
+                                  {"Origin": "https://evil.example"})[0], 403)
+        self.assertFalse((self.root / "attachments").exists() and any((self.root / "attachments").iterdir()))
+
+    def test_add_with_screenshot_token_reaches_feature(self):
+        self.keep_backlog()
+        text = "Fix the header [screenshot: /Users/t/repo/scrum/attachments/0123456789ab.png] please"
+        with mock.patch.object(self.serve, "estimate"):
+            code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": text})
+        self.assertEqual(code, 200)
+        self.assertIn(f"- [ ] {text}\n", (self.root / "backlog.md").read_text())
+        with mock.patch.object(self.serve, "spawn"):
+            code, out = self.req("POST", "/api/p/repo/backlog/run", {"index": items[-1]["index"]})
+        self.assertEqual(code, 202)
+        self.assertEqual((self.root / "jobs" / out["id"] / "feature.md").read_text(), text + "\n")
+
+    def test_add_with_points_skips_estimate(self):
+        self.keep_backlog()
+        with mock.patch.object(self.serve, "estimate") as est:
+            code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": "Picked by hand", "points": 8})
+            time.sleep(0.2)
+        self.assertEqual(code, 200)
+        self.assertEqual((items[-1]["text"], items[-1]["points"]), ("Picked by hand", 8))
+        self.assertIn("- [ ] [8] Picked by hand\n", (self.root / "backlog.md").read_text())
+        est.assert_not_called()
+
+    def test_add_with_bad_points_rejected(self):
+        self.keep_backlog()
+        before = (self.root / "backlog.md").read_text()
+        with mock.patch.object(self.serve, "estimate") as est:
+            code, out = self.post_raw("/api/p/repo/backlog", {"op": "add", "text": "Bad points", "points": 4})
+        self.assertEqual(code, 400)
+        self.assertIn("points must be one of", out["error"])
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
+        est.assert_not_called()
+
     def test_writes_need_json_and_localhost(self):
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog", method="POST",
                                    data=b"op=delete&index=0", headers={"Content-Type": "application/x-www-form-urlencoded"})
