@@ -464,6 +464,12 @@ def respawn_orphans(project, root, p, kids, alive):
     return spawned
 
 
+def finished_bigboy(job, by_id):
+    """A running BigBoy parent whose every child on the board is done/aborted: it waits only for its final review."""
+    return job.get("lane") == "bigboy" and job.get("stage") == "running" and bool(job.get("children")) \
+        and all(by_id[k].get("stage") in ("done", "aborted") for k in job["children"] if k in by_id)
+
+
 def sweep_parents(project, root, jobs, alive=None):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
@@ -478,6 +484,8 @@ def sweep_parents(project, root, jobs, alive=None):
         if not (root / "jobs" / p["id"] / ".chain.lock").exists() and respawn_orphans(project, root, p, kids, alive):
             continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
         if any(k.get("stage") not in board.IDLE for k in kids):
+            continue
+        if finished_bigboy(p, by_id):
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):
             if p["lane"] == "runall":
@@ -567,7 +575,8 @@ def watchdog_tick():
                 busy[project] = False
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
-            busy[project] = any(j.get("stage") not in board.IDLE for j in jobs)
+            by_id = {j["id"]: j for j in jobs}
+            busy[project] = any(j.get("stage") not in board.IDLE and not finished_bigboy(j, by_id) for j in jobs)
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll

@@ -4339,6 +4339,40 @@ class AutoContinueTest(unittest.TestCase):
         (root / "project.md").write_text(text)
         return self.serve.auto_continue(root)
 
+    def parent_jobs(self, kids, lane="bigboy", stage="running", children=True):
+        parent = {"id": "1-parent", "stage": stage, "lane": lane}
+        if children is True:
+            children = [f"{i+2}-kid" for i in range(len(kids))]
+        if children is not None:
+            parent["children"] = children
+        return [parent] + [{"id": f"{i+2}-kid", "stage": st, "parent": "1-parent"} for i, st in enumerate(kids)]
+
+    def test_finished_bigboy_parent_does_not_block_auto_continue(self):
+        self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", "aborted", "done"]))],
+                         [c[:3] for c in self.started("a")])
+
+    def test_unfinished_bigboy_parent_still_busy(self):
+        for st in ("build", "waiting", "needs-human"):
+            with self.subTest(st=st):
+                self.assertEqual(self.tick_run_all(self.parent_jobs(["done", st])), [])
+
+    def tick_run_all(self, jobs):
+        self.projects.clear()
+        shutil.rmtree(self.base / "a", ignore_errors=True)
+        self.project("a", 1, jobs=jobs)
+        with mock.patch.object(self.board, "pace_cap", return_value=None):
+            return [c for c in self.tick() if c[2] == "run-all"]
+
+    def test_only_running_bigboy_parent_is_excluded(self):
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], lane="runall")), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="review")), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="plan")), [])
+
+    def test_finished_bigboy_parent_edge_cases(self):
+        self.assertEqual(self.tick_run_all(self.parent_jobs([], children=[])), [])
+        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], children=None)), [])
+        self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=["2-kid", "9-gone"]))), 1)
+
     def test_parse_value(self):
         self.assertEqual(self.parse("# P\n- Stack: x\n- Auto continue: 2\n- Lint: none\n"), 2)
 
