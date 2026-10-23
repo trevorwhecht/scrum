@@ -4094,5 +4094,190 @@ class RouteCheckTest(unittest.TestCase):
             self.assertFalse(board.glob_match(path, globs), path)
 
 
+class PipelineFitTest(unittest.TestCase):
+    """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
+
+    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root = base / "scrum"
+        self.wt = base / "wt"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.wt.mkdir()
+        (self.wt / "README.md").write_text("readme\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "README.md")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "work")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, files):
+        for rel, text in files.items():
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change")
+
+    def put(self, job_id, rel, text):
+        p = self.root / "jobs" / job_id / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def reviews(self, job_id, n, **texts):
+        for r in ("security", "ux", "ui", "code"):
+            self.put(job_id, f"round-{n}/review-{r}.md", texts.get(r, "VERDICT: PASS\nok\n"))
+
+    def digest(self, *lines):
+        d = self.root / "digests" / "001"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("".join(f"{l}\n" for l in lines))
+
+    def snapshot(self):
+        bj = self.root / "board.json"
+        files = sorted(str(p) for sub in ("digests", "jobs") for p in (self.root / sub).rglob("*"))
+        return bj.read_bytes(), bj.stat().st_mtime_ns, files
+
+    def fit(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "pipeline-fit", "001"])
+        self.assertIn(code, (0, None))
+        return json.loads(out.getvalue())
+
+    def small_standard(self, lines=20, files=2, **round1):
+        job = board.cmd_new(self.root, "Small")
+        board.cmd_set(self.root, job, [f"worktree={self.wt}", "base=main", "lane=standard"])
+        per = lines // files
+        self.commit({f"src/f{i}.py": "x\n" * (per + (lines - per * files if i == 0 else 0)) for i in range(files)})
+        for f in ("spec.md", "build.md", "decision.md"):
+            self.put(job, f, "x\n")
+        self.reviews(job, 1, **round1)
+        return job
+
+    def test_pipeline_fit_reports_digest_jobs(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])  # no lane key: standard
+        for f in ("spec.md", "build.md", "decision.md"):
+            self.put(b, f, "x\n")
+        self.reviews(b, 1, ux="VERDICT: PASS\nCarried forward from round 0: no blocking findings.\n",
+                     ui="VERDICT: PASS\nSkipped by orchestrator: fast lane.\n", code="VERDICT: CHANGES\nfix it\n")
+        carried = "VERDICT: PASS\nCarried forward from round 1: no blocking findings.\n"
+        self.reviews(b, 2, security=carried, ux=carried, ui=carried)
+        d = board.cmd_new(self.root, "Trimmed")
+        board.cmd_set(self.root, d, ["lane=debug"])
+        self.put(d, "spec.md", "x\n")
+        self.put(d, "decision.md", "x\n")
+        e = board.cmd_new(self.root, "No reviews")
+        board.cmd_set(self.root, e, ["lane=fast"])
+        (self.root / "jobs" / e / "round-1").mkdir()
+        self.put(e, "round-1/review-ui.md", "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n")
+        self.digest(b, "../../etc", d, "998-gone", e)
+        before = self.snapshot()
+        calls = []
+        real_run = subprocess.run
+
+        def fake_run(argv, *a, **kw):
+            if argv[0] == "gh":
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '{"additions": 200, "deletions": 50, "changed_files": 4}', "")
+            return real_run(argv, *a, **kw)
+
+        with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+            out = self.fit()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(out["digest"], "001")
+        self.assertEqual([j["id"] for j in out["jobs"]], [b, d, "998-gone", e])
+        for j in out["jobs"]:
+            self.assertEqual(set(j), self.KEYS, j["id"])
+        jb, jd, gone, je = out["jobs"]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("repos/acme/app/pulls/42", calls[0])
+        self.assertEqual(jb, {
+            "id": b, "lane": "standard", "agents": ["spec", "builder", "review-security", "review-code", "approver"],
+            "added": 200, "deleted": 50, "files": 4,
+            "verdicts": {"1": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
+                         "2": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}},
+            "fix_rounds": 1, "over_routed": False, "fit": "standard"})
+        self.assertEqual(jd, {"id": d, "lane": "debug", "agents": ["spec", "approver"], "added": None, "deleted": None,
+                              "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "debug"})
+        self.assertEqual(gone, {"id": "998-gone", "lane": "standard", "agents": [], "added": None, "deleted": None,
+                                "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "standard"})
+        self.assertEqual(je["agents"], [])
+        self.assertEqual(je["verdicts"], {"1": {"security": None, "ux": None, "ui": "PASS", "code": None}})
+        self.assertEqual(je["fit"], "fast")
+
+    def test_pipeline_fit_gh_failure_gives_nulls(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])
+        self.reviews(b, 1)
+        self.digest(b)
+        with mock.patch.object(board.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(["gh"], 1, "", "HTTP 404\n")):
+            j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+        with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 30)):
+            j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+
+    def test_pipeline_fit_flags_over_routed_standard_job(self):
+        job = self.small_standard(security="VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n")
+        self.digest(job)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"]), (20, 0, 2))
+        self.assertEqual(j["agents"], ["spec", "builder", "review-ux", "review-ui", "review-code", "approver"])
+        self.assertEqual((j["over_routed"], j["fit"]), (True, "lilguy"))
+
+    def test_pipeline_fit_flags_mid_size_job_as_fast(self):
+        job = self.small_standard(lines=60, files=2)
+        board.cmd_set(self.root, job, ["lane=debug"])
+        self.digest(job)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["files"]), (60, 2))
+        self.assertEqual((j["over_routed"], j["fit"]), (True, "fast"))
+
+    def test_pipeline_fit_keeps_correctly_routed_job(self):
+        big = self.small_standard(lines=250, files=2)
+        self.digest(big)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["files"]), (250, 2))
+        self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+        board.cmd_set(self.root, big, ["worktree="])  # no worktree and no PR: unreadable diff
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+
+    def test_pipeline_fit_round1_changes_not_over_routed(self):
+        job = self.small_standard(code="VERDICT: CHANGES\nfix\n")
+        self.reviews(job, 2)
+        self.digest(job)
+        before = self.snapshot()
+        j = self.fit()["jobs"][0]
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((j["added"], j["files"], j["fix_rounds"]), (20, 2, 1))
+        self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+
+    def test_pipeline_fit_fast_lane_never_over_routed(self):
+        job = self.small_standard()
+        board.cmd_set(self.root, job, ["lane=fast"])
+        self.digest(job)
+        self.assertEqual(self.fit()["jobs"][0]["over_routed"], False)
+
+    def test_pipeline_fit_rejects_unknown_digest(self):
+        self.digest()
+        for bad in ("1", "../x", "999"):
+            with self.assertRaises(SystemExit, msg=bad) as cm:
+                board.cmd_pipeline_fit(self.root, bad)
+            self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
