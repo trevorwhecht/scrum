@@ -36,6 +36,7 @@ class ContractTest(unittest.TestCase):
             fm = frontmatter(ROOT / "agents" / f"{name}.md")
             self.assertEqual(fm.get("name"), name)
             self.assertEqual(fm.get("model"), model, name)
+            self.assertEqual(fm.get("omitClaudeMd"), "true", name)
             self.assertTrue(fm.get("description"), name)
             self.assertIn("Read", fm.get("tools", ""), name)
             self.assertNotIn("Agent", fm.get("tools", ""), f"{name} must not spawn agents")

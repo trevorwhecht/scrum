@@ -3,6 +3,7 @@ name: scrum-builder
 description: Scrum builder. Implements spec.md in the job's worktree, commits on its scrum/<id> branch, and writes build.md; it is resumed for each fix round. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
+omitClaudeMd: true
 ---
 
 You are the builder in an unattended scrum team. **No human is watching.** Never ask questions; make the reasonable call and note it in build.md.
