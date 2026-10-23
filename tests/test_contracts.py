@@ -1095,6 +1095,19 @@ class ContractTest(unittest.TestCase):
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
 
+    def test_spec_writer_retro_p2_scrum_never_in_diff(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        head = "- **`scrum/` is never in the diff.**"
+        for phrase in (head, "never an acceptance criterion or a Likely file",
+                       "Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`.",
+                       "A line the request only ticks stays open for the Run all triager, which retires done items."):
+            self.assertEqual(text.count(phrase), 1, phrase)
+        start = text.index(head)
+        end = text.index("- Write no code and touch no file")
+        self.assertLess(start, end)
+        self.assertEqual(text[start:end].count("\n"), 1)
+        self.assertTrue(text[start:end].endswith("\n"))
+
     def test_spec_writer_digest_001_p3_p4(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
@@ -1352,10 +1365,22 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
                        "Hard stop: render — UI not rendered"):
             self.assertIn(phrase, rule, phrase)
-        self.assertNotIn("Hard stop: blocked — UI not rendered", text)
+        self.assertEqual(text.count("Hard stop: blocked — UI not rendered"), 1)
+        self.assertIn("`Hard stop: blocked — UI not rendered` is only for a UI diff", text)
         stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
         for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>"):
             self.assertIn(phrase, stop, phrase)
+
+    def test_approver_retro_p1_blocked_render_never_hard_stop(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
+        phrase = ("`Hard stop: blocked — UI not rendered` is only for a UI diff with no `Rendered: yes` and no "
+                  "`Rendered: blocked`; never write it, with or without an `(environment)` note, when a "
+                  "latest-round review says `Rendered: blocked` and none says `Rendered: no`.")
+        self.assertEqual(text.count(phrase), 1)
+        self.assertIn("so Trevor can glance later without holding the merge. " + phrase, rule)
+        self.assertLess(rule.index("Exception: when at least one latest-round review has `Rendered: blocked`"),
+                        rule.index(phrase))
 
     def test_reviewers_no_rendered_change_answer(self):
         for name in ("ux", "ui"):
@@ -2061,7 +2086,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 82000)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -2093,6 +2118,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("roadmap-next $ID", clean)
         self.assertLess(clean.index("**Mark done"), clean.index("roadmap-next $ID"))
         self.assertLess(clean.index("roadmap-next $ID"), clean.index("**Digest check"))
+
+    def test_skill_merge_files_spec_followups(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
+        clean = merge[merge.index("7. **Clean up:**"):]
+        start = clean.index("**Spec follow-ups.**")
+        bullet = clean[start:clean.index("\n", start)]
+        for phrase in ("`Follow-up: <text>`", "remove every `'` from each",
+                       "`B backlog-add '<text> (from <job id>)' ...`",
+                       "A failing `backlog-add` never stops the job; name it in the final report only."):
+            self.assertIn(phrase, bullet, phrase)
+        self.assertLess(clean.index("**Mark done"), start)
+        self.assertLess(start, clean.index("**Roadmap chaining.**"))
 
     def test_skill_merge_roadmap_done_starts_run_all(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
