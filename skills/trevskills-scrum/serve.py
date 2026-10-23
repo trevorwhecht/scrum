@@ -2,7 +2,7 @@
 """The one Trevskills Scrum dashboard, for every project: serves the dashboard, each registered project's scrum/
 files, and a small JSON API so the buttons can edit backlogs and start Claude runs (approve, rework, discuss, run now, abort, setup done,
 pause, resume/play, answer). Once a minute it runs board.py's stalled-job watchdog on every project and starts any sibling that frees,
-and every 10 minutes, while a project has a job in stage cloud, board.py cloud-sync (starting cloud-home where it must).
+and every 10 minutes, while a project has a job in stage cloud or awaiting its artifacts, board.py cloud-sync (starting cloud-home where it must).
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
@@ -351,11 +351,13 @@ CLOUD_HOME = ("Hard stop: schema", "Hard stop: agent rules")  # moved jobs whose
 
 
 def cloud_tick(project, root, jobs, now=None):
-    """While a job is in stage cloud, run board.py cloud-sync (plain Python, no LLM) at most every CLOUD_EVERY
-    seconds, then start a headless `/trevskills-scrum cloud-home <id>` for each moved job with an artifacts branch
-    or a schema / agent-rules hard stop. Errors are printed, never raised."""
+    """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
+    Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
+    each moved job with an artifacts branch or a schema / agent-rules hard stop, and each job whose artifacts arrived
+    late. Errors are printed, never raised."""
     now = time.time() if now is None else now
-    if not any(j.get("stage") == "cloud" for j in jobs) or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
+    if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
+            or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
         return
     CLOUD_LAST[project] = now
     try:
@@ -363,6 +365,7 @@ def cloud_tick(project, root, jobs, now=None):
         if out.get("error"):
             print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
+        homes += out.get("arrived") or []
         for job_id in dict.fromkeys(homes):
             if not running(project, job_id):
                 spawn(project, root, job_id, "cloud-home", f"/trevskills-scrum cloud-home {job_id}")

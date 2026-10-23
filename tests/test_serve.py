@@ -3913,6 +3913,27 @@ class CloudPollTest(unittest.TestCase):
         for c in sp.call_args_list:
             self.assertEqual(c.kwargs, {}, "default flags: no model override")
 
+    def test_cloud_poll_spawns_home_when_artifacts_arrive(self):
+        moved = [{"id": "001-art", "state": "MERGED", "pr": "u", "reason": None, "worktree": None, "artifacts": True},
+                 {"id": "005-schema", "state": "NEEDS-HUMAN", "pr": "u", "reason": "Hard stop: schema x",
+                  "worktree": None, "artifacts": False}]
+        s = self.serve
+        result = {"moved": moved, "arrived": ["003-late", "001-art", "004-busy"], "error": None}
+        with mock.patch.object(s.board, "cmd_cloud_sync", return_value=result), mock.patch.object(s, "spawn") as sp, \
+                mock.patch.object(s, "running", side_effect=lambda project, job_id: job_id == "004-busy"):
+            s.cloud_tick("p", self.root, self.cloud, now=10_000)
+        self.assertEqual([c.args[2] for c in sp.call_args_list], ["001-art", "005-schema", "003-late"])
+        self.assertEqual(sp.call_args_list[2].args,
+                         ("p", self.root, "003-late", "cloud-home", "/trevskills-scrum cloud-home 003-late"))
+
+    def test_cloud_poll_runs_for_pending_without_cloud_job(self):
+        jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
+        cs, sp = self.tick(jobs, now=10_000, result={"moved": [], "arrived": ["003-late"], "error": None})
+        cs.assert_called_once_with(self.root)
+        self.assertEqual([c.args[2] for c in sp.call_args_list], ["003-late"])
+        cs, _ = self.tick(jobs, now=10_599)
+        cs.assert_not_called()
+
     def test_cloud_poll_error_is_contained(self):
         for err in (RuntimeError("boom"), SystemExit("board.json is not valid JSON")):
             self.serve.CLOUD_LAST.clear()
