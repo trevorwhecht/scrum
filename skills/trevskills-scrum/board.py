@@ -1151,7 +1151,7 @@ def _deletion_dominated(rows):
     return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
 
 
-def _promote_trigger(rows, names, globs):
+def _promote_trigger(rows, names):
     """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
@@ -1160,7 +1160,7 @@ def _promote_trigger(rows, names, globs):
     if (files := len({p for a, _, p in rows if a})) > FAST_MAX_FILES:
         return f"more than {FAST_MAX_FILES} files ({files})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
-                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
+                       ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
             return f"{label} {path}"
     return None
@@ -1186,7 +1186,7 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     if lane == "fast" and check == "FAIL" and check_fails >= 2:
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
-        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+        promote = _promote_trigger(*diff) if diff else "diff unreadable"
     spec = d / "spec.md"
     hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
         if spec.is_file() else None
