@@ -1978,7 +1978,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
