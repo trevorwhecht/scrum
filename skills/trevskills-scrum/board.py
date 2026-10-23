@@ -70,7 +70,9 @@
   board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
                                    MERGED -> done, CLOSED -> aborted + requeued, open + scrum:needs-human -> needs-human with
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
-                                   fixed: reason aborts it and closes the PR instead); print {"moved","error"}, exit 1 on a gh
+                                   fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id> head PR and
+                                   its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
+                                   re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
                                    error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
@@ -1911,6 +1913,7 @@ CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's 
 CLOUD_LABEL = "scrum:needs-human"
 CLOUD_CLOSED = "requeue: cloud PR closed without merging"
 CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
+CLOUD_PENDING_HOURS = 24  # how long a moved job waits for its scrum-artifacts/<id> push; fixed, not a setting
 
 
 class GhError(Exception):
@@ -1947,6 +1950,18 @@ def cloud_worktree(repo: Path, job_id: str) -> str | None:
     return str(path) if r.returncode == 0 else None
 
 
+def cloud_worktree_remove(repo: Path, path: str) -> None:
+    """`git -C <repo> worktree remove <path>` for a worktree cloud_worktree just added; a failure is printed, not
+    raised. path is cloud_worktree's absolute path, so it never starts with "-"."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "worktree", "remove", path], capture_output=True, timeout=60)
+        err = r.returncode and (r.stderr.decode(errors="replace").strip() or f"git exited {r.returncode}")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        err = str(e)
+    if err:
+        print(f"cloud-sync: worktree remove {path} failed: {err}", file=sys.stderr)
+
+
 def artifacts_pushed(repo: Path, job_id: str) -> bool:
     """Whether the cloud session pushed scrum-artifacts/<id> (Artifacts home then has work to do)."""
     try:
@@ -1957,12 +1972,52 @@ def artifacts_pushed(repo: Path, job_id: str) -> bool:
     return r.returncode == 0
 
 
+def _login(item):
+    """item's user.login (a REST PR or comment), or None."""
+    user = item.get("user")
+    return user.get("login") if isinstance(user, dict) else None
+
+
+def _cloud_trusted(pr, job_id):
+    """Whether pr's head is this repo's own scrum/<id> branch: a fork PR, or one from another branch, steers nothing."""
+    head, base = pr.get("head"), pr.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") != f"scrum/{job_id}":
+        return False
+    full = [r.get("full_name") if isinstance(r, dict) else None for r in (head.get("repo"), base.get("repo"))]
+    return bool(full[0]) and full[0] == full[1]
+
+
+def _cloud_arrivals(root, repo):
+    """Re-check every job carrying artifactsPending: drop the mark once scrum-artifacts/<id> exists (returned) or the
+    mark is CLOUD_PENDING_HOURS old (not returned)."""
+    pending = [j for j in read_board(root)["jobs"] if j.get("artifactsPending")]
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=CLOUD_PENDING_HOURS)
+    arrived, drop = [], set()
+    for job in pending:
+        if artifacts_pushed(repo, job["id"]):
+            arrived.append(job["id"])
+            drop.add(job["id"])
+            continue
+        try:
+            stale = datetime.fromisoformat(job["artifactsPending"]) < cutoff
+        except (TypeError, ValueError):
+            stale = True  # an unreadable mark would cost an ls-remote every poll forever
+        if stale:
+            drop.add(job["id"])
+    if drop:
+        with locked_board(root) as board:
+            for job in board["jobs"]:
+                if job["id"] in drop:
+                    job.pop("artifactsPending", None)
+    return arrived
+
+
 def _cloud_plan(repo, job_id, prs):
     """(state, pairs, reason, needs a worktree, abort) for this job's newest [scrum <id>] PR, or None while it still
     runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
     raises GhError."""
-    pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")),
-              None)
+    pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
+               and _cloud_trusted(p, job_id)), None)
     if not pr:
         return None
     url = pr.get("html_url") or ""
@@ -1978,7 +2033,9 @@ def _cloud_plan(repo, job_id, prs):
     comments = gh_api(repo, f"repos/{{owner}}/{{repo}}/issues/{number}/comments?per_page=100")
     if not isinstance(comments, list):
         raise GhError(f"gh api comments for PR {url} did not return a list")
-    bodies = [str(c.get("body") or "") for c in comments if isinstance(c, dict) and CLOUD_MARK in str(c.get("body") or "")]
+    author = _login(pr)  # only the PR author (the cloud session's account) may steer the job
+    bodies = [str(c.get("body") or "") for c in comments
+              if isinstance(c, dict) and author and _login(c) == author and CLOUD_MARK in str(c.get("body") or "")]
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
@@ -2004,20 +2061,22 @@ def cmd_cloud_sync(root: Path) -> dict:
     """Move every stage-`cloud` job whose PR finished: MERGED -> done, CLOSED -> aborted and requeued, open with the
     scrum:needs-human label -> needs-human with the comment's reason and a local worktree, or, for a requeue:,
     obsolete: or looks already fixed: reason, aborted with the PR closed. Every gh read runs before any write, so a
-    gh failure changes nothing. A job that left stage cloud meanwhile is skipped. Returns
-    {"moved": [{"id","state","pr","reason","worktree","artifacts"}], "error"}."""
+    gh failure changes nothing. A job that left stage cloud meanwhile is skipped. A moved job with no artifacts branch
+    yet gets the internal artifactsPending mark; every run re-checks marked jobs and lists those whose branch arrived.
+    Returns {"moved": [{"id","state","pr","reason","worktree","artifacts"}], "arrived": [ids], "error"}."""
     root = Path(root)
     repo = root.parent
     cloud = [j["id"] for j in read_board(root)["jobs"] if j.get("stage") == "cloud"]
+    arrived = _cloud_arrivals(root, repo)
     if not cloud:
-        return {"moved": [], "error": None}
+        return {"moved": [], "arrived": arrived, "error": None}
     try:
         prs = gh_api(repo, CLOUD_PULLS)
         if not isinstance(prs, list):
             raise GhError(f"gh api {CLOUD_PULLS} did not return a list")
         plans = [(job_id, plan) for job_id in cloud if (plan := _cloud_plan(repo, job_id, prs))]
     except GhError as e:
-        return {"moved": [], "error": str(e) or type(e).__name__}
+        return {"moved": [], "arrived": arrived, "error": str(e) or type(e).__name__}
     moved = []
     for job_id, (state, pairs, reason, wants_worktree, abort) in plans:
         worktree, url = None, next(p[3:] for p in pairs if p.startswith("pr="))
@@ -2032,6 +2091,8 @@ def cmd_cloud_sync(root: Path) -> dict:
                         internal=True)
         except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
             print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
+            if worktree:  # added for a move that did not happen: leave no orphan behind
+                cloud_worktree_remove(repo, worktree)
             continue
         if abort and abort[1]:
             try:  # best effort: the job is already aborted, so a later poll skips it either way
@@ -2040,7 +2101,13 @@ def cmd_cloud_sync(root: Path) -> dict:
                 print(f"cloud-sync: {job_id}: PR close failed: {e}", file=sys.stderr)
         moved.append({"id": job_id, "state": state, "pr": url, "reason": reason, "worktree": worktree,
                       "artifacts": artifacts_pushed(repo, job_id)})
-    return {"moved": moved, "error": None}
+    pending = {m["id"] for m in moved if not m["artifacts"]}
+    if pending:  # the session pushes scrum-artifacts/<id> last, so a poll can land between its label and that push
+        with locked_board(root) as board:
+            for job in board["jobs"]:
+                if job["id"] in pending:
+                    job["artifactsPending"] = now()  # internal, not in FIELDS, like pid
+    return {"moved": moved, "arrived": arrived, "error": None}
 
 
 # --- `waiting`: Claude Code hooks in the orchestrator's terminal mark the job paused on Trevor, and clear it ---
