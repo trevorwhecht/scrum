@@ -3,7 +3,7 @@
 Every failure raises JevError, so a caller can catch one thing and carry on.
 Key: $TYPESAFE_API_KEY, else the macOS Keychain item TypeSafe/typesafe.
 """
-import json, os, subprocess, time, urllib.error, urllib.request
+import http.client, json, os, subprocess, time, urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 URL = "https://api.typesafe.ai/v1/systemone"
@@ -57,6 +57,8 @@ def ask(state, questions, timeout=TIMEOUT, key=None):
             raise JevError(f"timed out after {timeout}s") from None
         except urllib.error.URLError as e:
             raise fail(f"network error: {e.reason}") from None
+        except (http.client.HTTPException, OSError) as e:  # a failed r.read(); not retried
+            raise fail(f"read failed: {type(e).__name__}: {e}") from None
     try:
         answers = json.loads(raw)["answers"]
     except (ValueError, KeyError, TypeError):
