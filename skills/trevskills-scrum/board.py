@@ -1595,6 +1595,18 @@ def slot_cap(runall):
     return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
 
 
+SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum (start|resume) ")
+
+
+def live_sessions():
+    """How many headless `start`/`resume` orchestrators run on this machine, any project and any launcher (ps sees
+    them all; serve.py's RUNS only knows its own). SCRUM_PS names a file read in place of ps's output."""
+    fake = os.environ.get("SCRUM_PS")
+    out = Path(fake).read_text() if fake else \
+        subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True).stdout
+    return sum(1 for line in out.splitlines() if SESSION_RE.match(line))
+
+
 def slot_conflict(k, busy, files, cap):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files. The rules `ready` and `resume_blocker` share: the in-progress cap; parallel=no, or

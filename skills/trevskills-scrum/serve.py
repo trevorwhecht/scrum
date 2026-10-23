@@ -173,9 +173,13 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 
 def resume_refusal(project, root, job):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. lilguy has no worktree or
-    builder to resume; a Run-all/BigBoy child waits for the same cap and overlap rules `ready` applies to new claims."""
+    builder to resume; no job resumes while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy
+    child also waits for the same cap and overlap rules `ready` applies to new claims."""
     if job.get("lane") == "lilguy":
         return LILGUY_RESUME
+    live, cap = board.live_sessions(), board.slot_cap(True)
+    if live >= cap:
+        return f"can't resume yet: {live} sessions running (usage cap {cap}). Fix: click Resume when one finishes."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
 

@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 import serve  # noqa: E402
 
 board = serve.board

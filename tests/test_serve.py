@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
 STUB = r'''#!/usr/bin/env python3
@@ -858,6 +859,24 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
                                                       "Fix: click Resume when 123-sib finish."}))
         self.assert_nothing_ran(m)
+
+    def test_resume_refused_at_machine_wide_session_cap(self):
+        """A standalone job has no siblings, so only the machine-wide count stops it resuming over the usage cap."""
+        ps = Path(self.tmp.name) / "ps.txt"
+        two = ["/opt/homebrew/bin/claude -p /trevskills-scrum resume 1-a --model sonnet",
+               "claude -p /trevskills-scrum start 2-b --model sonnet",
+               "claude -p /trevskills-scrum run-all", "vim serve.py"]  # neither of these two counts
+        three = two + ["claude -p /trevskills-scrum resume 3-c"]
+        job = {"id": "9-x", "lane": "standard"}
+        for lines, count, cap, refused in ((two, 2, 3, False), (three, 3, 3, True), (two, 2, 1, True)):
+            with self.subTest(count=count, cap=cap):
+                ps.write_text("\n".join(lines) + "\n")
+                with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
+                        mock.patch.object(self.serve.board, "slot_cap", return_value=cap):
+                    self.assertEqual(self.serve.board.live_sessions(), count)
+                    out = self.serve.resume_refusal("repo", self.root, job)
+                self.assertEqual(out, f"can't resume yet: {count} sessions running (usage cap {cap}). "
+                                      "Fix: click Resume when one finishes." if refused else None)
 
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
