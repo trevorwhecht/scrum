@@ -438,15 +438,16 @@ def cmd_next(root, index=None):
 def cmd_cloud_claim(root, n) -> dict:
     """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
     An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
-    or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build. A cloud or
-    build job with no readable Likely files may touch anything, so it blocks every item."""
+    or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build, or in stage spec
+    carrying cloudClaim (claimed here, not yet moved to cloud). Such a job with no readable Likely files may touch
+    anything, so it blocks every item."""
     if n < 1:
         raise SystemExit("N must be at least 1")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         taken, blocked_all = set(), False
         for job in board["jobs"]:
-            if job.get("stage") in ("cloud", "build"):
+            if job.get("stage") in ("cloud", "build") or (job.get("stage") == "spec" and job.get("cloudClaim")):
                 spec = Path(root) / "jobs" / job.get("id", "") / "spec.md"
                 files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
                 blocked_all |= not files
@@ -462,6 +463,7 @@ def cmd_cloud_claim(root, n) -> dict:
             if not files or files & taken:
                 continue
             job_id = add_job(root, board, item["text"][:60])
+            board["jobs"][-1]["cloudClaim"] = True  # keeps its files reserved until the dispatcher moves it to stage cloud
             take_spec(root, item["text"], job_id)
             claim_item(lines, item, job_id)
             taken |= files
