@@ -270,20 +270,35 @@ AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit ou
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
 STALL_RESUMED: set[str] = set()  # "project/child id/stage": the one non-limit resume a Run-all/BigBoy child gets per stage
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
+NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
+NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
 RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
+
+
+def run_log_tail(root, job):
+    """(last 8 KB of the job's run log, its mtime), or ("", None) when there is no log or it can't be read."""
+    if not job.get("runlog"):
+        return "", None
+    log = root / job["runlog"]
+    try:
+        tail = log.read_bytes()[-8192:].decode("utf-8", "replace")
+        return tail, datetime.fromtimestamp(log.stat().st_mtime)
+    except OSError:
+        return "", None
+
+
+def net_error(root, job):
+    """True when the run log's last non-empty line is a network error (the session died on an outage)."""
+    lines = [l for l in run_log_tail(root, job)[0].splitlines() if l.strip()]
+    return bool(lines and NET_RE.search(lines[-1]))
 
 
 def limit_reset(root, job):
     """(limit hit?, reset epoch or None) from the tail of the job's run log: the line Claude Code prints when the
     account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm"). A clock time
     is the next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever."""
-    log = root / (job.get("runlog") or "")
-    try:
-        tail = log.read_bytes()[-8192:].decode("utf-8", "replace") if job.get("runlog") else ""
-        written = datetime.fromtimestamp(log.stat().st_mtime) if tail else None
-    except OSError:
-        return False, None
+    tail, written = run_log_tail(root, job)
     if not LIMIT_RE.search(tail):
         return False, None
     m = RESET_EPOCH_RE.search(tail)
@@ -309,7 +324,8 @@ def limit_reset(root, job):
 
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
-    that line names, else every 30 min; at most 12 tries per job. A Run-all/BigBoy child of a running parent stalled
+    that line names, else every 30 min; at most 12 tries per job. A job whose log ends on a network error resumes
+    at once and every 5 min, on the same try budget. A Run-all/BigBoy child of a running parent stalled
     for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
     is left on the board. A refused restart costs nothing. A job respawn_exited held in its stage (limitResetAt) is
     resumed 120 s after that reset, under the same slot cap and try counter. True when it resumed a job this tick or a
@@ -333,6 +349,11 @@ def auto_resume(project, root, jobs):
             continue
         hit, reset = limit_reset(root, job)
         if not hit:
+            if net_error(root, job):
+                if resume_refusal(root, job) is None:
+                    AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
+                    resume_job(project, root, job, jobs)
+                continue
             m = re.match(rf"{board.STALLED}(\w+):", reason)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             once_key = f"{key}/{m.group(1) if m else ''}"

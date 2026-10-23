@@ -3969,6 +3969,50 @@ class AutoResumeTest(unittest.TestCase):
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(self.sweep(), [], "capped")
 
+    NET = "API Error: Can't reach the API server \u2014 check your internet or DNS (ENOTFOUND)"
+
+    def net_job(self, text=NET, **extra):
+        (self.root / "runs" / "net.log").write_text(text)
+        self.jobs = [{"id": "net", "stage": "needs-human", "reason": "stalled in build: no live session",
+                      "runlog": "runs/net.log", **extra}]
+
+    def test_network_error_stall_resumes_next_sweep(self):
+        s = self.serve
+        self.net_job()
+        t = 1_000_000.0
+        with mock.patch.object(s.time, "time", return_value=t):
+            self.assertEqual(self.sweep(), ["net"])
+            self.assertEqual(s.AUTO_RESUME["p/net"], [1, t + 300])
+        self.assertEqual(s.STALL_RESUMED, set())
+        with mock.patch.object(s.time, "time", return_value=t + 299):
+            self.assertEqual(self.sweep(), [])
+        with mock.patch.object(s.time, "time", return_value=t + 301):
+            self.assertEqual(self.sweep(), ["net"])
+        s.AUTO_RESUME["p/net"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.sweep(), [])
+        s.AUTO_RESUME.clear()
+        self.net_job(parent="par")  # a child of a running Run-all parent: no STALL_RESUMED spent
+        self.jobs.append({"id": "par", "stage": "running", "lane": "runall"})
+        self.assertEqual(self.sweep(), ["net"])
+        self.assertEqual(s.STALL_RESUMED, set())
+
+    def test_network_error_only_on_last_line(self):
+        for text in ("Traceback: something else broke", "ECONNRESET\nAll done, 3 files changed.\n\n"):
+            self.net_job(text)
+            self.assertEqual(self.sweep(), [], text)
+        for word in ("EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND"):
+            self.serve.AUTO_RESUME.clear()
+            self.net_job(f"working\nError: {word} 1.2.3.4\n\n")
+            self.assertEqual(self.sweep(), ["net"], word)
+
+    def test_network_error_stall_waits_for_slot(self):
+        s = self.serve
+        self.net_job()
+        with mock.patch.object(s, "resume_refusal", return_value="slot held"):
+            self.assertEqual(self.sweep(), [])
+        self.assertNotIn("p/net", s.AUTO_RESUME)
+        self.assertEqual(self.sweep(), ["net"])
+
     def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
         s = self.serve
         stalled = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
