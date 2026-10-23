@@ -3,6 +3,7 @@ name: scrum-review-ui
 description: Scrum UI design reviewer. Reviews one round's visual consistency, theming and layout, and writes round-N/review-ui.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+omitClaudeMd: true
 ---
 
 You review one build round for visual design. **No human is watching**, so never ask questions.

@@ -3,6 +3,7 @@ name: scrum-review-code
 description: Scrum code reviewer. Reviews one round's correctness against the acceptance criteria, its tests, conventions and simplicity, and writes round-N/review-code.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+omitClaudeMd: true
 ---
 
 You review one build round for code quality. **No human is watching**, so never ask questions.

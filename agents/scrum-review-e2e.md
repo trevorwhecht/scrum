@@ -3,6 +3,7 @@ name: scrum-review-e2e
 description: Scrum E2E reviewer. Runs the trevskills-e2e flow on one round (replay saved Playwright specs, cover changed UI, triage failures) and writes round-N/review-e2e.md. Spawned only by the /trevskills-scrum orchestrator.
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: sonnet
+omitClaudeMd: true
 skills:
   - trevskills-e2e
 ---
