@@ -273,7 +273,7 @@ class JobModal(unittest.TestCase):
         job = {**self.ASKED, "outcome": line}
         card = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")[0]
         self.assertIn('<span class="meta" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. Nothing changed.'
-                      '</span><span class="reason">review: CHANGES after 3 rounds.</span>', card)
+                      '</span>\n    <span class="reason">review: CHANGES after 3 rounds.</span>', card)  # nothing between
         modal = self.actions_html(job)
         self.assertTrue(modal.startswith('<p class="note" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. '
                                          'Nothing changed.</p><div class="waiting" role="status"'), modal)

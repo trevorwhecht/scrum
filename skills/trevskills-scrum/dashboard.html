@@ -376,14 +376,10 @@ const outcomeLine = (job, tag, cls) => job.stage === "needs-human" && job.outcom
 // Approve & merge drops whatever is in the feedback box, so arming it says so.
 const feedbackWarning = text => (text || "").trim() ? '<span class="error" role="alert">You typed feedback. Send it back instead?</span>' : "";
 // rework.md entries (SKILL.md rework: `## <ISO date>` then the feedback), newest first. Text before the first heading is skipped.
-function reworkEntries(md) {
-  const out = [];
-  for (const line of String(md ?? "").split(/\r?\n/)) {
-    if (line.startsWith("## ")) out.push({at: line.slice(3).trim(), text: ""});
-    else if (out.length) out[out.length - 1].text += line + "\n";
-  }
-  return out.map(e => ({...e, text: e.text.trim()})).reverse();
-}
+const reworkEntries = md => String(md ?? "").split(/^## /m).slice(1).map(entry => {
+  const [at, ...text] = entry.split(/\r?\n/);
+  return {at: at.trim(), text: text.join("\n").trim()};
+}).reverse();
 const sentAt = at => isNaN(new Date(at)) ? at : when(at);  // a heading that is no date shows as written
 // The modal's Sent back list, from reworkMd (filled by loadRework); the wrapper is always there so a late fetch can fill it.
 const reworkMd = {};
@@ -450,8 +446,8 @@ function card(job) {
     ${(job.rounds || []).map(roundRow).join("")}
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
-    ${outcomeLine(job, "span", "meta")}${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
+    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}${outcomeLine(job, "span", "meta")}
+    ${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
     ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
@@ -725,7 +721,7 @@ const splitReason = reason => {
 const answerState = {};
 function optionsRow(job) {
   if (job.stage !== "needs-human" || !job.options?.length) return "";
-  const st = answerState[job.key] || {}, off = st.pending || runs[job.key]?.alive;
+  const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const opts = [...job.options].sort((a, b) => String(a.key).localeCompare(String(b.key)));
   return `<div class="answer"><span class="reason">${esc(job.question || splitReason(job.reason).problem)}</span><div class="acts">${opts.map(o =>
     `<button class="btn tall${st.armed === o.key ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${off ? " disabled" : ""}>${st.armed === o.key ? "Confirm: " : ""}${esc(o.label)}</button>`).join("")}</div><p class="error" role="alert">${esc(st.err || "")}</p></div>`;

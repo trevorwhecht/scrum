@@ -141,7 +141,9 @@ class BoardGetAndDiscussTest(unittest.TestCase):
     def test_discuss_listed_while_process_alive(self):
         job_id = board.cmd_new(self.root, "Talk it over")
         board.cmd_ask(self.root, job_id, "Which way?", [f"A=approve {job_id}", f"B=abort {job_id}"])
-        self.addCleanup(lambda: serve.DISCUSSES.pop(f"repo/{job_id}", None))
+        others = mock.patch.dict(serve.DISCUSSES, clear=True)  # another test's Discuss click must not trigger ps here
+        others.start()
+        self.addCleanup(others.stop)
         real_run = subprocess.run
         with mock.patch.object(serve.subprocess, "run", wraps=real_run) as run:
             self.get("/api/runs")
