@@ -156,6 +156,22 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["waiting="])
         self.assertIsNone(self.jobs()[0]["waiting"])
 
+    def test_outcome_field_set_and_cleared(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["outcome=  Approve refused \n at 4:21 PM" + "z" * 400])
+        self.assertEqual(self.jobs()[0]["outcome"], "Approve refused at 4:21 PM" + "z" * 274)
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["outcome=Approve refused. Nothing changed."])
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        self.assertEqual(self.jobs()[0]["outcome"], "Approve refused. Nothing changed.")  # same reason keeps it
+        board.cmd_ask(self.root, job_id, "New blocker?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        self.assertNotIn("outcome", self.jobs()[0])  # a new reason drops it
+        board.cmd_set(self.root, job_id, ["outcome=Rework refused. Nothing changed."])
+        board.cmd_set(self.root, job_id, ["reason=still here"])
+        self.assertEqual(self.jobs()[0]["outcome"], "Rework refused. Nothing changed.")  # no stage change keeps it
+        board.cmd_set(self.root, job_id, ["stage=build"], unpause=True)
+        self.assertNotIn("outcome", self.jobs()[0])  # a stage change drops it
+
     def test_set_specwriter_field(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["specwriter=abc123"])

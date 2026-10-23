@@ -1,4 +1,4 @@
-import json, re, shutil, subprocess, unittest
+import json, os, re, shutil, subprocess, unittest
 from pathlib import Path
 
 DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum" / "dashboard.html"
@@ -14,17 +14,18 @@ JOBS = [
 ]
 
 
-def run(expr):
+def run(expr, tz=None):
     """Evaluate expr in node over dashboard.html's esc and its job-modal helpers, with JOBS as the board."""
     node = shutil.which("node")
     if not node:
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
-    esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
+    esc = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "const when = ")))
     helpers = text[text.index("const setupWait = "):text.index("function bigboyLines(")] \
         + text[text.index("const abortForm = "):text.index("const termState = ")]
     script = f"{esc}\nlet jobs = {json.dumps(JOBS)};\n{helpers}\nconsole.log(JSON.stringify({expr}));"
-    return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+    env = {**os.environ, "TZ": tz} if tz else None
+    return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, env=env).stdout)
 
 
 class JobModal(unittest.TestCase):
@@ -80,16 +81,16 @@ class JobModal(unittest.TestCase):
         submit = text[text.index('$("actions").addEventListener("submit"'):]
         self.assertIn('act === "resume" || act === "pause" || act === "setup-done" ? {}', submit)
 
-    def actions_html(self, job):
+    def actions_html(self, job, runs=None):
         """renderActions(job) evaluated in node with a stub #actions element; returns the HTML it wrote."""
         node = shutil.which("node")
         if not node:
             raise unittest.SkipTest("node not on PATH")
         text = DASHBOARD.read_text()
-        esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
+        esc = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "const when = ")))
         helpers = text[text.index("const paused = "):text.index("function bigboyLines(")] \
             + text[text.index("const abortForm = "):text.index('$("actions").addEventListener("submit"')]
-        script = (f"{esc}\nconst enc = encodeURIComponent;\nlet runs = {{}};\nlet jobs = {json.dumps(JOBS)};\n"
+        script = (f"{esc}\nconst enc = encodeURIComponent;\nlet runs = {json.dumps(runs or {})};\nlet jobs = {json.dumps(JOBS)};\n"
                   "const el = {innerHTML: ''};\nconst $ = id => el;\n"
                   f"{helpers}\nrenderActions({json.dumps(job)});\nconsole.log(JSON.stringify(el.innerHTML));")
         return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
@@ -262,6 +263,74 @@ class JobModal(unittest.TestCase):
         new = text[text.index("const answerState = "):text.index("const waitingBanner = ")] \
             + text[text.index("const ofJob = "):text.index("// answer() end")]
         self.assertIsNone(re.search(r"[^.\w](window\.)?(confirm|alert)\(", new))
+
+    # --- needs-human: running line, outcome, feedback warning, Sent back list ---
+    def test_running_line_shows_action_and_since(self):
+        # 1767284460 s is 2026-01-01T16:21:00Z
+        self.assertEqual(run('runLine({action: "rework", started: 1767284460, alive: true})', tz="UTC"),
+                         "Rework running since 4:21 PM")
+        self.assertEqual(run('runLine({action: "discuss", started: 1767229260.5, alive: true})', tz="UTC"),
+                         "Discuss running since 1:01 AM")
+        alive = {"rework": {"action": "rework", "started": 1767284460, "alive": True, "log": "runs/r.log"}}
+        card = self.card_js(f"runs = {json.dumps({'p/020-q': alive['rework']})};"
+                            f"console.log(JSON.stringify(card({json.dumps(self.ASKED)})));")[0]
+        self.assertRegex(card, r'<span class="running">Rework running since \d{1,2}:21 [AP]M</span>')
+        self.assertNotIn("running…", card)
+        modal = self.actions_html(self.ASKED, runs={"p/020-q": alive["rework"]})
+        self.assertRegex(modal, r'<p class="running">Rework running since \d{1,2}:21 [AP]M · <a href="p/p/runs/r.log"')
+        discuss = self.actions_html(self.ASKED, runs={"p/020-q": {"action": "discuss", "started": 1767284460,
+                                                                  "alive": True, "log": None}})
+        self.assertRegex(discuss, r'<p class="running">Discuss running since \d{1,2}:21 [AP]M</p>')
+        self.assertIn("Approve &amp; merge</button>", discuss)  # a Discuss session keeps the needs-human buttons
+        self.assertNotIn("running…", DASHBOARD.read_text())
+
+    def test_outcome_line_above_reason(self):
+        line = "Approve refused at 4:21 PM: <b>budget</b>. Nothing changed."
+        job = {**self.ASKED, "outcome": line}
+        card = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")[0]
+        self.assertIn('<span class="meta" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. Nothing changed.'
+                      '</span>\n    <span class="reason">review: CHANGES after 3 rounds.</span>', card)  # nothing between
+        modal = self.actions_html(job)
+        self.assertTrue(modal.startswith('<p class="note" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. '
+                                         'Nothing changed.</p><div class="waiting" role="status"'), modal)
+        for other in ({**self.ASKED, "outcome": None}, {**self.ASKED, "stage": "build", "outcome": line}):
+            self.assertNotIn("Nothing changed", self.actions_html(other))
+            other_card = self.card_js(f"console.log(JSON.stringify(card({json.dumps(other)})));")[0]
+            self.assertNotIn("Nothing changed", other_card)
+            self.assertNotIn("undefined", other_card)
+        self.assertEqual(self.actions_html({**self.ASKED, "outcome": None}), self.TODAY_ACTIONS)
+
+    def test_approve_warns_when_feedback_typed(self):
+        warn = '<span class="error" role="alert">You typed feedback. Send it back instead?</span>'
+        self.assertEqual(run('feedbackWarning("please fix the copy")'), warn)
+        for empty in ('""', '"  \\n\\t "', "undefined"):
+            self.assertEqual(run(f"feedbackWarning({empty})"), "", empty)
+        text = DASHBOARD.read_text()
+        submit = text[text.index('$("actions").addEventListener("submit"'):]
+        armed = submit[submit.index('if (act === "approve" && !form.dataset.armed)'):submit.index('if (act === "abort"')]
+        self.assertIn('btn.textContent = "Confirm: merge into main";', armed)
+        self.assertIn("""feedbackWarning($("actions").querySelector('textarea[name="feedback"]')?.value)""", armed)
+
+    def test_rework_entries_parse_and_render(self):
+        md = "# Rework\nintro\n## 2026-01-01T16:21:00Z\nFirst <try>\nsecond line\n\n## not a date\nSecond\n## 2026-01-02T09:05:00Z\nThird\n"
+        self.assertEqual(run(f"reworkEntries({json.dumps(md)})"), [
+            {"at": "2026-01-02T09:05:00Z", "text": "Third"},
+            {"at": "not a date", "text": "Second"},
+            {"at": "2026-01-01T16:21:00Z", "text": "First <try>\nsecond line"}])
+        self.assertEqual(run('reworkEntries("")'), [])
+        self.assertEqual(run('reworkEntries("just text, no headings")'), [])
+        job = {**self.ASKED, "files": ["spec.md", "rework.md"]}
+        html = run(f"(reworkMd[{json.dumps(job['key'])}] = {json.dumps(md)}, reworkList({json.dumps(job)}))", tz="UTC")
+        self.assertEqual(html, '<div class="sentback"><h3>Sent back</h3><ul>'
+                               '<li><span class="note">2026-01-02 09:05</span> Third</li>'
+                               '<li><span class="note">not a date</span> Second</li>'
+                               '<li><span class="note">2026-01-01 16:21</span> First &lt;try&gt;\nsecond line</li></ul></div>')
+        self.assertNotIn("Invalid Date", html)
+        self.assertEqual(run(f"(reworkMd[{json.dumps(job['key'])}] = '', reworkList({json.dumps(job)}))"),
+                         '<div class="sentback"></div>')
+        self.assertEqual(run(f"reworkList({json.dumps(self.ASKED)})"), "")  # no rework.md in files
+        self.assertEqual(run(f"reworkList({json.dumps({**job, 'stage': 'build'})})"), "")
+        self.assertIn('<div class="sentback"></div><form data-act="ask">', self.actions_html(job))
 
 if __name__ == "__main__":
     unittest.main()

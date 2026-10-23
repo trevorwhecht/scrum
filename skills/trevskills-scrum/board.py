@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null);
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
@@ -96,7 +96,7 @@ REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
@@ -1906,7 +1906,11 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
                 raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
             if key == "waiting":
                 value = clean(value, 200)
+            if key == "outcome":
+                value = clean(value, 300)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        if job["stage"] != was and "outcome" not in given:
+            job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
             job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
         if job["stage"] != was:
@@ -1944,6 +1948,8 @@ def cmd_ask(root, job_id, question, options):
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         was = job["stage"]
+        if job.get("reason") != question:
+            job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
         job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
         questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                              "question": question, "options": parsed})
@@ -2839,7 +2845,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
                                 env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                                          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
     try:  # the Open terminal button tails this; a job that isn't on the board (run-all, digest) has no row to set
-        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
     except SystemExit:
         pass
     return proc, f"runs/{log.name}"
