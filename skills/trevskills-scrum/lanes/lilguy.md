@@ -1,6 +1,6 @@
 # Lilguy lane
 
-Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This session makes the whole change itself in `$REPO` (the main checkout), on whatever branch is checked out, and spawns no agent: no spec writer, builder, reviewer or approver, no worktree, no `scrum/<id>` branch, no Digest check, no BigBoy chaining (a lilguy job never has a `parent`). Every needs-human reason here leaves the change uncommitted in the main checkout, so its Fix says to finish it by hand or discard it; Approve and rework do not apply.
+Steps 1-6 apply only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This session makes the whole change itself in `$REPO` (the main checkout), on whatever branch is checked out, and spawns no agent: no spec writer, builder, reviewer or approver, no worktree, no `scrum/<id>` branch, no Digest check, no BigBoy chaining (a lilguy job never has a `parent`). Every needs-human reason here leaves the change uncommitted in the main checkout, so its Fix says to finish it by hand or discard it; Approve and rework do not apply.
 
 1. **Refuse (before any `B new`).** After Setup and Prerequisites, give a plain message, create no job, and stop when:
    - `git -C "$REPO" status --porcelain -- . ':(exclude)scrum'` prints anything (tracked or untracked): `<repo name> has uncommitted changes: <first files>. Fix: commit or discard them, then run lilguy again.`
@@ -20,3 +20,17 @@ Applies only to `/trevskills-scrum lilguy <feature text>`, the cheap mode. This 
    - Both pass: `B set $ID stage=done reason=` (board.py plays the done sound). If commitpush stopped, the test fails, or Path B finds no PR, run `B ask $ID 'lilguy: commitpush did not finish — <one line why>' --a "Land by hand=abort $ID" --b 'Discard=shell: git checkout -- <changed tracked files>'` and stop.
    - If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the PR on GitHub before you retry.' --a 'Retry=shell: gh pr view <pr url> --json state' --b "Abort=abort $ID"` and stop.
 6. End with the **Final report** (job id, stage, PR URL on Path B, and for needs-human the reason).
+
+## Worktree mode
+
+**New job** step 3's **Lilguy route** sends a tiny job here when `B lilguy-fit $ID` prints `fit: true`: a job with no `parent` or a `runall` parent (so **Run all** children too), outside a Cloud lane session, that is 1 point on the backlog or that Jev rates trivial with confidence, and whose feature.md has no hard-stop word. A pre-written spec.md does not stop the route; this mode ignores it. The orchestrator spawns no subagents (no spec writer, builder, reviewer or approver) and makes the change itself, in the job's own `scrum/<id>` worktree, and lands it through the normal **Merge** squash PR.
+
+1. **Worktree.** Run `B set $ID lane=lilguy`, then **New job** step 4. If `.claude/worktrees/scrum-$ID` already exists (a resume), reuse it as `$WT` instead.
+2. **Build.** Run `B set $ID stage=build`. Read `$F/project.md` and every convention file it lists, make the change in `$WT` and commit it on `scrum/<id>`.
+3. **Check.** Run `B set $ID stage=check`. In `$WT`, run the **Check gate** step 2 commands and its `.env` check, and write `$F/jobs/$ID/check.md` as in step 4 above. A `.env` hit is a check failure. Schema files and rules files are not stopped here: **Merge**'s schema guard (**Migrate**) and agent rules guard (with its in-ticket self-heal) handle them.
+4. **Route.** On a check failure, fix, commit and re-run step 3. On the 3rd failure, run `B route-check $ID --check-fails 3`. After a pass, run `B route-check $ID`. A non-null `promote` promotes the job (below); it triggers on a 3rd check failure, a binary file, more than 30 added lines, more than 3 files with added lines, or a rules file not named in feature.md. Exception: when the trigger is a line or file count and the diff is mostly deletions, you may keep the job here and append `Kept in lilguy: <trigger>` to `$F/jobs/$ID/promoted.md`. A `null` `promote` goes on to step 5.
+5. **Merge.** Land through **Merge**. Wherever Merge resumes the builder, make the fix yourself. Merge's **Conflicts** step returns to step 3 here, not to the **Check gate**. The PR uses Merge's no-Merge-summary fallback, with bullets summarising the change, and the body line `Lilguy lane: orchestrator build + check gate, no reviewers. Job files: scrum/jobs/$ID/`. With no decision.md, `Restart:` counts as `none`.
+
+**Promotion.** Run `B set $ID lane=fast` and append `Promoted to fast: <trigger>` to `$F/jobs/$ID/promoted.md`. Keep the worktree and its commits. Then run **New job** step 3 with `WORKTREE=$WT` (its `B lilguy-fit` now says `already on fast lane`), then 3b and 3c, except that `Lane: bigboy` and `Lane: debug` count as `standard`. Skip step 4 and go on at step 5, so the builder continues from the existing commits. From there the **Fast lane** promotions to standard apply.
+
+**Resume.** A lilguy job with a worktree flagged `stalled in <stage>` re-runs this mode: step 2 for `build`, step 3 for `check`, **Merge** from step 1 for `merging`.

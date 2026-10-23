@@ -735,6 +735,24 @@ class ContractTest(unittest.TestCase):
         self.assertIn("lilguy", record)
         self.assertIn("lilguy", (ROOT / "README.md").read_text())
 
+    def test_lilguy_worktree_mode_contract(self):
+        lilguy = self.lane("lilguy")
+        self.assertIn("Steps 1-6 apply only to `/trevskills-scrum lilguy <feature text>`", lilguy)
+        self.assertLess(lilguy.index("6. End with the **Final report**"), lilguy.index("\n## Worktree mode\n"))
+        mode = lilguy[lilguy.index("\n## Worktree mode\n"):]
+        for phrase in ("lilguy-fit", "scrum/<id>", "**Merge**", "B route-check $ID", "lane=fast", "Promoted to fast:",
+                       "promoted.md", "30", "spawns no subagents"):
+            self.assertIn(phrase, mode, phrase)
+
+    def test_new_job_routes_tiny_jobs_to_lilguy(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
+        for phrase in ("B lilguy-fit $ID", "**Lilguy lane**", "**Lilguy route:**"):
+            self.assertIn(phrase, step3, phrase)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("(a lilguy job with a worktree: **Lilguy lane** Worktree mode)", resume)
+        self.assertIn("lilguy-fit", self.lane("runall"))
+
     def test_skill_bigboy_lane_handles_runall_parent(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         bigboy = self.lane("bigboy")
