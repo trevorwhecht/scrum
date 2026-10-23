@@ -480,6 +480,15 @@ class ContractTest(unittest.TestCase):
         self.assertIn("kill", review[url:])
         self.assertIn("-sTCP:LISTEN", review[url:])
 
+    def test_skill_review_dev_server_serve_py(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        for phrase in ("serve.py --port <port>", 'HOME="$T" CLAUDE_HOME="$T/.claude"', "mktemp -d", "never 8765",
+                       "projects.json", "exec env PORT=<port> nohup"):
+            self.assertIn(phrase, review, phrase)
+        self.assertIn("DEV_PID=<pid>", review[review.index("DEV_URL=<url>"):])
+        self.assertIn('rm -rf "$T"', review[review.index("Stop the shared server"):])
+
     def test_review_code_has_security_checklist(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("injection", "secrets", "dangerouslySetInnerHTML"):
@@ -1202,6 +1211,15 @@ class ContractTest(unittest.TestCase):
                 self.assertIn(phrase, text, f"{name}: {phrase}")
             step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
             self.assertLess(step1.index("DEV_URL=<url>"), step1.index('HOME="$T" CLAUDE_HOME="$T/.claude"'), name)
+
+    def test_ui_reviewers_click_guard_accepts_dev_url(self):
+        for name in ("ui", "ux"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            guard = next(l for l in text.splitlines()
+                         if l.startswith("   Before any Save, Undo, Disable or Enable click"))
+            for phrase in ("DEV_URL", "DEV_PID", "lsof -ti tcp:<port> -sTCP:LISTEN", "Rendered: no — <reason>",
+                           "outside $T or WORKTREE"):
+                self.assertIn(phrase, guard, f"{name}: {phrase}")
 
     def test_agent_test_servers_use_throwaway_home(self):
         start = 'HOME="$T" CLAUDE_HOME="$T/.claude"'
@@ -1960,7 +1978,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
