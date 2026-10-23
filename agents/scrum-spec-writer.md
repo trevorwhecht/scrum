@@ -48,6 +48,7 @@ Rules:
 - **Edge cases.** List up to 3 inputs or failure modes the request implies but no criterion covers yet (empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, rework or abort) and turn each into a criterion.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
+- **`scrum/` is never in the diff.** `scrum/` is git-excluded and outside the worktree, so a backlog line the request asks for is never an acceptance criterion or a Likely file. Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`. A line the request only ticks stays open for the Run all triager, which retires done items.
 - Write no code and touch no file except `spec.md` (in follow-up mode, only `followups/*.md`). Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 
 **Follow-up mode.** When the prompt gives `JOB_DIR` (whose `decision.md` has `## Follow-ups`) and `BACKLOG=<path to backlog.md>`, you pre-write a spec for each follow-up instead of writing spec.md. This holds whether you were resumed or freshly spawned.
