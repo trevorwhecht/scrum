@@ -13,10 +13,13 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   `SCRUM_ROUTE`, ...) override paths and URLs so tests stay hermetic.
 - SKILL.md: locate sections by heading (`grep -n '^## ' skills/trevskills-scrum/SKILL.md`), never by line number.
   Headings: Setup, Commands, New job, Run all, Fast lane, Debug lane, BigBoy lane, Roadmap lane, Lilguy lane,
-  Cloud lane, Check gate, Review (WAIT FOR ALL), Approve, Merge, Routing, Resuming the builder, Digest, Final report.
+  Cloud lane, Check gate, Review (WAIT FOR ALL), Approve, Migrate, Merge, Routing, Resuming the builder, Digest, Final report.
+- SKILL.md must stay under 80,000 bytes (`test_skill_md_size_budget` in `tests/test_contracts.py`); check `wc -c` before adding text.
+- Lane bodies live in `skills/trevskills-scrum/lanes/<lane>.md` (runall, debug, bigboy, roadmap, lilguy, cloud); their SKILL.md section is one `Read ... when this lane runs.` line. New lane text goes in the lane file, not SKILL.md.
 - Dashboard: `skills/trevskills-scrum/dashboard.html` is one file served by `serve.py` on :8765. The UI rules in
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
 - Local routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
-- A diff that touches `agents/scrum-*.md` or `SKILL.md` always stops at the Merge agent-rules guard for Trevor unless
-  it is exactly an approved digest proposal. Batch rule edits; do not mix them into feature jobs.
+- A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` always stops at the Merge
+  agent-rules guard for Trevor unless it is exactly an approved digest proposal. Specs need not restate this.
+  Batch rule edits; do not mix them into feature jobs.
