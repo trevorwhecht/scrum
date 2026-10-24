@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
+os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
 STUB = r'''#!/usr/bin/env python3
@@ -907,6 +909,27 @@ class ServeTest(unittest.TestCase):
                 self.assertEqual(out, f"can't resume yet: {count} sessions running (usage cap {cap}). "
                                       "Fix: click Resume when one finishes." if refused else None)
 
+    def test_resume_refusal_machine_guard(self):
+        """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("claude -p /trevskills-scrum resume 1-a\nclaude -p /trevskills-scrum resume 2-b\n")
+        blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
+        alone, kid = {"id": "9-x", "lane": "standard"}, {"id": "8-k", "lane": "standard", "parent": "100-parent"}
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
+                mock.patch.object(self.serve.board, "slot_cap", return_value=1), \
+                mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
+            for ram, disk, why in (("14", "1000", "free RAM 14% (< 20%)"), ("100", "6.2", "free disk 6.2 GB (< 10 GB)")):
+                with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
+                    for job in (alone, kid):
+                        self.assertEqual(self.serve.resume_refusal("repo", self.root, job),
+                                         f"waiting: {why}. Fix: click Resume once memory or disk frees up.")
+            self.assertEqual(self.serve.resume_refusal("repo", self.root, alone),
+                             "can't resume yet: 2 sessions running (usage cap 1). Fix: click Resume when one finishes.")
+        with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
+            self.assertEqual(self.serve.resume_refusal("repo", self.root, kid),
+                             "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish.")
+        self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
+
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
             with self.subTest(command=command):
@@ -1024,7 +1047,7 @@ class ServeTest(unittest.TestCase):
     def test_play_on_paused_parent_resumes_at_most_the_cap(self):
         b, s = self.serve.board, self.serve
         parent = b.cmd_new(self.root, "Capped parent")
-        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(5)]
+        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(7)]
         self.edit_job(parent, lane="runall", stage="running", children=kids)
         for i, k in enumerate(kids):
             self.edit_job(k, parent=parent, stage="build", parallel=True)
@@ -1040,14 +1063,14 @@ class ServeTest(unittest.TestCase):
         self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in kids])
         with mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
-        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:3], "a just-spawned resume holds its slot")
-        for k in kids[3:]:
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:5], "a just-spawned resume holds its slot")
+        for k in kids[5:]:
             job = self.stage_of(k)
             self.assertEqual(job["stage"], "needs-human")
             self.assertTrue(job["reason"].startswith("stalled in build: "), job["reason"])
             self.assertEqual(job["reason"], "stalled in build: waiting for a free slot after Play. Fix: click Resume.")
             self.assertNotIn("paused", job, "no longer paused, so auto_resume takes it when a slot frees")
-        for k in kids[:3]:
+        for k in kids[:5]:
             self.assertEqual((self.stage_of(k)["stage"], self.stage_of(k)["paused"]), ("build", True),
                              "its resume session clears the pause with B set --unpause")
 
@@ -4687,6 +4710,15 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick_run_all(self.parent_jobs([], children=[])), [])
         self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], children=None)), [])
         self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=["2-kid", "9-gone"]))), 1)
+
+    def test_auto_continue_machine_guard(self):
+        """Low RAM or disk: no run-all starts; the next tick with room starts it as before."""
+        self.project("a", n=1)
+        with mock.patch.object(self.board, "pace_cap", return_value=None):
+            for ram, disk in (("14", "1000"), ("100", "6.2")):
+                with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
+                    self.assertEqual(self.tick(), [], (ram, disk))
+            self.assertEqual(self.tick(), self.started("a"))
 
     def test_parse_value(self):
         self.assertEqual(self.parse("# P\n- Stack: x\n- Auto continue: 2\n- Lint: none\n"), 2)

@@ -184,10 +184,13 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 
 def resume_refusal(project, root, job):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
-    checkout has no worktree or builder to resume; no job resumes while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy
-    child also waits for the same cap and overlap rules `ready` applies to new claims."""
+    checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low (board.machine_ok),
+    or while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy child also waits for the same cap and overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
+    machine = board.machine_ok(root)
+    if machine:
+        return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
     live, cap = board.live_sessions(), board.slot_cap(True)
     if live >= cap:
         return f"can't resume yet: {live} sessions running (usage cap {cap}). Fix: click Resume when one finishes."
@@ -692,6 +695,8 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             continue
         try:
             if claimable(root):
+                if board.machine_ok(root):  # no room on this machine; retry next tick, like the pace gate
+                    return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
                 return
         except (Exception, SystemExit) as e:

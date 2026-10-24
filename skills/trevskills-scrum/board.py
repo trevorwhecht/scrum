@@ -1587,7 +1587,8 @@ BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
-RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
+MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok)
+RUNALL_MAX_IN_PROGRESS = 5  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
 WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
 USAGE_FRESH = 300  # seconds; an older usage.json means no status line is running, so no pacing
 
@@ -1805,6 +1806,47 @@ def slot_cap(runall):
     return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
 
 
+MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
+MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
+
+
+def free_ram_pct():
+    """System-wide free memory in percent, or None when unknown (no memory_pressure, as on Linux). SCRUM_FREE_RAM
+    stands in for the reading."""
+    fake = os.environ.get("SCRUM_FREE_RAM")
+    if fake:
+        return float(fake)
+    try:
+        out = subprocess.run(["/usr/bin/memory_pressure"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"System-wide memory free percentage: (\d+(?:\.\d+)?)%", out)
+    return float(m.group(1)) if m else None
+
+
+def free_disk_gb(path):
+    """Free disk in GB on path's volume, or None when unknown. SCRUM_FREE_DISK_GB stands in for the reading."""
+    fake = os.environ.get("SCRUM_FREE_DISK_GB")
+    if fake:
+        return float(fake)
+    try:
+        return shutil.disk_usage(path).free / 1e9
+    except OSError:
+        return None
+
+
+def machine_ok(path):
+    """None when the machine has room for new work, else why not. Gates new claims and resumes only; a running job is
+    never touched. An unknown reading passes."""
+    ram = free_ram_pct()
+    if ram is not None and ram < MIN_FREE_RAM_PCT:
+        return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
+    disk = free_disk_gb(path)
+    if disk is not None and disk < MIN_FREE_DISK_GB:
+        return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
+    return None
+
+
 SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum (start|resume) ")
 
 
@@ -1895,15 +1937,17 @@ def cmd_ready(root, parent_id, live=()):
         # re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
         held = bool(parent.get("paused"))  # a paused parent claims nothing and keeps its stage and reason
-        blocked = not held and (legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON)))
+        blocked = not held and (legacy or (parent["stage"] == "running"
+                                           and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
+        machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
         cap = slot_cap(runall)
         ready = []
-        for k in kids if go else []:
+        for k in kids if go and not machine else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
@@ -1915,7 +1959,10 @@ def cmd_ready(root, parent_id, live=()):
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if blocked and (ready or busy or finished == len(kids)):
+        if machine:  # wait for RAM or disk; never needs-human, and a legacy parent keeps its reason to re-evaluate
+            if parent["stage"] == "running" and finished < len(kids):
+                new = "running", MACHINE_WAIT + machine
+        elif blocked and (ready or busy or finished == len(kids)):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and go:
             human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
