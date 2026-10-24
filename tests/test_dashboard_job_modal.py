@@ -22,7 +22,7 @@ def run(expr):
     text = DASHBOARD.read_text()
     esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
     helpers = text[text.index("const setupWait = "):text.index("function bigboyLines(")] \
-        + text[text.index("const abortForm = "):text.index("const termState = ")]
+        + text[text.index("const abortForm = "):text.index("// Splits a needs-human reason")]
     script = f"{esc}\nlet jobs = {json.dumps(JOBS)};\n{helpers}\nconsole.log(JSON.stringify({expr}));"
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
 
@@ -108,33 +108,11 @@ class JobModal(unittest.TestCase):
         self.assertNotIn('Send back to builder', blocked)
         self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', blocked)
 
-    def test_ask_button_in_every_modal_branch(self):
+    def test_no_terminal_or_ask_button(self):
         text = DASHBOARD.read_text()
-        body = text[text.index("function renderActions(job)"):text.index('$("actions").addEventListener("submit"')]
-        branches = re.findall(r"el\.innerHTML = (.*?)(?:;\n|;$)", body, re.S)
-        self.assertEqual(len(branches), 3)  # run alive, not needs-human, needs-human
-        for branch in branches:
-            self.assertIn("askForm(job)", branch)
-        submit = text[text.index('$("actions").addEventListener("submit"'):]
-        self.assertIn('if (act === "ask") return askClaude(key);', submit)
-        self.assertIn('post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/ask`, {})', text)
-        self.assertIn("if (!askState[job.key]?.pending) delete askState[job.key];", text[text.index("function open(job)"):])
-        form = text[text.index("const askState = "):text.index("const redrawAsk = ")]
-        node = shutil.which("node")
-        if not node:
-            raise unittest.SkipTest("node not on PATH")
-        esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
-        def ask(state):
-            script = f"{esc}\n{form}\naskState.k = {json.dumps(state)};\nconsole.log(JSON.stringify(askForm({{key: 'k'}})));"
-            return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        idle = ask({})
-        self.assertTrue(idle.startswith('<form data-act="ask"><button class="btn" type="submit" data-agent-hint="'), idle)
-        self.assertTrue(idle.endswith('">Ask Claude</button></form>'), idle)
-        self.assertIn(" disabled>Ask Claude</button>", ask({"pending": True}))
-        self.assertTrue(ask({"msg": "Claude opened in Ghostty."}).endswith(
-            '</button><span class="note" role="status">Claude opened in Ghostty.</span></form>'))
-        self.assertTrue(ask({"err": "no <Ghostty>"}).endswith(
-            '</button><span class="error" role="alert">no &lt;Ghostty&gt;</span></form>'))
+        for gone in ('data-act="terminal"', 'data-act="ask"', "openTerminal", "askClaude", "termForm", "askForm",
+                     "Open terminal", "Ask Claude"):
+            self.assertNotIn(gone, text, gone)
 
     def test_stale_uses_newest_activity(self):
         # 2026-01-01T00:00:00Z is 1767225600 s
@@ -161,10 +139,7 @@ class JobModal(unittest.TestCase):
         'data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window '
         'that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree '
         'on.">Discuss first</button>\n      <button class="btn" type="submit">Send back to builder</button></form>'
-        '<form data-act="ask"><button class="btn" type="submit" data-agent-hint="Opens a new interactive Claude session in '
-        "the job's worktree (the repo's main checkout once that is gone), preloaded with the paths of the job's feature, "
-        "spec, build, round and decision files and its board entry, to answer questions about the job.\">Ask Claude"
-        '</button></form><form data-act="abort">\n    <label hidden><input type="checkbox" name="requeue"> Put back in '
+        '<form data-act="abort">\n    <label hidden><input type="checkbox" name="requeue"> Put back in '
         'backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button></form>'
         '<p class="error" role="alert"></p>')
     TODAY_CARD = (
@@ -211,11 +186,10 @@ class JobModal(unittest.TestCase):
                          [("a", "Ship it"), ("b", "Redo"), ("c", "Drop &lt;it&gt;")])
         for gone in ('data-act="resume"', 'data-act="approve"', "Discuss first", "Send back to builder"):
             self.assertNotIn(gone, html)
-        for kept in (">Ask Claude</button>", ">Abort job</button>"):
+        for kept in (">Abort job</button>",):
             self.assertIn(kept, html)
-        with_term = self.actions_html({**self.ASKED, "tty": "ttys001", "options": self.OPTIONS})
-        self.assertIn(">Open terminal</button>", with_term)
-        self.assertIn('<span class="reason">review: CHANGES after 3 rounds.</span>', with_term)  # no question: the problem line
+        no_question = self.actions_html({**self.ASKED, "tty": "ttys001", "options": self.OPTIONS})
+        self.assertIn('<span class="reason">review: CHANGES after 3 rounds.</span>', no_question)  # no question: the problem line
 
     def test_option_buttons_post_answer(self):
         job = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}

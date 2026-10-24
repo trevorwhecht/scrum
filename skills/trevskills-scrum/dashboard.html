@@ -564,8 +564,6 @@ function open(job) {
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   $("diverged").innerHTML = "";  // the previous job's bullets must not show while this job's files load
-  if (!termState[job.key]?.pending) delete termState[job.key];
-  if (!askState[job.key]?.pending) delete askState[job.key];
   renderActions(job);
   renderDiverged(job);
   if (!$("viewer").open) $("viewer").showModal();
@@ -628,51 +626,6 @@ const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
   : `<form data-act="reopen"><textarea name="note" required maxlength="2000" placeholder="What should the follow-up job do?" aria-label="Note for the reopened job"></textarea>
     <button class="btn" type="submit">Reopen</button></form>`;
 
-// Open terminal: kept per job outside the DOM, so a polling re-render keeps the pending state and the message.
-const termState = {};
-function termForm(job) {
-  if (!job.tty && !job.runlog && !runs[job.key]?.log) return "";
-  const st = termState[job.key] || {};
-  return `<form data-act="terminal"><button class="btn" type="submit"${st.pending ? " disabled" : ""}>Open terminal</button>${
-    st.err ? `<span class="error" role="alert">${esc(st.err)}</span>` : st.msg ? `<span class="note" role="status">${esc(st.msg)}</span>` : ""}</form>`;
-}
-const redrawTerm = key => {
-  const job = jobs.find(j => j.key === key), form = $("actions").querySelector('form[data-act="terminal"]');
-  if (job && form && $("viewer").dataset.key === key) form.outerHTML = termForm(job);
-};
-async function openTerminal(key) {
-  const job = jobs.find(j => j.key === key);
-  if (!job || termState[key]?.pending) return;
-  termState[key] = {pending: true}; redrawTerm(key);
-  try {
-    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/terminal`, {});
-    termState[key] = {msg: out.message || ""};
-  } catch (err) { termState[key] = {err: err.message}; }
-  redrawTerm(key);
-}
-
-// Ask Claude: like Open terminal, but on every job; it opens a new session, never the job's own.
-const askState = {};
-function askForm(job) {
-  const st = askState[job.key] || {};
-  return `<form data-act="ask"><button class="btn" type="submit" data-agent-hint="Opens a new interactive Claude session in the job's worktree (the repo's main checkout once that is gone), preloaded with the paths of the job's feature, spec, build, round and decision files and its board entry, to answer questions about the job."${st.pending ? " disabled" : ""}>Ask Claude</button>${
-    st.err ? `<span class="error" role="alert">${esc(st.err)}</span>` : st.msg ? `<span class="note" role="status">${esc(st.msg)}</span>` : ""}</form>`;
-}
-const redrawAsk = key => {
-  const job = jobs.find(j => j.key === key), form = $("actions").querySelector('form[data-act="ask"]');
-  if (job && form && $("viewer").dataset.key === key) form.outerHTML = askForm(job);
-};
-async function askClaude(key) {
-  const job = jobs.find(j => j.key === key);
-  if (!job || askState[key]?.pending) return;
-  askState[key] = {pending: true}; redrawAsk(key);
-  try {
-    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/ask`, {});
-    askState[key] = {msg: out.message || ""};
-  } catch (err) { askState[key] = {err: err.message}; }
-  redrawAsk(key);
-}
-
 // Splits a needs-human reason into problem and fix on the first " Fix: " the orchestrator writes.
 const splitReason = reason => {
   const r = reason || "", i = r.indexOf(" Fix: ");
@@ -695,7 +648,7 @@ const waitingBanner = job => {
   if (!p && job.stage !== "needs-human") return "";
   const {problem, fix} = p ? {problem: job.waiting, fix: "Answer it in the job's terminal."} : splitReason(job.reason);
   return `<div class="waiting" role="status"
-    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for; Open terminal brings that session to the front."
+    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for."
       : "This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix."}">
     <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
 };
@@ -704,10 +657,10 @@ function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
   const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
   const err = '<p class="error" role="alert"></p>', kids = waitingNote(job, "note") + childLinks(job);
-  if (run?.alive) return el.innerHTML = banner + kids + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (run?.alive) return el.innerHTML = banner + kids + `<p class="running">● ${esc(run.action)} running…${log}</p>` + pauseForm(job) + abortForm(job) + err;
   const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + pauseForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
@@ -718,15 +671,13 @@ function renderActions(job) {
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + termForm(job) + askForm(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
   const form = e.target, btn = e.submitter || form.querySelector("button"), act = btn.dataset.act || form.dataset.act, key = $("viewer").dataset.key;
   const job = jobs.find(j => j.key === key);
-  if (act === "terminal") return openTerminal(key);
-  if (act === "ask") return askClaude(key);
   if (act === "goto") { const linked = jobs.find(j => j.key === form.dataset.key); if (linked) open(linked); return; }
   if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
   if (act === "abort" && !form.dataset.armed) {

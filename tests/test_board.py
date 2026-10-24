@@ -102,16 +102,26 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=review", "reason=r"])  # every other stage still sets
         self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", "r"))
 
-    def test_set_tty_term_runlog_stored(self):
+    def test_set_tty_runlog_stored(self):
         job_id = board.cmd_new(self.root, "x")
         out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id,
-                              "tty=ttys003", "term=Apple_Terminal", "runlog=runs/x.log"], capture_output=True, text=True)
+                              "tty=ttys003", "runlog=runs/x.log"], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
         job = self.jobs()[0]
-        self.assertEqual((job["tty"], job["term"], job["runlog"]), ("ttys003", "Apple_Terminal", "runs/x.log"))
-        board.cmd_set(self.root, job_id, ["tty=", "term=", "runlog="])
+        self.assertEqual((job["tty"], job["runlog"]), ("ttys003", "runs/x.log"))
+        board.cmd_set(self.root, job_id, ["tty=", "runlog="])
         job = self.jobs()[0]
-        self.assertEqual((job["tty"], job["term"], job["runlog"]), (None, None, None))
+        self.assertEqual((job["tty"], job["runlog"]), (None, None))
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, job_id, ["term=Apple_Terminal"])
+
+    def test_leftover_term_key_is_ignored(self):
+        job_id = board.cmd_new(self.root, "x")
+        data = json.loads((self.root / "board.json").read_text())
+        data["jobs"][0]["term"] = "Apple_Terminal"
+        (self.root / "board.json").write_text(json.dumps(data))
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.assertEqual(self.jobs()[0]["stage"], "build")
 
     def test_set_tty_records_claude_pid(self):
         # pid -> "ppid command", as `ps -o ppid=,command=` prints it; board.py's parent is 100, a shell under claude 40
@@ -173,10 +183,10 @@ class BoardTest(unittest.TestCase):
             self.assertIn("bad field", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_set_rejects_unknown_term(self):
+    def test_set_rejects_unknown_field_whole(self):
         job_id = board.cmd_new(self.root, "x")
         with self.assertRaisesRegex(SystemExit, "bad field"):
-            board.cmd_set(self.root, job_id, ["tty=ttys2", "term=xterm"])
+            board.cmd_set(self.root, job_id, ["tty=ttys2", "color=red"])
         self.assertNotIn("tty", self.jobs()[0])
 
     def test_set_lane_stored(self):
