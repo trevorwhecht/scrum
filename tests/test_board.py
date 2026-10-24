@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
+os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -1252,6 +1253,36 @@ class BoardTest(unittest.TestCase):
             with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout="Usage: memory_pressure\n")):
                 self.assertIsNone(board.free_ram_pct())
                 self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def sessions(self, n):
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * n + "claude -p /trevskills-scrum run-all\n")
+        return mock.patch.dict(os.environ, SCRUM_PS=str(ps))
+
+    def test_machine_ok_session_ceiling(self):
+        self.assertEqual(board.MAX_LIVE_SESSIONS, 8)
+        with self.sessions(7):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+        with self.sessions(8):
+            self.assertEqual(board.machine_ok(self.tmp.name), "8 sessions running (machine cap 8)")
+            with self.machine("14", "1000"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+            with self.machine("100", "6.2"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "free disk 6.2 GB (< 10 GB)")
+        with self.sessions(9):
+            self.assertEqual(board.machine_ok(self.tmp.name), "9 sessions running (machine cap 8)")
+
+    def test_ready_session_ceiling(self):
+        parent, (a, b) = self.runall(2)
+        self.spec(a, "src/m0.py"); self.spec(b, "src/m1.py")
+        with self.sessions(8), mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting: 8 sessions running (machine cap 8)"))
+        play.assert_not_called()
+        with self.sessions(7):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b])
 
     def test_ready_machine_guard_blocks_then_recovers(self):
         parent, (a, b, c) = self.runall(3)

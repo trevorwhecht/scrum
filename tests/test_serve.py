@@ -892,22 +892,45 @@ class ServeTest(unittest.TestCase):
         self.assert_nothing_ran(m)
 
     def test_resume_refused_at_machine_wide_session_cap(self):
-        """A standalone job has no siblings, so only the machine-wide count stops it resuming over the usage cap."""
+        """A standalone job has no siblings: only the usage-pace cap (when pacing is active) or the machine ceiling of 8
+        live sessions stops it resuming. With no pacing, 6 live sessions still resume."""
         ps = Path(self.tmp.name) / "ps.txt"
         two = ["/opt/homebrew/bin/claude -p /trevskills-scrum resume 1-a --model sonnet",
                "claude -p /trevskills-scrum start 2-b --model sonnet",
                "claude -p /trevskills-scrum run-all", "vim serve.py"]  # neither of these two counts
         three = two + ["claude -p /trevskills-scrum resume 3-c"]
+        six = three + [f"claude -p /trevskills-scrum resume {i}-d" for i in range(4, 7)]
         job = {"id": "9-x", "lane": "standard"}
-        for lines, count, cap, refused in ((two, 2, 3, False), (three, 3, 3, True), (two, 2, 1, True)):
+        for lines, count, cap, refused in ((two, 2, 3, False), (three, 3, 3, True), (two, 2, 1, True),
+                                           (six, 6, None, False)):
             with self.subTest(count=count, cap=cap):
                 ps.write_text("\n".join(lines) + "\n")
                 with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
-                        mock.patch.object(self.serve.board, "slot_cap", return_value=cap):
+                        mock.patch.object(self.serve.board, "pace_cap", return_value=cap):
                     self.assertEqual(self.serve.board.live_sessions(), count)
                     out = self.serve.resume_refusal("repo", self.root, job)
                 self.assertEqual(out, f"can't resume yet: {count} sessions running (usage cap {cap}). "
                                       "Fix: click Resume when one finishes." if refused else None)
+
+    def test_resume_pace_cap_uses_runall_base(self):
+        """Light usage (projected 12.5 %): pace_cap gives the Run-all base 5 + 2 = 7, so 6 live resume and 7 wait."""
+        ps, usage = Path(self.tmp.name) / "ps.txt", Path(self.tmp.name) / "usage.json"
+        now = time.time()  # 10 % used, 1 h of 5 left
+        usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 10, "resets_at": now + 3600}}}))
+        job = {"id": "9-x", "lane": "standard"}
+        for count, out in ((6, None), (7, "can't resume yet: 7 sessions running (usage cap 7). "
+                                          "Fix: click Resume when one finishes.")):
+            ps.write_text("claude -p /trevskills-scrum resume 1-a\n" * count)
+            with mock.patch.dict(os.environ, SCRUM_PS=str(ps), SCRUM_USAGE=str(usage)):
+                self.assertEqual(self.serve.resume_refusal("repo", self.root, job), out)
+
+    def test_resume_refused_at_machine_ceiling(self):
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 8)
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}),
+                             "waiting: 8 sessions running (machine cap 8). Fix: click Resume once memory or disk frees up.")
 
     def test_resume_refusal_machine_guard(self):
         """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
@@ -916,7 +939,7 @@ class ServeTest(unittest.TestCase):
         blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         alone, kid = {"id": "9-x", "lane": "standard"}, {"id": "8-k", "lane": "standard", "parent": "100-parent"}
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
-                mock.patch.object(self.serve.board, "slot_cap", return_value=1), \
+                mock.patch.object(self.serve.board, "pace_cap", return_value=1), \
                 mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
             for ram, disk, why in (("14", "1000", "free RAM 14% (< 20%)"), ("100", "6.2", "free disk 6.2 GB (< 10 GB)")):
                 with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
@@ -4633,9 +4656,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
 
 
 class AutoContinueTest(unittest.TestCase):
-    """`- Auto continue: <n>` in project.md: when no opted-in project has work in flight, the watchdog starts one
-    headless run-all, in the project that just finished, else the most recently active, else the lowest n, unless usage
-    is over pace."""
+    """`- Auto continue: <n>` in project.md: each tick the watchdog starts one headless run-all in every opted-in
+    project with no work in flight and a claimable backlog line: Focus projects first, then the project that just
+    finished, then the most recently active, then the lowest n. Nothing starts when usage is over pace, and starts
+    stop at the first failed machine_ok (RAM, disk, or 8 live sessions)."""
 
     def setUp(self):
         import serve
@@ -4712,13 +4736,43 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=["2-kid", "9-gone"]))), 1)
 
     def test_auto_continue_machine_guard(self):
-        """Low RAM or disk: no run-all starts; the next tick with room starts it as before."""
+        """Low RAM or disk: no run-all starts; the next tick with room starts it as before. A guard that fails partway
+        through a tick stops the later starts and keeps the earlier ones."""
         self.project("a", n=1)
         with mock.patch.object(self.board, "pace_cap", return_value=None):
             for ram, disk in (("14", "1000"), ("100", "6.2")):
                 with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
                     self.assertEqual(self.tick(), [], (ram, disk))
             self.assertEqual(self.tick(), self.started("a"))
+            self.project("b", n=2); self.project("c", n=3)
+            answers = iter([None, "free RAM 14% (< 20%)", None])
+            with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
+                self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
+
+    def test_auto_continue_session_ceiling(self):
+        self.project("a", n=1); self.project("b", n=2)
+        ps = self.base / "ps.txt"
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 8)
+            self.assertEqual(self.tick(), [], "8 live sessions: no run-all starts")
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 7)
+            self.assertEqual(self.tick(), self.started("a") + self.started("b"))
+
+    def test_auto_continue_starts_each_idle_project(self):
+        self.project("a", n=1); self.project("b", n=5)
+        self.assertEqual(self.tick(), self.started("a") + self.started("b"))
+
+    def test_busy_project_does_not_block_others(self):
+        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5)
+        self.assertEqual(self.tick(), self.started("b"), "a busy: only a is skipped")
+        (self.projects["a"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("a", "run-all")), self.started("b"),
+                         "a's run-all running: only a is skipped")
+        with mock.patch.object(self.board, "projects", return_value=self.projects), \
+                mock.patch.object(self.serve, "running", return_value=False), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.auto_continue_tick({"b": False})
+        self.assertEqual([c.args for c in spawn.call_args_list], self.started("b"), "a missing from busy: skipped")
 
     def test_parse_value(self):
         self.assertEqual(self.parse("# P\n- Stack: x\n- Auto continue: 2\n- Lint: none\n"), 2)
@@ -4758,28 +4812,29 @@ class AutoContinueTest(unittest.TestCase):
     def test_focus_beats_recency(self):
         self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
         self.project("b", n=5, focus=True)
-        self.assertEqual(self.tick(), self.started("b"))
+        self.assertEqual(self.tick(), self.started("b") + self.started("a"), "Focus goes first; a still starts")
 
     def test_busy_non_focus_does_not_block_focus(self):
         self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5, focus=True)
         self.assertEqual(self.tick(running=lambda p, j: p == "a"), self.started("b"))
 
     def test_busy_focus_still_exclusive(self):
+        """Focus is ordering only: a Focus project that is busy, running its run-all or has nothing claimable never
+        stops the others."""
         self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.serve.LAST_BUSY.add("a")
-        self.assertEqual(self.tick(), self.started("a"), "focus has nothing claimable: it lends the slot")
+        self.assertEqual(self.tick(), self.started("a"), "focus has nothing claimable: a starts")
+        (self.projects["b"] / "scrum" / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
         (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [
             {"id": "001-y", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
-        self.assertEqual(self.tick(), [], "busy focus blocks the start")
+        self.assertEqual(self.tick(), self.started("a"), "busy focus: a starts anyway")
         (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
-        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), [],
-                         "focus run-all running: it holds")
+        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), self.started("a"),
+                         "focus run-all running: a starts anyway")
 
     def test_busy_focus_holds_chaining(self):
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        self.project("c", n=5, focus=True, backlog="- [x] Claimed → 001-x\n",
-                     jobs=[{"id": "001-y", "stage": "build"}])
-        self.assertEqual(self.tick(), [], "busy focus: a gets no chaining")
+        self.project("c", n=5, focus=True, jobs=[{"id": "001-y", "stage": "build"}])
+        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "busy focus: a still chains")
 
     BLOCKED_FOCUS = {
         "setup-only": {"backlog": "- [ ] Needs a key {setup: add key}\n"},
@@ -4813,33 +4868,28 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1)
         self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
         self.project("c", n=9, focus=True)
-        self.assertEqual(self.tick(), self.started("c"), "only c holds: it is the only target")
+        self.assertEqual(self.tick(), self.started("c") + self.started("a"), "c first; b has nothing claimable")
         (self.projects["c"] / "scrum" / "backlog.md").write_text("# Backlog\n- [x] Claimed → 002-z\n")
         self.serve.LAST_BUSY.clear()
-        self.assertEqual(self.tick(), self.started("a"), "neither holds: a competes as usual")
+        self.assertEqual(self.tick(), self.started("a"), "neither Focus can start: a starts")
         self.projects.clear()
         for name in ("a", "b", "c"):
             shutil.rmtree(self.base / name)
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
         self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
         self.project("c", n=9, focus=True)
-        self.assertEqual(self.tick(), self.started("c"), "c holds: a's run-all is held, b is no target")
+        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start"), ("run-all", "run-all")],
+                         "a's run-all chains, then c starts")
+        self.assertFalse(hasattr(self.serve, "focus_holds"))
 
     def test_focus_missing_from_busy_holds(self):
-        self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        """A Focus project missing from busy (its sweep failed) is skipped; the others still start."""
+        self.project("a", n=1); self.project("b", n=5, focus=True)
         with mock.patch.object(self.board, "projects", return_value=self.projects), \
                 mock.patch.object(self.serve, "running", return_value=False), \
                 mock.patch.object(self.serve, "spawn") as spawn:
             self.serve.auto_continue_tick({"a": False})
-        spawn.assert_not_called()
-
-    def test_focus_holds_on_error(self):
-        root = self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        with mock.patch.object(self.serve, "running", return_value=False), \
-                mock.patch.object(self.serve, "claimable", side_effect=SystemExit("bad backlog")):
-            self.assertTrue(self.serve.focus_holds("b", root, False))
-        with mock.patch.object(self.serve, "running", return_value=False):
-            self.assertFalse(self.serve.focus_holds("b", root, False))
+        self.assertEqual([c.args for c in spawn.call_args_list], self.started("a"))
 
     def test_focus_without_opt_in_ignored(self):
         self.project("a", n=1); self.project("b", focus=True)
@@ -4850,32 +4900,66 @@ class AutoContinueTest(unittest.TestCase):
                        {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
 
     def test_focus_holds_other_projects(self):
-        """Focus elsewhere that can use the slot: the watchdog neither chains nor auto-resumes a non-focus project's
-        run-all. A blocked Focus project holds nothing."""
+        """Focus elsewhere never holds a non-focus project's run-all: it chains whether the Focus project can start
+        or not."""
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
         self.project("b", n=5)
-        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "no Focus anywhere: the run-all chains")
+        self.assertEqual([c[:4] for c in self.tick()], [("a", self.base / "a" / "scrum", "003-wait", "start"),
+                                                        ("b", self.base / "b" / "scrum", "run-all", "run-all")],
+                         "no Focus anywhere: a's run-all chains and idle b starts")
         self.projects.clear(); shutil.rmtree(self.base / "a")
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
         c = self.project("c", n=5, focus=True)
-        self.assertEqual(self.tick(), self.started("c"), "Focus on c: a's run-all is held")
+        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start"), ("run-all", "run-all")],
+                         "Focus on c: a's run-all still chains, c starts")
         (c / "backlog.md").write_text("# Backlog\n- [x] Claimed → 001-x\n")
-        self.assertIn(("003-wait", "start"), [c[2:4] for c in self.tick()], "blocked Focus on c: a's run-all chains")
+        shutil.rmtree(self.base / "a"); self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
+        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "blocked Focus on c: a's run-all chains")
+
+    def test_prune_finished_worktrees(self):
+        """Each tick deletes node_modules and .next in done/aborted jobs' worktrees under .claude/worktrees/, and
+        nothing else."""
+        repo = self.base / "a"
+        wt = lambda name: repo / ".claude" / "worktrees" / name
+        main = repo / "checkout"  # a lilguy job's main checkout: outside .claude/worktrees/
+        for d in (wt("done"), wt("aborted"), wt("build"), wt("nowt"), main):
+            for sub in ("node_modules/pkg", ".next/cache", "src"):
+                (d / sub).mkdir(parents=True)
+        self.project("a", n=1, backlog="", jobs=[
+            {"id": "001-done", "stage": "done", "worktree": str(wt("done"))},
+            {"id": "002-aborted", "stage": "aborted", "worktree": str(wt("aborted"))},
+            {"id": "003-build", "stage": "build", "worktree": str(wt("build"))},
+            {"id": "004-lil", "stage": "done", "lane": "lilguy", "worktree": str(main)},
+            {"id": "005-gone", "stage": "done", "worktree": str(wt("missing"))},
+            {"id": "006-none", "stage": "done", "worktree": None},
+            {"id": "007-escape", "stage": "done", "worktree": str(wt("..") / ".." / "checkout")}])
+        for _ in range(2):  # the second tick finds nothing left to delete
+            self.tick()
+            for name in ("done", "aborted"):
+                self.assertFalse((wt(name) / "node_modules").exists(), name)
+                self.assertFalse((wt(name) / ".next").exists(), name)
+                self.assertTrue((wt(name) / "src").is_dir(), name)
+            for d in (wt("build"), wt("nowt"), main):
+                for sub in ("node_modules/pkg", ".next/cache", "src"):
+                    self.assertTrue((d / sub).is_dir(), d / sub)
+            self.assertFalse(wt("missing").exists())
 
     def test_starts_lowest_n(self):
         self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
-        self.assertEqual(self.tick(), self.started("b"), "lowest n; b before c in projects() order")
+        self.assertEqual(self.tick(), self.started("b") + self.started("c") + self.started("a"),
+                         "lowest n; b before c in projects() order")
 
     def test_most_recent_activity_beats_n(self):
         self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-01-01T00:00:00+00:00"}])
         self.project("b", n=5, jobs=[{"id": "001-y", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
         self.project("c", n=1)
-        self.assertEqual(self.tick(), self.started("b"), "newest board activity first; an empty board comes last")
+        self.assertEqual(self.tick(), self.started("b") + self.started("a") + self.started("c"),
+                         "newest board activity first; an empty board comes last")
 
     def test_prefers_just_finished_project(self):
         self.project("a", n=1); self.project("b", n=5)
         self.serve.LAST_BUSY.add("b")
-        self.assertEqual(self.tick(), self.started("b"))
+        self.assertEqual(self.tick(), self.started("b") + self.started("a"))
 
     def test_just_finished_without_claimable_falls_back(self):
         self.project("a", n=1); self.project("b", n=5, backlog="- [x] Claimed → 001-x\n")
@@ -4884,16 +4968,16 @@ class AutoContinueTest(unittest.TestCase):
 
     def test_no_start_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
-        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(), self.started("a"), "b in flight: only b is skipped")
         self.assertEqual(self.serve.LAST_BUSY, {"b"})
         self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                      {"id": "002-k", "stage": "build", "paused": True, "parent": "001-p"}])
-        del self.projects["b"]
+        del self.projects["b"], self.projects["a"]
         self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
 
     def test_no_start_while_auto_run_all_running(self):
         self.project("a", n=1); self.project("b", n=2)
-        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), [])
+        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), self.started("a"))
 
     def test_no_start_over_pace(self):
         self.project("a", n=1)

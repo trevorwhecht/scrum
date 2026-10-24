@@ -28,7 +28,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fnmatch, hashlib, json, os, re, shlex, signal, subprocess, sys, threading, time
+import argparse, base64, fnmatch, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -184,15 +184,17 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 
 def resume_refusal(project, root, job):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
-    checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low (board.machine_ok),
-    or while the machine already runs the usage cap's worth of sessions; a Run-all/BigBoy child also waits for the same cap and overlap rules `ready` applies to new claims."""
+    checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low or 8 sessions run
+    (board.machine_ok), or, while usage pacing is active, when the machine already runs the pace cap's worth of
+    sessions; a Run-all/BigBoy child also waits for the same cap and overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     machine = board.machine_ok(root)
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
-    live, cap = board.live_sessions(), board.slot_cap(True)
-    if live >= cap:
+    live = board.live_sessions()
+    cap = board.pace_cap(board.read_usage(), time.time(), board.RUNALL_MAX_IN_PROGRESS)
+    if cap is not None and live >= cap:
         return f"can't resume yet: {live} sessions running (usage cap {cap}). Fix: click Resume when one finishes."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
@@ -630,11 +632,8 @@ def auto_continue(root: Path) -> int | None:
 
 
 def focus(root: Path) -> bool:
-    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). Focus =
-    priority, exclusive only while the Focus project can use the slot (focus_holds): then it is auto continue's only
-    target and the watchdog leaves every other project alone: no chaining, no auto-resume (so their run-alls hold where
-    they are and claim no session slot). A blocked Focus project lends the slot and the tick runs as if no project had
-    Focus. Trevor's own starts, Resume and Play still work everywhere."""
+    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). Focus is
+    ordering only: auto continue starts Focus projects first, and never holds any other project."""
     try:
         return bool(FOCUS_RE.search((root / "project.md").read_text()))
     except (OSError, ValueError):
@@ -661,19 +660,11 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
                and not parked_parent(project, root, j, by_id, alive) for j in jobs)
 
 
-def focus_holds(project: str, root: Path, busy: bool) -> bool:
-    """A Focus project can use the slot: busy, its auto-started run-all running, or a claimable backlog line. Any
-    error counts as holding."""
-    try:
-        return busy or running(project, "run-all") or claimable(root)
-    except (Exception, SystemExit):
-        return True
-
-
 def auto_continue_tick(busy: dict[str, bool]) -> None:
-    """Start one headless run-all across opted-in projects when none of them has work in flight, no auto-started
-    run-all is still running, and usage is not over pace. The project that just finished goes first, then the most
-    recent board activity, then lowest n.
+    """Start one headless run-all in every opted-in project with no work in flight, no auto-started run-all still
+    running and a claimable backlog line, unless usage is over pace. Focus projects go first, then the project that
+    just finished, then the most recent board activity, then lowest n. board.machine_ok (RAM, disk, the session
+    ceiling) is checked before each start; the first failure stops this tick's later starts.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -681,26 +672,33 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     for project, repo in board.projects().items():
         n = auto_continue(repo / "scrum")
         if n is not None:
-            opted.append((project, repo / "scrum", n, last_active(repo / "scrum")))
-    # Focus = priority, exclusive only while the Focus project can use the slot: a holding Focus project is the only
-    # target and the only busy gate; with none holding, every opted-in project competes as usual
-    holding = [o for o in opted if focus(o[1]) and focus_holds(o[0], o[1], busy.get(o[0], True))]
-    if holding:
-        opted = holding
-    if any(busy.get(p) or running(p, "run-all") for p, *_ in opted) \
-            or board.pace_cap(board.read_usage(), time.time(), None) is not None:
+            opted.append((project, repo / "scrum", n, last_active(repo / "scrum"), focus(repo / "scrum")))
+    if board.pace_cap(board.read_usage(), time.time(), None) is not None:
         return
-    for project, root, *_ in sorted(opted, key=lambda o: (o[0] not in last, -o[3], o[2])):  # stable: ties keep projects() order
-        if project not in busy:
+    # stable: ties keep projects() order
+    for project, root, *_ in sorted(opted, key=lambda o: (not o[4], o[0] not in last, -o[3], o[2])):
+        if busy.get(project, True):
             continue
         try:
-            if claimable(root):
+            if not running(project, "run-all") and claimable(root):
                 if board.machine_ok(root):  # no room on this machine; retry next tick, like the pace gate
                     return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
-                return
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+
+
+def prune_worktrees(repo: Path, jobs: list[dict]) -> None:
+    """Delete node_modules and .next in the worktree of every done or aborted job, only under repo/.claude/worktrees/
+    (never a lilguy job's main checkout). Errors are ignored, and a symlinked folder is left in place."""
+    base = (repo / ".claude" / "worktrees").resolve()
+    for job in jobs:
+        if job.get("stage") not in ("done", "aborted") or not job.get("worktree"):
+            continue
+        wt = Path(job["worktree"]).resolve()
+        if base in wt.parents and wt.is_dir():
+            for name in ("node_modules", ".next"):
+                shutil.rmtree(wt / name, ignore_errors=True)
 
 
 def outcome_line(root, run, code):
@@ -768,20 +766,10 @@ def discuss_runs():
 def watchdog_tick():
     """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
     whatever siblings are now ready, then restart or close idle parents (sweep_parents), auto-resume the stalled
-    ones, and poll its cloud jobs (cloud_tick). Last, auto_continue_tick. One project's failure never stops the others."""
+    ones, poll its cloud jobs (cloud_tick) and prune finished worktrees. Last, auto_continue_tick. One project's failure
+    never stops the others."""
     busy, alive = {}, once(lambda: board.session_alive_fn())
-    projects = board.projects()
-
-    def holds(project, root):  # from board state before this tick's sweep; a read or parse error holds
-        try:
-            jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
-            busy_now = board_busy(project, root, jobs, {j["id"]: j for j in jobs}, alive)
-        except (Exception, SystemExit):
-            return True
-        return focus_holds(project, root, busy_now)
-
-    focused = {p for p, repo in projects.items() if focus(repo / "scrum") and holds(p, repo / "scrum")}
-    for project, repo in projects.items():
+    for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
             board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
@@ -794,9 +782,6 @@ def watchdog_tick():
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
             busy[project] = board_busy(project, root, jobs, by_id, alive)
-            if focused and project not in focused:  # a holding Focus elsewhere: bookkeeping only, no chaining or auto-resume
-                cloud_tick(project, root, jobs)
-                continue
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll
@@ -805,6 +790,7 @@ def watchdog_tick():
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             busy[project] = auto_resume(project, root, jobs) or busy[project]
             cloud_tick(project, root, jobs)
+            prune_worktrees(repo, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     try:

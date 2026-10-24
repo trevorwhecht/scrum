@@ -55,7 +55,7 @@ class ParkedParentReproTest(unittest.TestCase):
                 root = self.project(f"p{int(focus)}", jobs=self.parked(), focus=focus)
                 if focus:
                     self.project(f"other{int(focus)}")  # a second opted-in, idle project
-                self.assertEqual(self.run_alls(),
+                self.assertEqual(self.run_alls()[:1],  # Focus goes first; an idle second project starts after it
                                  [(f"p{int(focus)}", root, "run-all", "run-all", "/trevskills-scrum run-all")],
                                  "a parent parked on Trevor must not count busy")
 
