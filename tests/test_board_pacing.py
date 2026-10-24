@@ -5,6 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -36,6 +38,10 @@ class PaceCapTest(unittest.TestCase):
         self.assertEqual(cap(usage(five=(55, 9000)), None), 2)      # min(None, 2) = 2
         self.assertEqual(cap(usage(five=(55, 9000)), 1), 1)         # min(1, 2)
         self.assertEqual(cap(usage(five=(62.5, 9000))), 1)          # P=125
+        # the Run-all base of 5: under 60% gives 7, 100% and 125% still give 2 and 1
+        self.assertEqual(cap(usage(five=(20, 9000)), 5), 7)         # P=40
+        self.assertEqual(cap(usage(five=(50, 9000)), 5), 2)         # P=100
+        self.assertEqual(cap(usage(five=(62.5, 9000)), 5), 1)       # P=125
         self.assertEqual(cap(usage(five=(100, 9000)), None), 1)     # P=200
         # the highest window wins: 5h P=40, 7d (half of 604800 left) P=130
         self.assertEqual(cap(usage(five=(20, 9000), seven=(65, 302400))), 1)
@@ -156,20 +162,20 @@ class ReadyPacingTest(unittest.TestCase):
         return parent, kids[:-1]  # the last (exposure) child depends on all the others
 
     def test_ready_runall_cap_follows_pacing(self):
-        for p5, claims in ((40, 5), (80, 3), (110, 2), (130, 1), (None, 3)):
+        for p5, claims in ((40, 7), (80, 5), (110, 2), (130, 1), (None, 5)):
             self.tmp.cleanup()
             self.root.parent.mkdir(parents=True, exist_ok=True)
             if p5 is not None:
                 self.write_usage(p5)
-            parent, kids = self.runall(6)
+            parent, kids = self.runall(8)
             out = board.cmd_ready(self.root, parent)
             self.assertEqual((out["ready"], out["in_progress"]), (kids[:claims], claims), p5)
         # a stale usage file means no throttling
         self.tmp.cleanup()
         self.root.parent.mkdir(parents=True, exist_ok=True)
         self.usage.write_text(json.dumps(usage(five=(55, 9000), written_at=int(time.time()) - 301)))
-        parent, kids = self.runall(6)
-        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:3])
+        parent, kids = self.runall(8)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:5])
 
     def test_ready_bigboy_throttled_when_over_pace(self):
         for p5, claims in ((None, 4), (40, 4), (80, 4), (110, 2), (130, 1)):

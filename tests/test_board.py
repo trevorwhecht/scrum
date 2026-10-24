@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -1187,17 +1189,17 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, a, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
 
-    def test_runall_ready_caps_in_progress_at_three(self):
-        self.assertEqual(board.RUNALL_MAX_IN_PROGRESS, 3)
-        parent, kids = self.runall(5)
+    def test_runall_ready_caps_in_progress_at_five(self):
+        self.assertEqual(board.RUNALL_MAX_IN_PROGRESS, 5)
+        parent, kids = self.runall(7)
         for i, k in enumerate(kids):
             self.spec(k, f"src/{i}.py")
         out = board.cmd_ready(self.root, parent)
-        self.assertEqual((out["ready"], out["in_progress"]), (kids[:3], 3))
+        self.assertEqual((out["ready"], out["in_progress"]), (kids[:5], 5))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         board.cmd_set(self.root, kids[0], ["stage=done"])
         out = board.cmd_ready(self.root, parent)
-        self.assertEqual((out["ready"], out["in_progress"]), ([kids[3]], 3))
+        self.assertEqual((out["ready"], out["in_progress"]), ([kids[5]], 5))
         # A spec-less Run-all child starts only alone.
         parent, (a, b) = self.runall(2)
         self.spec(b, "src/b.py")
@@ -1214,6 +1216,67 @@ class BoardTest(unittest.TestCase):
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["merged"], out["total"], out["in_progress"], out["all_merged"]), (2, 3, 0, True))
         self.assertEqual(self.child(parent)["stage"], "running")
+
+    def machine(self, ram, disk):
+        return mock.patch.dict(os.environ, {"SCRUM_FREE_RAM": ram, "SCRUM_FREE_DISK_GB": disk})
+
+    def test_machine_ok_low_ram(self):
+        self.assertEqual(board.MIN_FREE_RAM_PCT, 20)
+        with self.machine("14", "1000"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+        with self.machine("14", "6.2"):  # both low: RAM only, one short line
+            self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+
+    def test_machine_ok_low_disk(self):
+        self.assertEqual(board.MIN_FREE_DISK_GB, 10)
+        with self.machine("100", "6.2"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "free disk 6.2 GB (< 10 GB)")
+        with self.machine("100", "9.96"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "free disk 10.0 GB (< 10 GB)")
+
+    def test_machine_ok_passes(self):
+        with self.machine("20", "10"):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+        with self.machine("", ""), \
+                mock.patch.object(board.subprocess, "run", return_value=mock.Mock(
+                    stdout="Pages free: 1\n\nSystem-wide memory free percentage: 59%\n")), \
+                mock.patch.object(board.shutil, "disk_usage", return_value=mock.Mock(free=250_000_000_000)):
+            self.assertEqual((board.free_ram_pct(), board.free_disk_gb(self.tmp.name)), (59.0, 250.0))
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def test_machine_ok_unknown_readings_pass(self):
+        with self.machine("", ""), mock.patch.object(board.shutil, "disk_usage", side_effect=OSError("gone")):
+            with mock.patch.object(board.subprocess, "run", side_effect=FileNotFoundError("memory_pressure")):
+                self.assertEqual((board.free_ram_pct(), board.free_disk_gb(self.tmp.name)), (None, None))
+                self.assertIsNone(board.machine_ok(self.tmp.name))
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout="Usage: memory_pressure\n")):
+                self.assertIsNone(board.free_ram_pct())
+                self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def test_ready_machine_guard_blocks_then_recovers(self):
+        parent, (a, b, c) = self.runall(3)
+        for i, k in enumerate((a, b, c)):
+            self.spec(k, f"src/m{i}.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b, c])
+        board.cmd_set(self.root, b, ["stage=waiting"])
+        board.cmd_set(self.root, c, ["stage=waiting"])
+        with self.machine("14", "1000"), mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([], 1))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting: free RAM 14% (< 20%)"))
+        self.assertEqual(self.child(a)["stage"], "spec", "a child in progress keeps its stage")
+        play.assert_not_called()
+        board.cmd_set(self.root, a, ["stage=done"])  # nothing in progress: still no needs-human
+        with self.machine("100", "6.2"), mock.patch.object(board, "play") as play:
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting: free disk 6.2 GB (< 10 GB)"))
+        play.assert_not_called()
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [b, c])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p.get("reason")), ("running", None))
 
     def test_runall_ready_parent_waits_and_resumes(self):
         parent, (a, b, c) = self.runall(3)
@@ -2147,16 +2210,16 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, b, ["stage=done"])
         board.cmd_set(self.root, a, ["stage=build"])
         self.assertIsNone(board.resume_blocker(self.root, a))
-        # (c) Run-all cap: RUNALL_MAX_IN_PROGRESS (3) with no pacing.
-        _, kids = self.runall(5)
+        # (c) Run-all cap: RUNALL_MAX_IN_PROGRESS (5) with no pacing.
+        _, kids = self.runall(7)
         for i, k in enumerate(kids):
             self.spec(k, f"src/r{i}.py")
         board.cmd_set(self.root, kids[0], stalled, internal=True)
-        for k in kids[1:4]:
+        for k in kids[1:6]:
             board.cmd_set(self.root, k, ["stage=build"])
         text = board.resume_blocker(self.root, kids[0])
-        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
-        board.cmd_set(self.root, kids[3], ["stage=done"])
+        self.assertEqual((text, text.ids), ("5 siblings in progress (cap 5)", kids[1:6]))
+        board.cmd_set(self.root, kids[5], ["stage=done"])
         self.assertIsNone(board.resume_blocker(self.root, kids[0]))
         # (c) a fresh usage.json with projected use >= 125% paces the cap down to 1 for Run-all and BigBoy alike.
         now = int(__import__("time").time())
@@ -2165,7 +2228,7 @@ class BoardTest(unittest.TestCase):
                                      "written_at": now}))
         with mock.patch.dict(os.environ, {"SCRUM_USAGE": str(usage)}):
             text = board.resume_blocker(self.root, kids[0])
-            self.assertEqual((text, text.ids), ("2 siblings in progress (cap 1)", kids[1:3]))
+            self.assertEqual((text, text.ids), ("4 siblings in progress (cap 1)", kids[1:5]))
             board.cmd_set(self.root, b, ["stage=build"])
             board.cmd_set(self.root, a, stalled, internal=True)
             text = board.resume_blocker(self.root, a)
@@ -2176,18 +2239,18 @@ class BoardTest(unittest.TestCase):
         """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so
         one sweep cannot resume or claim past the cap."""
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
-        parent, kids = self.runall(6)
+        parent, kids = self.runall(8)
         for i, k in enumerate(kids):
             self.spec(k, f"src/l{i}.py")
-        for k in kids[:4]:
+        for k in kids[:6]:
             board.cmd_set(self.root, k, stalled, internal=True)
         self.assertIsNone(board.resume_blocker(self.root, kids[0]))
-        text = board.resume_blocker(self.root, kids[0], live={kids[1], kids[2], kids[3]})
-        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
+        text = board.resume_blocker(self.root, kids[0], live=set(kids[1:6]))
+        self.assertEqual((text, text.ids), ("5 siblings in progress (cap 5)", kids[1:6]))
         self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
-        out = board.cmd_ready(self.root, parent, live={kids[0], kids[1], kids[2]})
-        self.assertEqual(out["ready"], [], "3 live resumes fill the cap")
-        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[4:6])
+        out = board.cmd_ready(self.root, parent, live=set(kids[:5]))
+        self.assertEqual(out["ready"], [], "5 live resumes fill the cap")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[6:8])
 
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):
