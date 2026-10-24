@@ -896,8 +896,7 @@ class ServeTest(unittest.TestCase):
         live sessions stops it resuming. With no pacing, 6 live sessions still resume."""
         ps = Path(self.tmp.name) / "ps.txt"
         two = ["/opt/homebrew/bin/claude -p /trevskills-scrum resume 1-a --model sonnet",
-               "claude -p /trevskills-scrum start 2-b --model sonnet",
-               "claude -p /trevskills-scrum run-all", "vim serve.py"]  # neither of these two counts
+               "claude -p /trevskills-scrum approve 2-b", "vim serve.py"]  # every scrum action counts; vim does not
         three = two + ["claude -p /trevskills-scrum resume 3-c"]
         six = three + [f"claude -p /trevskills-scrum resume {i}-d" for i in range(4, 7)]
         job = {"id": "9-x", "lane": "standard"}

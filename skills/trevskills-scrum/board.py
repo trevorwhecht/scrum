@@ -1961,7 +1961,7 @@ def slot_cap(runall):
 
 MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
 MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
-MAX_LIVE_SESSIONS = 8  # ... or with this many headless start/resume sessions live machine-wide (live_sessions)
+MAX_LIVE_SESSIONS = 8  # ... or with this many headless scrum sessions live machine-wide (live_sessions)
 
 
 def free_ram_pct():
@@ -2005,12 +2005,13 @@ def machine_ok(path):
     return None
 
 
-SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum (start|resume) ")
+SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")
 
 
 def live_sessions():
-    """How many headless `start`/`resume` orchestrators run on this machine, any project and any launcher (ps sees
-    them all; serve.py's RUNS only knows its own). SCRUM_PS names a file read in place of ps's output."""
+    """How many headless `/trevskills-scrum <action>` sessions (start, resume, approve, run-all, ...) run on this
+    machine, any project and any launcher (ps sees them all; serve.py's RUNS only knows its own). SCRUM_PS names a
+    file read in place of ps's output."""
     fake = os.environ.get("SCRUM_PS")
     out = Path(fake).read_text() if fake else \
         subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True).stdout
@@ -2104,8 +2105,11 @@ def cmd_ready(root, parent_id, live=()):
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
         cap = slot_cap(runall)
+        room = MAX_LIVE_SESSIONS - live_sessions() if go and not machine else 0  # one claim = one new session
         ready = []
         for k in kids if go and not machine else []:
+            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the ceiling
+                break
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue

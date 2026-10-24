@@ -1258,7 +1258,8 @@ class BoardTest(unittest.TestCase):
 
     def sessions(self, n):
         ps = Path(self.tmp.name) / "ps.txt"
-        ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * n + "claude -p /trevskills-scrum run-all\n")
+        ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * (n - 1) + "claude -p /trevskills-scrum run-all\n" * min(n, 1)
+                      + "vim board.py\n")  # run-all counts too; vim does not
         return mock.patch.dict(os.environ, SCRUM_PS=str(ps))
 
     def test_machine_ok_session_ceiling(self):
@@ -1283,8 +1284,19 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", "waiting: 8 sessions running (machine cap 8)"))
         play.assert_not_called()
-        with self.sessions(7):
+        with self.sessions(6):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b])
+
+    def test_ready_claims_only_up_to_the_session_ceiling(self):
+        """The 2026-10-24 crash: one ready call claimed 7 children while 4 sessions ran. Claims stop at the ceiling."""
+        parent, kids = self.runall(7)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/m{i}.py")
+        with self.sessions(4), mock.patch.object(board, "slot_cap", return_value=7):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:4])
+        with self.sessions(7), mock.patch.object(board, "slot_cap", return_value=7):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[4:5])
+        self.assertEqual(self.child(parent)["stage"], "running")
 
     def test_ready_machine_guard_blocks_then_recovers(self):
         parent, (a, b, c) = self.runall(3)
