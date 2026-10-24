@@ -2110,9 +2110,11 @@ def cmd_ask(root, job_id, question, options):
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         was = job["stage"]
-        if job.get("reason") != question:
+        # a session that did not load the scrum agent types is a session fault: stalled, so auto_resume retries it
+        reason = f"{STALLED}{was}: {question}" if was in WATCHED and AGENT_TYPES_RE.search(question) else question
+        if job.get("reason") != reason:
             job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
-        job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
+        job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
         questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                              "question": question, "options": parsed})
     if was != "needs-human":
@@ -2472,6 +2474,7 @@ def cmd_hook(event, tty, pid=None):
 WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
