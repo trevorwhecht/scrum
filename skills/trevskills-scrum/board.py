@@ -97,6 +97,7 @@ Verdicts are never typed in by hand: sync derives them from the first line of ea
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
@@ -1081,10 +1082,11 @@ def _file_problems(rel, text):
             out.append(f"rule 1: {rel}: frontmatter needs name and description")
         if name and (not NAME_RE.match(name) or len(name) > NAME_MAX or re.search("claude|anthropic", name, re.I)):
             out.append(f"rule 2: {rel}: name must be lowercase-hyphenated, {NAME_MAX} chars or less, without claude or anthropic")
-        if desc and (len(desc) > DESC_MAX or re.search("[<>]", desc) or PERSON_RE.search(desc)):
-            out.append(f"rule 3: {rel}: description must be 1-{DESC_MAX} chars, third person, with no angle brackets")
-    if AT_LINK_RE.search(text):
-        out.append(f"rule 5: {rel}: has an @ link; name the file instead")
+        if len(desc) > DESC_MAX:
+            out.append(f"rule 3: {rel}: description is over {DESC_MAX} chars")
+        out += [f"rule 3: {rel}: description has an angle bracket" for _ in re.findall("[<>]", desc)]
+        out += [f"rule 3: {rel}: description is not third person ({m})" for m in PERSON_RE.findall(desc)]
+    out += [f"rule 5: {rel}: has an @ link; name the file instead" for _ in AT_LINK_RE.finditer(text)]
     if "/lanes/" in rel:
         if text.count("\n") > REF_TOC_LINES and not re.search(r"contents", "\n".join(text.splitlines()[:TOC_WITHIN]), re.I):
             out.append(f"rule 5: {rel}: over {REF_TOC_LINES} lines with no contents list in its first {TOC_WITHIN} lines")
@@ -1141,13 +1143,14 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
             except (ValueError, UnicodeDecodeError):
                 return None
 
-        fails = [] if rules else ["the diff changes no rules file"]
+        guarded = rules or [f for f in diff if f in HUMAN_ONLY_FILES or f in HUMAN_ONLY_SECTIONS]
+        fails = [] if guarded else ["the diff changes no rules file"]
         for f in rules:
             before, after = show(mb, f), show("HEAD", f)
             if after is None:
                 continue
-            old = set(_file_problems(f, before)) if before is not None else set()
-            fails += [p for p in _file_problems(f, after) if p not in old]
+            # one message per occurrence, so a second @ link or bracket still fails when the base has one
+            fails += list((Counter(_file_problems(f, after)) - Counter(_file_problems(f, before) if before else [])).elements())
             if _over_budget(after) and (before is None or after.count("\n") > before.count("\n")
                                         or len(after) > len(before)):
                 fails.append(f"rule 4: {f}: {after.count(chr(10))} lines, ~{_tokens(after)} tokens: over the "

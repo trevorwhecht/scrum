@@ -451,7 +451,8 @@ class ContractTest(unittest.TestCase):
     def test_skill_merge_stops_for_agent_rule_edits(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
-        regex = r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
+        regex = (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
+                 r"|(^|/)docs/skill-standards\.md$|(^|/)trevskills-scrum/board\.py$")
         for phrase in (f"grep -E '{regex}'", "human-approval.md", "Hard stop: agent rules", "**Agent rules guard"):
             self.assertIn(phrase, merge, phrase)
         self.assertLess(merge.index("**Schema guard"), merge.index("**Agent rules guard"))
@@ -463,9 +464,11 @@ class ContractTest(unittest.TestCase):
         for phrase in ("B digest-verify $ID --worktree \"$WT\" --base \"$BASE\"", f"grep -E '{regex}'",
                        "human-approval.md", "Run this guard again right before step 6"):
             self.assertIn(phrase, guard, phrase)
-        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md"):
+        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md",
+                     "docs/skill-standards.md", "skills/trevskills-scrum/board.py"):
             self.assertIsNotNone(re.search(regex, path), path)
-        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py", "src/lanes/foo.md"):
+        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/route.py", "src/lanes/foo.md",
+                     "docs/plans/skill-standards.md"):
             self.assertIsNone(re.search(regex, path), path)
         commands = self.section(text, "## Commands", "## New job")
         approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
@@ -2597,6 +2600,18 @@ class RulesCheckTest(unittest.TestCase):
         code, out = self.run_cli()
         self.assertEqual((code, out["failures"]), (0, []), out)
 
+    def test_rules_2_3_5_second_violation_still_fails(self):
+        """Base already has one @ link and one angle bracket; the diff adding another of each still fails."""
+        bad = self.AGENT.replace("Writes demo.md.", "Writes <demo>.") + "See @docs/a.md first.\n"
+        (self.repo / "agents" / "scrum-demo.md").write_text(bad)
+        self.git(self.repo, "commit", "-q", "-am", "old violations")
+        self.git(self.wt, "merge", "-q", "main")
+        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
+        self.commit("agents/scrum-demo.md", bad + "Then @docs/b.md.\n")
+        self.assert_fails("rule 5: agents/scrum-demo.md: has an @ link")
+        self.commit("agents/scrum-demo.md", bad.replace("Writes <demo>.", "Writes <demo> and <more>."))
+        self.assert_fails("rule 3: agents/scrum-demo.md: description has an angle bracket")
+
     def test_rule4_new_file_over_budget_fails(self):
         self.commit("skills/trevskills-scrum/lanes/big.md", "# Big\n\n## Contents\n" + "line\n" * 501)
         self.assert_fails("rule 4: skills/trevskills-scrum/lanes/big.md")
@@ -2681,6 +2696,12 @@ class RulesCheckTest(unittest.TestCase):
         self.assertEqual((code, out["failures"]), (0, []), out)
         self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("y = 2", "y = 0"))
         self.assert_fails("rule 8: skills/trevskills-scrum/board.py: the rules-check code")
+
+    def test_board_py_only_edit_outside_rules_check_passes(self):
+        """The Merge guard also routes board.py diffs here; one that leaves the rules-check code alone passes."""
+        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("z = 3", "z = 4"))
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"], out["files"]), (0, [], []), out)
 
     def test_real_repo_markers_exist(self):
         """Rule 8's section markers are found in the real files, so the human-only set is never silently empty."""
