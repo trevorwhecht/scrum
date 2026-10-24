@@ -586,7 +586,8 @@ def sweep_parents(project, root, jobs, alive=None):
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
     child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
     mark a parent parked on Trevor (parked_parent) with the WAITING_ON reason and one needs-human sound, else start its
-    waiting children when no child session is alive and no chaining session holds the lock."""
+    waiting children when no child session is alive and no chaining session holds the lock. A runall with a child
+    still in progress tops up its free slots each tick, unless a chaining session holds the lock."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
@@ -597,6 +598,9 @@ def sweep_parents(project, root, jobs, alive=None):
         if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive):
             continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
+            if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
+                    and not board.chain_lock_live(root, p["id"]):
+                start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
             continue
         if finished_bigboy(p, by_id):
             continue

@@ -4497,8 +4497,24 @@ class WatchdogIdleParentTest(unittest.TestCase):
     def test_skips_child_in_progress(self):
         for stage in ("build", "merging", "cloud"):
             with self.subTest(stage=stage):
-                self.write("running", {"002-busy": stage, "003-wait": "waiting"})
+                self.write("running", {"002-busy": stage, "003-wait": "waiting"}, lane="bigboy")
                 self.assert_no_start(ps_calls=0)  # no candidate parent, no ps scan
+
+    def test_runall_tops_up_beside_child_in_progress(self):
+        self.write("running", {"002-busy": "build", "003-wait": "waiting"})
+        data = json.loads((self.root / "board.json").read_text())
+        for j in data["jobs"][1:]:
+            j["parallel"] = True
+            (self.root / "jobs" / j["id"]).mkdir()
+            (self.root / "jobs" / j["id"] / "spec.md").write_text(f"## Likely files\n- `src/{j['id']}.ts`\n")
+        (self.root / "board.json").write_text(json.dumps(data))
+        (self.root / "jobs" / "001-par").mkdir()
+        (self.root / "jobs" / "001-par" / ".chain.lock").write_text("002-busy")
+        self.tick_kw = {"alive": lambda job: job["id"] == "002-busy"}
+        self.assert_no_start()  # a chaining session holds the lock: it claims for itself
+        (self.root / "jobs" / "001-par" / ".chain.lock").unlink()
+        spawn, _, _ = self.tick(alive=lambda job: job["id"] == "002-busy")
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("003-wait", "start")])
 
     def test_skips_live_child_session(self):
         self.write("running", {"002-done": "done", "003-wait": "waiting"})
