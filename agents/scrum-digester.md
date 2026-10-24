@@ -37,6 +37,8 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - It is `"obvious": true` only when its entry is marked `(unanimous)` and it also passes the 5 obvious conditions below. Otherwise it is `"obvious": false`, and `obvious_reason` names the failed check: `pick not unanimous` or the condition number.
 - It counts toward the at-most-8 cap.
 
+**Pipeline fit.** From `notes.md`'s `## Pipeline fit` section, you may propose threshold or routing edits (a lane-size limit, a routing rule in `SKILL.md`) when its over-routed jobs show a pattern. Cite their ids and `fit`. They count toward the at-most-8 cap.
+
 **New skill.** From `notes.md`'s `## Rediscovery` section only, you may propose a new skill: a short reference an agent reads up front so it stops re-deriving the same facts.
 - Propose a skill only from a `## Rediscovery` entry. When that section is `None`, propose no skill.
 - Prefer a one-sentence edit to an existing agent, rule or skill. Propose a skill only when no such edit would hold the facts.

@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null);
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
@@ -36,6 +36,8 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
+  board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
+                                   and whether a cheaper lane would have done (read-only; Digest step 1)
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
@@ -74,6 +76,10 @@
                                    its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
                                    re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
                                    error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
+  board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
+                                   "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
+                                   Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
+                                   board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
@@ -90,7 +96,7 @@ REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
@@ -800,6 +806,69 @@ def cmd_digest_trim(root, digest_id):
     return trimmed
 
 
+# --- pipeline-fit: per-job routing facts for the digest reader's ## Pipeline fit section. Read-only. ---
+FAST_STUB = "Skipped by orchestrator: fast lane."
+
+
+def _real_review(p):
+    """True when p is a review a reviewer wrote, not an orchestrator skip or carried-forward stub."""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return not ORCH_REVIEW_RE.fullmatch(text) and FAST_STUB not in text
+
+
+def _fit_diff(root, job):
+    """(added, deleted, files) from the worktree, else the PR's REST totals; (None, None, None) when unreadable."""
+    if job.get("worktree") and Path(job["worktree"]).is_dir():
+        diff = _route_diff(job)
+        if diff is None or any(a is None for a, _, _ in diff[0]):
+            return None, None, None
+        rows, names = diff
+        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names)
+    m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", job.get("pr") or "")
+    if not m:
+        return None, None, None
+    try:
+        pr = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}")
+        out = tuple(pr[k] for k in ("additions", "deletions", "changed_files"))
+    except (GhError, TypeError, KeyError):
+        return None, None, None
+    return out if all(type(v) is int for v in out) else (None, None, None)
+
+
+def cmd_pipeline_fit(root, digest_id: str) -> dict:
+    """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
+    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed."""
+    d = Path(root) / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
+        raise SystemExit(f"no digest {digest_id!r}")
+    listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
+    jobs = {j["id"]: j for j in read_board(root)["jobs"]}
+    out = []
+    for job_id in listed:
+        job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
+        lane = job.get("lane") or "standard"
+        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
+                        if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+        agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
+        agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
+                                                           for n in rounds)]
+        agents += ["approver"] if (folder / "decision.md").is_file() else []
+        verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
+                             for r in REVIEWERS} for n in rounds}
+        added, deleted, files = _fit_diff(root, job)
+        size = None if added is None else added + deleted
+        over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES)
+        fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+        out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
+                    "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
+                    "fit": fit})
+    return {"digest": str(digest_id), "jobs": out}
+
+
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
 # the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
 CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
@@ -915,6 +984,7 @@ ENV_RE = re.compile(r"(^|/)\.env")
 SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
                           r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
 FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
+LILGUY_MAX_LINES, LILGUY_MAX_FILES = 30, 3
 
 
 # --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
@@ -930,6 +1000,8 @@ SECURITY_RES = tuple(re.compile(p, re.I) for p in (
 CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n"
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
+DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+DELETION_MIN_RATIO = 0.9
 
 
 def ui_globs(root):
@@ -974,7 +1046,8 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP)) + "|" + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP)) + "|"
+    + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
 
 
 def _drop_stale(rd, spawn):
@@ -1008,7 +1081,8 @@ def _incremental_since(prev, wt, base):
 
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
-    (incremental) or UI/UX and security skip files (full); never writes board.json."""
+    (incremental) or UI/UX (no UI file, or a deletion-dominated diff) and security skip files (full); never writes
+    board.json."""
     job = live(read_board(root), check_id(job_id))
     wt, base = job.get("worktree"), job.get("base")
     if not wt or not base:
@@ -1038,6 +1112,8 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         globs = ui_globs(root)
         if globs and not any(glob_match(f, globs) for f in files):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        elif _deletion_dominated((_route_diff(job) or ([], []))[0]):
+            skips.update(ui=DELETION_SKIP, ux=DELETION_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
@@ -1066,14 +1142,23 @@ def _route_diff(job):
     return None if names is None else (rows, sorted(n for n in names if n))
 
 
+def _deletion_dominated(rows):
+    """True when at least DELETION_MIN_RATIO of the numstat rows' changed lines are deletions; False with no rows, a
+    binary row or no changed lines."""
+    if not rows or any(a is None for a, _, _ in rows):
+        return False
+    added, deleted = sum(a for a, _, _ in rows), sum(d for _, d, _ in rows)
+    return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
+
+
 def _promote_trigger(rows, names, globs):
     """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
-    if (lines := sum(a + d for a, d, _ in rows)) > FAST_MAX_LINES:
+    if (lines := sum(a for a, _, _ in rows)) > FAST_MAX_LINES:  # size counts added lines only
         return f"diff over {FAST_MAX_LINES} lines ({lines})"
-    if len(names) > FAST_MAX_FILES:
-        return f"more than {FAST_MAX_FILES} files ({len(names)})"
+    if (files := len({p for a, _, p in rows if a})) > FAST_MAX_FILES:
+        return f"more than {FAST_MAX_FILES} files ({files})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
                        ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
@@ -1591,6 +1676,18 @@ def slot_cap(runall):
     return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
 
 
+SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum (start|resume) ")
+
+
+def live_sessions():
+    """How many headless `start`/`resume` orchestrators run on this machine, any project and any launcher (ps sees
+    them all; serve.py's RUNS only knows its own). SCRUM_PS names a file read in place of ps's output."""
+    fake = os.environ.get("SCRUM_PS")
+    out = Path(fake).read_text() if fake else \
+        subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True).stdout
+    return sum(1 for line in out.splitlines() if SESSION_RE.match(line))
+
+
 def slot_conflict(k, busy, files, cap):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files. The rules `ready` and `resume_blocker` share: the in-progress cap; parallel=no, or
@@ -1616,9 +1713,10 @@ class Blocker(str):
         return self
 
 
-def resume_blocker(root, job_id):
+def resume_blocker(root, job_id, live=()):
     """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s cap and overlap rules
-    (slot_conflict) against its in-progress siblings. Reads the board without writing or claiming anything."""
+    (slot_conflict) against its in-progress siblings: any not IDLE, plus the ids in `live` (serve.py's running
+    sessions, which still read needs-human until they write the board). Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     job = jobs.get(job_id)
@@ -1631,7 +1729,7 @@ def resume_blocker(root, job_id):
     spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
         if (jobs_dir / k["id"] / "spec.md").is_file() else ""
     files = {k["id"]: likely_files(spec(k)) for k in kids}
-    busy = [k for k in kids if k["stage"] not in IDLE and k["id"] != job_id]
+    busy = [k for k in kids if (k["stage"] not in IDLE or k["id"] in live) and k["id"] != job_id]
     if not busy:
         return None
     hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
@@ -1651,8 +1749,9 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
-def cmd_ready(root, parent_id):
-    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
+def cmd_ready(root, parent_id, live=()):
+    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
+    `live` ids count as in progress whatever their stage (see resume_blocker)."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -1670,7 +1769,7 @@ def cmd_ready(root, parent_id):
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
-        busy = [k for k in kids if k["stage"] not in IDLE]
+        busy = [k for k in kids if k["stage"] not in IDLE or k["id"] in live]
         cap = slot_cap(runall)
         ready = []
         for k in kids if parent["stage"] == "running" or legacy else []:
@@ -1822,9 +1921,15 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
                 raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
             if key == "waiting":
                 value = clean(value, 200)
+            if key == "outcome":
+                value = clean(value, 300)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        if job["stage"] != was and "outcome" not in given:
+            job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
             job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
+        if job["stage"] != was:
+            job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
@@ -1858,6 +1963,8 @@ def cmd_ask(root, job_id, question, options):
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         was = job["stage"]
+        if job.get("reason") != question:
+            job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
         job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
         questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                              "question": question, "options": parsed})
@@ -1915,6 +2022,7 @@ CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's 
 CLOUD_LABEL = "scrum:needs-human"
 CLOUD_CLOSED = "requeue: cloud PR closed without merging"
 CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
+CLOUD_LANE = re.compile(r"^Scrum lane: (fast|standard|debug|lilguy)[ \t]*$", re.M)  # the PR body's lane line
 CLOUD_PENDING_HOURS = 24  # how long a moved job waits for its scrum-artifacts/<id> push; fixed, not a setting
 
 
@@ -2023,10 +2131,11 @@ def _cloud_plan(repo, job_id, prs):
     if not pr:
         return None
     url = pr.get("html_url") or ""
+    lane = [f"lane={m[1]}"] if (m := CLOUD_LANE.search(str(pr.get("body") or ""))) else []  # first line wins
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False, None
+        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None
     if pr.get("state") == "closed":
-        return "CLOSED", [f"pr={url}"], CLOUD_CLOSED, False, (True, None)
+        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None)
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -2041,21 +2150,24 @@ def _cloud_plan(repo, job_id, prs):
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
-        return "ABORTED", [f"pr={url}"], reason, False, (reason.startswith("requeue:"), number)
+        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number)
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True, None
+    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None
 
 
-def _cloud_abort(root, job_id, url, requeue, reason):
-    """Record pr= and abort a job still in stage cloud, atomically; requeue skips a BigBoy child (Auto-abort rule)."""
+def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
+    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically; requeue skips a BigBoy
+    child (Auto-abort rule)."""
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         if job["stage"] != "cloud":
             raise SystemExit(f"job {job_id} is {job['stage']}, not cloud; left alone")
         job["pr"] = url
+        if lane:
+            job["lane"] = lane
         abort_job(root, job, requeue and not job.get("parent"), reason)
 
 
@@ -2086,7 +2198,8 @@ def cmd_cloud_sync(root: Path) -> dict:
             if live(read_board(root), job_id)["stage"] != "cloud":
                 continue  # moved meanwhile: add no worktree for it
             if abort:
-                _cloud_abort(root, job_id, url, abort[0], reason)
+                lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
+                _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
                 worktree = cloud_worktree(repo, job_id) if wants_worktree else None
                 cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
@@ -2232,6 +2345,7 @@ def cmd_pause(root, job_id):
         hit = [job] + [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k]["stage"] in PAUSABLE]
         for j in hit:
             j.update(stage="needs-human", reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+            j.pop("limitResetAt", None)
         return [j["id"] for j in hit]
 
 
@@ -2278,8 +2392,9 @@ def cmd_watchdog(root, alive=None):
     try:
         with locked_board(root) as board:
             # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
+            # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
+                     and j.get("lane") != "lilguy" and not j.get("limitResetAt") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
                 if alive(job):
@@ -2556,6 +2671,7 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
+    sub.add_parser("pipeline-fit").add_argument("digest")
     dv = sub.add_parser("digest-verify")
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
@@ -2586,6 +2702,11 @@ def main(argv=None):
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
+    sp = sub.add_parser("spawn")
+    sp.add_argument("id")
+    sp.add_argument("action")
+    sp.add_argument("prompt", nargs="?")
+    sp.add_argument("--model")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
@@ -2638,6 +2759,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_start(a.dir)))
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
+    elif a.cmd == "pipeline-fit":
+        print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
@@ -2672,6 +2795,9 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "spawn":
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
+        print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
@@ -2686,6 +2812,58 @@ def spawn_estimates(root, texts):
         subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
                           "--dir", str(Path(root).resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# Started from the app icon, PATH can be bare, so look in the usual install spots too. Tests set SCRUM_CLAUDE.
+CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
+    (str(p) for p in (Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path.home() / ".claude/local/claude")
+     if p.exists()), "claude")
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
+SPAWN_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # job ids plus run-all, digest, research-<hash>; it names the log file
+SPAWN_ACTION_RE = re.compile(r"[a-z-]+")
+
+
+def orchestrator_model(root: Path) -> str | None:
+    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
+    Missing, blank or malformed values give `sonnet`."""
+    try:
+        text = (root / "project.md").read_text()
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return "sonnet"
+    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    if value.lower() == "inherit":
+        return None
+    return value if MODEL_RE.fullmatch(value) else "sonnet"
+
+
+def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
+          model: str | None = None) -> tuple[subprocess.Popen, str]:
+    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog.
+    start/resume get `--model <Orchestrator model>` unless `model` is given. Returns (proc, log path relative to root)."""
+    if not SPAWN_ID_RE.fullmatch(job_id):
+        raise SystemExit(f"bad spawn id {job_id!r}")
+    if not SPAWN_ACTION_RE.fullmatch(action):
+        raise SystemExit(f"bad spawn action {action!r}")
+    if model is not None and not MODEL_RE.fullmatch(model):
+        raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
+    if model is None and action in ("start", "resume"):
+        model = orchestrator_model(root)
+    prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
+    logs = root / "runs"
+    logs.mkdir(exist_ok=True)
+    log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
+    with open(log, "w") as fh:
+        proc = subprocess.Popen(argv, cwd=root.parent,
+                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    try:  # the Open terminal button tails this; a job that isn't on the board (run-all, digest) has no row to set
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
+    except SystemExit:
+        pass
+    return proc, f"runs/{log.name}"
 
 
 if __name__ == "__main__":

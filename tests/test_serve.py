@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
 STUB = r'''#!/usr/bin/env python3
@@ -43,7 +44,7 @@ class ServeTest(unittest.TestCase):
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
                           SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
-        serve.CLAUDE = str(stub)  # another test class may have imported serve first
+        serve.CLAUDE = serve.board.CLAUDE = str(stub)  # another test class may have imported serve or board first
         cls.serve = serve
         cls.root = base / "repo" / "scrum"
         (cls.root / "jobs").mkdir(parents=True)
@@ -732,6 +733,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "use the existing helper"})[0], 202)
         self.assertEqual(self.req("POST", "/api/p/repo/jobs/..%2F..%2Fx/rework", {"feedback": "x"})[0], 400)
 
+    def test_rework_keeps_long_feedback_whole(self):
+        feedback = ("Don't touch the header. " * 63)[:1499] + "!"  # 1,500 chars, cut at no word edge
+        self.assertEqual(len(feedback), 1500)
+        for sent, kept in ((feedback, feedback), ("y" * 2500, "y" * 2000)):
+            job_id = self.serve.board.cmd_new(self.root, "long rework")
+            self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": sent})[0], 202)
+            self.assertEqual(spawn.call_args.args[4], f'/trevskills-scrum rework {job_id} "{kept}"')
+
     def test_abort_stops_running_job_and_can_requeue(self):
         job_id = self.serve.board.cmd_new(self.root, "abort me")
         self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=blocked: x"], internal=True)
@@ -805,6 +816,15 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
                          [(job_id, "rework", f'/trevskills-scrum rework {job_id} "use the existing helper"')])
 
+    def test_answer_dispatch_rework_keeps_long_text(self):
+        text = ("Use the shared helper. " * 66)[:1499] + "."  # 1,500 chars
+        self.assertEqual(len(text), 1500)
+        job_id = self.asked(f'rework 77 "{text}"')
+        code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Rework", "command": f'rework 77 "{text}"'})
+        self.assertEqual(code, 202, out)
+        self.assertEqual([c.args[2:] for c in m["spawn"].call_args_list],
+                         [(job_id, "rework", f'/trevskills-scrum rework {job_id} "{text}"')])
+
     def test_answer_dispatch_abort(self):
         for command, requeue in (("abort 77", False), ("abort 77 --requeue", True)):
             with self.subTest(command):
@@ -858,6 +878,24 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
                                                       "Fix: click Resume when 123-sib finish."}))
         self.assert_nothing_ran(m)
+
+    def test_resume_refused_at_machine_wide_session_cap(self):
+        """A standalone job has no siblings, so only the machine-wide count stops it resuming over the usage cap."""
+        ps = Path(self.tmp.name) / "ps.txt"
+        two = ["/opt/homebrew/bin/claude -p /trevskills-scrum resume 1-a --model sonnet",
+               "claude -p /trevskills-scrum start 2-b --model sonnet",
+               "claude -p /trevskills-scrum run-all", "vim serve.py"]  # neither of these two counts
+        three = two + ["claude -p /trevskills-scrum resume 3-c"]
+        job = {"id": "9-x", "lane": "standard"}
+        for lines, count, cap, refused in ((two, 2, 3, False), (three, 3, 3, True), (two, 2, 1, True)):
+            with self.subTest(count=count, cap=cap):
+                ps.write_text("\n".join(lines) + "\n")
+                with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
+                        mock.patch.object(self.serve.board, "slot_cap", return_value=cap):
+                    self.assertEqual(self.serve.board.live_sessions(), count)
+                    out = self.serve.resume_refusal("repo", self.root, job)
+                self.assertEqual(out, f"can't resume yet: {count} sessions running (usage cap {cap}). "
+                                      "Fix: click Resume when one finishes." if refused else None)
 
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
@@ -946,6 +984,32 @@ class ServeTest(unittest.TestCase):
                          [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
         self.assertEqual(self.stage_of(w)["stage"], "spec")
 
+    def test_play_on_paused_parent_resumes_at_most_the_cap(self):
+        b, s = self.serve.board, self.serve
+        parent = b.cmd_new(self.root, "Capped parent")
+        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(5)]
+        self.edit_job(parent, lane="runall", stage="running", children=kids)
+        for i, k in enumerate(kids):
+            self.edit_job(k, parent=parent, stage="build", parallel=True)
+            (self.root / "jobs" / k).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/cap{i}.py`: why\n")
+        b.cmd_pause(self.root, parent)
+
+        def fake_spawn(project, root, jid, action, prompt, flags=()):
+            proc = mock.Mock(); proc.poll.return_value = None
+            with s.RUNS_LOCK:
+                s.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/y.log"}
+
+        self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in kids])
+        with mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:3], "a just-spawned resume holds its slot")
+        for k in kids[3:]:
+            job = self.stage_of(k)
+            self.assertEqual(job["stage"], "needs-human")
+            self.assertTrue(job["reason"].startswith("stalled in build: "), job["reason"])
+            self.assertIsNone(b.PAUSED_RE.match(job["reason"]), "no longer paused, so auto_resume takes it when a slot frees")
+
     def test_activity_picks_newest_of_runlog_worktree_and_board(self):
         wt = Path(self.tmp.name) / "wt-newest"
         (wt / "src").mkdir(parents=True)
@@ -1005,6 +1069,8 @@ class ServeTest(unittest.TestCase):
             self.serve.spawn("repo", self.root, "999-not-on-board", "start", "x")  # failure is ignored
         self.addCleanup(lambda: [self.serve.RUNS.pop(f"repo/{i}", None) for i in (job_id, "999-not-on-board")])
         self.assertEqual(popen.call_count, 2)
+        self.assertEqual(popen.call_args.kwargs["env"]["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"], "0",
+                         "a headless orchestrator waiting on a background builder is never killed")
         job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
         self.assertRegex(job["runlog"], rf"^runs/\d{{8}}-\d{{6}}-start-{job_id}\.log$")
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
@@ -1092,6 +1158,17 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
         popen.assert_not_called()
         self.assertFalse(self.serve.running("repo", job_id))
+
+    def test_discuss_keeps_long_note_whole(self):
+        note = ("Ask about the header. " * 70)[:1499] + "?"  # 1,500 chars
+        self.assertEqual(len(note), 1500)
+        job_id = self.job("discuss long")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
+        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen"):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": note})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(run.call_args.args[0][-1], f'/trevskills-scrum discuss {job_id} "{note}"')
 
     def test_spawn_silences_notifier(self):
         job_id = self.job("quiet spawn")
@@ -2953,7 +3030,9 @@ class AiResearchTest(unittest.TestCase):
 
     def setUp(self):
         AiSettingsTest.setUp(self)
-        self.serve.CLAUDE = "claude-stub"
+        patcher = mock.patch.object(self.serve.board, "CLAUDE", "claude-stub")  # spawn launches board.CLAUDE
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.runs, self.real_home = self.reg / "scrum" / "runs", self.serve.research_home
         patcher = mock.patch.object(self.serve, "research_home", lambda: ("reg", self.reg / "scrum"))
         patcher.start()
@@ -3906,6 +3985,35 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(s.AUTO_RESUME["p/kid"][0], 1)
         self.assertNotIn("p/lil", s.AUTO_RESUME)
 
+    def test_auto_resume_held_job_waits_for_reset_and_slot(self):
+        s, T = self.serve, 1_800_000_000
+        def hold():
+            self.jobs = [{"id": "held", "stage": "build", "reason": None, "limitResetAt": T, "updatedAt": "2026-01-01T00:00:00+00:00"}]
+            (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        def at(t, refusal=None):
+            with mock.patch.object(s.time, "time", return_value=t), \
+                    mock.patch.object(s, "resume_refusal", return_value=refusal):
+                return self.sweep()
+        def live():
+            return json.loads((self.root / "board.json").read_text())["jobs"][0]
+        hold()
+        self.assertEqual(at(T + 60), [], "before the reset + 120 s")
+        self.assertEqual((live()["stage"], live()["limitResetAt"]), ("build", T))
+        self.assertEqual(at(T + 121, refusal="can't resume yet: sib. Fix: x"), [], "a sibling holds the slot")
+        self.assertEqual((live()["stage"], live()["limitResetAt"]), ("build", T))
+        self.assertNotIn("p/held", s.AUTO_RESUME, "a refusal spends no try")
+        self.assertEqual(at(T + 121), ["held"])
+        self.assertEqual((live()["stage"], live()["reason"]),
+                         ("needs-human", "stalled in build: usage limit reset. Fix: click Resume."))
+        self.assertNotIn("limitResetAt", live())
+        self.assertEqual(s.AUTO_RESUME["p/held"][0], 1)
+        hold()
+        s.AUTO_RESUME["p/held"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(at(T + 121), [], "capped")
+        self.assertEqual(live()["stage"], "needs-human")
+        self.assertTrue(live()["reason"].startswith("stalled in build: "), live()["reason"])
+        self.assertNotIn("limitResetAt", live())
+
     def run_child(self, parent_stage="running", lane="runall", reason="stalled in build: no board update for 30 min "
                   "and no live session. Fix: click Resume."):
         """A Run-all/BigBoy-style parent and one child stalled for a non-limit reason (its log names no limit)."""
@@ -4277,6 +4385,14 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.orphan(stage="build")
         self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
         self.assertEqual(self.spawned(), [])
+
+    def test_respawn_orphans_skips_limit_held_child(self):
+        (self.root / "jobs" / "002-claimed").mkdir()
+        (self.root / "jobs" / "002-claimed" / "spec.md").write_text("# x\n")
+        self.orphan(minutes=10, stage="build", worktree="/tmp/wt-002", limitResetAt=1_800_000_000)
+        self.assertEqual(self.spawned(), [])
+        kid = self.job("002-claimed")
+        self.assertEqual((kid["stage"], kid["reason"], kid["limitResetAt"]), ("build", None, 1_800_000_000))
 
     def test_orphan_respawn_skips(self):
         lock = self.root / "jobs" / "001-par" / ".chain.lock"
