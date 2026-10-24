@@ -226,5 +226,85 @@ class JevGateTest(unittest.TestCase):
                         self.assertNotIn(KEY, text)
 
 
+    # --- rank ---
+    def rank_ask(self, importance=2, necessity=2, progress=0.9, kind="bug"):
+        return lambda s, q, *a: {"importance": {"type": "score", "score": importance},
+                                 "necessity": {"type": "score", "score": necessity},
+                                 "progress": {"type": "noul", "noul": progress},
+                                 "kind": {"type": "choice", "choice": kind}}
+
+    def test_rank_prints_priority_and_kind(self):
+        (self.root / "roadmap.md").write_text("ROADMAP: x\nGoal: Ship the billing page\n\n## P1 a\n")
+        out, f = self.gate("rank", "  Fix the refund rounding bug\n", self.rank_ask(3.8, 2, 0.9, "bug"))
+        self.assertEqual(out, "p5 bug")
+        self.assertEqual((f[1], f[4]), ("rank", "p5 bug"))
+        self.assertEqual(len(self.sent), 1)
+        state, qs = self.sent[0]
+        self.assertEqual(state, {"ticket": "Fix the refund rounding bug", "goal": "Ship the billing page"})
+        self.assertEqual(sorted(qs), ["importance", "kind", "necessity", "progress"])
+        self.assertEqual(qs["importance"]["type"], "score")
+        self.assertEqual([c.split(" (")[0] for c in qs["importance"]["criteria"]],
+                         ["Trivial", "Minor", "Moderate", "High", "Critical"])
+        self.assertEqual(qs["necessity"]["type"], "score")
+        self.assertEqual([c.split(" (")[0] for c in qs["necessity"]["criteria"]],
+                         ["Unnecessary", "Optional", "Should do eventually", "Needed"])
+        self.assertEqual(qs["progress"], {"type": "noul", "instructions":
+                         "Doing this ticket moves the project meaningfully closer to completing its stated goal / "
+                         "current roadmap, rather than being side work"})
+        self.assertEqual(qs["kind"]["type"], "choice")
+        self.assertEqual(qs["kind"]["criteria"], ["bug", "security", "feature", "ui-polish", "ux-a11y", "refactor-dedupe",
+                                                  "dead-code-lint", "tests", "docs-rules", "ops-manual"])
+
+    def test_rank_mapping(self):
+        (self.root / "project.md").write_text("- Notes: Make the app fast\n")
+        cases = [((3.8, 2, 0.9, "bug"), "p5 bug"), ((0.2, 0.4, 0.9, "bug"), "p1 bug"),
+                 ((2, 2, 0.2, "ui-polish"), "p2 ui-polish"), ((2, 2, 0.2, "feature"), "p3 feature"),
+                 ((2, 0.5, 0.2, "dead-code-lint"), "p2 dead-code-lint"), ((4, 3, 0.1, "ux-a11y"), "p4 ux-a11y"),
+                 ((1, 3, 0.6, "ux-a11y"), "p2 ux-a11y")]
+        for args, want in cases:
+            with self.subTest(args=args):
+                self.assertEqual(self.gate("rank", "ticket", self.rank_ask(*args))[0], want)
+
+    def test_rank_goal_source_fallback(self):
+        (self.root / "project.md").write_text("# Project\n- Stack: x\n- Notes: Notes goal here\n")
+        for roadmap, want in ((None, "Notes goal here"), ("ROADMAP: r\nGoal:   \n## P1 a\n", "Notes goal here"),
+                              ("ROADMAP: r\n## P1 a\n", "Notes goal here"),
+                              ("ROADMAP: r\nGoal: Roadmap goal\n## P1 a\n", "Roadmap goal")):
+            with self.subTest(roadmap=roadmap):
+                (self.root / "roadmap.md").unlink(missing_ok=True)
+                if roadmap is not None:
+                    (self.root / "roadmap.md").write_text(roadmap)
+                self.sent.clear()
+                self.assertEqual(self.gate("rank", "ticket", self.rank_ask())[0], "p3 bug")
+                self.assertEqual(self.sent[0][0]["goal"], want)
+
+    def test_rank_none_fallback(self):
+        (self.root / "project.md").write_text("- Notes: The goal\n")
+        for stdin in ("", " \n\t"):
+            with self.subTest(stdin=stdin):
+                out, f = self.gate("rank", stdin)  # ask=None: a Jev call fails the test
+                self.assertEqual((out, f[1], f[2], f[4]), ("none", "rank", "-", "none"))
+        bad = {"timeout": TimeoutError("t"), "jeverror": jev.JevError("x"),
+               "importance": self.rank_ask(importance=4.5), "necessity": self.rank_ask(necessity=-1),
+               "progress": self.rank_ask(progress=1.2), "kind": self.rank_ask(kind="chore"),
+               "missing": lambda s, q, *a: {"importance": {"score": 2}}}
+        for name, ask in bad.items():
+            with self.subTest(case=name):
+                out, f = self.gate("rank", "ticket", ask)
+                self.assertEqual((out, f[4]), ("none", "none"))
+        n = len(self.sent)
+        for project in ("- Notes:   \n", "# no notes\n", None):
+            with self.subTest(project=project):
+                (self.root / "project.md").unlink(missing_ok=True)
+                if project is not None:
+                    (self.root / "project.md").write_text(project)
+                self.assertEqual(self.gate("rank", "ticket")[0], "none")
+        self.assertEqual(len(self.sent), n)
+
+    def test_usage_lists_rank(self):
+        code, out, err = self.run_gate([])
+        self.assertEqual(code, 2)
+        self.assertIn("rank", err.split("<")[1])
+
 if __name__ == "__main__":
     unittest.main()

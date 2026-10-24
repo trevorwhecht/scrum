@@ -108,6 +108,26 @@ def choice(state, instructions, options, timeout=TIMEOUT):
     return picked, answer
 
 
+def ask_many(state, questions, timeout=TIMEOUT):
+    """Ask several noul / score / choice questions in one request. Returns {name: (value, raw answer)};
+    raises JevError when any answer is missing or out of range."""
+    answers = ask(state, questions, timeout)
+    out = {}
+    for name, q in questions.items():
+        answer = answers.get(name)
+        if not isinstance(answer, dict):
+            raise JevError(f"no answer for question {name}")
+        if q["type"] == "noul":
+            value = parse_noul(answer)
+        elif q["type"] == "score":
+            value = _number(answer, "score", len(q["criteria"]) - 1)
+        else:
+            value = answer.get("choice")
+            if not isinstance(value, str) or value not in q["criteria"]:
+                raise JevError(f"{name} answer is not one of the options")
+        out[name] = value, answer
+    return out
+
 def rank(query, items, instruction, key=None, batch=20, max_chars=1500):
     """Score each item with one noul question (`instruction.format(i=i)`), `batch` items per request, 4 requests at
     a time. Returns scores in input order; raises JevError on any failure."""

@@ -5,7 +5,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
-import board  # noqa: E402
+import board, jev  # noqa: E402
 
 
 class BacklogTest(unittest.TestCase):
@@ -843,6 +843,75 @@ class BacklogTest(unittest.TestCase):
         items = board.backlog_items(self.root)
         self.assertEqual([(i["text"], i["priority"]) for i in items], [("Marked", 5), ("Unmarked", None)])
 
+
+    # --- rank-backlog ---
+    RANK_BACKLOG = ("# Backlog\n"
+                    "- [ ] [5] Add CSV export {#ab12} {needs #cd34} {setup: Buy a key} <!-- touches orders API -->\n"
+                    "- [ ] Already rated {p:3}\n"
+                    "- [x] Old thing → 001-old-thing\n"
+                    "- [x] Closed unmarked\n"
+                    "note line\n"
+                    "- [ ] Polish the footer\n"
+                    "- [ ] Jev chokes on this\n")
+
+    def rank_backlog(self, answers, during=None):
+        """Run rank-backlog via main with jev.ask stubbed; answers maps ticket text -> (importance, necessity, progress,
+        kind) or None (Jev error). Returns (printed JSON, the tickets Jev was asked about)."""
+        (self.root / "project.md").write_text("- Notes: Ship the orders app\n")
+        asked = []
+
+        def fake(state, questions, timeout=jev.TIMEOUT, key=None):
+            asked.append(state["ticket"])
+            if during:
+                during(state["ticket"])
+            a = answers[state["ticket"]]
+            if a is None:
+                raise jev.JevError("down")
+            return {"importance": {"score": a[0]}, "necessity": {"score": a[1]}, "progress": {"noul": a[2]},
+                    "kind": {"choice": a[3]}}
+        out = io.StringIO()
+        with mock.patch.object(jev, "ask", side_effect=fake), mock.patch("sys.stdout", out):
+            board.main(["--dir", str(self.root), "rank-backlog"])
+        return json.loads(out.getvalue()), asked
+
+    ANSWERS = {"Add CSV export": (3.8, 2, 0.9, "feature"), "Polish the footer": (2, 2, 0.2, "ui-polish"),
+               "Jev chokes on this": None}
+
+    def test_rank_backlog_rates_only_unmarked_open_items(self):
+        (self.root / "backlog.md").write_text(self.RANK_BACKLOG)
+        out, asked = self.rank_backlog(self.ANSWERS)
+        self.assertEqual(out, {"rated": 2, "unrated": 1, "skipped": 1})
+        self.assertEqual(asked, ["Add CSV export", "Polish the footer", "Jev chokes on this"])
+        self.assertEqual(self.text(), "# Backlog\n"
+                         "- [ ] [5] Add CSV export {#ab12} {p:5} {needs #cd34} {setup: Buy a key} <!-- touches orders API -->\n"
+                         "- [ ] Already rated {p:3}\n"
+                         "- [x] Old thing → 001-old-thing\n"
+                         "- [x] Closed unmarked\n"
+                         "note line\n"
+                         "- [ ] Polish the footer {p:2}\n"
+                         "- [ ] Jev chokes on this\n")
+        log = (self.root / "jev.log").read_text().splitlines()
+        self.assertEqual([(len(l.split("\t")), l.split("\t")[1], l.split("\t")[4]) for l in log],
+                         [(6, "rank", "p5 feature"), (6, "rank", "p2 ui-polish"), (6, "rank", "none")])
+
+    def test_rank_backlog_second_run_makes_no_calls(self):
+        (self.root / "backlog.md").write_text(self.RANK_BACKLOG)
+        self.rank_backlog(self.ANSWERS | {"Jev chokes on this": (1, 2, 0.9, "tests")})
+        before = (self.root / "backlog.md").read_bytes()
+        out, asked = self.rank_backlog({})
+        self.assertEqual((out, asked), ({"rated": 0, "unrated": 0, "skipped": 4}, []))
+        self.assertEqual((self.root / "backlog.md").read_bytes(), before)
+
+    def test_rank_backlog_skips_item_edited_mid_run(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Edit me\n- [ ] Delete me\n- [ ] Keep me\n")
+
+        def during(ticket):
+            if ticket == "Keep me":  # the last call: change the file after rank-backlog read it
+                (self.root / "backlog.md").write_text("# Backlog\n- [ ] Edit me please\n- [ ] Keep me\n"
+                                                      "- [ ] Added meanwhile\n")
+        out, asked = self.rank_backlog({t: (2, 2, 0.9, "bug") for t in ("Edit me", "Delete me", "Keep me")}, during)
+        self.assertEqual(out, {"rated": 1, "unrated": 2, "skipped": 0})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Edit me please\n- [ ] Keep me {p:3}\n- [ ] Added meanwhile\n")
 
 if __name__ == "__main__":
     unittest.main()
