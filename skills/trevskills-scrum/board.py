@@ -20,6 +20,8 @@
                                    (--setup adds a " {setup: step; step}" marker: next and runall-start skip the item until
                                    Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5), then
                                    estimate each in the background
+  board.py rank-backlog            one-off backfill: Jev rates each open backlog item with no {p:N} marker (jev-gate.py
+                                   rank, logged to jev.log), writes {p:N} where it gave one, print {"rated","unrated","skipped"}
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
@@ -91,7 +93,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, json, os, re, secrets, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
@@ -413,6 +415,35 @@ def backlog_set_estimate(root, text, points, why):
                 write_backlog(root, lines)
                 return True
     return False
+
+
+def cmd_rank_backlog(root) -> dict:
+    """Rate every open, unmarked backlog item with jev-gate's rank step, one Jev call at a time outside the lock, then
+    write each {p:N} under the lock on the first open, unmarked item with the exact same text (gone or edited = skip)."""
+    # jev-gate.py has a hyphen, so no plain import; loaded only for this one-off
+    spec = importlib.util.spec_from_file_location("jev_gate", Path(__file__).resolve().with_name("jev-gate.py"))
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    items = [i for i in read_backlog(root)[1] if not i["done"]]
+    todo = [i["text"] for i in items if i["priority"] is None]
+    rated = []
+    for text in todo:
+        decision = gate.run("rank", lambda asked, t=text: gate.rank_ticket(t, Path(root), asked), Path(root) / "jev.log")
+        if m := re.fullmatch(r"p([1-5]) \S+", decision):
+            rated.append((text, int(m[1])))
+    written = 0
+    if rated:
+        with locked_board(root):
+            lines, items_now = read_backlog(root)
+            for text, n in rated:
+                item = next((i for i in items_now if not i["done"] and i["priority"] is None and i["text"] == text), None)
+                if item:
+                    item["priority"] = n
+                    lines[item["line"]] = format_item(item)
+                    written += 1
+            if written:
+                write_backlog(root, lines)
+    return {"rated": written, "unrated": len(todo) - written, "skipped": len(items) - len(todo)}
 
 
 def spec_path(root, text):
@@ -2792,6 +2823,7 @@ def main(argv=None):
     ba.add_argument("--priority", type=int, metavar="N", help="importance 1-5, highest claimed first")
     ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
+    sub.add_parser("rank-backlog")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
     rl.add_argument("p", type=int)
@@ -2923,6 +2955,8 @@ def main(argv=None):
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
         print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
+    elif a.cmd == "rank-backlog":
+        print(json.dumps(cmd_rank_backlog(a.dir)))
     elif a.cmd == "manual-add":
         print(json.dumps(cmd_manual_add(a.dir, a.items)))
     elif a.cmd == "plan-apply":
