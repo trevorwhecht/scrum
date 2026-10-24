@@ -1557,6 +1557,15 @@ class BoardTest(unittest.TestCase):
             self.assertIn("was aborted", str(e.exception))
         self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
+    def test_abort_clears_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        board.cmd_abort(self.root, job_id, requeue=False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertNotIn("paused", job)
+
     def test_abort_requeues_full_feature_text(self):
         job_id = board.cmd_new(self.root, "Short title")
         (self.root / "jobs" / job_id / "feature.md").write_text("Short title\nwith the full details on line two\n")
@@ -1595,13 +1604,16 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=build", "round=2", "limit=3", "pr=https://x/1", "worktree=/wt/x",
                                           "builder=agent-1"])
         self.write(f"{job_id}/build.md", "STATUS: READY\n")
+        with board.locked_board(self.root) as b:
+            b["jobs"][0]["limitResetAt"] = 1700000000
         before = self.jobs()[0]
         with mock.patch.object(board, "play") as play:
             self.assertEqual(board.cmd_pause(self.root, job_id), [job_id])
         play.assert_not_called()
         job = self.jobs()[0]
-        self.assertEqual((job["stage"], job["reason"]),
-                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual((job["stage"], job["paused"], job["reason"]),
+                         ("build", True, "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertNotIn("limitResetAt", job)
         for key in ("worktree", "branch", "pr", "round", "limit", "builder", "files"):
             self.assertEqual(job[key], before[key], key)
         self.assertEqual((self.root / "jobs" / job_id / "build.md").read_text(), "STATUS: READY\n")
@@ -1627,15 +1639,23 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board, "merge_refusal", return_value=None):  # the pause must refuse, not the PR guard
             for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
                          lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                         lambda: board.cmd_set(self.root, job_id, ["reason="]),
                          lambda: board.cmd_sync(self.root, job_id),
                          lambda: board.cmd_set(self.root, job_id, ["stage=done", "reason="]),
                          lambda: board.cmd_set(self.root, job_id, ["stage=review", "reason="])):
                 with self.assertRaises(SystemExit) as e:
                     call()
                 self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("needs-human", paused))
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"]), ("review", True, paused))
+        # spawn bookkeeping writes through the pause and keeps it, so a surviving old session stays refused
+        board.cmd_set(self.root, job_id, ["runlog=runs/x.log", "tty=", "outcome="], unpause=True)
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"], job["runlog"]), ("review", True, paused, "runs/x.log"))
         board.cmd_set(self.root, job_id, ["stage=review", "reason="], unpause=True)
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]), ("review", None))
+        self.assertNotIn("paused", job)
         board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
         self.assertEqual(self.jobs()[0]["stage"], "approve")
 
@@ -1643,13 +1663,17 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=build"])
         board.cmd_pause(self.root, job_id)
-        with self.assertRaises(SystemExit) as e:
-            board.main(["--dir", str(self.root), "set", job_id, "stage=review", "reason="])
-        self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]),
-                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
-        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        for pairs in (["stage=review", "reason="], ["reason="]):
+            with self.assertRaises(SystemExit) as e:
+                board.main(["--dir", str(self.root), "set", job_id, *pairs])
+            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"]),
+                         ("build", True, "stalled in build: paused by Trevor. Fix: click Play."))
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=build", "reason="])
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]), ("build", None))
+        self.assertNotIn("paused", job)
         board.main(["--dir", str(self.root), "set", job_id, "stage=approve"])
         self.assertEqual(self.jobs()[0]["stage"], "approve")
         # not paused: --unpause is harmless, the write applies as without it
@@ -1668,14 +1692,73 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, c1, ["stage=done"])
         board.cmd_set(self.root, c2, ["stage=build"])
         self.assertEqual(sorted(board.cmd_pause(self.root, parent)), sorted([parent, c2]))
-        stalled = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
-        self.assertEqual(stalled[parent], ("needs-human", "stalled in running: paused by Trevor. Fix: click Play."))
-        self.assertEqual(stalled[c2], ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        jobs = {j["id"]: j for j in self.jobs()}
+        stalled = {k: (j["stage"], j["reason"]) for k, j in jobs.items()}
+        self.assertEqual(stalled[parent], ("running", "stalled in running: paused by Trevor. Fix: click Play."))
+        self.assertEqual(stalled[c2], ("build", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual((jobs[parent].get("paused"), jobs[c2].get("paused")), (True, True))
         self.assertEqual((stalled[c1][0], stalled[c3][0], stalled[c4][0]), ("done", "waiting", "waiting"))
+        self.assertNotIn("paused", jobs[c3])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # c3's only dependency is done
         after = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
         self.assertEqual(after[parent], stalled[parent])
         self.assertEqual(after[c3][0], "waiting")
+
+    def test_paused_child_is_idle_for_ready_and_named_in_waiting_on(self):
+        parent = self.plan(self.ticket(1), self.ticket(2),
+                           self.ticket(3, deps="T1, T2", parallel="no — last", exposure="yes"))
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        board.cmd_set(self.root, parent, ["stage=running"])
+        board.cmd_set(self.root, c1, ["stage=build"])
+        board.cmd_set(self.root, c2, ["stage=build"])
+        board.cmd_pause(self.root, c1)
+        board.cmd_pause(self.root, c2)
+        # both paused: none in progress, c3 waits on them, so the parent names the paused children
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([], 0))
+        p = next(j for j in self.jobs() if j["id"] == parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {c1}, {c2}"))
+        self.assertIsNone(board.resume_blocker(self.root, c1))  # the paused sibling holds no slot
+
+    # --- paused migration ---
+    def legacy_board(self, *jobs):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}, indent=2) + "\n")
+
+    def test_migrate_paused_legacy_job_back_to_stage(self):
+        self.legacy_board({"id": "001-a", "stage": "needs-human", "round": 2,
+                           "reason": "stalled in build: paused by Trevor. Fix: click Play."},
+                          {"id": "002-b", "stage": "needs-human",
+                           "reason": "stalled in running: paused by Trevor. Fix: click Play."})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a", "002-b"])
+        self.assertEqual(self.jobs(), [
+            {"id": "001-a", "stage": "build", "round": 2, "paused": True,
+             "reason": "stalled in build: paused by Trevor. Fix: click Play."},
+            {"id": "002-b", "stage": "running", "paused": True,
+             "reason": "stalled in running: paused by Trevor. Fix: click Play."}])
+        # every locked write migrates too
+        self.legacy_board({"id": "003-c", "stage": "needs-human",
+                           "reason": "stalled in review: paused by Trevor. Fix: click Play."})
+        with board.locked_board(self.root):
+            pass
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["paused"]), ("review", True))
+
+    def test_migrate_paused_is_idempotent(self):
+        self.legacy_board({"id": "001-a", "stage": "needs-human",
+                           "reason": "stalled in check: paused by Trevor. Fix: click Play."})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a"])
+        once = (self.root / "board.json").read_text()
+        os.utime(self.root / "board.json", (1, 1))
+        self.assertEqual(board.cmd_migrate_paused(self.root), [])
+        self.assertEqual((self.root / "board.json").read_text(), once)
+        self.assertEqual((self.root / "board.json").stat().st_mtime, 1)  # nothing migrated: not written
+
+    def test_migrate_paused_skips_other_stalled_reasons(self):
+        job = {"id": "001-a", "stage": "needs-human",
+               "reason": "stalled in build: waiting for a free slot after Play. Fix: click Resume."}
+        self.legacy_board(job)
+        self.assertEqual(board.cmd_migrate_paused(self.root), [])
+        self.assertEqual(self.jobs(), [job])
 
     # --- reopen ---
     def test_reopen_creates_linked_job(self):
@@ -1866,6 +1949,13 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.get(held)["stage"], self.get(held)["limitResetAt"]), ("review", 1_800_000_000))
         plain = self.aged("Plain review", 120, stage="review")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
+    def test_watchdog_skips_paused_job(self):
+        paused = self.aged("Paused build", 120, stage="build", paused=True,
+                           reason="stalled in build: paused by Trevor. Fix: click Play.")
+        before = self.get(paused)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.get(paused), before)
 
     def test_limit_hold_cleared_on_stage_change_and_pause(self):
         def held(title):
