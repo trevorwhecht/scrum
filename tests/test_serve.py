@@ -4732,30 +4732,103 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5, focus=True)
         self.assertEqual(self.tick(running=lambda p, j: p == "a"), self.started("b"))
 
-    def test_non_focus_never_started(self):
+    def test_busy_focus_still_exclusive(self):
         self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
         self.serve.LAST_BUSY.add("a")
-        self.assertEqual(self.tick(), [], "focus has nothing claimable")
+        self.assertEqual(self.tick(), self.started("a"), "focus has nothing claimable: it lends the slot")
         (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [
             {"id": "001-y", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
         self.assertEqual(self.tick(), [], "busy focus blocks the start")
+        (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), [],
+                         "focus run-all running: it holds")
+
+    def test_busy_focus_holds_chaining(self):
+        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
+        self.project("c", n=5, focus=True, backlog="- [x] Claimed → 001-x\n",
+                     jobs=[{"id": "001-y", "stage": "build"}])
+        self.assertEqual(self.tick(), [], "busy focus: a gets no chaining")
+
+    BLOCKED_FOCUS = {
+        "setup-only": {"backlog": "- [ ] Needs a key {setup: add key}\n"},
+        "prerequisite-only": {"backlog": "- [ ] Blocked {needs #ab12}\n- [ ] Prereq {#ab12} {setup: do it}\n"},
+        "claimed-only": {"backlog": "- [x] Claimed → 001-x\n",
+                         "jobs": [{"id": "001-x", "stage": "needs-human"}, {"id": "002-y", "stage": "done"}]},
+        "parked-parent-only": {"backlog": "- [x] Claimed → 002-k\n",
+                               "jobs": [{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
+                                        {"id": "002-k", "stage": "needs-human", "parent": "001-p"}]},
+    }
+
+    def test_blocked_focus_falls_through(self):
+        for case, kw in self.BLOCKED_FOCUS.items():
+            with self.subTest(case=case):
+                self.projects.clear(); shutil.rmtree(self.base / "a", ignore_errors=True)
+                shutil.rmtree(self.base / "b", ignore_errors=True)
+                self.project("a", n=1); self.project("b", n=5, focus=True, **kw)
+                self.assertEqual([c for c in self.tick() if c[2] == "run-all"], self.started("a"))
+
+    def test_focus_reclaims_slot(self):
+        a = self.project("a", n=1); b = self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        self.assertEqual(self.tick(), self.started("a"))
+        (b / "backlog.md").write_text("# Backlog\n- [ ] Now claimable\n")
+        (a / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-a", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
+        with mock.patch.object(self.serve, "stop") as stop, mock.patch.object(self.serve, "kill_session") as kill:
+            self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("a", "run-all")), self.started("b"))
+        stop.assert_not_called(); kill.assert_not_called()
+
+    def test_two_focus_one_blocked(self):
+        self.project("a", n=1)
+        self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        self.project("c", n=9, focus=True)
+        self.assertEqual(self.tick(), self.started("c"), "only c holds: it is the only target")
+        (self.projects["c"] / "scrum" / "backlog.md").write_text("# Backlog\n- [x] Claimed → 002-z\n")
+        self.serve.LAST_BUSY.clear()
+        self.assertEqual(self.tick(), self.started("a"), "neither holds: a competes as usual")
+        self.projects.clear()
+        for name in ("a", "b", "c"):
+            shutil.rmtree(self.base / name)
+        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
+        self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        self.project("c", n=9, focus=True)
+        self.assertEqual(self.tick(), self.started("c"), "c holds: a's run-all is held, b is no target")
+
+    def test_focus_missing_from_busy_holds(self):
+        self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        with mock.patch.object(self.board, "projects", return_value=self.projects), \
+                mock.patch.object(self.serve, "running", return_value=False), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.auto_continue_tick({"a": False})
+        spawn.assert_not_called()
+
+    def test_focus_holds_on_error(self):
+        root = self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        with mock.patch.object(self.serve, "running", return_value=False), \
+                mock.patch.object(self.serve, "claimable", side_effect=SystemExit("bad backlog")):
+            self.assertTrue(self.serve.focus_holds("b", root, False))
+        with mock.patch.object(self.serve, "running", return_value=False):
+            self.assertFalse(self.serve.focus_holds("b", root, False))
 
     def test_focus_without_opt_in_ignored(self):
         self.project("a", n=1); self.project("b", focus=True)
         self.assertEqual(self.tick(), self.started("a"))
 
+    WAITING_RUN_ALL = [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
+                       {"id": "002-done", "stage": "done", "parent": "001-par"},
+                       {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
+
     def test_focus_holds_other_projects(self):
-        """Focus elsewhere: the watchdog neither chains nor auto-resumes a non-focus project's run-all."""
-        run_all = [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
-                   {"id": "002-done", "stage": "done", "parent": "001-par"},
-                   {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
-        self.project("a", n=1, jobs=run_all)
+        """Focus elsewhere that can use the slot: the watchdog neither chains nor auto-resumes a non-focus project's
+        run-all. A blocked Focus project holds nothing."""
+        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
         self.project("b", n=5)
         self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "no Focus anywhere: the run-all chains")
         self.projects.clear(); shutil.rmtree(self.base / "a")
-        self.project("a", n=1, jobs=run_all)
-        self.project("c", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.assertEqual(self.tick(), [], "Focus on c: a's run-all is held")
+        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
+        c = self.project("c", n=5, focus=True)
+        self.assertEqual(self.tick(), self.started("c"), "Focus on c: a's run-all is held")
+        (c / "backlog.md").write_text("# Backlog\n- [x] Claimed → 001-x\n")
+        self.assertIn(("003-wait", "start"), [c[2:4] for c in self.tick()], "blocked Focus on c: a's run-all chains")
 
     def test_starts_lowest_n(self):
         self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
