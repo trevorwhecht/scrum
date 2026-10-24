@@ -332,7 +332,7 @@ def check_points(points):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None):
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
     with locked_board(root):
@@ -362,6 +362,10 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             item = pick(items, index)
             del lines[item["line"]]
             drop_spec(root, item["text"], [i for i in items if i is not item])
+        elif op == "move" and to is not None:
+            # Take item `to`'s place: lands after it when moving down, before it when moving up (top, bottom, drag).
+            a, b = pick(items, index), pick(items, to)
+            lines.insert(b["line"], lines.pop(a["line"]))
         elif op == "move":
             a = pick(items, index)
             # Swap with the nearest open item that way; finished items are hidden in the dashboard.

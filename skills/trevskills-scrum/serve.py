@@ -350,7 +350,7 @@ def auto_resume(project, root, jobs):
         hit, reset = limit_reset(root, job)
         if not hit:
             if net_error(root, job):
-                if resume_refusal(root, job) is None:
+                if resume_refusal(project, root, job) is None:
                     AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
                     resume_job(project, root, job, jobs)
                 continue
@@ -2663,6 +2663,8 @@ class Handler(BaseHTTPRequestHandler):
                 kwargs.update(text=body.get("text"), **({"points": body["points"]} if "points" in body else {}))
             if op == "move":
                 kwargs["delta"] = body.get("delta")
+                if "to" in body:  # top, bottom and drag: move to that item's place
+                    kwargs["to"] = body["to"]
             return 200, board.backlog_op(root, op, **kwargs)
         if rest in ("/backlog/run", "/backlog/run-all"):
             askme = body.get("askme")
