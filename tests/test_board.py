@@ -992,6 +992,20 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [ ] Parked {setup: add the API key}\n- [x] Free → 001-free\n")
 
+    def test_cloud_claim_priority_order(self):
+        self.cloud_backlog([("Plain", ["a.py"]), ("Low {p:1}", ["b.py"]), ("High {p:5}", ["a.py"]),
+                            ("Parked {p:5} {setup: Buy}", ["d.py"])])
+        # cloud_backlog keys specs on the full line text; re-key them on the stored item text
+        for raw, text in (("Low {p:1}", "Low"), ("High {p:5}", "High"), ("Parked {p:5} {setup: Buy}", "Parked")):
+            self.spec_file(raw).rename(self.spec_file(text))
+        out = board.cmd_cloud_claim(self.root, 1)
+        self.assertEqual(out, {"claimed": [{"id": "001-high", "feature": "High"}]})
+        out = board.cmd_cloud_claim(self.root, 5)  # Plain shares a.py with the High claim, still in flight
+        self.assertEqual(out, {"claimed": [{"id": "002-low", "feature": "Low"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] Plain\n- [x] Low {p:1} → 002-low\n- [x] High {p:5} → 001-high\n"
+                         "- [ ] Parked {p:5} {setup: Buy}\n")
+
     def test_cloud_claim_skips_item_overlapping_earlier_pick(self):
         self.cloud_backlog([("A", ["a.py"]), ("B", ["a.py", "b.py"]), ("C", ["c.py"])])
         out = board.cmd_cloud_claim(self.root, 3)
@@ -1090,6 +1104,21 @@ class BoardTest(unittest.TestCase):
                          "# Backlog\n- [x] Add UI {needs #api1 #sch2} → 002-add-ui\n"
                          "- [x] Add API {#api1} {needs #sch2} → 003-add-api\n- [x] Add schema {#sch2} → 004-add-schema\n"
                          "- [x] Docs {needs #zzzz} → 005-docs\n")
+
+    def test_runall_start_children_in_priority_order(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Plain {needs #hi11}\n- [ ] Low {#lo11} {p:1}\n- [ ] High {#hi11} {p:5} {needs #lo11}\n"
+            "- [ ] Mid {p:3}\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-high", "003-mid", "004-plain", "005-low"]})
+        self.assertEqual(self.child("001-run-all")["children"], ["002-high", "003-mid", "004-plain", "005-low"])
+        self.assertEqual(self.child("002-high")["depends_on"], ["005-low"])
+        self.assertEqual(self.child("004-plain")["depends_on"], ["002-high"])
+        self.assertEqual(self.child("003-mid")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Plain {needs #hi11} → 004-plain\n- [x] Low {#lo11} {p:1} → 005-low\n"
+                         "- [x] High {#hi11} {p:5} {needs #lo11} → 002-high\n- [x] Mid {p:3} → 003-mid\n")
 
     def test_runall_start_leaves_items_waiting_on_outside_job_open(self):
         self.root.mkdir(parents=True)

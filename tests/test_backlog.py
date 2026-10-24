@@ -722,6 +722,127 @@ class BacklogTest(unittest.TestCase):
             self.assertEqual(self.text(), before)
         self.assertEqual(board.cmd_next(self.root)["feature"], "Parked")
 
+    # --- {p:N} importance marker ---
+    def test_priority_marker_round_trip(self):
+        backlog = ("# Backlog\n"
+                   "- [ ] Plain {p:3}\n"
+                   "- [ ] [5] Pointed {p:1} <!-- why -->\n"
+                   "- [ ] [8] Unknown {#k3f9} {p:5}\n"
+                   "- [ ] Needs {p:2} {needs #k3f9}\n"
+                   "- [ ] Setup {p:4} {setup: Buy a number}\n"
+                   "- [x] [3] All {#a1b2} {p:5} {needs #k3f9} {setup: Step one; Step two} → 003-x <!-- why -->\n"
+                   "- [x] Claimed {p:1} → 004-y\n"
+                   "- [ ] Zero {p:0}\n"
+                   "- [ ] Six {p:6}\n"
+                   "- [ ] Letter {p:x}\n"
+                   "- [ ] Unmarked\n")
+        (self.root / "backlog.md").write_text(backlog)
+        lines, parsed = board.read_backlog(self.root)
+        self.assertEqual([board.format_item(i) for i in parsed], lines[1:])
+        self.assertEqual([(i["text"], i["priority"]) for i in parsed], [
+            ("Plain", 3), ("Pointed", 1), ("Unknown", 5), ("Needs", 2), ("Setup", 4), ("All", 5), ("Claimed", 1),
+            ("Zero {p:0}", None), ("Six {p:6}", None), ("Letter {p:x}", None), ("Unmarked", None)])
+        all_ = parsed[5]
+        self.assertEqual((all_["id"], all_["needs"], all_["setup"], all_["job"], all_["why"], all_["points"]),
+                         ("a1b2", ["k3f9"], ["Step one", "Step two"], "003-x", "why", 3))
+
+    def test_priority_marker_survives_rewrites(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] One {#o111} {p:4} {needs #t222}\n- [ ] Two {#t222} {p:2}\n"
+                                              "- [ ] Three {p:5}\n")
+        board.backlog_op(self.root, "edit", index=0, text="One edited", points=3)
+        self.assertIn("- [ ] [3] One edited {#o111} {p:4} {needs #t222}\n", self.text())
+        board.backlog_op(self.root, "move", index=0, delta=1)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Two {#t222} {p:2}\n- [ ] [3] One edited {#o111} {p:4} {needs #t222}\n"
+                                      "- [ ] Three {p:5}\n")
+        board.backlog_op(self.root, "move", index=2, to=0)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Three {p:5}\n- [ ] Two {#t222} {p:2}\n"
+                                      "- [ ] [3] One edited {#o111} {p:4} {needs #t222}\n")
+        self.assertTrue(board.backlog_set_estimate(self.root, "Three", 2, "tiny"))
+        self.assertIn("- [ ] [2] Three {p:5} <!-- tiny -->\n", self.text())
+        out = board.cmd_next(self.root)
+        self.assertIn(f"- [x] [2] Three {{p:5}} → {out['id']} <!-- tiny -->\n", self.text())
+        # triage-apply depends and estimate rewrites
+        self.triage("# Backlog\n- [ ] Api {p:3}\n- [ ] Ui {p:5}\n",
+                    {"estimate": [{"item": "Ui", "points": 5, "why": "page"}],
+                     "depends": [{"item": "Ui", "needs": ["Api"], "why": "calls it"}]})
+        with mock.patch.object(board, "new_item_id", side_effect=["api1"]):
+            board.cmd_triage_apply(self.root, "001")
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Api {#api1} {p:3}\n- [ ] [5] Ui {p:5} {needs #api1} <!-- page -->\n")
+        # cloud-claim and runall-start claims
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Cloudy {p:4}\n")
+        (self.root / "backlog-specs").mkdir(exist_ok=True)
+        board.spec_path(self.root, "Cloudy").write_text("## Likely files\n- `c.py`\n")
+        cid = board.cmd_cloud_claim(self.root, 1)["claimed"][0]["id"]
+        self.assertEqual(self.text(), f"# Backlog\n- [x] Cloudy {{p:4}} → {cid}\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Runner {#r111} {p:1}\n")
+        kid = board.cmd_runall_start(self.root)["children"][0]
+        self.assertEqual(self.text(), f"# Backlog\n- [x] Runner {{#r111}} {{p:1}} → {kid}\n")
+
+    def test_setup_done_keeps_priority_marker(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] [?] Parked {#park} {p:4} {needs #zzzz} {setup: Buy a number; Set the key} <!-- why -->\n")
+        board.backlog_op(self.root, "setup-done", index=0)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] [?] Parked {#park} {p:4} {needs #zzzz} <!-- why -->\n")
+
+    def test_backlog_add_priority_flag(self):
+        with mock.patch.object(board, "spawn_estimates"):
+            board.main(["--dir", str(self.root), "backlog-add", "--priority", "4", "a", "b"])
+        self.assertTrue(self.text().endswith("some note the user wrote\n- [ ] a {p:4}\n- [ ] b {p:4}\n"))
+        board.backlog_op(self.root, "add", text="c", priority=4)
+        self.assertTrue(self.text().endswith("- [ ] b {p:4}\n- [ ] c {p:4}\n"))
+        board.cmd_backlog_add(self.root, ["d"], setup="Buy a number", priority=2)
+        self.assertTrue(self.text().endswith("- [ ] d {p:2} {setup: Buy a number}\n"))
+        with mock.patch.object(board, "spawn_estimates"):
+            board.main(["--dir", str(self.root), "backlog-add", "e"])
+        self.assertTrue(self.text().endswith("- [ ] d {p:2} {setup: Buy a number}\n- [ ] e\n"))
+
+    def test_backlog_add_priority_rejects_out_of_range(self):
+        before = self.text()
+        for bad in (0, 6, True, "4", 2.0):
+            with self.assertRaises(SystemExit, msg=bad):
+                board.cmd_backlog_add(self.root, ["a", "b"], priority=bad)
+            with self.assertRaises(SystemExit, msg=bad):
+                board.backlog_op(self.root, "add", text="a", priority=bad)
+        for bad in ("0", "6", "abc"):
+            with mock.patch.object(board, "spawn_estimates"), redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit, msg=bad):
+                board.main(["--dir", str(self.root), "backlog-add", "--priority", bad, "a"])
+        self.assertEqual(self.text(), before)
+
+    def test_next_claims_highest_priority_first(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Unmarked\n- [ ] Two {p:2}\n- [ ] Three {p:3}\n"
+                                              "- [ ] Five A {p:5}\n- [ ] Five B {p:5}\n")
+        got = [board.cmd_next(self.root)["feature"] for _ in range(6)]
+        self.assertEqual(got, ["Five A", "Five B", "Three", "Unmarked", "Two", None])
+
+    def test_next_priority_skips_waiting_item(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Low {#low1} {p:1}\n- [ ] Parked {p:5} {setup: Buy}\n"
+                                              "- [ ] Blocked {p:5} {needs #low1}\n- [ ] Mid {p:3}\n")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Mid")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Low")
+
+    def test_next_index_ignores_priority(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] High {p:5}\n- [ ] Low {p:1}\n")
+        self.assertEqual(board.cmd_next(self.root, index=1)["feature"], "Low")
+
+    def test_triage_merge_takes_max_priority(self):
+        self.triage("# Backlog\n- [ ] One {p:2}\n- [ ] Two\n- [ ] Three {p:4}\n",
+                    {"merge": [{"items": ["One", "Two", "Three"], "text": "All three"}]})
+        board.cmd_triage_apply(self.root, "001")
+        self.assertIn("- [ ] All three {p:4}\n", self.text())
+
+    def test_triage_merge_without_priority_has_none(self):
+        self.triage("# Backlog\n- [ ] One\n- [ ] Two\n",
+                    {"merge": [{"items": ["One", "Two"], "text": "Both"}]})
+        board.cmd_triage_apply(self.root, "001")
+        self.assertTrue(self.text().startswith("# Backlog\n- [ ] Both\n"))
+        self.assertEqual(board.backlog_items(self.root)[0]["priority"], None)
+
+    def test_backlog_items_carry_priority(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Marked {p:5}\n- [ ] Unmarked\n")
+        items = board.backlog_items(self.root)
+        self.assertEqual([(i["text"], i["priority"]) for i in items], [("Marked", 5), ("Unmarked", None)])
+
 
 if __name__ == "__main__":
     unittest.main()
