@@ -640,6 +640,8 @@ class BoardTest(unittest.TestCase):
         text = "## Problem\n`a/x.py`\n## Likely files\n- `skills/board.py`: `SHAPES[\"lane\"]` and `cmd_ready(root)`\n- `tests/t.py`\n## Assumptions\n- `b/y.py`\n"
         self.assertEqual(board.likely_files(text), {"skills/board.py", "tests/t.py"})
         self.assertEqual(board.likely_files("# no section\n"), set())
+        nextjs = "## Likely files\n- `src/app/(app)/page.tsx`\n- `src/app/api/orders/[id]/route.ts`\n"
+        self.assertEqual(board.likely_files(nextjs), {"src/app/(app)/page.tsx", "src/app/api/orders/[id]/route.ts"})
 
     def five(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),

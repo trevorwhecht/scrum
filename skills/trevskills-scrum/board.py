@@ -1727,7 +1727,7 @@ def cmd_triage_apply(root, triage_id):
 PLAN_FIELDS = {"Depends on": "depends", "Parallel": "parallel", "Exposure": "exposure", "Hard stops": "hard",
                "Human setup": "setup"}
 TICKET_RE = re.compile(r"^### (T\d+):[ \t]*(.*?)\s*$")
-PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with a / or . and nothing code-like
+PATH_RE = re.compile(r"^[\w.@~+/()\[\]-]*[./][\w.@~+/()\[\]-]*$")  # a backticked token with a / or . and nothing code-like; () and [] for Next.js route folders
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
 
 
