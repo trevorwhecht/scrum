@@ -49,6 +49,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 
 **Resumed runs.** You'll be pointed at a round folder (`JOB_DIR/round-N/`) holding `check.md` and/or `review-*.md`, or at `JOB_DIR/decision.md`, `JOB_DIR/rework.md` or `JOB_DIR/ci.md`:
 - If the worktree is mid-merge (the orchestrator merged the default branch in, and there are conflict markers): resolve every conflict, keeping both sides' intent. Then `git add -A && git commit --no-edit`, and note what you resolved in build.md.
+- After any merge of the default branch that changed `prisma/schema.prisma`, run `npx prisma generate` before the typecheck.
 - Fix every failing check, and every finding marked `[blocking]` in a CHANGES review. `[minor]` findings and Notes are optional.
 - You may decline a finding that is wrong; give the reason in build.md.
 - Do not start a new review yourself, and do not edit any review file.
