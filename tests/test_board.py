@@ -314,6 +314,23 @@ class BoardTest(unittest.TestCase):
         self.assertEqual([o["label"] for o in job["options"]], ["R", "S"])
         self.assertEqual([l["question"] for l in self.log_lines()], ["One?", "Two?"])
 
+    def test_ask_agent_types_not_loaded_is_stalled(self):
+        opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
+        for q, stage, want in (
+                ("scrum-debugger, scrum-builder are not loaded as agent types in this session", "build",
+                 "stalled in build: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
+                ("The scrum Agent Types not loaded here", "check", "stalled in check: The scrum Agent Types not loaded here"),
+                ("agent types are not loaded", "review", "stalled in review: agent types are not loaded"),
+                ("Pick a layout?", "build", "Pick a layout?"),
+                ("agent types are not loaded", "plan", "agent types are not loaded")):
+            with self.subTest(q=q, stage=stage):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                board.cmd_ask(self.root, job_id, q, opts(job_id))
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
+                                 ("needs-human", want, q, [f"resume {job_id}", f"abort {job_id}"]))
+
     def test_stage_change_clears_question(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])

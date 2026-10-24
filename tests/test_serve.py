@@ -4665,9 +4665,11 @@ class AutoContinueTest(unittest.TestCase):
                          [c[:3] for c in self.started("a")])
 
     def test_unfinished_bigboy_parent_still_busy(self):
-        for st in ("build", "waiting", "needs-human"):
+        for st in ("build", "waiting"):
             with self.subTest(st=st):
                 self.assertEqual(self.tick_run_all(self.parent_jobs(["done", st])), [])
+        self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", "needs-human"]))],
+                         [c[:3] for c in self.started("a")], "parked on Trevor (the 054 shape): not busy")
 
     def tick_run_all(self, jobs):
         self.projects.clear()
@@ -4780,7 +4782,7 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick(), [])
         self.assertEqual(self.serve.LAST_BUSY, {"b"})
         self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
-                                     {"id": "002-k", "stage": "needs-human", "parent": "001-p"}])
+                                     {"id": "002-k", "stage": "build", "paused": True, "parent": "001-p"}])
         del self.projects["b"]
         self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
 
@@ -4845,3 +4847,109 @@ class AutoContinueTest(unittest.TestCase):
         with mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
             self.assertEqual(self.tick(), self.started("good"))
         self.assertTrue(e.getvalue().startswith("watchdog: bad: "), e.getvalue())
+
+
+class ParkedParentTest(unittest.TestCase):
+    """A running Run-all/BigBoy parent whose idle children wait only on Trevor (needs-human, not stalled) is parked:
+    not busy for auto continue, marked once with the WAITING_ON reason, and closed once its children finish."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.base = Path(tempfile.mkdtemp())
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.base / "no-usage.json"))
+        env.start(); self.addCleanup(env.stop)
+        for s in (serve.LAST_BUSY, serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
+            s.clear(); self.addCleanup(s.clear)
+        self.root = self.base / "p" / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [x] 074-b claimed item\n- [ ] Open item\n")
+
+    def write(self, kids):
+        """kids: (id, stage, reason[, extra]) of the running runall parent 054-run-all."""
+        parent = {"id": "054-run-all", "stage": "running", "lane": "runall", "reason": None,
+                  "children": [k[0] for k in kids]}
+        jobs = [parent] + [{"id": k[0], "stage": k[1], "reason": k[2], "parent": "054-run-all",
+                            **(k[3] if len(k) > 3 else {})} for k in kids]
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j} for j in jobs]}))
+
+    PARKED = [("060-a", "done", None), ("074-b", "needs-human", "applied by hand; git-excluded"),
+              ("080-d", "needs-human", "Pick a layout?")]
+
+    def tick(self, running=lambda p, j: False, alive=lambda job: False):
+        with mock.patch.object(self.board, "projects", return_value={"p": self.root.parent}), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive), \
+                mock.patch.object(self.board, "pace_cap", return_value=None), \
+                mock.patch.object(self.serve, "running", side_effect=running), \
+                mock.patch.object(self.serve, "resume_job"), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.watchdog_tick()
+        return [c.args for c in spawn.call_args_list if c.args[2] == "run-all"]
+
+    def jobs(self):
+        return {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+
+    def test_parked_parent_edge_cases(self):
+        stalled = "stalled in build: no live session. Fix: click Resume."
+        cases = {
+            "child in build": (self.PARKED + [("090-e", "build", None)], {}),
+            "child waiting": (self.PARKED + [("090-e", "waiting", None)], {}),
+            "child running": (self.PARKED, {"running": lambda p, j: j == "080-d"}),
+            "child alive": (self.PARKED, {"alive": lambda job: job["id"] == "074-b"}),
+            "chain lock": (self.PARKED, {}),
+            "no needs-human child": ([("060-a", "done", None), ("061-b", "build", None, {"paused": True})], {}),
+            "every needs-human child stalled": ([("060-a", "done", None), ("074-b", "needs-human", stalled)], {}),
+        }
+        for case, (kids, kw) in cases.items():
+            with self.subTest(case=case):
+                self.serve.LAST_BUSY.clear()
+                self.serve.STALL_RESUMED.update({"p/074-b/build"})  # its one retry spent: auto_resume leaves it
+                lock = self.root / "jobs" / "054-run-all" / ".chain.lock"
+                if case == "chain lock":
+                    lock.parent.mkdir(parents=True, exist_ok=True); lock.write_text("holder")
+                self.write(kids)
+                self.assertEqual(self.tick(**kw), [], case)
+                lock.unlink(missing_ok=True)
+
+    def test_parked_parent_marked_once(self):
+        self.write(self.PARKED)
+        with mock.patch.object(self.board, "play") as play:
+            self.assertEqual(len(self.tick()), 1, "parked: auto continue starts a run-all beside it")
+            parent = self.jobs()["054-run-all"]
+            self.assertEqual((parent["stage"], parent["reason"]), ("running", "waiting on you in: 074-b, 080-d"))
+            before = (self.root / "board.json").read_text()
+            self.tick()
+            self.assertEqual((self.root / "board.json").read_text(), before, "a second tick writes nothing")
+        self.assertEqual(play.call_args_list, [mock.call(self.board.sound("needs-human"))])
+
+    def test_parked_parent_closes_when_children_finish(self):
+        self.write(self.PARKED)
+        self.tick()
+        out = self.board.cmd_runall_start(self.root)  # beside the parked parent: only the still-open line
+        self.assertEqual(len(out["children"]), 1)
+        self.assertEqual(self.jobs()[out["children"][0]]["title"], "Open item")
+        b = json.loads((self.root / "board.json").read_text())
+        for j in b["jobs"]:
+            if j["id"] in ("074-b", "080-d"):
+                j.update(stage="done" if j["id"] == "074-b" else "aborted", reason=None)
+        (self.root / "board.json").write_text(json.dumps(b))
+        self.tick()
+        parent = self.jobs()["054-run-all"]
+        self.assertEqual((parent["stage"], parent.get("reason")), ("done", None))
+
+    def test_agent_types_child_auto_resumed(self):
+        self.write([("060-a", "done", None), ("074-b", "build", None)])
+        self.board.cmd_ask(self.root, "074-b", "scrum-debugger, scrum-builder are not loaded as agent types in this "
+                           "session", ["Resume=resume 074-b", "Abort=abort 074-b"])
+        with mock.patch.object(self.board, "projects", return_value={"p": self.root.parent}), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.board, "pace_cap", return_value=None), \
+                mock.patch.object(self.serve, "running", return_value=False), \
+                mock.patch.object(self.serve, "resume_job") as resume, \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.watchdog_tick()
+        self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["074-b"])
+        self.assertEqual([c for c in spawn.call_args_list if c.args[2] == "run-all"], [],
+                         "a stalled child does not park its parent")
+        self.assertEqual(self.jobs()["054-run-all"]["reason"], None)
