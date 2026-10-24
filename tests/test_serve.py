@@ -1299,7 +1299,7 @@ class ServeTest(unittest.TestCase):
     def test_estimate_is_one_cloud_call_never_routed(self):
         scrum = self.estimate_scrum("est-cloud", "Cloud item")
         with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "m", "why": "x"}) as r, \
-                mock.patch.object(self.serve.route, "chat", return_value='{"points": 3}') as chat:
+                mock.patch.object(self.serve.route, "chat", create=True, return_value='{"points": 3}') as chat:
             self.assertTrue(self.serve.estimate(scrum, "Cloud item"))
         r.assert_not_called()
         chat.assert_not_called()
