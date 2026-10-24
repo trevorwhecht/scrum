@@ -276,6 +276,24 @@ class ContractTest(unittest.TestCase):
                        "a review without one adds nothing"):
             self.assertIn(phrase, text, phrase)
 
+    def test_approver_groups_and_gates_follow_ups(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("same file or area", "one bullet", "one bullet per file", "every rule ID",
+                       "`cosmetic:`", "`Goal:` line", "roadmap.md", "`- Notes:` line",
+                       "advance the goal", "never under `## Follow-ups`", "no goal line"):
+            self.assertIn(phrase, text, phrase)
+        self.assertNotIn("becomes one Follow-up", text)
+        template = text[text.index("    APPROVE\n"):text.index("**ESCALATE only")]
+        self.assertIn("\n    ## Dropped\n", template)
+        self.assertLess(template.index("## Follow-ups"), template.index("## Dropped"))
+        self.assertLess(template.index("## Dropped"), template.index("## Manual checks"))
+
+    def test_triager_bundles_low_rated(self):
+        text = (ROOT / "agents" / "scrum-triager.md").read_text()
+        for phrase in ("{p:1}", "{p:2}", "even when they are not near-duplicates",
+                       "Never bundle a p5 item with p1-p2 items", "highest p of its parts"):
+            self.assertIn(phrase, text, phrase)
+
     def test_approver_has_manual_checks_heading(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         template = text[text.index("    APPROVE\n"):text.index("**ESCALATE only")]
