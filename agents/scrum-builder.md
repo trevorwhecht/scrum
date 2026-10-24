@@ -22,6 +22,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - A phrase assert on prose uses a phrase found only in the new rule, never a word that already appears elsewhere in the asserted section.
    - While working, run only the focused test. Run the full suite once before the final commit.
 4. Run the project's test, typecheck, lint and build commands from `PROJECT`. Fix whatever you broke, and name in build.md any failure you didn't cause.
+   - Run the build command through the machine-wide build lock, as the Check gate does: `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" '<Build>'`.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - When tsc fails only on files under `.next/types`, delete `.next/types` in WORKTREE and re-run tsc before calling it a failure.
    - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
