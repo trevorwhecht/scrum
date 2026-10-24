@@ -26,6 +26,12 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   not restate this.
   Batch rule edits; do not mix them into feature jobs.
 
+## Scrum map
+- `~/.claude/scrum-map.md` is the one-page reference for how the pipeline actually works (processes, Ollama use,
+  lanes, pacing/caps, Focus, idle checklist). Any change to those (board.py, serve.py, continue.py, routing.json,
+  LaunchAgents, lanes, agent models) updates the map in the same job or chat. It lives outside the repo, so editing
+  it never dirties this checkout.
+
 ## Git
 - The main checkout stays on `main` and is live in `~/.claude`; scrum jobs branch from `origin/main` and squash-merge
   their PRs into `main`.
