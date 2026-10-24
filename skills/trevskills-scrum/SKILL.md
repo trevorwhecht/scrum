@@ -121,7 +121,9 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing.
 
    `- Auto continue: <n>` (optional, hand-added): serve.py starts one headless run-all at a time across opted-in projects, lower `n` first, skipped when usage is over pace. First-run setup never writes these optional lines.
 
-5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765.
+   `- Test sign-in: <account> — credentials in <where>` is optional: the test account `scrum-review-ui` and `scrum-review-ux` sign in with to render signed-in pages. `<where>` is where the credentials live, such as an env var name or a file path; the line only points at them and never holds a password or token value. First-run setup writes it only when the repo's CLAUDE.md/AGENTS.md, rules files, README, seed script or e2e config already names a test account, and then writes just the account and where its credentials live. Otherwise it writes no such line.
+
+5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. When `Has UI: yes` and step 4 wrote no `Test sign-in:` line, also ask the user to add one to `$F/project.md` so the ui and ux reviewers can render signed-in pages. This is a request in the message only: setup never waits for the answer. When `Has UI: no`, neither ask nor write it.
 
 ## Commands
 
