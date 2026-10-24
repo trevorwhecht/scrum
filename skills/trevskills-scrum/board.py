@@ -1040,7 +1040,7 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
         if suite != 0:
             fails.append("rule 6: python3 -m unittest tests.test_contracts fails in the worktree")
         pins = _first_line_pins(show("HEAD", "tests/test_contracts.py"))
-        for name, phrase in sorted(_first_line_pins(show(mb, "tests/test_contracts.py")) - pins):
+        for name, _ in sorted(_first_line_pins(show(mb, "tests/test_contracts.py")) - pins):
             fails.append(f"rule 6: FIRST_LINE pin for {name} removed or changed")
         jd = Path(root) / "jobs" / job_id
         feature, spec = (p.read_text(errors="replace") if p.is_file() else "" for p in (jd / "feature.md", jd / "spec.md"))
