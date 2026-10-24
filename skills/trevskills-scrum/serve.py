@@ -602,7 +602,10 @@ def auto_continue(root: Path) -> int | None:
 
 
 def focus(root: Path) -> bool:
-    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable)."""
+    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). While any
+    project has it, it is auto continue's only target and the watchdog leaves every other project alone: no chaining,
+    no auto-resume (so their run-alls hold where they are and claim no session slot). Trevor's own starts, Resume and
+    Play still work everywhere."""
     try:
         return bool(FOCUS_RE.search((root / "project.md").read_text()))
     except (OSError, ValueError):
@@ -718,7 +721,9 @@ def watchdog_tick():
     whatever siblings are now ready, then restart or close idle parents (sweep_parents), auto-resume the stalled
     ones, and poll its cloud jobs (cloud_tick). Last, auto_continue_tick. One project's failure never stops the others."""
     busy, alive = {}, once(lambda: board.session_alive_fn())
-    for project, repo in board.projects().items():
+    projects = board.projects()
+    focused = {p for p, repo in projects.items() if focus(repo / "scrum")}
+    for project, repo in projects.items():
         try:
             root = repo / "scrum"
             board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
@@ -731,6 +736,9 @@ def watchdog_tick():
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
             busy[project] = any(not board.idle(j) and not finished_bigboy(j, by_id) for j in jobs)
+            if focused and project not in focused:  # Focus elsewhere: bookkeeping only, no chaining or auto-resume
+                cloud_tick(project, root, jobs)
+                continue
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll

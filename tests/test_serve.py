@@ -4742,6 +4742,19 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1); self.project("b", focus=True)
         self.assertEqual(self.tick(), self.started("a"))
 
+    def test_focus_holds_other_projects(self):
+        """Focus elsewhere: the watchdog neither chains nor auto-resumes a non-focus project's run-all."""
+        run_all = [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
+                   {"id": "002-done", "stage": "done", "parent": "001-par"},
+                   {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
+        self.project("a", n=1, jobs=run_all)
+        self.project("b", n=5)
+        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "no Focus anywhere: the run-all chains")
+        self.projects.clear(); shutil.rmtree(self.base / "a")
+        self.project("a", n=1, jobs=run_all)
+        self.project("c", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
+        self.assertEqual(self.tick(), [], "Focus on c: a's run-all is held")
+
     def test_starts_lowest_n(self):
         self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
         self.assertEqual(self.tick(), self.started("b"), "lowest n; b before c in projects() order")
