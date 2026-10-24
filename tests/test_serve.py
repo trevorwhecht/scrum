@@ -1047,7 +1047,7 @@ class ServeTest(unittest.TestCase):
     def test_play_on_paused_parent_resumes_at_most_the_cap(self):
         b, s = self.serve.board, self.serve
         parent = b.cmd_new(self.root, "Capped parent")
-        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(5)]
+        kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(7)]
         self.edit_job(parent, lane="runall", stage="running", children=kids)
         for i, k in enumerate(kids):
             self.edit_job(k, parent=parent, stage="build", parallel=True)
@@ -1063,14 +1063,14 @@ class ServeTest(unittest.TestCase):
         self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in kids])
         with mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
-        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:3], "a just-spawned resume holds its slot")
-        for k in kids[3:]:
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:5], "a just-spawned resume holds its slot")
+        for k in kids[5:]:
             job = self.stage_of(k)
             self.assertEqual(job["stage"], "needs-human")
             self.assertTrue(job["reason"].startswith("stalled in build: "), job["reason"])
             self.assertEqual(job["reason"], "stalled in build: waiting for a free slot after Play. Fix: click Resume.")
             self.assertNotIn("paused", job, "no longer paused, so auto_resume takes it when a slot frees")
-        for k in kids[:3]:
+        for k in kids[:5]:
             self.assertEqual((self.stage_of(k)["stage"], self.stage_of(k)["paused"]), ("build", True),
                              "its resume session clears the pause with B set --unpause")
 
