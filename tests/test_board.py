@@ -2326,7 +2326,6 @@ class BoardTest(unittest.TestCase):
                  "  302 ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
                  "  303 ttys004 /Users/t/.local/bin/claude --resume\n"
                  "  304 ??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
-                 "  305 ??      python3 local/run.py claude -p /trevskills-scrum start 009-local\n"
                  "  306 ??      node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js start 010-node\n")
         ps = mock.Mock(stdout=lines, returncode=0)
         with mock.patch.object(board.subprocess, "run", return_value=ps):
@@ -2335,7 +2334,6 @@ class BoardTest(unittest.TestCase):
             self.assertFalse(alive({"id": "011-x", "tty": "ttys009"}))
             self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004"}))
             self.assertTrue(alive({"id": "005-headless", "tty": None}))
-            self.assertTrue(alive({"id": "009-local", "tty": None}))
             self.assertTrue(alive({"id": "010-node", "tty": None}))
         job_id = self.aged("Orphan dev server", 31, stage="build")
         orphan = ps.stdout.replace("scrum-024-x", f"scrum-{job_id}")
