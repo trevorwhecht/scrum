@@ -1,4 +1,4 @@
-import hashlib, io, json, os, subprocess, sys, tempfile, unittest
+import hashlib, io, json, os, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -156,6 +156,22 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["waiting="])
         self.assertIsNone(self.jobs()[0]["waiting"])
 
+    def test_outcome_field_set_and_cleared(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["outcome=  Approve refused \n at 4:21 PM" + "z" * 400])
+        self.assertEqual(self.jobs()[0]["outcome"], "Approve refused at 4:21 PM" + "z" * 274)
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_set(self.root, job_id, ["outcome=Approve refused. Nothing changed."])
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        self.assertEqual(self.jobs()[0]["outcome"], "Approve refused. Nothing changed.")  # same reason keeps it
+        board.cmd_ask(self.root, job_id, "New blocker?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        self.assertNotIn("outcome", self.jobs()[0])  # a new reason drops it
+        board.cmd_set(self.root, job_id, ["outcome=Rework refused. Nothing changed."])
+        board.cmd_set(self.root, job_id, ["reason=still here"])
+        self.assertEqual(self.jobs()[0]["outcome"], "Rework refused. Nothing changed.")  # no stage change keeps it
+        board.cmd_set(self.root, job_id, ["stage=build"], unpause=True)
+        self.assertNotIn("outcome", self.jobs()[0])  # a stage change drops it
+
     def test_set_specwriter_field(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["specwriter=abc123"])
@@ -297,6 +313,23 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((job["question"], job["reason"]), ("Two?", "Two?"))
         self.assertEqual([o["label"] for o in job["options"]], ["R", "S"])
         self.assertEqual([l["question"] for l in self.log_lines()], ["One?", "Two?"])
+
+    def test_ask_agent_types_not_loaded_is_stalled(self):
+        opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
+        for q, stage, want in (
+                ("scrum-debugger, scrum-builder are not loaded as agent types in this session", "build",
+                 "stalled in build: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
+                ("The scrum Agent Types not loaded here", "check", "stalled in check: The scrum Agent Types not loaded here"),
+                ("agent types are not loaded", "review", "stalled in review: agent types are not loaded"),
+                ("Pick a layout?", "build", "Pick a layout?"),
+                ("agent types are not loaded", "plan", "agent types are not loaded")):
+            with self.subTest(q=q, stage=stage):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                board.cmd_ask(self.root, job_id, q, opts(job_id))
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
+                                 ("needs-human", want, q, [f"resume {job_id}", f"abort {job_id}"]))
 
     def test_stage_change_clears_question(self):
         job_id = board.cmd_new(self.root, "x")
@@ -571,6 +604,22 @@ class BoardTest(unittest.TestCase):
         out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "chain-lock", parent, "002-part-1",
                               "--wait", "0"], capture_output=True, text=True)
         self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"acquired": False, "holder": "003-part-2"}))
+
+    def test_chain_lock_live(self):
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        lock.parent.mkdir(parents=True)
+        self.assertFalse(board.chain_lock_live(self.root, "001-par"), "no lock file")
+        lock.write_text("002-a")
+        self.assertTrue(board.chain_lock_live(self.root, "001-par"))
+        young = time.time() - 1700
+        os.utime(lock, (young, young))
+        self.assertTrue(board.chain_lock_live(self.root, "001-par"), "younger than 1800 s")
+        stale = time.time() - 1801
+        os.utime(lock, (stale, stale))
+        self.assertFalse(board.chain_lock_live(self.root, "001-par"), "older than 1800 s")
+        lock.write_text("002-a")
+        with mock.patch.object(Path, "stat", side_effect=FileNotFoundError):  # gone between the check and the stat
+            self.assertFalse(board.chain_lock_live(self.root, "001-par"))
 
     def test_chain_unlock_only_by_holder(self):
         parent, _ = self.three()
@@ -960,6 +1009,20 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [ ] Parked {setup: add the API key}\n- [x] Free → 001-free\n")
 
+    def test_cloud_claim_priority_order(self):
+        self.cloud_backlog([("Plain", ["a.py"]), ("Low {p:1}", ["b.py"]), ("High {p:5}", ["a.py"]),
+                            ("Parked {p:5} {setup: Buy}", ["d.py"])])
+        # cloud_backlog keys specs on the full line text; re-key them on the stored item text
+        for raw, text in (("Low {p:1}", "Low"), ("High {p:5}", "High"), ("Parked {p:5} {setup: Buy}", "Parked")):
+            self.spec_file(raw).rename(self.spec_file(text))
+        out = board.cmd_cloud_claim(self.root, 1)
+        self.assertEqual(out, {"claimed": [{"id": "001-high", "feature": "High"}]})
+        out = board.cmd_cloud_claim(self.root, 5)  # Plain shares a.py with the High claim, still in flight
+        self.assertEqual(out, {"claimed": [{"id": "002-low", "feature": "Low"}]})
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [ ] Plain\n- [x] Low {p:1} → 002-low\n- [x] High {p:5} → 001-high\n"
+                         "- [ ] Parked {p:5} {setup: Buy}\n")
+
     def test_cloud_claim_skips_item_overlapping_earlier_pick(self):
         self.cloud_backlog([("A", ["a.py"]), ("B", ["a.py", "b.py"]), ("C", ["c.py"])])
         out = board.cmd_cloud_claim(self.root, 3)
@@ -1058,6 +1121,21 @@ class BoardTest(unittest.TestCase):
                          "# Backlog\n- [x] Add UI {needs #api1 #sch2} → 002-add-ui\n"
                          "- [x] Add API {#api1} {needs #sch2} → 003-add-api\n- [x] Add schema {#sch2} → 004-add-schema\n"
                          "- [x] Docs {needs #zzzz} → 005-docs\n")
+
+    def test_runall_start_children_in_priority_order(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Plain {needs #hi11}\n- [ ] Low {#lo11} {p:1}\n- [ ] High {#hi11} {p:5} {needs #lo11}\n"
+            "- [ ] Mid {p:3}\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-high", "003-mid", "004-plain", "005-low"]})
+        self.assertEqual(self.child("001-run-all")["children"], ["002-high", "003-mid", "004-plain", "005-low"])
+        self.assertEqual(self.child("002-high")["depends_on"], ["005-low"])
+        self.assertEqual(self.child("004-plain")["depends_on"], ["002-high"])
+        self.assertEqual(self.child("003-mid")["depends_on"], [])
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n- [x] Plain {needs #hi11} → 004-plain\n- [x] Low {#lo11} {p:1} → 005-low\n"
+                         "- [x] High {#hi11} {p:5} {needs #lo11} → 002-high\n- [x] Mid {p:3} → 003-mid\n")
 
     def test_runall_start_leaves_items_waiting_on_outside_job_open(self):
         self.root.mkdir(parents=True)
@@ -1525,6 +1603,15 @@ class BoardTest(unittest.TestCase):
             self.assertIn("was aborted", str(e.exception))
         self.assertEqual(self.jobs()[0]["stage"], "aborted")
 
+    def test_abort_clears_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        board.cmd_abort(self.root, job_id, requeue=False)
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "aborted")
+        self.assertNotIn("paused", job)
+
     def test_abort_requeues_full_feature_text(self):
         job_id = board.cmd_new(self.root, "Short title")
         (self.root / "jobs" / job_id / "feature.md").write_text("Short title\nwith the full details on line two\n")
@@ -1563,13 +1650,16 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=build", "round=2", "limit=3", "pr=https://x/1", "worktree=/wt/x",
                                           "builder=agent-1"])
         self.write(f"{job_id}/build.md", "STATUS: READY\n")
+        with board.locked_board(self.root) as b:
+            b["jobs"][0]["limitResetAt"] = 1700000000
         before = self.jobs()[0]
         with mock.patch.object(board, "play") as play:
             self.assertEqual(board.cmd_pause(self.root, job_id), [job_id])
         play.assert_not_called()
         job = self.jobs()[0]
-        self.assertEqual((job["stage"], job["reason"]),
-                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual((job["stage"], job["paused"], job["reason"]),
+                         ("build", True, "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertNotIn("limitResetAt", job)
         for key in ("worktree", "branch", "pr", "round", "limit", "builder", "files"):
             self.assertEqual(job[key], before[key], key)
         self.assertEqual((self.root / "jobs" / job_id / "build.md").read_text(), "STATUS: READY\n")
@@ -1595,15 +1685,23 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board, "merge_refusal", return_value=None):  # the pause must refuse, not the PR guard
             for call in (lambda: board.cmd_set(self.root, job_id, ["stage=approve"]),
                          lambda: board.cmd_set(self.root, job_id, ["tty=ttys003"]),
+                         lambda: board.cmd_set(self.root, job_id, ["reason="]),
                          lambda: board.cmd_sync(self.root, job_id),
                          lambda: board.cmd_set(self.root, job_id, ["stage=done", "reason="]),
                          lambda: board.cmd_set(self.root, job_id, ["stage=review", "reason="])):
                 with self.assertRaises(SystemExit) as e:
                     call()
                 self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("needs-human", paused))
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"]), ("review", True, paused))
+        # spawn bookkeeping writes through the pause and keeps it, so a surviving old session stays refused
+        board.cmd_set(self.root, job_id, ["runlog=runs/x.log", "tty=", "outcome="], unpause=True)
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"], job["runlog"]), ("review", True, paused, "runs/x.log"))
         board.cmd_set(self.root, job_id, ["stage=review", "reason="], unpause=True)
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]), ("review", None))
+        self.assertNotIn("paused", job)
         board.cmd_set(self.root, job_id, ["stage=approve"])  # un-paused: writes work again
         self.assertEqual(self.jobs()[0]["stage"], "approve")
 
@@ -1611,13 +1709,17 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=build"])
         board.cmd_pause(self.root, job_id)
-        with self.assertRaises(SystemExit) as e:
-            board.main(["--dir", str(self.root), "set", job_id, "stage=review", "reason="])
-        self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]),
-                         ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
-        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=review", "reason="])
-        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["reason"]), ("review", None))
+        for pairs in (["stage=review", "reason="], ["reason="]):
+            with self.assertRaises(SystemExit) as e:
+                board.main(["--dir", str(self.root), "set", job_id, *pairs])
+            self.assertEqual(str(e.exception), f"job {job_id} was paused by Trevor; stop working on it")
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["paused"], job["reason"]),
+                         ("build", True, "stalled in build: paused by Trevor. Fix: click Play."))
+        board.main(["--dir", str(self.root), "set", "--unpause", job_id, "stage=build", "reason="])
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]), ("build", None))
+        self.assertNotIn("paused", job)
         board.main(["--dir", str(self.root), "set", job_id, "stage=approve"])
         self.assertEqual(self.jobs()[0]["stage"], "approve")
         # not paused: --unpause is harmless, the write applies as without it
@@ -1636,14 +1738,73 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, c1, ["stage=done"])
         board.cmd_set(self.root, c2, ["stage=build"])
         self.assertEqual(sorted(board.cmd_pause(self.root, parent)), sorted([parent, c2]))
-        stalled = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
-        self.assertEqual(stalled[parent], ("needs-human", "stalled in running: paused by Trevor. Fix: click Play."))
-        self.assertEqual(stalled[c2], ("needs-human", "stalled in build: paused by Trevor. Fix: click Play."))
+        jobs = {j["id"]: j for j in self.jobs()}
+        stalled = {k: (j["stage"], j["reason"]) for k, j in jobs.items()}
+        self.assertEqual(stalled[parent], ("running", "stalled in running: paused by Trevor. Fix: click Play."))
+        self.assertEqual(stalled[c2], ("build", "stalled in build: paused by Trevor. Fix: click Play."))
+        self.assertEqual((jobs[parent].get("paused"), jobs[c2].get("paused")), (True, True))
         self.assertEqual((stalled[c1][0], stalled[c3][0], stalled[c4][0]), ("done", "waiting", "waiting"))
+        self.assertNotIn("paused", jobs[c3])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # c3's only dependency is done
         after = {j["id"]: (j["stage"], j["reason"]) for j in self.jobs()}
         self.assertEqual(after[parent], stalled[parent])
         self.assertEqual(after[c3][0], "waiting")
+
+    def test_paused_child_is_idle_for_ready_and_named_in_waiting_on(self):
+        parent = self.plan(self.ticket(1), self.ticket(2),
+                           self.ticket(3, deps="T1, T2", parallel="no — last", exposure="yes"))
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        board.cmd_set(self.root, parent, ["stage=running"])
+        board.cmd_set(self.root, c1, ["stage=build"])
+        board.cmd_set(self.root, c2, ["stage=build"])
+        board.cmd_pause(self.root, c1)
+        board.cmd_pause(self.root, c2)
+        # both paused: none in progress, c3 waits on them, so the parent names the paused children
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([], 0))
+        p = next(j for j in self.jobs() if j["id"] == parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", f"waiting on you in: {c1}, {c2}"))
+        self.assertIsNone(board.resume_blocker(self.root, c1))  # the paused sibling holds no slot
+
+    # --- paused migration ---
+    def legacy_board(self, *jobs):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}, indent=2) + "\n")
+
+    def test_migrate_paused_legacy_job_back_to_stage(self):
+        self.legacy_board({"id": "001-a", "stage": "needs-human", "round": 2,
+                           "reason": "stalled in build: paused by Trevor. Fix: click Play."},
+                          {"id": "002-b", "stage": "needs-human",
+                           "reason": "stalled in running: paused by Trevor. Fix: click Play."})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a", "002-b"])
+        self.assertEqual(self.jobs(), [
+            {"id": "001-a", "stage": "build", "round": 2, "paused": True,
+             "reason": "stalled in build: paused by Trevor. Fix: click Play."},
+            {"id": "002-b", "stage": "running", "paused": True,
+             "reason": "stalled in running: paused by Trevor. Fix: click Play."}])
+        # every locked write migrates too
+        self.legacy_board({"id": "003-c", "stage": "needs-human",
+                           "reason": "stalled in review: paused by Trevor. Fix: click Play."})
+        with board.locked_board(self.root):
+            pass
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["paused"]), ("review", True))
+
+    def test_migrate_paused_is_idempotent(self):
+        self.legacy_board({"id": "001-a", "stage": "needs-human",
+                           "reason": "stalled in check: paused by Trevor. Fix: click Play."})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a"])
+        once = (self.root / "board.json").read_text()
+        os.utime(self.root / "board.json", (1, 1))
+        self.assertEqual(board.cmd_migrate_paused(self.root), [])
+        self.assertEqual((self.root / "board.json").read_text(), once)
+        self.assertEqual((self.root / "board.json").stat().st_mtime, 1)  # nothing migrated: not written
+
+    def test_migrate_paused_skips_other_stalled_reasons(self):
+        job = {"id": "001-a", "stage": "needs-human",
+               "reason": "stalled in build: waiting for a free slot after Play. Fix: click Resume."}
+        self.legacy_board(job)
+        self.assertEqual(board.cmd_migrate_paused(self.root), [])
+        self.assertEqual(self.jobs(), [job])
 
     # --- reopen ---
     def test_reopen_creates_linked_job(self):
@@ -1662,6 +1823,14 @@ class BoardTest(unittest.TestCase):
         board.cmd_abort(self.root, long, requeue=False)
         newer = board.cmd_reopen(self.root, long, "x" * 100)
         self.assertEqual(next(j for j in self.jobs() if j["id"] == newer)["title"], "Reopen 003: " + "x" * 48)
+
+    def test_reopen_keeps_long_note_whole(self):
+        note = ("Still wraps on mobile. " * 66)[:1499] + "."  # 1,500 chars
+        self.assertEqual(len(note), 1500)
+        old = board.cmd_new(self.root, "Wide one")
+        board.cmd_set(self.root, old, ["stage=done", "reason=merged"])
+        new = board.cmd_reopen(self.root, old, note)
+        self.assertEqual((self.root / "jobs" / new / "feature.md").read_text().splitlines()[0], note)
 
     def test_reopen_feature_carries_context(self):
         old = board.cmd_new(self.root, "Done one")
@@ -1820,6 +1989,45 @@ class BoardTest(unittest.TestCase):
     def get(self, job_id):
         return next(j for j in self.jobs() if j["id"] == job_id)
 
+    def test_watchdog_skips_limit_held_job(self):
+        held = self.aged("Held review", 120, stage="review", limitResetAt=1_800_000_000)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.get(held)["stage"], self.get(held)["limitResetAt"]), ("review", 1_800_000_000))
+        plain = self.aged("Plain review", 120, stage="review")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
+    def test_watchdog_skips_paused_job(self):
+        paused = self.aged("Paused build", 120, stage="build", paused=True,
+                           reason="stalled in build: paused by Trevor. Fix: click Play.")
+        before = self.get(paused)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual(self.get(paused), before)
+
+    def test_watchdog_flags_dead_merge_session(self):
+        """A session killed between stage=merging and the squash merge (227, 2026-10-23) must be flagged, or its
+        run-all siblings that share a file wait on it forever."""
+        merging = self.aged("Merging", 31, stage="merging")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [merging])
+        self.assertEqual(self.get(merging)["stage"], "needs-human")
+        self.assertTrue(self.get(merging)["reason"].startswith("stalled in merging: "))
+
+    def test_limit_hold_cleared_on_stage_change_and_pause(self):
+        def held(title):
+            return self.aged(title, 1, stage="build", limitResetAt=1_800_000_000)
+        kept = held("Kept")
+        board.cmd_set(self.root, kept, ["round=1"])
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+        moved = held("Moved")
+        board.cmd_set(self.root, moved, ["stage=merging"])
+        self.assertNotIn("limitResetAt", self.get(moved))
+        paused = held("Paused")
+        board.cmd_pause(self.root, paused)
+        self.assertNotIn("limitResetAt", self.get(paused))
+        with self.assertRaises(SystemExit) as e:
+            board.main(["--dir", str(self.root), "set", kept, "limitResetAt=1"])
+        self.assertTrue(str(e.exception).startswith("bad field 'limitResetAt=1'"), str(e.exception))
+        self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
+
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
         old = self.get(job_id)["updatedAt"]
@@ -1838,7 +2046,7 @@ class BoardTest(unittest.TestCase):
         live = self.aged("Live", 31, stage="build")
         paused = self.aged("Paused", 31, stage="check", waiting="question: which one?")
         others = [self.aged(f"In {s}", 31, stage=s)
-                  for s in ("merging", "running", "waiting", "needs-human", "done", "aborted")]
+                  for s in ("plan", "running", "waiting", "needs-human", "done", "aborted")]
         before = self.jobs()
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
         self.assertEqual(self.jobs(), before)
@@ -1889,6 +2097,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.get(std)["stage"], "needs-human")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
+
+    def test_watchdog_flags_lilguy_with_worktree(self):
+        wt = self.aged("Lil in worktree", 45, stage="build", lane="lilguy", worktree="/tmp/wt-lil")
+        here = self.aged("Lil in checkout", 45, stage="build", lane="lilguy")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [wt])
+        self.assertEqual(self.get(wt)["stage"], "needs-human")
+        self.assertTrue(self.get(wt)["reason"].startswith("stalled in build"), self.get(wt)["reason"])
+        self.assertEqual(self.get(here)["stage"], "build")
 
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
@@ -1955,6 +2171,23 @@ class BoardTest(unittest.TestCase):
             text = board.resume_blocker(self.root, a)
             self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
+
+    def test_live_sessions_count_as_busy_siblings(self):
+        """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so
+        one sweep cannot resume or claim past the cap."""
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        parent, kids = self.runall(6)
+        for i, k in enumerate(kids):
+            self.spec(k, f"src/l{i}.py")
+        for k in kids[:4]:
+            board.cmd_set(self.root, k, stalled, internal=True)
+        self.assertIsNone(board.resume_blocker(self.root, kids[0]))
+        text = board.resume_blocker(self.root, kids[0], live={kids[1], kids[2], kids[3]})
+        self.assertEqual((text, text.ids), ("3 siblings in progress (cap 3)", kids[1:4]))
+        self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
+        out = board.cmd_ready(self.root, parent, live={kids[0], kids[1], kids[2]})
+        self.assertEqual(out["ready"], [], "3 live resumes fill the cap")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[4:6])
 
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):
@@ -2361,6 +2594,131 @@ class BoardTest(unittest.TestCase):
                      "Set PRIVATE KEY in the vault", "TOKEN: see docs", ""):
             with self.subTest(text=text):
                 self.assertFalse(board.secret_filter(text))
+
+
+class SpawnTest(unittest.TestCase):
+    """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
+    STUB = """import json, os, sys
+st, null = os.fstat(0), os.stat(os.devnull)
+rec = {"argv": sys.argv[1:], "cwd": os.getcwd(), "notifier": os.environ.get("CLAUDE_NOTIFIER_DISABLE"),
+       "new_session": os.getsid(0) == os.getpid(), "stdin_devnull": (st.st_dev, st.st_ino) == (null.st_dev, null.st_ino)}
+with open(os.environ["STUB_OUT"], "a") as fh:
+    fh.write(json.dumps(rec) + "\\n")
+print("stub out")
+print("stub err", file=sys.stderr)
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.root, self.out = base / "repo", base / "repo" / "scrum", base / "calls.jsonl"
+        self.root.mkdir(parents=True)
+        self.stub = base / "claude"
+        self.stub.write_text(f"#!{sys.executable}\n" + self.STUB)
+        self.stub.chmod(0o755)
+        for patch in (mock.patch.object(board, "CLAUDE", str(self.stub)),
+                      mock.patch.dict(os.environ, {"STUB_OUT": str(self.out), "SCRUM_CLAUDE": str(self.stub)})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        no_claude_pid(self)
+
+    def records(self, n=1):
+        for _ in range(200):
+            lines = self.out.read_text().splitlines() if self.out.exists() else []
+            if len(lines) >= n:
+                return [json.loads(l) for l in lines]
+            time.sleep(0.05)
+        self.fail(f"stub ran {len(lines)} times, expected {n}")
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "spawn", *args],
+                              capture_output=True, text=True, env={**os.environ, "CLAUDE_NOTIFIER_DISABLE": ""})
+
+    def argv(self, action, prompt="/p", model=None):
+        """The stub's argv (after the binary) for one in-process spawn."""
+        self.out.unlink(missing_ok=True)
+        proc, _ = board.spawn(self.root, "999-not-a-job", action, prompt, model=model)
+        proc.wait(timeout=10)
+        return self.records()[0]["argv"]
+
+    def test_spawn_argv_log_and_env(self):
+        out = self.cli("123-some-job", "start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        line = json.loads(out.stdout)
+        self.assertEqual(set(line), {"log", "pid"})
+        self.assertRegex(line["log"], r"^runs/\d{8}-\d{6}-start-123-some-job\.log$")
+        self.assertIsInstance(line["pid"], int)
+        rec = self.records()[0]
+        self.assertEqual(rec["argv"], ["-p", "/trevskills-scrum start 123-some-job", "--model", "sonnet",
+                                       "--permission-mode", "acceptEdits"])
+        self.assertEqual(os.path.realpath(rec["cwd"]), os.path.realpath(self.repo))
+        self.assertEqual(rec["notifier"], "1")
+        self.assertTrue(rec["new_session"])
+        self.assertTrue(rec["stdin_devnull"])
+        log = self.root / line["log"]
+        for _ in range(200):
+            if "stub err" in log.read_text():
+                break
+            time.sleep(0.05)
+        self.assertIn("stub out", log.read_text())
+        self.assertIn("stub err", log.read_text())
+        out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
+                                                      "--permission-mode", "acceptEdits"])
+
+    def test_spawn_model_selection(self):
+        project = self.root / "project.md"
+        plain = ["-p", "/p", "--permission-mode", "acceptEdits"]
+        for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: inherit\n", None),
+                            ("- Orchestrator model: Inherit\n", None), ("- Orchestrator model: so net; rm\n", "sonnet"),
+                            ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
+                            ("- Stack: Python\n", "sonnet")):
+            project.write_text("# Project profile\n" + line)
+            for action in ("start", "resume"):
+                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits"]
+                self.assertEqual(self.argv(action), expect, (line, action))
+            self.assertEqual(self.argv("approve"), plain, line)
+        project.write_text("- Orchestrator model: opus\n")
+        self.assertEqual(self.argv("approve", model="sonnet"),
+                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits"])
+        self.assertEqual(self.argv("start", model="haiku"),
+                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits"])
+        for bad in ("so net", "$(touch x)", "", "-x y"):
+            with self.assertRaises(SystemExit, msg=bad):
+                board.spawn(self.root, "999-not-a-job", "approve", "/p", model=bad)
+        logs = sorted((self.root / "runs").iterdir())
+        out = self.cli("999-not-a-job", "digest", "--model", "so net")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(sorted((self.root / "runs").iterdir()), logs)  # nothing started, no log
+
+    def test_spawn_sets_runlog(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["tty=ttys004"])
+        proc, log = board.spawn(self.root, job_id, "resume")
+        proc.wait(timeout=10)
+        job = json.loads((self.root / "board.json").read_text())["jobs"][0]
+        self.assertEqual(job["runlog"], log)
+        self.assertRegex(log, rf"^runs/\d{{8}}-\d{{6}}-resume-{job_id}\.log$")
+        self.assertIsNone(job["tty"])
+        self.assertEqual(self.records()[0]["argv"][:2], ["-p", f"/trevskills-scrum resume {job_id}"])
+
+    def test_spawn_unknown_job_still_starts(self):
+        out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits"])
+
+    def test_spawn_rejects_bad_id_or_action(self):
+        for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),
+                               ("001-ok", "St"), ("001-ok", "st art"), ("001-ok", "a/b"), ("001-ok", "")):
+            with self.assertRaises(SystemExit, msg=(job_id, action)):
+                board.spawn(self.root, job_id, action)
+        out = self.cli("../escape", "start")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse((self.root / "runs").exists())
+        self.assertFalse(self.out.exists())
 
 
 class HookTest(unittest.TestCase):
@@ -2848,6 +3206,53 @@ class CloudSyncTest(unittest.TestCase):
         with self.gh([self.pr(state="closed", merged_at="2026-10-01T00:00:00Z")]), mock.patch("sys.stderr", io.StringIO()):
             self.assertEqual(board.cmd_cloud_sync(self.root)["moved"], [])
         self.assertEqual(self.get()["stage"], "cloud")
+
+    def merged(self, body):
+        return self.pr(state="closed", merged_at="2026-10-01T00:00:00Z", body=body)
+
+    def test_cloud_sync_merged_records_lane(self):
+        with self.gh([self.merged("Summary\n\nScrum lane: fast\n")]):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("done", "fast"))
+        self.assertEqual(self.calls, [(self.root.parent, self.PULLS)])  # the lane costs no extra gh call
+
+    def test_cloud_sync_no_lane_line_leaves_lane_unset(self):
+        for body in (None, "Summary only\nlane: fast\n"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    board.cmd_cloud_sync(self.root)
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_unknown_lane_ignored(self):
+        for body in ("Scrum lane: turbo", "Scrum lane: bigboy", "Scrum lane:", "Scrum lane: fastest", "x Scrum lane: fast"):
+            with self.subTest(body=body):
+                self.setUp()
+                with self.gh([self.merged(body)]):
+                    out = board.cmd_cloud_sync(self.root)
+                self.assertEqual(out["moved"][0]["state"], "MERGED")
+                self.assertEqual(self.get()["stage"], "done")
+                self.assertIsNone(self.get().get("lane"))
+
+    def test_cloud_sync_needs_human_and_abort_record_lane(self):
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: debug")
+        comments = [{"user": self.TREV, "body": "Hard stop: schema first\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=None):
+            board.cmd_cloud_sync(self.root)
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("needs-human", "debug"))
+
+        self.setUp()
+        labelled = self.pr(labels=[{"name": "scrum:needs-human"}], body="Scrum lane: fast")
+        comments = [{"user": self.TREV, "body": "requeue: spec writer produced nothing\n<!-- scrum needs-human -->"}]
+        with self.gh([labelled], comments):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "ABORTED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "fast"))
+
+        self.setUp()
+        with self.gh([self.pr(state="closed", body="Scrum lane: standard")]):
+            self.assertEqual(board.cmd_cloud_sync(self.root)["moved"][0]["state"], "CLOSED")
+        self.assertEqual((self.get()["stage"], self.get()["lane"]), ("aborted", "standard"))
 
     def backlog_texts(self):
         return [i["text"] for i in board.read_backlog(self.root)[1] if not i["done"]]
@@ -3414,6 +3819,102 @@ class ReviewPlanTest(unittest.TestCase):
                 board.cmd_review_plan(self.root, self.job)
             self.assertEqual(self.files(1), [])
 
+    # --- deletion-dominated diffs (job 242) ---
+    DEL_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+
+    def big_base(self, files):
+        """Commit files in the worktree and make that commit the job's base, so later deletions are in the diff."""
+        for rel, text in files.items():
+            p = self.wt / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(text) if isinstance(text, bytes) else p.write_text(text)
+            self.git(self.wt, "add", rel)
+        self.git(self.wt, "commit", "-q", "-m", "big base")
+        self.git(self.wt, "branch", "-f", "bigbase")
+        board.cmd_set(self.root, self.job, ["base=bigbase"])
+
+    def delete(self, *rels):
+        self.git(self.wt, "rm", "-q", *rels)
+        self.git(self.wt, "commit", "-q", "-m", "delete")
+
+    def test_review_plan_deletion_dominated_skips_ui_ux(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100, "src/big.py": "x = 1\n" * 100})
+        self.delete("src/big.py")
+        self.commit("web/page.html", "<p>x</p>\n" * 9 + "<p>new</p>\n")  # +1 -91 on a UI file
+        for globs in ("*.html", None):
+            with self.subTest(globs=globs):
+                self.project(globs)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out, {"spawn": ["code"], "since": None})
+                self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+                self.assertEqual(self.read(1, "ux"), self.DEL_SKIP)
+                self.assertEqual(self.read(1, "security"), self.SEC_SKIP)
+        with self.subTest("no UI file: UI_SKIP wins"):
+            self.project("*.css")
+            out = board.cmd_review_plan(self.root, self.job)
+            self.assertEqual(out["spawn"], ["code"])
+            self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+            self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
+    def test_review_plan_deletion_skip_boundary_is_90pct(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 10})
+        self.commit("web/page.html", "<p>x</p>\n" + "<p>new</p>\n")  # +1 -9: exactly 90%
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["code"])
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+
+    def test_review_plan_deletion_dominated_keeps_security_on_sensitive_path(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 50, "src/auth.py": "x = 1\n" * 50})
+        self.delete("src/auth.py")
+        self.commit("web/page.html", "<p>new</p>\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["security", "code"], "since": None})
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.assertFalse((self.rdir(1) / "review-security.md").exists())
+
+    def test_review_plan_80pct_deletion_unchanged(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 10})
+        self.commit("web/page.html", "<p>x</p>\n" * 2 + "<p>a</p>\n<p>b</p>\n")  # +2 -8: 80%
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_deletion_skip_ignores_binary(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        (self.wt / "img.bin").write_bytes(b"\x00\x01\xff" * 10)
+        self.git(self.wt, "add", "img.bin")
+        self.git(self.wt, "commit", "-q", "-m", "binary")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), ["review-security.md"])
+        board.cmd_set(self.root, self.job, ["base=no-such-branch"])
+        (self.rdir(1) / "review-security.md").unlink()
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), [])
+
+    def test_review_plan_rerun_removes_stale_deletion_skip(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.assertFalse(board._real_review(self.rdir(1) / "review-ui.md"))
+        self.commit("src/more.py", "y = 1\n" * 100)  # +101 -100: no longer deletion-dominated
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
+
+    def test_review_plan_incremental_never_deletion_skips(self):
+        self.big_base({"web/page.html": "<p>x</p>\n" * 100})
+        self.commit("web/page.html", "<p>new</p>\n")
+        since = self.round_one({"security": "PASS", "ux": "CHANGES", "ui": "CHANGES", "code": "PASS"})
+        self.commit("src/a.py", "a = 3\n")
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["ux", "ui"], "since": since})
+        self.assertEqual(self.files(2), ["review-code.md", "review-security.md"])
+        self.assertEqual(self.read(2, "code"), self.CARRIED)
+
     # --- AC 7 ---
     def test_review_plan_cli_prints_json(self):
         since = self.round_one(self.MIXED)
@@ -3646,16 +4147,10 @@ class RouteCheckTest(unittest.TestCase):
     def test_route_check_promotes_on_env_file(self):
         self.assertEqual(self.promote({".env.example": "A=1\n"}), "env file .env.example")
 
-    def test_route_check_promotes_on_ui_file(self):
-        self.assertEqual(self.promote({"web/index.html": "<p>\n"}), "UI file web/index.html")
-
-    def test_route_check_promotes_on_ui_directory_and_exact_path(self):
-        self.assertEqual(self.promote({"src/components/x.py": "x\n"}), "UI file src/components/x.py")
+    def test_route_check_ui_file_stays_fast(self):
+        self.assertIsNone(self.promote({"web/index.html": "<p>\n", "src/util.py": "x = 1\n"}))
         self.git("reset", "-q", "--hard", "main")
-        self.commit({"app/page.tsx": "x\n"})
-        self.assertEqual(self.route()["promote"], "UI file app/page.tsx")
-        self.git("reset", "-q", "--hard", "main")
-        self.commit({"src/app/page.tsx": "x\n", "mycomponents/y.py": "y\n"})
+        self.commit({"src/components/x.py": "x\n", "app/page.tsx": "x\n"})
         self.assertIsNone(self.route()["promote"])
 
     def test_route_check_server_only_paths_not_ui_file(self):
@@ -3678,7 +4173,7 @@ class RouteCheckTest(unittest.TestCase):
         self.assertIsNone(self.route()["promote"])
 
     def test_route_check_trigger_order(self):
-        # binary before size, size before file count, count before paths, schema before env/UI/sensitive
+        # binary before size, size before file count, count before paths, schema before env/sensitive; a UI file never promotes
         self.assertEqual(self.promote({"a.bin": b"\x00\xff", "src/a.py": "x\n" * 200}), "binary file a.bin")
         self.git("reset", "-q", "--hard", "main")
         self.commit({**{f"f{i}.py": "x\n" for i in range(5)}, "big.py": "x\n" * 200})
@@ -3694,7 +4189,52 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.route()["promote"], "env file .env")
         self.git("reset", "-q", "--hard", "main")
         self.commit({"x/auth.py": "x\n", "x.html": "x\n"})
-        self.assertEqual(self.route()["promote"], "UI file x.html")
+        self.assertEqual(self.route()["promote"], "sensitive path x/auth.py")
+
+    # --- deletions (job 242) ---
+    def big_base(self, files):
+        """Commit files on the work branch and make that commit the job's base, so later deletions are in the diff."""
+        self.commit(files)
+        self.git("branch", "-f", "bigbase")
+        board.cmd_set(self.root, self.job, ["base=bigbase"])
+
+    def delete(self, *rels):
+        self.git("rm", "-q", *rels)
+        self.git("commit", "-q", "-m", "delete")
+
+    def test_route_check_deletions_stay_fast(self):
+        self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(8)})
+        self.delete(*(f"src/f{i}.py" for i in range(7)))
+        self.assertIsNone(self.promote({"src/f7.py": "y\n" * 5}))  # +5 -400 over 8 files, 1 with an added line
+
+    def test_route_check_promotes_on_120_added_lines(self):
+        self.big_base({"src/old.py": "x\n" * 300})
+        self.delete("src/old.py")
+        self.assertEqual(self.promote({"src/a.py": "x\n" * 120}), "diff over 100 lines (120)")
+
+    def test_route_check_promotes_on_deleted_schema_path(self):
+        for rel, want in (("prisma/schema.prisma", "schema path prisma/schema.prisma"), (".env.example", "env file .env.example"),
+                          ("web/index.html", None), ("src/auth.py", "sensitive path src/auth.py")):
+            with self.subTest(rel):
+                self.git("reset", "-q", "--hard", "main")
+                self.big_base({rel: "x\n"})
+                self.delete(rel)
+                self.assertEqual(self.promote({"src/util.py": "x = 1\n"}), want)
+
+    def test_route_check_clean_round_with_deletion_skips(self):
+        self.big_base({"src/old.py": "x\n" * 95, "src/auth_old.py": "x\n"})
+        self.delete("src/old.py")
+        self.commit({"src/util.py": "x\n" * 5})  # +5 -95
+        d = self.jd / "round-1"
+        d.mkdir(parents=True)
+        (d / "check.md").write_text("CHECK: PASS\n")
+        (d / "review-code.md").write_text("VERDICT: PASS\nok\n")
+        for r in ("ui", "ux"):
+            (d / f"review-{r}.md").write_text("VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n")
+        (d / "review-security.md").write_text("VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n")
+        self.assertTrue(self.route(clean_start=True)["clean_round"])
+        self.delete("src/auth_old.py")
+        self.assertFalse(self.route(clean_start=True)["clean_round"])
 
     # --- 2nd check failure ---
     def test_route_check_promotes_on_second_check_fail(self):
@@ -3837,6 +4377,49 @@ class RouteCheckTest(unittest.TestCase):
         self.round(1, check="FAIL")
         self.assertFalse(self.route(clean_start=True)["approver_sonnet"])
 
+    # --- lilguy promotion (job 244) ---
+    def lilguy(self, files, feature="Tiny change\n", **kw):
+        board.cmd_set(self.root, self.job, ["lane=lilguy"])
+        (self.jd / "feature.md").write_text(feature)
+        if files:
+            self.commit(files)
+        return self.route(**kw)["promote"]
+
+    def test_route_check_lilguy_30_lines_stays(self):
+        self.assertIsNone(self.lilguy({"src/a.py": "x\n" * 20, "src/b.py": "y\n" * 5, "src/c.py": "z\n" * 5}))
+
+    def test_route_check_lilguy_31_lines_promotes(self):
+        self.assertEqual(self.lilguy({"src/a.py": "x\n" * 31}), "diff over 30 added lines (31)")
+
+    def test_route_check_lilguy_4_files_promotes(self):
+        self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(4)}), "more than 3 files with added lines (4)")
+
+    def test_route_check_lilguy_deletions_dont_count(self):
+        self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(5)})
+        self.git("rm", "-q", "src/f0.py", "src/f1.py", "src/f2.py")
+        self.commit({"src/f3.py": "y\n" * 5 + "x\n" * 45, "src/f4.py": "z\n" * 5 + "x\n" * 10})
+        # +10 -200 over 5 files, 2 with added lines
+        self.assertIsNone(self.lilguy({}))
+
+    def test_route_check_lilguy_rules_file_outside_ticket_promotes(self):
+        self.assertEqual(self.lilguy({"skills/trevskills-scrum/SKILL.md": "x\n"}),
+                         "rules file skills/trevskills-scrum/SKILL.md not in feature.md")
+        (self.jd / "feature.md").write_text("Edit skills/trevskills-scrum/SKILL.md wording\n")
+        self.assertIsNone(self.route()["promote"])
+        self.git("reset", "-q", "--hard", "main")
+        self.commit({"agents/scrum-builder.md": "x\n"})
+        (self.jd / "feature.md").write_text("Edit SKILL.md and scrum-builder.md\n")
+        self.assertEqual(self.route()["promote"], "rules file agents/scrum-builder.md not in feature.md")
+        (self.jd / "feature.md").write_text("Edit every agents/*.md file\n")
+        self.assertIsNone(self.route()["promote"])
+
+    def test_route_check_lilguy_check_fails_3(self):
+        self.round(1, check="FAIL")
+        self.assertIsNone(self.lilguy({"src/a.py": "x\n"}, check_fails=2))
+        self.assertEqual(self.route(check_fails=3)["promote"], "check failed 3 times")
+        board.cmd_set(self.root, self.job, ["worktree="])
+        self.assertIsNone(self.route(check_fails=3)["promote"])  # lilguy in the main checkout: no promotion
+
     # --- can't tell ---
     def test_route_check_unreadable_diff_is_conservative(self):
         self.commit({"src/util.py": "x\n"})
@@ -3879,6 +4462,293 @@ class RouteCheckTest(unittest.TestCase):
             self.assertTrue(board.glob_match(path, globs), path)
         for path in ("a.ts", "mycomponents/x.py", "src/app/layout.ts", "app/layout.js", "components"):
             self.assertFalse(board.glob_match(path, globs), path)
+
+
+class LilguyFitTest(unittest.TestCase):
+    """board.py lilguy-fit: whether a new job is tiny and safe enough for Lilguy Worktree mode."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.job = board.cmd_new(self.root, "Tweak a label")
+        self.jd = self.root / "jobs" / self.job
+        (self.jd / "feature.md").write_text("Tweak the dashboard label text\n")
+
+    def points(self, pts):
+        (self.root / "backlog.md").write_text(f"# Backlog\n- [ ] [5] Other item\n- [ ] [{pts}] Tweak a label → {self.job}\n")
+
+    def jev(self, *raws):
+        (self.jd / "jev.log").write_text("".join(f"2026-10-23T10:00:00\tmodel\tHow hard\t{r}\tsonnet\t0.10\n" for r in raws))
+
+    def fit(self):
+        return board.cmd_lilguy_fit(self.root, self.job)
+
+    def test_lilguy_fit_points_1_passes(self):
+        self.points(1)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "lilguy-fit", self.job])
+        self.assertIn(code, (0, None))
+        got = json.loads(out.getvalue())
+        self.assertEqual(set(got), {"fit", "why"})
+        self.assertIs(got["fit"], True)
+        self.assertEqual(out.getvalue().count("\n"), 1)
+
+    def test_lilguy_fit_points_1_naming_skill_md_passes(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Reword SKILL.md, agents/scrum-builder.md and lanes/lilguy.md\n")
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_points_2_fails(self):
+        self.points(2)
+        self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_jev_confident_low_score_passes(self):
+        self.jev('{"type":"score","score":2.8,"confidence":0.9}', '{"type":"score","score":1.2,"confidence":0.79}')
+        self.assertIs(self.fit()["fit"], True)
+        self.jev('{"type":"score","score":1.2,"confidence":0.79}', '{"type":"score","score":2.8,"confidence":0.9}')
+        self.assertIs(self.fit()["fit"], False)  # the last model line decides
+
+    def test_lilguy_fit_jev_low_confidence_fails(self):
+        self.jev('{"type":"score","score":1.2,"confidence":0.69}')
+        self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_missing_confidence_fails(self):
+        for raw in ('{"type":"score","score":1.2}', '{"type":"score","score":1.2,"confidence":"0.9"}', "JevError", "-"):
+            with self.subTest(raw):
+                self.jev(raw)
+                self.assertIs(self.fit()["fit"], False)
+        (self.jd / "jev.log").write_text('2026-10-23T10:00:00\treview\tq\t{"score":0.1,"confidence":0.99}\tskip\t0.1\n')
+        self.assertIs(self.fit()["fit"], False)  # no model line
+
+    def test_lilguy_fit_missing_jevlog_fails(self):
+        self.assertIs(self.fit()["fit"], False)
+        self.points(1)
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_promoted_job_stays_put(self):
+        self.points(1)
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+        board.cmd_set(self.root, self.job, ["lane=lilguy"])
+        self.assertIs(self.fit()["fit"], True)
+
+    def test_lilguy_fit_hard_stop_word_fails(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the Payment total on the receipt\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("Payment", got["why"])
+        for text in ("Read the API key from config", "Load .env.local first", "Fix the LOGIN button", "Bump the env vars"):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(text + "\n")
+                self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_author_is_not_auth(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the author name and the OAuthor badge\n")
+        self.assertIs(self.fit()["fit"], True)
+        (self.jd / "feature.md").write_text("Show the author name next to auth status\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("auth", got["why"])
+
+    def test_lilguy_fit_unknown_job_exits(self):
+        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "lilguy-fit", "999-nope"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("999-nope", r.stderr)
+        with self.assertRaises(SystemExit):
+            board.cmd_lilguy_fit(self.root, "999-nope")
+
+
+class PipelineFitTest(unittest.TestCase):
+    """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
+
+    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root = base / "scrum"
+        self.wt = base / "wt"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.wt.mkdir()
+        (self.wt / "README.md").write_text("readme\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "README.md")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "work")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, files):
+        for rel, text in files.items():
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change")
+
+    def put(self, job_id, rel, text):
+        p = self.root / "jobs" / job_id / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def reviews(self, job_id, n, **texts):
+        for r in ("security", "ux", "ui", "code"):
+            self.put(job_id, f"round-{n}/review-{r}.md", texts.get(r, "VERDICT: PASS\nok\n"))
+
+    def digest(self, *lines):
+        d = self.root / "digests" / "001"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("".join(f"{l}\n" for l in lines))
+
+    def snapshot(self):
+        bj = self.root / "board.json"
+        files = sorted(str(p) for sub in ("digests", "jobs") for p in (self.root / sub).rglob("*"))
+        return bj.read_bytes(), bj.stat().st_mtime_ns, files
+
+    def fit(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "pipeline-fit", "001"])
+        self.assertIn(code, (0, None))
+        return json.loads(out.getvalue())
+
+    def small_standard(self, lines=20, files=2, **round1):
+        job = board.cmd_new(self.root, "Small")
+        board.cmd_set(self.root, job, [f"worktree={self.wt}", "base=main", "lane=standard"])
+        per = lines // files
+        self.commit({f"src/f{i}.py": "x\n" * (per + (lines - per * files if i == 0 else 0)) for i in range(files)})
+        for f in ("spec.md", "build.md", "decision.md"):
+            self.put(job, f, "x\n")
+        self.reviews(job, 1, **round1)
+        return job
+
+    def test_pipeline_fit_reports_digest_jobs(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])  # no lane key: standard
+        for f in ("spec.md", "build.md", "decision.md"):
+            self.put(b, f, "x\n")
+        self.reviews(b, 1, ux="VERDICT: PASS\nCarried forward from round 0: no blocking findings.\n",
+                     ui="VERDICT: PASS\nSkipped by orchestrator: fast lane.\n", code="VERDICT: CHANGES\nfix it\n")
+        carried = "VERDICT: PASS\nCarried forward from round 1: no blocking findings.\n"
+        self.reviews(b, 2, security=carried, ux=carried, ui=carried)
+        d = board.cmd_new(self.root, "Trimmed")
+        board.cmd_set(self.root, d, ["lane=debug"])
+        self.put(d, "spec.md", "x\n")
+        self.put(d, "decision.md", "x\n")
+        e = board.cmd_new(self.root, "No reviews")
+        board.cmd_set(self.root, e, ["lane=fast"])
+        (self.root / "jobs" / e / "round-1").mkdir()
+        self.put(e, "round-1/review-ui.md", "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n")
+        self.digest(b, "../../etc", d, "998-gone", e)
+        before = self.snapshot()
+        calls = []
+        real_run = subprocess.run
+
+        def fake_run(argv, *a, **kw):
+            if argv[0] == "gh":
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '{"additions": 200, "deletions": 50, "changed_files": 4}', "")
+            return real_run(argv, *a, **kw)
+
+        with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+            out = self.fit()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(out["digest"], "001")
+        self.assertEqual([j["id"] for j in out["jobs"]], [b, d, "998-gone", e])
+        for j in out["jobs"]:
+            self.assertEqual(set(j), self.KEYS, j["id"])
+        jb, jd, gone, je = out["jobs"]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("repos/acme/app/pulls/42", calls[0])
+        self.assertEqual(jb, {
+            "id": b, "lane": "standard", "agents": ["spec", "builder", "review-security", "review-code", "approver"],
+            "added": 200, "deleted": 50, "files": 4,
+            "verdicts": {"1": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
+                         "2": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}},
+            "fix_rounds": 1, "over_routed": False, "fit": "standard"})
+        self.assertEqual(jd, {"id": d, "lane": "debug", "agents": ["spec", "approver"], "added": None, "deleted": None,
+                              "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "debug"})
+        self.assertEqual(gone, {"id": "998-gone", "lane": "standard", "agents": [], "added": None, "deleted": None,
+                                "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "standard"})
+        self.assertEqual(je["agents"], [])
+        self.assertEqual(je["verdicts"], {"1": {"security": None, "ux": None, "ui": "PASS", "code": None}})
+        self.assertEqual(je["fit"], "fast")
+
+    def test_pipeline_fit_gh_failure_gives_nulls(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])
+        self.reviews(b, 1)
+        self.digest(b)
+        with mock.patch.object(board.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(["gh"], 1, "", "HTTP 404\n")):
+            j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+        with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 30)):
+            j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+
+    def test_pipeline_fit_flags_over_routed_standard_job(self):
+        job = self.small_standard(security="VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n")
+        self.digest(job)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"]), (20, 0, 2))
+        self.assertEqual(j["agents"], ["spec", "builder", "review-ux", "review-ui", "review-code", "approver"])
+        self.assertEqual((j["over_routed"], j["fit"]), (True, "lilguy"))
+
+    def test_pipeline_fit_flags_mid_size_job_as_fast(self):
+        job = self.small_standard(lines=60, files=2)
+        board.cmd_set(self.root, job, ["lane=debug"])
+        self.digest(job)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["files"]), (60, 2))
+        self.assertEqual((j["over_routed"], j["fit"]), (True, "fast"))
+
+    def test_pipeline_fit_keeps_correctly_routed_job(self):
+        big = self.small_standard(lines=250, files=2)
+        self.digest(big)
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["files"]), (250, 2))
+        self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+        board.cmd_set(self.root, big, ["worktree="])  # no worktree and no PR: unreadable diff
+        j = self.fit()["jobs"][0]
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"]), (None, None, None, False))
+
+    def test_pipeline_fit_round1_changes_not_over_routed(self):
+        job = self.small_standard(code="VERDICT: CHANGES\nfix\n")
+        self.reviews(job, 2)
+        self.digest(job)
+        before = self.snapshot()
+        j = self.fit()["jobs"][0]
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((j["added"], j["files"], j["fix_rounds"]), (20, 2, 1))
+        self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+
+    def test_pipeline_fit_fast_lane_never_over_routed(self):
+        job = self.small_standard()
+        board.cmd_set(self.root, job, ["lane=fast"])
+        self.digest(job)
+        self.assertEqual(self.fit()["jobs"][0]["over_routed"], False)
+
+    def test_pipeline_fit_rejects_unknown_digest(self):
+        self.digest()
+        for bad in ("1", "../x", "999"):
+            with self.assertRaises(SystemExit, msg=bad) as cm:
+                board.cmd_pipeline_fit(self.root, bad)
+            self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
 
 
 if __name__ == "__main__":

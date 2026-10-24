@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 import serve  # noqa: E402
 
 board = serve.board
@@ -67,6 +68,44 @@ class ExitedRunTest(unittest.TestCase):
         self.assertEqual(self.job(job_id)["stage"], "needs-human")
         self.assertTrue(self.job(job_id)["reason"].startswith("stalled in build: session exited"))
 
+
+    def held_after_exit(self, line, now):
+        """A start run that exited mid-build with `line` in its runlog; respawn_exited at time `now`.
+        Returns (flagged ids, job id, spawn mock, play mock)."""
+        job_id = board.cmd_new(self.root, "Limit-killed run")
+        (self.root / "runs").mkdir(exist_ok=True)
+        (self.root / "runs" / "x.log").write_text(f"working...\n{line}\n")
+        self.edit_job(job_id, stage="build", reason="kept reason", runlog="runs/x.log")
+        key = f"repo/{job_id}"
+        dead = mock.Mock()
+        dead.poll.return_value = 0
+        serve.RUNS[key] = {"action": "start", "started": time.time(), "proc": dead, "log": "runs/x.log"}
+        self.addCleanup(lambda: serve.RUNS.pop(key, None))
+        with mock.patch.object(board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(serve.time, "time", return_value=now), \
+                mock.patch.object(serve, "spawn") as spawn, mock.patch.object(board, "play") as play:
+            flagged = serve.respawn_exited("repo", self.root)
+        self.assertIs(serve.RUNS[key]["proc"], dead, "no new RUNS entry")
+        return flagged, job_id, spawn, play
+
+    def test_exited_limit_run_holds_stage(self):
+        now = 1_800_000_000.0
+        flagged, job_id, spawn, play = self.held_after_exit("rate_limit: rejected (five_hour) resets_at=1800003600", now)
+        self.assertEqual(flagged, [])
+        job = self.job(job_id)
+        self.assertEqual((job["stage"], job["reason"], job["limitResetAt"]), ("build", "kept reason", 1800003600))
+        spawn.assert_not_called()
+        self.assertNotIn(mock.call(board.sound("needs-human")), play.call_args_list)
+
+    def test_exited_limit_run_without_future_reset_holds_30_min(self):
+        now = 1_800_000_000.0
+        for line in ("You've hit your usage limit", "rate_limit: rejected (five_hour) resets_at=1799999880"):
+            with self.subTest(line=line):
+                flagged, job_id, spawn, _ = self.held_after_exit(line, now)
+                self.assertEqual(flagged, [])
+                self.assertEqual(self.job(job_id)["stage"], "build")
+                self.assertEqual(self.job(job_id)["limitResetAt"], 1_800_001_800)
+                spawn.assert_not_called()
 
     def test_exited_roadmap_job_logs_roadmap_step(self):
         step_job, child = "017-step-job", "018-child-fix"
