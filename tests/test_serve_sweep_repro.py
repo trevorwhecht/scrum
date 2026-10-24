@@ -44,9 +44,20 @@ class SweepReproTest(unittest.TestCase):
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
         (self.root / "runs" / "001-a.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
-        self.write([{"id": "001-a", "stage": "needs-human", "reason": "stalled in build: no live session",
+        # merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
+        self.write([{"id": "001-a", "stage": "needs-human", "reason": "stalled in merging: no live session",
                      "runlog": "runs/001-a.log"}])
         self.assertEqual(self.tick(), [("001-a", "resume")], "the resumed job makes the project busy: no run-all")
+
+    def test_limit_stalled_build_job_held_in_its_stage_blocks_run_all(self):
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
+        (self.root / "runs" / "001-a.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
+        self.write([{"id": "001-a", "stage": "needs-human", "reason": "stalled in build: no live session",
+                     "runlog": "runs/001-a.log"}])
+        self.assertEqual(self.tick(), [], "held for its reset, and the held job makes the project busy: no run-all")
+        self.assertEqual(self.job("001-a")["stage"], "build")
+        self.assertIn("limitResetAt", self.job("001-a"))
 
     def test_stale_chain_lock_does_not_block(self):
         self.write([{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
