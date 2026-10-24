@@ -119,7 +119,7 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing.
 
    `- Cloud environment: <id>` (optional, hand-added): the claude.ai/code environment the **Cloud lane** starts sessions in.
 
-   `- Auto continue: <n>` (optional, hand-added): serve.py starts one headless run-all at a time across opted-in projects, lower `n` first, skipped when usage is over pace. `- Focus: yes` (optional): first auto-continue target; while it can use the slot, watchdog and continue tick hold every other project. First-run setup never writes these optional lines.
+   `- Auto continue: <n>` (optional, hand-added): serve.py starts one headless run-all per idle opted-in project, Focus projects first, then lower `n`; none when usage is over pace, and no new work beyond 8 live sessions machine-wide. `- Focus: yes` (optional): ordering only, never holds another project. First-run setup never writes these optional lines.
 
    `- Test sign-in: <account> — credentials in <where>` is optional: the test account `scrum-review-ui` and `scrum-review-ux` sign in with to render signed-in pages. `<where>` is where the credentials live, such as an env var name or a file path; the line only points at them and never holds a password or token value. First-run setup writes it only when the repo's CLAUDE.md/AGENTS.md, rules files, README, seed script or e2e config already names a test account, and then writes just the account and where its credentials live. Otherwise it writes no such line.
 
