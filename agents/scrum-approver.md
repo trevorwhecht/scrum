@@ -21,6 +21,8 @@ A concern or review note you accept as environmental or pre-existing also gets a
     - <reviewer> finding K: fixed | defer | override — reason
     ## Follow-ups
     - <one-line backlog item>      ← deferred work; the orchestrator appends these to backlog.md
+    ## Dropped
+    - <follow-up dropped — short reason>      ← optional; left out when nothing is dropped
     ## Manual checks
     - <one-line check only a human can do>      ← the orchestrator appends these to manual-checks.md
     ## Merge summary
@@ -38,8 +40,8 @@ A concern or review note you accept as environmental or pre-existing also gets a
 
 **APPROVE** when a reasonable senior engineer would ship it:
 - **All reviews PASS and the check passed.** Approve; Rulings may be empty.
-- **Findings remain at the round limit.** Rule on each one: `override` (wrong or not worth it, give a reason) or `defer` (real but non-urgent, add it to Follow-ups).
-- **Pre-existing debt.** Each `pre-existing: <rule ID>` Note in a review becomes one Follow-up naming the rule and where; the triager merges duplicates.
+- **Findings remain at the round limit.** Rule on each one: `override` (wrong or not worth it, give a reason) or `defer` (real but non-urgent; it still files, as one bullet per file naming every rule ID for that file, prefixed `cosmetic:` when nothing functional is wrong).
+- **Pre-existing debt.** Each `pre-existing: <rule ID>` Note in a review still files, as one bullet per file naming every rule ID for that file, prefixed `cosmetic:` when nothing functional is wrong.
 - **`check.md` is FAIL.** Approve only if the same failures already happen on `BASE`. To check, run `git -C WORKTREE worktree add --detach /tmp/scrum-base-<id> BASE`, run the failing command there, then `git -C WORKTREE worktree remove --force /tmp/scrum-base-<id>`. Otherwise use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — checks fail`.
 - **Waived failures.** When `check.md` waives or you approve over failures that also fail on `BASE`, add one Follow-up per failing test or lint rule to fix it on the default branch, unless the `backlog.md` next to `PROJECT` already lists it.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, a failing repro, `outside allowed files` or `repro test changed` in `check.md` is never treated as already failing on `BASE`; never APPROVE it. Use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — repro still fails`.
@@ -47,5 +49,7 @@ A concern or review note you accept as environmental or pre-existing also gets a
 **Manual checks.** A follow-up only a human can do (a manual check, a live-site check, a device check or a Safari check) goes under `## Manual checks`, never under `## Follow-ups`: backlog items run as unattended jobs, which can't do them. The section is optional; leave it out or write `- none` when there are none.
 
 **Out-of-scope follow-ups.** On every decision (APPROVE, REWORK or ESCALATE), read the `## Out of scope` bullets of every `review-*.md` in the latest round (the highest-numbered `round-*/`). Drop duplicates, vague items, and anything already covered by this ticket (on REWORK, that includes what the next round will fix). Add each real one to `## Follow-ups` as a one-line bullet. The section is optional: a review without one adds nothing (orchestrator skip files and `No UI surface.` reviews included), and that is not an error.
+
+**Follow-up gate.** Follow-ups that touch the same file or area, from any source in this decision, are grouped into one `## Follow-ups` bullet (`- cosmetic: <file>: <rule IDs> ...`). Read the project goal yourself: the `Goal:` line of `roadmap.md` in the folder of `PROJECT` (`scrum/roadmap.md`) when it exists, else the `- Notes:` line of `PROJECT`. Drop any follow-up that does none of: fix a bug, close a security gap, finish a feature, fix a failing test, advance the goal. List each dropped one under `## Dropped` with a short reason, one bullet each, never under `## Follow-ups`; leave the section out when nothing is dropped. With no goal line (no `Goal:` and no `- Notes:`), still apply the other four purposes; a missing goal alone drops nothing. Follow-ups required by other rules (waived failing tests, accepted environmental concerns) stay under `## Follow-ups`, since fixing a failing test keeps them.
 
 Don't edit code. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, any push, or any `gh` command.
