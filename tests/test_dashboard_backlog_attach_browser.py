@@ -95,7 +95,7 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
-        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 1, "weekly": 1}, "ollama": "down",
+        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 1, "weekly": 1},
                                                                          "claude_exhausted_until": None})
         status.start()
         self.addCleanup(status.stop)

@@ -831,49 +831,23 @@ def run_estimate(argv, root, env):
         return None
 
 
-def local_estimate(root, text, model):
-    """One local attempt: a single Ollama chat with the repo's file list in place of browsing, since a small model
-    in a Claude Code agent loop overflows 32K and never answers. Its points JSON, or None."""
+def estimate(root, text):
+    """One cloud Sonnet attempt, logged to root/routing.log. On any failure the item just stays unestimated (no retry).
+    Returns True when points landed."""
+    argv = [CLAUDE, "-p", ESTIMATE_PROMPT.format(text=text), "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"]
+    start = time.monotonic()
+    data = run_estimate(argv, root, dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1"))
     try:
-        files = subprocess.run(["git", "ls-files"], cwd=root.parent, capture_output=True, text=True,
-                               timeout=30).stdout[:40000]  # ponytail: ~10K tokens cap; a big repo gets a truncated map
-        prompt = ESTIMATE_PROMPT.format(text=text).replace(ESTIMATE_LOOK, "Files in the repository:\n" + files)
-        return points_in(route.chat(model, prompt, timeout=180))
-    except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def estimate(root, text, local_only=False):
-    """Ask the router where the estimator runs (cloud Sonnet or local Ollama), retry a failed local run once on cloud,
-    log each attempt to root/routing.log. On any failure the item just stays unestimated. local_only (the background
-    worker) never spends paid usage: no cloud attempt at all. Returns True when points landed."""
-    prompt, env = ESTIMATE_PROMPT.format(text=text), dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1")
+        route.record(root, "estimator", "cloud", "-", round(time.monotonic() - start, 1), "ok" if data else "invalid-artifact")
+    except (ValueError, OSError):
+        pass  # a missing scrum dir loses the log line, not the estimate
+    if not data:
+        return False
     try:
-        pick = route.route("estimator", scrum_dir=root)
-        model = pick["model"] if pick["runner"] == "local" and pick["model"] else None
-    except Exception:  # a broken or unparseable router answer must never stop an estimate: treat it as cloud
-        model = None
-    attempts = []
-    if model:
-        attempts.append(("local", model, lambda: local_estimate(root, text, model)))
-    cloud = [CLAUDE, "-p", prompt, "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"]
-    if not local_only:
-        attempts.append(("cloud", "sonnet", lambda: run_estimate(cloud, root, env)))
-    for runner, name, attempt in attempts:
-        start = time.monotonic()
-        data = attempt()
-        outcome = "invalid-artifact" if not data else "fallback" if runner == "cloud" and model else "ok"
-        try:
-            route.record(root, "estimator", runner, name, round(time.monotonic() - start, 1), outcome)
-        except (ValueError, OSError):
-            pass  # a missing scrum dir loses the log line, not the estimate
-        if data:
-            try:
-                board.backlog_set_estimate(root, text, data["points"], data.get("why"))
-            except (ValueError, SystemExit, OSError):
-                return False
-            return True
-    return False
+        board.backlog_set_estimate(root, text, data["points"], data.get("why"))
+    except (ValueError, SystemExit, OSError):
+        return False
+    return True
 
 
 # Screenshots dropped on the Backlog add input: saved under scrum/attachments/ and referenced as
@@ -2634,8 +2608,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, [{"name": name} for name in board.projects()])
         if path == "/api/routing-status":  # the header spans every project, so no scrum dir
             t = time.time()
-            return self.send_json(200, {**route.status(), "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t),
-                                        "ollama_models": route.loaded_models()})
+            s = route.status()  # only the keys the dashboard shows: route.py may still report its local model server
+            return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
+                                        "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
         if path == "/api/runs":
             discusses = discuss_runs()
             with RUNS_LOCK:
