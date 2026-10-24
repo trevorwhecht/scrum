@@ -2423,7 +2423,7 @@ def cmd_hook(event, tty, pid=None):
 
 
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
-WATCHED = ("spec", "build", "check", "review", "approve")
+WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).

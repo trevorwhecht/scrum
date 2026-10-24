@@ -3972,10 +3972,10 @@ class AutoResumeTest(unittest.TestCase):
         for jid, text in [("limit", "You've hit your limit \u00b7 resets 2am (America/Los_Angeles)"),
                           ("crash", "Traceback: something else broke"), ("paused", "hit your limit"), ("epoch", "rate_limit: rejected (five_hour) resets_at=1700000000")]:
             (self.root / "runs" / f"{jid}.log").write_text(text)
-            # merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
-            job = {"id": jid, "stage": "needs-human", "reason": "stalled in merging: no live session", "runlog": f"runs/{jid}.log"}
+            # plan is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
+            job = {"id": jid, "stage": "needs-human", "reason": "stalled in plan: no live session", "runlog": f"runs/{jid}.log"}
             if jid == "paused":
-                job.update(stage="merging", paused=True, reason="stalled in merging: paused by Trevor")
+                job.update(stage="plan", paused=True, reason="stalled in plan: paused by Trevor")
             self.jobs.append(job)
 
     def sweep(self):
@@ -4049,7 +4049,7 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
         s = self.serve
-        stalled = "stalled in merging: no board update for 30 min and no live session. Fix: click Resume."
+        stalled = "stalled in plan: no board update for 30 min and no live session. Fix: click Resume."
         for jid in ("lil", "kid"):
             (self.root / "runs" / f"{jid}.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
             (self.root / "jobs" / jid).mkdir(parents=True)
@@ -4330,7 +4330,7 @@ class ExitedRunSweepTest(unittest.TestCase):
         return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
 
     def test_exited_run_ignored_outside_watched_stages(self):
-        jobs = [{"id": f"s-{st}", "stage": st} for st in ("done", "needs-human", "merging", "running", "plan", "aborted")]
+        jobs = [{"id": f"s-{st}", "stage": st} for st in ("done", "needs-human", "running", "plan", "aborted")]
         jobs += [{"id": "wait", "stage": "build", "waiting": True}, {"id": "lil", "stage": "build", "lane": "lilguy"},
                  {"id": "appr", "stage": "build"}, {"id": "live", "stage": "build"}]
         self.write(jobs)
@@ -4561,7 +4561,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
                  ("running", {}, {"running": lambda p, j: j == "002-claimed"}), ("chain lock", {}, {}),
                  ("parent not running", {"parent": "needs-human"}, {}), ("standard lane", {"parent_lane": "standard"}, {}),
                  ("waiting question", {"waiting": {"question": "x?"}}, {}), ("lilguy", {"lane": "lilguy"}, {}),
-                 ("merging", {"stage": "merging"}, {}), ("cloud", {"stage": "cloud"}, {})]
+                 ("plan", {"stage": "plan"}, {}), ("cloud", {"stage": "cloud"}, {})]
         for case, kw, tick_kw in cases:
             with self.subTest(case=case):
                 self.serve.ORPHAN_RESPAWN.clear()
@@ -4791,14 +4791,14 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick(), [])
 
     def limit_stalled(self, log):
-        """Opted-in project a with a claimable backlog and one job stalled in merging, its run log reading `log`.
-        merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage."""
+        """Opted-in project a with a claimable backlog and one job stalled in plan, its run log reading `log`.
+        plan is not WATCHED, so a limit hit resumes it here rather than holding it in its stage."""
         self.serve.AUTO_RESUME.clear(); self.addCleanup(self.serve.AUTO_RESUME.clear)
         root = self.base / "a" / "scrum"
         if not root.exists():
             self.project("a", n=1, jobs=[{"id": "001-x", "stage": "needs-human", "runlog": "runs/001-x.log"}])
         data = json.loads((root / "board.json").read_text())
-        data["jobs"][0].update(stage="needs-human", reason="stalled in merging: no live session")
+        data["jobs"][0].update(stage="needs-human", reason="stalled in plan: no live session")
         (root / "board.json").write_text(json.dumps(data))
         (root / "runs").mkdir(exist_ok=True); (root / "runs" / "001-x.log").write_text(log)
         return root

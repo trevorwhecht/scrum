@@ -44,8 +44,8 @@ class SweepReproTest(unittest.TestCase):
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
         (self.root / "runs" / "001-a.log").write_text("rate_limit: rejected (five_hour) resets_at=1700000000")
-        # merging is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
-        self.write([{"id": "001-a", "stage": "needs-human", "reason": "stalled in merging: no live session",
+        # plan is not WATCHED, so a limit hit resumes it here rather than holding it in its stage
+        self.write([{"id": "001-a", "stage": "needs-human", "reason": "stalled in plan: no live session",
                      "runlog": "runs/001-a.log"}])
         self.assertEqual(self.tick(), [("001-a", "resume")], "the resumed job makes the project busy: no run-all")
 

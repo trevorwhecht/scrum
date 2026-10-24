@@ -1957,6 +1957,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual(self.get(paused), before)
 
+    def test_watchdog_flags_dead_merge_session(self):
+        """A session killed between stage=merging and the squash merge (227, 2026-10-23) must be flagged, or its
+        run-all siblings that share a file wait on it forever."""
+        merging = self.aged("Merging", 31, stage="merging")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [merging])
+        self.assertEqual(self.get(merging)["stage"], "needs-human")
+        self.assertTrue(self.get(merging)["reason"].startswith("stalled in merging: "))
+
     def test_limit_hold_cleared_on_stage_change_and_pause(self):
         def held(title):
             return self.aged(title, 1, stage="build", limitResetAt=1_800_000_000)
@@ -1992,7 +2000,7 @@ class BoardTest(unittest.TestCase):
         live = self.aged("Live", 31, stage="build")
         paused = self.aged("Paused", 31, stage="check", waiting="question: which one?")
         others = [self.aged(f"In {s}", 31, stage=s)
-                  for s in ("merging", "running", "waiting", "needs-human", "done", "aborted")]
+                  for s in ("plan", "running", "waiting", "needs-human", "done", "aborted")]
         before = self.jobs()
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == live), [])
         self.assertEqual(self.jobs(), before)
