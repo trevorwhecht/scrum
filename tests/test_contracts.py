@@ -545,6 +545,33 @@ class ContractTest(unittest.TestCase):
         self.assertIn("jev-gate.py dupe", self.lane("bigboy"))
         self.assertIn("jev-gate.py dupe", self.section(text, "## Approve", "## Migrate"))
 
+    def test_skill_jev_rank_step(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        new_job = self.section(text, "## New job", "## Run all")
+        for phrase in ("jev-gate.py rank", "--priority", "p<N>", "never stops"):
+            self.assertIn(phrase, new_job, phrase)
+        self.assertLess(new_job.index("**Dupe check** (before"), new_job.index("**Rank** (after the Dupe check"))
+
+    def test_skill_rank_on_every_backlog_add(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Routing")
+        for body in (self.section(text, "## Approve", "## Migrate"), merge, self.lane("bigboy"), self.lane("cloud")):
+            self.assertTrue("jev-gate.py rank" in body or "**Rank**" in body, body[:80])
+        self.assertIn("jev-gate.py dupe", merge)
+        self.assertEqual(self.lane("bigboy").count("**Rank**"), 3)
+        self.assertIn("--setup='<Human setup value>' [--priority N]", text)
+
+    def test_skill_rank_backlog_after_backlog_spec(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("rank-backlog", self.section(text, "## Approve", "## Migrate"))
+        self.assertIn("rank-backlog", self.lane("cloud"))
+
+    def test_skill_fallback_already_done_check(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        phrase = "the repository shows is already done"
+        self.assertIn(phrase, self.section(text, "## Approve", "## Migrate"))
+        self.assertIn(phrase, (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+
     def test_skill_jev_approver_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         approve = self.section(text, "## Approve", "## Migrate")

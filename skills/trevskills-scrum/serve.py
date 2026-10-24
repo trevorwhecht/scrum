@@ -559,11 +559,29 @@ def finished_bigboy(job, by_id):
         and all(by_id[k].get("stage") in ("done", "aborted") for k in job["children"] if k in by_id)
 
 
+def parked_parent(project, root, job, by_id, alive):
+    """Ids of the needs-human, non-stalled children of a running, unpaused Run-all/BigBoy parent that is parked on
+    Trevor: every child on the board idle, none waiting, no chain lock, no child running or alive. Else []. Board
+    checks first, so alive() (the ps scan) runs only when the shape matches."""
+    if job.get("stage") != "running" or job.get("lane") not in ("runall", "bigboy") or not job.get("children") \
+            or job.get("paused"):
+        return []
+    kids = [by_id[k] for k in job["children"] if k in by_id]
+    ids = [k["id"] for k in kids if k.get("stage") == "needs-human"
+           and not (k.get("reason") or "").startswith(board.STALLED)]
+    if not ids or not all(board.idle(k) for k in kids) or any(k.get("stage") == "waiting" for k in kids) \
+            or board.chain_lock_live(root, job["id"]) or any(running(project, k["id"]) for k in kids) \
+            or any(alive()(k) for k in kids):
+        return []
+    return ids
+
+
 def sweep_parents(project, root, jobs, alive=None):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
     child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
-    start its waiting children when no child session is alive and no chaining session holds the lock."""
+    mark a parent parked on Trevor (parked_parent) with the WAITING_ON reason and one needs-human sound, else start its
+    waiting children when no child session is alive and no chaining session holds the lock."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
@@ -580,6 +598,13 @@ def sweep_parents(project, root, jobs, alive=None):
         if all(k.get("stage") in ("done", "aborted") for k in kids):
             if p["lane"] == "runall":
                 board.cmd_set(root, p["id"], ["stage=done", "reason="], expect="running")
+            continue
+        parked = parked_parent(project, root, p, by_id, alive)
+        if parked:
+            reason = board.WAITING_ON + ", ".join(parked)
+            if p.get("reason") != reason:  # once per transition: the reason itself is the guard
+                board.cmd_set(root, p["id"], [f"reason={reason}"], expect="running")
+                board.play(board.sound("needs-human"))
             continue
         if not any(k.get("stage") == "waiting" for k in kids) or board.chain_lock_live(root, p["id"]) \
                 or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids):
@@ -735,7 +760,8 @@ def watchdog_tick():
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
-            busy[project] = any(not board.idle(j) and not finished_bigboy(j, by_id) for j in jobs)
+            busy[project] = any(not board.idle(j) and not finished_bigboy(j, by_id)
+                                and not parked_parent(project, root, j, by_id, alive) for j in jobs)
             if focused and project not in focused:  # Focus elsewhere: bookkeeping only, no chaining or auto-resume
                 cloud_tick(project, root, jobs)
                 continue
