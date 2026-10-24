@@ -55,9 +55,12 @@ class RoutingText(unittest.TestCase):
             {"claude": {"5h": 12.6, "weekly": None}, "codex": {"5h": 42, "weekly": 61.4}, "ollama": "up"},
             {"codex": {"5h": None, "weekly": None}, "ollama": "down"},
             {"ollama": "up"}]), [
-            "Claude 5h 13% · wk — · Codex 5h 42% · wk 61% · Ollama up",
-            "Claude 5h — · wk — · Codex 5h — · wk — · Ollama down",
-            "Claude 5h — · wk — · Codex 5h — · wk — · Ollama up"])
+            "Claude 5h 13% · wk — · Codex 5h 42% · wk 61%",
+            "Claude 5h — · wk — · Codex 5h — · wk —",
+            "Claude 5h — · wk — · Codex 5h — · wk —"])
+
+    def test_dashboard_never_mentions_ollama(self):
+        self.assertNotIn("ollama", DASHBOARD.read_text().lower())
 
 
 class UsageRows(unittest.TestCase):
@@ -72,23 +75,22 @@ class UsageRows(unittest.TestCase):
         self.assertEqual(self.rows([s]), [
             '<tr><th scope="row">Claude</th><td title="resets 2025-10-22 16:00">38%</td><td>81%</td><td>2025-10-22 13:45</td></tr>'
             '<tr><th scope="row">Codex</th><td>42%</td><td>61%</td><td>—</td></tr>'
-            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>3 today · last 2026-10-22 14:30</td></tr>'
-            '<tr><th scope="row">Ollama</th><td>—</td><td>—</td><td>up · qwen3:8b, gemma3:4b</td></tr>'])
+            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>3 today · last 2026-10-22 14:30</td></tr>'])
 
     def test_empty_status_renders_dashes(self):
         got = self.rows([{}])[0]
         self.assertEqual(got,
             '<tr><th scope="row">Claude</th><td>—</td><td>—</td><td>—</td></tr>'
             '<tr><th scope="row">Codex</th><td>—</td><td>—</td><td>—</td></tr>'
-            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>— today · last —</td></tr>'
-            '<tr><th scope="row">Ollama</th><td>—</td><td>—</td><td>down</td></tr>')
+            '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>— today · last —</td></tr>')
         for word in ("undefined", "null", "NaN", "Infinity"):
             self.assertNotIn(word, got)
 
-    def test_model_names_are_escaped(self):
+    def test_stale_ollama_fields_render_nothing(self):
         got = self.rows([{"ollama": "up", "ollama_models": ["<script>alert(1)</script>"]}])[0]
-        self.assertIn("<td>up · &lt;script&gt;alert(1)&lt;/script&gt;</td>", got)
+        self.assertNotIn("Ollama", got)
         self.assertNotIn("<script>", got)
+        self.assertNotIn("&lt;script", got)
 
 
 # Drives the real dashboard in headless Chromium against a real serve.py. Prints one JSON line: {"skip": why} when

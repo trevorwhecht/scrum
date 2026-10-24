@@ -204,7 +204,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline); Codex 5h and weekly quota used, from the newest Codex rollout file; and whether local Ollama answers. local/route.py moves the Codex review to Ollama when either Codex window passes its threshold in local/routing.json. Refreshed every 60 s. Opens the Usage dialog."></button>
+  <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
@@ -244,7 +244,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </dialog>
 <dialog id="usage" aria-label="Usage">
   <div class="tabs"><b>Usage</b><button class="close" type="button" aria-label="Close">✕</button></div>
-  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. Ollama: up or down, plus the models loaded right now. A window past its reset shows —.">
+  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
     <thead><tr><th scope="col">AI</th><th scope="col">5h</th><th scope="col">Week</th><th scope="col">Latest</th></tr></thead>
     <tbody id="usageRows"></tbody></table></article>
 </dialog>
@@ -1604,20 +1604,18 @@ document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e =
 
 // Pinned by test_dashboard_routing.
 function routingText(s) {
-  return `Claude 5h ${pct(s.claude?.["5h"])} · wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)} · Ollama ${s.ollama === "up" ? "up" : "down"}`;
+  return `Claude 5h ${pct(s.claude?.["5h"])} · wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)}`;
 }
 // The Usage dialog's rows, one per AI the scrum calls. Pinned by test_dashboard_routing.
 function usageRows(s) {
   const c = s.claude || {}, x = s.codex || {}, j = s.jev || {};
   const cell = (v, reset) => `<td${reset ? ` title="resets ${esc(when(reset))}"` : ""}>${esc(v)}</td>`;
   const row = (ai, five, week, latest) => `<tr><th scope="row">${ai}</th>${five}${week}<td>${esc(latest)}</td></tr>`;
-  const models = (Array.isArray(s.ollama_models) ? s.ollama_models : []).map(String).join(", ");
   return row("Claude", cell(pct(c["5h"]), c["5h_resets_at"]), cell(pct(c.weekly), c.weekly_resets_at), when(c.as_of))
     + row("Codex", cell(pct(x["5h"])), cell(pct(x.weekly)), "—")
-    + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`)
-    + row("Ollama", cell("—"), cell("—"), (s.ollama === "up" ? "up" : "down") + (models ? ` · ${models}` : ""));
+    + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`);
 }
-// Status reads a rollout file, usage.json and every jev.log, and pings Ollama: too much for the 2 s poll. A 404 (older
+// Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. A 404 (older
 // serve.py) or an error hides the button; an open Usage dialog keeps its last rows until a status arrives.
 let usage = null;
 async function loadRouting() {

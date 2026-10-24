@@ -1,4 +1,4 @@
-import json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import inspect, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -43,7 +43,7 @@ class ServeTest(unittest.TestCase):
         stub.write_text(STUB)
         stub.chmod(0o755)
         cls.stub = stub
-        # SCRUM_ROUTE=cloud keeps every estimate on the stub cloud path whatever the local Ollama state.
+        # SCRUM_ROUTE=cloud pins route.py to cloud for every role, so no test depends on local machine state.
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
                           SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
@@ -1296,85 +1296,56 @@ class ServeTest(unittest.TestCase):
     def stub_calls_for(self, item):
         return [c for c in self.calls() if any(item in a for a in c)]
 
-    def test_estimate_cloud_route_records_routing_log(self):
+    def test_estimate_is_one_cloud_call_never_routed(self):
         scrum = self.estimate_scrum("est-cloud", "Cloud item")
-        with mock.patch.object(self.serve.route, "route", return_value={"runner": "cloud", "model": None, "why": "x"}) as r:
-            self.serve.estimate(scrum, "Cloud item")
-        self.assertEqual(r.call_args.args[0], "estimator")
+        with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "m", "why": "x"}) as r, \
+                mock.patch.object(self.serve.route, "chat", return_value='{"points": 3}') as chat:
+            self.assertTrue(self.serve.estimate(scrum, "Cloud item"))
+        r.assert_not_called()
+        chat.assert_not_called()
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Cloud item <!-- several files -->\n")
         [argv] = self.stub_calls_for("Cloud item")
         self.assertEqual([argv[0], *argv[2:]], ["-p", "--model", "sonnet", "--allowedTools", "Read,Grep,Glob"])
-        self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
+        self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "-", "outcome": "ok"}])
 
-    def test_estimate_local_route_is_one_ollama_chat(self):
-        scrum = self.estimate_scrum("est-local", "Local item")
-        with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
-                mock.patch.object(self.serve.route, "chat", return_value='{"points": 5, "why": "several files"}') as chat:
-            self.serve.estimate(scrum, "Local item")
-        (model, prompt), kw = chat.call_args.args, chat.call_args.kwargs
-        self.assertEqual((model, kw["timeout"]), ("qwen3.5:4b", 180))
-        self.assertIn("Item: Local item", prompt)
-        self.assertIn("Files in the repository:", prompt)  # the file map replaces browsing
-        self.assertNotIn(self.serve.ESTIMATE_LOOK, prompt)
-        self.assertEqual(self.stub_calls_for("Local item"), [])  # no claude process at all
-        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Local item <!-- several files -->\n")
-        self.assertEqual(self.routing_lines(scrum),
-                         [{"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "ok"}])
-
-    def test_estimate_local_failure_retries_cloud_once(self):
-        scrum = self.estimate_scrum("est-fallback", "Fallback item")
-        for failure in ({"return_value": "no json"}, {"side_effect": OSError("Ollama down")}):
-            (scrum / "backlog.md").write_text("# Backlog\n- [ ] Fallback item\n")
-            (scrum / "routing.log").unlink(missing_ok=True)
-            with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
-                    mock.patch.object(self.serve.route, "chat", **failure):
-                self.serve.estimate(scrum, "Fallback item")
-            self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Fallback item <!-- several files -->\n")
-            self.assertEqual(self.routing_lines(scrum), [
-                {"role": "estimator", "runner": "local", "model": "qwen3.5:4b", "outcome": "invalid-artifact"},
-                {"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "fallback"}])
-        [cloud, _] = self.stub_calls_for("Fallback item")
-        self.assertEqual([cloud[0], *cloud[2:4]], ["-p", "--model", "sonnet"])
-
-    def test_estimate_failed_cloud_retry_is_not_retried(self):
-        scrum = self.estimate_scrum("est-double-fail", "Double fail")
-        with mock.patch.object(self.serve.route, "route", return_value={"runner": "local", "model": "qwen3.5:4b", "why": "x"}), \
-                mock.patch.object(self.serve.route, "chat", return_value="no json") as chat, \
-                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")):
-            self.serve.estimate(scrum, "Double fail")
-        self.assertEqual(chat.call_count, 1)
-        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Double fail\n")
-        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact", "invalid-artifact"])
+    def test_estimate_failed_cloud_is_not_retried(self):
+        scrum = self.estimate_scrum("est-fail", "Fail item")
+        with mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout="no json")) as run:
+            self.assertFalse(self.serve.estimate(scrum, "Fail item"))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Fail item\n")
+        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact"])
 
     def test_estimate_non_fibonacci_points_are_invalid(self):
         scrum = self.estimate_scrum("est-fib", "Fib item")
-        with mock.patch.object(self.serve.route, "route", return_value={"runner": "cloud", "model": None, "why": "x"}), \
-                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout='{"points": 4, "why": "x"}')):
+        with mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(stdout='{"points": 4, "why": "x"}')):
             self.serve.estimate(scrum, "Fib item")
         self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Fib item\n")
+        self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact"])
 
-    def test_estimate_router_error_falls_back_to_cloud(self):
-        for i, kw in enumerate(({"side_effect": RuntimeError("router broke")}, {"return_value": "garbage"})):
-            scrum = self.estimate_scrum(f"est-router-error-{i}", f"Router error {i}")
-            with mock.patch.object(self.serve.route, "route", **kw):
-                self.serve.estimate(scrum, f"Router error {i}")
-            self.assertEqual((scrum / "backlog.md").read_text(), f"# Backlog\n- [ ] [5] Router error {i} <!-- several files -->\n")
-            [argv] = self.stub_calls_for(f"Router error {i}")
-            self.assertEqual([argv[0], *argv[2:4]], ["-p", "--model", "sonnet"])
-            self.assertEqual(self.routing_lines(scrum), [{"role": "estimator", "runner": "cloud", "model": "sonnet", "outcome": "ok"}])
+    def test_estimate_has_no_local_path(self):
+        self.assertFalse(hasattr(self.serve, "local_estimate"))
+        self.assertEqual(list(inspect.signature(self.serve.estimate).parameters), ["root", "text"])
+
+    def test_estimate_log_failure_keeps_the_estimate(self):
+        scrum = self.estimate_scrum("est-nolog", "Nolog item")
+        with mock.patch.object(self.serve.route, "record", side_effect=OSError("no scrum dir")):
+            self.assertTrue(self.serve.estimate(scrum, "Nolog item"))
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] [5] Nolog item <!-- several files -->\n")
 
     NO_CLAUDE = {"5h": None, "weekly": None, "5h_resets_at": None, "weekly_resets_at": None, "as_of": None}
 
     def test_routing_status_endpoint(self):
         fixed = {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}
         with mock.patch.object(self.serve.route, "status", return_value=fixed) as status, \
-                mock.patch.object(self.serve.route, "loaded_models", return_value=["qwen3:8b"]), \
+                mock.patch.object(self.serve.route, "loaded_models", create=True) as models, \
                 mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.req("GET", "/api/routing-status"),
-                             (200, {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None,
-                                    "claude": self.NO_CLAUDE, "jev": {"today": 0, "last": None}, "ollama_models": ["qwen3:8b"]}))
+                             (200, {"codex": {"5h": 42, "weekly": None}, "claude_exhausted_until": None,
+                                    "claude": self.NO_CLAUDE, "jev": {"today": 0, "last": None}}))
             self.assertEqual(self.req("GET", "/api/routing-status", headers={"Host": "evil.example"})[0], 403)
         self.assertEqual(status.call_count, 1)
+        models.assert_not_called()
         run.assert_not_called()
         popen.assert_not_called()
 
@@ -1384,8 +1355,7 @@ class ServeTest(unittest.TestCase):
             if text is not None:
                 usage.write_text(text)
             with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
-                    mock.patch.object(self.serve.route, "status", return_value={"codex": {"5h": None, "weekly": None}, "ollama": "down"}), \
-                    mock.patch.object(self.serve.route, "loaded_models", return_value=[]):
+                    mock.patch.object(self.serve.route, "status", return_value={"codex": {"5h": None, "weekly": None}, "ollama": "down"}):
                 return self.req("GET", "/api/routing-status")
 
     def test_routing_status_includes_claude_and_jev(self):
@@ -1403,8 +1373,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(data["claude"], {"5h": 37.5, "weekly": None, "5h_resets_at": 4102444800, "weekly_resets_at": None,
                                           "as_of": 1700000000})
         self.assertEqual(data["jev"], {"today": 1, "last": f"{today}T00:00:01"})
-        self.assertEqual(data["ollama_models"], [])
-        self.assertEqual(data["ollama"], "down")
+        self.assertNotIn("ollama", data)
+        self.assertNotIn("ollama_models", data)
 
     def test_routing_status_claude_missing_or_malformed(self):
         for text in (None, "not json", '{"written_at": 1}'):
