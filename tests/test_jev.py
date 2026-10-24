@@ -93,6 +93,24 @@ class JevTest(unittest.TestCase):
         self.assertEqual(body, {"model": "jev-latest", "state": "s", "questions": {
             "q": {"type": "choice", "instructions": "which", "criteria": {"red": "warm", "blue": "cold"}}}})
 
+    def test_choice_criteria_sent_as_dict(self):
+        # The Jev API 422s a list of choice criteria; a list of option names must go out as {name: name}.
+        kind = lambda a: Resp(json.dumps({"answers": {"kind": a}}).encode())
+        questions = {"kind": {"type": "choice", "instructions": "i", "criteria": ["bug", "feature"]}}
+        self.urlopen(kind({"choice": "bug"}), kind({"choice": "nope"}))
+        value, raw = jev.ask_many("s", questions)["kind"]
+        self.assertEqual((value, raw), ("bug", {"choice": "bug"}))
+        self.assertEqual(self.sent()[1]["questions"]["kind"]["criteria"], {"bug": "bug", "feature": "feature"})
+        self.assertEqual(questions["kind"]["criteria"], ["bug", "feature"])
+        with self.assertRaises(jev.JevError):
+            jev.ask_many("s", questions)
+
+        self.urlopen(answers({"choice": "red"}), answers({"choice": "green"}))
+        self.assertEqual(jev.choice("s", "which", ["red", "blue"])[0], "red")
+        self.assertEqual(self.sent()[1]["questions"]["q"]["criteria"], {"red": "red", "blue": "blue"})
+        with self.assertRaises(jev.JevError):
+            jev.choice("s", "which", ["red", "blue"])
+
     def test_bad_answers_raise(self):
         levels, options = ["a", "b", "c"], {"x": "1", "y": "2"}
         cases = [

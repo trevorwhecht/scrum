@@ -28,12 +28,19 @@ def api_key():
     return key
 
 
+def _options(criteria):
+    """Choice criteria on the wire: the API wants a dict, so a list of option names goes out as {name: name}."""
+    return criteria if isinstance(criteria, dict) else {o: o for o in criteria}
+
+
 def ask(state, questions, timeout=TIMEOUT, key=None):
     """Send one request; return the response's `answers` dict."""
     key = key or api_key()
     fail = lambda msg: JevError(msg.replace(key, "***"))
     deadline = time.monotonic() + timeout
-    body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
+    wire = {name: {**q, "criteria": _options(q["criteria"])} if q.get("type") == "choice" else q
+            for name, q in questions.items()}  # a copy: the caller's questions keep their list
+    body = json.dumps({"model": MODEL, "state": state, "questions": wire}).encode()
     req = urllib.request.Request(URL, body, {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     for attempt in range(4):
         try:
