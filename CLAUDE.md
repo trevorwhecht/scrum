@@ -21,9 +21,9 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - Local routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
 - A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` stops at the Merge
-  agent-rules guard for Trevor unless it is an approved digest proposal, or the in-ticket self-heal clears it (every
-  changed rules file named in feature.md or spec.md's `## Likely files`, and `tests.test_contracts` passes). Specs need
-  not restate this.
+  agent-rules guard for Trevor unless it is exactly an approved digest proposal,
+  or `B rules-check` exits 0 and the `scrum-review-rules` review is PASS (the rules gate, `lanes/rules-gate.md`).
+  A diff that touches the human-only set in `docs/skill-standards.md` always stops. Specs need not restate this.
   Batch rule edits; do not mix them into feature jobs.
 
 ## Scrum map

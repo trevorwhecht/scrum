@@ -48,6 +48,9 @@
                                    cited queued digest edits; else exit 1 and print {"ok": false, "error"}
                                    (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py rules-check <id> [--worktree PATH] [--base REF]
+                                   exit 0 and print {"ok","files","failures"} when the job's diff changes a rules file and
+                                   passes docs/skill-standards.md script rules 1-8; else exit 1 (lanes/rules-gate.md)
   board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
                                    --incremental) or full review, write round-N's carried-forward or UI/UX and security
                                    skip files, print {"spawn","since"} (since null = full review)
@@ -94,6 +97,7 @@ Verdicts are never typed in by hand: sync derives them from the first line of ea
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
@@ -1031,6 +1035,155 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
         return {"ok": True, "files": changed, "proposals": labels}
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)}
+
+
+# --- rules-check: the script rules (1-8) of docs/skill-standards.md over a job's rules diff. Merge's Agent rules guard
+# merges without a human when this exits 0 and scrum-review-rules writes VERDICT: PASS (lanes/rules-gate.md). Rule 8:
+# this block and every board.py line naming rules-check are human-only, so no unattended diff can loosen them.
+NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+PERSON_RE = re.compile(r"\b(I|[Yy]ou|[Yy]our|[Ww]e|[Oo]ur)\b")  # rule 3: descriptions are third person
+AT_LINK_RE = re.compile(r"(^|\s)@[\w.~/-]*/[\w./-]*\.md\b", re.M)  # rule 5: an @path import loads the file eagerly
+OTHER_LANE_RE = re.compile(r"lanes/([\w-]+)\.md")
+NAME_MAX, DESC_MAX, AGENT_DESCS_MAX_TOKENS = 64, 1024, 15000  # the skill spec's limits; sub-agents warn past 15k tokens
+BODY_MAX_LINES, BODY_MAX_TOKENS = 500, 5000  # skill best practices: under 500 lines; agentskills.io: 5k-token body
+REF_TOC_LINES, TOC_WITHIN = 100, 10  # best practices: a reference over 100 lines starts with a contents list
+HUMAN_ONLY_FILES = ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md")
+HUMAN_ONLY_SECTIONS = {
+    "skills/trevskills-scrum/SKILL.md": [
+        ("the never-list", "This skill is a sanctioned exception", "\n## Setup"),
+        ("the Merge step 1 guard bullets", "1. **Preconditions:**", "\n2. Run `B set $ID stage=merging`")],
+    "skills/trevskills-scrum/board.py": [("the rules-check code", "# --- rules-check:", "# --- end rules-check")],
+}
+
+
+def _section(text, start, end):
+    """text from start up to end, or None when either marker is missing."""
+    i = text.find(start) if text is not None else -1
+    j = text.find(end, i) if i >= 0 else -1
+    return text[i:j] if j >= 0 else None
+
+
+def _frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    return dict(l.split(": ", 1) for l in m.group(1).splitlines() if ": " in l) if m else None
+
+
+def _tokens(text):
+    return len(text) // 4  # ponytail: chars/4 estimate, a real tokenizer is not stdlib
+
+
+def _file_problems(rel, text):
+    """Rules 1, 2, 3 and 5 for one rules file's text. Messages carry no line numbers, so base and HEAD compare."""
+    out = []
+    if rel.endswith("SKILL.md") or rel.startswith("agents/") or "/agents/" in rel:
+        fm = _frontmatter(text) or {}
+        name, desc = fm.get("name", ""), fm.get("description", "")
+        if not name or not desc:
+            out.append(f"rule 1: {rel}: frontmatter needs name and description")
+        if name and (not NAME_RE.match(name) or len(name) > NAME_MAX or re.search("claude|anthropic", name, re.I)):
+            out.append(f"rule 2: {rel}: name must be lowercase-hyphenated, {NAME_MAX} chars or less, without claude or anthropic")
+        if len(desc) > DESC_MAX:
+            out.append(f"rule 3: {rel}: description is over {DESC_MAX} chars")
+        out += [f"rule 3: {rel}: description has an angle bracket" for _ in re.findall("[<>]", desc)]
+        out += [f"rule 3: {rel}: description is not third person ({m})" for m in PERSON_RE.findall(desc)]
+    out += [f"rule 5: {rel}: has an @ link; name the file instead" for _ in AT_LINK_RE.finditer(text)]
+    if "/lanes/" in rel:
+        if text.count("\n") > REF_TOC_LINES and not re.search(r"contents", "\n".join(text.splitlines()[:TOC_WITHIN]), re.I):
+            out.append(f"rule 5: {rel}: over {REF_TOC_LINES} lines with no contents list in its first {TOC_WITHIN} lines")
+        if any(m != Path(rel).stem for m in OTHER_LANE_RE.findall(text)):
+            out.append(f"rule 5: {rel}: points to another lanes file; keep references one level deep from SKILL.md")
+    return out
+
+
+def _over_budget(text):
+    return text.count("\n") > BODY_MAX_LINES or _tokens(text) > BODY_MAX_TOKENS
+
+
+def _human_only_parts(rel, text):
+    parts = {label: _section(text, start, end) for label, start, end in HUMAN_ONLY_SECTIONS.get(rel, [])}
+    if rel.endswith("board.py") and rel in HUMAN_ONLY_SECTIONS and text is not None:
+        parts["the rules-check code"] = (parts["the rules-check code"], sorted(
+            l for l in text.splitlines() if "rules-check" in l or "rules_check" in l))
+    return parts
+
+
+def _named(rel, texts):
+    """Rule 7 (job 180's in-ticket rule): rel appears verbatim in one of texts, or a `<dir>/*.md` mention covers it."""
+    for text in texts:
+        if re.search(rf"(?<![\w./-]){re.escape(rel)}(?![\w/-]|\.\w)", text):
+            return True
+        if rel.endswith(".md") and any(g[:-5] == os.path.dirname(rel) for g in re.findall(r"[\w./-]+/\*\.md", text)):
+            return True
+    return False
+
+
+def _first_line_pins(text):
+    block = re.search(r"^FIRST_LINE = \{(.*?)^\}", text or "", re.M | re.S)
+    return set(re.findall(r'"([\w-]+)": "([^"]*)"', block.group(1))) if block else set()
+
+
+def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
+    """{"ok", "files", "failures"}: ok only when the job's diff changes a rules file and breaks none of the script rules.
+    worktree/base, when not None, replace the board's values, as in digest-verify; empty fails."""
+    try:
+        job = find(read_board(root), check_id(job_id))
+        wt = job.get("worktree") if worktree is None else worktree
+        base = job.get("base") if base is None else base
+        if not wt or not base:
+            raise ValueError(f"no {'worktree' if not wt else 'base'}")
+        if base.startswith("-"):
+            raise ValueError(f"bad base {base!r}")
+        diff = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
+        rules = [f for f in diff if RULES_RE.search(f)]
+        mb = _git(wt, "merge-base", base, "HEAD").decode().strip()
+
+        def show(rev, f):
+            try:
+                return _git(wt, "show", f"{rev}:{f}").decode()
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        guarded = rules or [f for f in diff if f in HUMAN_ONLY_FILES or f in HUMAN_ONLY_SECTIONS]
+        fails = [] if guarded else ["the diff changes no rules file"]
+        for f in rules:
+            before, after = show(mb, f), show("HEAD", f)
+            if after is None:
+                continue
+            # one message per occurrence, so a second @ link or bracket still fails when the base has one
+            fails += list((Counter(_file_problems(f, after)) - Counter(_file_problems(f, before) if before else [])).elements())
+            if _over_budget(after) and (before is None or after.count("\n") > before.count("\n")
+                                        or len(after) > len(before)):
+                fails.append(f"rule 4: {f}: {after.count(chr(10))} lines, ~{_tokens(after)} tokens: over the "
+                             f"{BODY_MAX_LINES}-line / {BODY_MAX_TOKENS}-token budget and new or grown")
+        descs = sum(len((_frontmatter(p.read_text(errors="replace")) or {}).get("description", ""))
+                    for p in Path(wt).glob("agents/scrum-*.md"))
+        if descs // 4 > AGENT_DESCS_MAX_TOKENS:
+            fails.append(f"rule 3: agent descriptions total ~{descs // 4} tokens, over {AGENT_DESCS_MAX_TOKENS}")
+        try:
+            suite = subprocess.run([sys.executable, "-m", "unittest", "tests.test_contracts"], cwd=wt,
+                                   capture_output=True, timeout=540).returncode  # under the 600 s Bash cap
+        except subprocess.TimeoutExpired:
+            suite = "timeout"
+        if suite != 0:
+            fails.append("rule 6: python3 -m unittest tests.test_contracts fails in the worktree")
+        pins = _first_line_pins(show("HEAD", "tests/test_contracts.py"))
+        for name, _ in sorted(_first_line_pins(show(mb, "tests/test_contracts.py")) - pins):
+            fails.append(f"rule 6: FIRST_LINE pin for {name} removed or changed")
+        jd = Path(root) / "jobs" / job_id
+        feature, spec = (p.read_text(errors="replace") if p.is_file() else "" for p in (jd / "feature.md", jd / "spec.md"))
+        likely = md_section(spec, "Likely files") or ""
+        fails += [f"rule 7: {f} is not named in feature.md or spec.md ## Likely files" for f in diff
+                  if not _named(f, (feature, likely))]
+        for f in diff:
+            if f in HUMAN_ONLY_FILES:
+                fails.append(f"rule 8: {f} is human-only")
+            before, after = _human_only_parts(f, show(mb, f)), _human_only_parts(f, show("HEAD", f))
+            fails += [f"rule 8: {f}: {label} changed; it is human-only" for label in before
+                      if before[label] != after.get(label) or after.get(label) is None]
+        return {"ok": not fails, "files": rules, "failures": fails}
+    except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
+        return {"ok": False, "files": [], "failures": [str(e)]}
+# --- end rules-check
 
 
 # --- route-check: the Fast lane promotion, Review clean-round and Approve model decisions (SKILL.md), from files ---
@@ -2903,6 +3056,10 @@ def main(argv=None):
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
+    rules_check = sub.add_parser("rules-check")
+    rules_check.add_argument("id")
+    rules_check.add_argument("--worktree", default=None)
+    rules_check.add_argument("--base", default=None)
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
     rc = sub.add_parser("route-check")
@@ -2991,6 +3148,10 @@ def main(argv=None):
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
+        print(json.dumps(out))
+        return 0 if out["ok"] else 1
+    elif a.cmd == "rules-check":
+        out = cmd_rules_check(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
     elif a.cmd == "move-ratio":
