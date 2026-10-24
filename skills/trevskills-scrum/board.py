@@ -4,7 +4,8 @@
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
                                    stage=needs-human is refused: park a job with ask
-  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
+  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
+                                   clears the pause
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
                                    closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
                                    shell: <cmd>), log it to questions.log
@@ -49,8 +50,11 @@
                                    skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
+  board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
+                                   answer score < 1.5 at confidence >= 0.7) with no hard-stop word in feature.md
+                                   (SKILL.md New job step 3's Lilguy route)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
-                                   Fast lane promotion trigger (or null), whether a PASS round is a clean round, and
+                                   Fast or Lilguy Worktree mode promotion trigger (or null), whether a PASS round is a clean round, and
                                    whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
@@ -177,6 +181,7 @@ def locked_board(root):
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = root / "board.json"
         board = read_board(root)
+        migrate_paused(board)
         yield board
         for job in board["jobs"]:  # a question lives only while its job waits on Trevor, whoever moved it on
             if job.get("stage") != "needs-human":
@@ -206,7 +211,7 @@ def live(board, job_id, unpause=False):
     job = find(board, job_id)
     if job["stage"] == "aborted":
         raise SystemExit(f"job {job_id} was aborted by Trevor; stop working on it")
-    if not unpause and job["stage"] == "needs-human" and PAUSED_RE.match(job.get("reason") or ""):
+    if not unpause and job.get("paused"):
         raise SystemExit(f"job {job_id} was paused by Trevor; stop working on it")
     return job
 
@@ -329,7 +334,7 @@ def check_points(points):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None):
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
     with locked_board(root):
@@ -359,6 +364,10 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             item = pick(items, index)
             del lines[item["line"]]
             drop_spec(root, item["text"], [i for i in items if i is not item])
+        elif op == "move" and to is not None:
+            # Take item `to`'s place: lands after it when moving down, before it when moving up (top, bottom, drag).
+            a, b = pick(items, index), pick(items, to)
+            lines.insert(b["line"], lines.pop(a["line"]))
         elif op == "move":
             a = pick(items, index)
             # Swap with the nearest open item that way; finished items are hidden in the dashboard.
@@ -494,6 +503,7 @@ def abort_job(root, job, requeue, reason):
     folder = Path(root) / "jobs" / job["id"]
     feature = folder / "feature.md"
     job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    job.pop("paused", None)  # an aborted job is never played
     if not requeue:
         return
     lines, items = read_backlog(root)
@@ -1151,7 +1161,7 @@ def _deletion_dominated(rows):
     return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
 
 
-def _promote_trigger(rows, names, globs):
+def _promote_trigger(rows, names):
     """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
@@ -1160,9 +1170,23 @@ def _promote_trigger(rows, names, globs):
     if (files := len({p for a, _, p in rows if a})) > FAST_MAX_FILES:
         return f"more than {FAST_MAX_FILES} files ({files})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
-                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
+                       ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
             return f"{label} {path}"
+    return None
+
+
+def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
+    """The first Lilguy Worktree mode promotion trigger the diff hits, else None. Deleted lines never count."""
+    if binary := next((p for a, _, p in rows if a is None), None):
+        return f"binary file {binary}"
+    if (lines := sum(a for a, _, _ in rows)) > LILGUY_MAX_LINES:
+        return f"diff over {LILGUY_MAX_LINES} added lines ({lines})"
+    if (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
+        return f"more than {LILGUY_MAX_FILES} files with added lines ({files})"
+    for p in names:
+        if RULES_RE.search(p) and p not in feature_text and f"{p.rpartition('/')[0]}/*.md" not in feature_text:
+            return f"rules file {p} not in feature.md"
     return None
 
 
@@ -1186,7 +1210,12 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     if lane == "fast" and check == "FAIL" and check_fails >= 2:
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
-        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+        promote = _promote_trigger(*diff) if diff else "diff unreadable"
+    elif lane == "lilguy" and job.get("worktree"):
+        feature = d / "feature.md"
+        feature = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
+        promote = "check failed 3 times" if check_fails >= 3 else \
+            _lilguy_trigger(*diff, feature) if diff else "diff unreadable"
     spec = d / "spec.md"
     hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
         if spec.is_file() else None
@@ -1197,6 +1226,53 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
         and not blocked and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
     return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
+
+
+# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, or Jev confident it is trivial) and no hard-stop
+# word in feature.md. Anything unreadable counts as not tiny.
+LILGUY_HARD_STOP_RE = re.compile(
+    r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
+    r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
+    r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
+LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
+
+
+def _jev_model(folder: Path) -> dict | None:
+    """The raw JSON answer of the last `model` line in folder/jev.log (fields: time, step, question, raw, decision,
+    seconds), or None when there is no such line or it isn't a JSON object."""
+    try:
+        lines = (folder / "jev.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    fields = next((f for f in (l.split("\t") for l in reversed(lines)) if len(f) > 3 and f[1] == "model"), None)
+    try:
+        raw = json.loads(fields[3]) if fields else None
+    except ValueError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def cmd_lilguy_fit(root, job_id: str) -> dict:
+    """{"fit", "why"}: fit only for a job on no lane (or lilguy) that is tiny by backlog points or by Jev, with no
+    LILGUY_HARD_STOP_RE word in its feature.md."""
+    job = find(read_board(root), check_id(job_id))
+    lane = job.get("lane")
+    if lane and lane != "lilguy":
+        return {"fit": False, "why": f"already on {lane} lane"}
+    folder = Path(root) / "jobs" / job_id
+    feature = folder / "feature.md"
+    if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
+        return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
+    item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+    if item and item["points"] == 1:
+        return {"fit": True, "why": "backlog item is 1 point"}
+    raw = _jev_model(folder) or {}
+    score, conf = raw.get("score"), raw.get("confidence")
+    if is_num(score) and is_num(conf) and score < LILGUY_JEV_MAX_SCORE and conf >= LILGUY_JEV_MIN_CONFIDENCE:
+        return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
+    pts = f"{item['points']} points" if item and item["points"] else "no points"
+    jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
+    return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
@@ -1454,6 +1530,13 @@ PLAN_FIELDS = {"Depends on": "depends", "Parallel": "parallel", "Exposure": "exp
 TICKET_RE = re.compile(r"^### (T\d+):[ \t]*(.*?)\s*$")
 PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with a / or . and nothing code-like
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
+
+
+def idle(job) -> bool:
+    """Not in progress: an IDLE stage, or paused by Trevor (it keeps its stage but holds no slot)."""
+    return job.get("stage") in IDLE or bool(job.get("paused"))
+
+
 BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
@@ -1729,7 +1812,7 @@ def resume_blocker(root, job_id, live=()):
     spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
         if (jobs_dir / k["id"] / "spec.md").is_file() else ""
     files = {k["id"]: likely_files(spec(k)) for k in kids}
-    busy = [k for k in kids if (k["stage"] not in IDLE or k["id"] in live) and k["id"] != job_id]
+    busy = [k for k in kids if (not idle(k) or k["id"] in live) and k["id"] != job_id]
     if not busy:
         return None
     hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
@@ -1765,14 +1848,16 @@ def cmd_ready(root, parent_id, live=()):
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
         # re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
-        blocked = legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON))
+        held = bool(parent.get("paused"))  # a paused parent claims nothing and keeps its stage and reason
+        blocked = not held and (legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON)))
+        go = not held and (parent["stage"] == "running" or legacy)
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
-        busy = [k for k in kids if k["stage"] not in IDLE or k["id"] in live]
+        busy = [k for k in kids if not idle(k) or k["id"] in live]
         cap = slot_cap(runall)
         ready = []
-        for k in kids if parent["stage"] == "running" or legacy else []:
+        for k in kids if go else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
@@ -1786,8 +1871,8 @@ def cmd_ready(root, parent_id, live=()):
         new = parent["stage"], parent.get("reason")
         if blocked and (ready or busy or finished == len(kids)):
             new = "running", None
-        elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
-            human = [k["id"] for k in kids if k["stage"] == "needs-human"]
+        elif not ready and not busy and finished < len(kids) and go:
+            human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
             waits = human or [k["id"] for k in kids
                            if k.get("setup") == "pending" and k["stage"] not in ("done", "aborted")]
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
@@ -1810,6 +1895,14 @@ def cmd_ready(root, parent_id, live=()):
 
 
 CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
+
+
+def chain_lock_live(root, parent_id) -> bool:
+    """True when jobs/<parent>/.chain.lock exists and is no older than CHAIN_LOCK_STALE (a crashed holder's lock is not)."""
+    try:
+        return time.time() - (Path(root) / "jobs" / parent_id / ".chain.lock").stat().st_mtime <= CHAIN_LOCK_STALE
+    except OSError:
+        return False
 
 
 def cmd_chain_lock(root, parent_id, holder, wait=540):
@@ -1860,12 +1953,18 @@ def cmd_chain_unlock(root, parent_id, holder):
     return {"released": False}
 
 
+def lilguy_in_checkout(job: dict) -> bool:
+    """True for a manual lilguy job: it runs in the main checkout with no worktree, builder or PR to wait on. A lilguy
+    job with a worktree (Lilguy lane Worktree mode) is a normal PR job."""
+    return job.get("lane") == "lilguy" and not job.get("worktree")
+
+
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
-    (bigboy/runall) or lilguy lane."""
+    (bigboy/runall) lane or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall", "lilguy") else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
@@ -1887,9 +1986,9 @@ def merge_refusal(job: dict) -> str | None:
 
 def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
-    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses. expect: write only while the
-    job is still in that stage (checked under the lock), else raise SystemExit and write nothing. stage=needs-human is
-    refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
+    `set --unpause`, which resume and rework use. Only an unpause write with stage= clears `paused`. expect: write only
+    while the job is still in that stage (checked under the lock), else raise SystemExit and write nothing.
+    stage=needs-human is refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
     if "stage=needs-human" in pairs and not internal:
         raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command": '
                          "set never parks a job at needs-human")
@@ -1924,6 +2023,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             if key == "outcome":
                 value = clean(value, 300)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        if unpause and "stage" in given:
+            job.pop("paused", None)  # resume and rework re-enter a stage; spawn bookkeeping keeps the pause
         if job["stage"] != was and "outcome" not in given:
             job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
@@ -2327,24 +2428,50 @@ STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
-# Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
+# Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
+# existing resume path.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
-PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+PAUSED_RE = re.compile(rf"^{STALLED}(\w+): {PAUSED}")
 ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
 
 
+def migrate_paused(board: dict) -> list[str]:
+    """Rewrite each legacy paused job (needs-human with a PAUSED_RE reason) to its stage plus `paused`, keeping the
+    reason. Returns the migrated ids; a second run finds none."""
+    out = []
+    for job in board["jobs"]:
+        m = job.get("stage") == "needs-human" and PAUSED_RE.match(job.get("reason") or "")
+        if m:
+            job.update(stage=m.group(1), paused=True)
+            out.append(job["id"])
+    return out
+
+
+def cmd_migrate_paused(root) -> list[str]:
+    """migrate_paused on board.json, written only when something migrated (locked_board migrates on every write)."""
+    ids = migrate_paused(read_board(root))  # a read first: most ticks find nothing and write nothing
+    if ids:
+        with locked_board(root):
+            pass
+    return ids
+
+
 def cmd_pause(root, job_id):
-    """Mark a job in progress (and its children in progress) needs-human with a stalled reason naming its stage.
-    Every other field is kept, so resume picks up where it stopped. Returns the paused ids; plays no sound."""
+    """Pause a job in progress (and its children in progress): it keeps its stage, gets `paused` and a stalled reason
+    naming its stage. Every other field is kept, so resume picks up where it stopped. Returns the paused ids; plays no
+    sound."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] not in PAUSABLE:
             raise SystemExit(f"job {job_id} is {job['stage']}; only a job in progress can be paused")
+        if job.get("paused"):
+            raise SystemExit(f"job {job_id} is already paused; click Play to restart it")
         by_id = {j["id"]: j for j in board["jobs"]}
-        hit = [job] + [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k]["stage"] in PAUSABLE]
+        hit = [job] + [by_id[k] for k in job.get("children") or []
+                       if k in by_id and by_id[k]["stage"] in PAUSABLE and not by_id[k].get("paused")]
         for j in hit:
-            j.update(stage="needs-human", reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+            j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
         return [j["id"] for j in hit]
 
@@ -2391,10 +2518,11 @@ def cmd_watchdog(root, alive=None):
     flagged, requeued = [], []
     try:
         with locked_board(root) as board:
-            # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
+            # a lilguy job in the main checkout has no pipeline to resume: no worktree or builder.
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and j.get("lane") != "lilguy" and not j.get("limitResetAt") and stalled_since(j, cutoff)]
+                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
+                     and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
                 if alive(job):
@@ -2485,8 +2613,9 @@ def roadmap_show(root):
     blocker = None
     if cur and cur[1]["job"]:
         job_id, jobs = cur[1]["job"], read_board(root)["jobs"]
-        hit = next((j for j in jobs if j.get("id") == job_id and j.get("stage") == "needs-human"), None) \
-            or next((j for j in jobs if j.get("parent") == job_id and j.get("stage") == "needs-human"), None)
+        stopped = lambda j: j.get("stage") == "needs-human" or j.get("paused")
+        hit = next((j for j in jobs if j.get("id") == job_id and stopped(j)), None) \
+            or next((j for j in jobs if j.get("parent") == job_id and stopped(j)), None)
         blocker = hit and {"job": hit["id"], "reason": hit.get("reason") or ""}
     return {"name": rm["name"],
             "phases": [{"n": ph["n"], "title": ph["title"],
@@ -2677,6 +2806,7 @@ def main(argv=None):
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
     sub.add_parser("move-ratio").add_argument("id")
+    sub.add_parser("lilguy-fit").add_argument("id")
     rc = sub.add_parser("route-check")
     rc.add_argument("id")
     rc.add_argument("--check-fails", type=int, default=0)
@@ -2769,6 +2899,8 @@ def main(argv=None):
         out = cmd_move_ratio(a.dir, a.id)
         print(json.dumps(out))
         return 1 if out.get("ok") is False else 0
+    elif a.cmd == "lilguy-fit":
+        print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
     elif a.cmd == "route-check":
         print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":

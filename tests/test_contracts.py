@@ -735,6 +735,24 @@ class ContractTest(unittest.TestCase):
         self.assertIn("lilguy", record)
         self.assertIn("lilguy", (ROOT / "README.md").read_text())
 
+    def test_lilguy_worktree_mode_contract(self):
+        lilguy = self.lane("lilguy")
+        self.assertIn("Steps 1-6 apply only to `/trevskills-scrum lilguy <feature text>`", lilguy)
+        self.assertLess(lilguy.index("6. End with the **Final report**"), lilguy.index("\n## Worktree mode\n"))
+        mode = lilguy[lilguy.index("\n## Worktree mode\n"):]
+        for phrase in ("lilguy-fit", "scrum/<id>", "**Merge**", "B route-check $ID", "lane=fast", "Promoted to fast:",
+                       "promoted.md", "30", "spawns no subagents"):
+            self.assertIn(phrase, mode, phrase)
+
+    def test_new_job_routes_tiny_jobs_to_lilguy(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
+        for phrase in ("B lilguy-fit $ID", "**Lilguy lane**", "**Lilguy route:**"):
+            self.assertIn(phrase, step3, phrase)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("(a lilguy job with a worktree: **Lilguy lane** Worktree mode)", resume)
+        self.assertIn("lilguy-fit", self.lane("runall"))
+
     def test_skill_bigboy_lane_handles_runall_parent(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         bigboy = self.lane("bigboy")
@@ -882,6 +900,34 @@ class ContractTest(unittest.TestCase):
         for heading in ("## Check gate", "## Review (WAIT FOR ALL)"):
             nxt = text.index("\n## ", text.index(heading) + 1)
             self.assertIn("see **Fast lane**", text[text.index(heading):nxt], heading)
+
+    def test_spec_writer_fast_lane_allows_ui(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("- `Lane` picks the pipeline."))
+        for phrase in ("`UI surface: no`", "UI globs"):
+            self.assertNotIn(phrase, rule, phrase)
+        for phrase in ("100", "3 files", "Hard stops: none"):
+            self.assertIn(phrase, rule, phrase)
+
+    def test_skill_new_job_fast_ignores_ui_surface(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step = next(l for l in text.splitlines() if l.strip().startswith("3c. **Lane:**"))
+        fast_rule = step[step.index("Set `fast`"):]
+        self.assertNotIn("UI surface:", fast_rule)
+        self.assertIn("Hard stops:", fast_rule)
+
+    def test_skill_fast_lane_ui_reviewer(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Debug lane")
+        for phrase in ("scrum-review-ui", "scrum-review-e2e", "E2E:", "UI globs"):
+            self.assertIn(phrase, fast, phrase)
+        self.assertNotIn("UI globs", self.section(fast, "After `CHECK: PASS`", "2. **Review.**"))
+        route = fast[fast.index("3. **Route:**"):]
+        self.assertIn("both spawned reviewers passed", route)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        clause = resume[resume.index("a `lane=fast` job"):]
+        clause = clause[:clause.index(")")]
+        self.assertIn("UI reviewer", clause)
 
     def test_code_reviewer_fast_lane_is_diff_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
@@ -1640,6 +1686,17 @@ class ContractTest(unittest.TestCase):
                        'B backlog-add "re-run final review of $P (gap of $P)"', "B roadmap-next $P"):
             self.assertIn(phrase, line, phrase)
         self.assertNotIn("plan-apply $P --fix", line)
+
+    def test_pause_keeps_the_job_in_its_stage(self):
+        text = self.rules()
+        pause = next(l for l in text.splitlines() if l.startswith("**Pause:**"))
+        self.assertIn(pause, self.section(text, "## Setup", "## Commands"))
+        for phrase in ("the job stays in its stage with board `paused` true and reason `stalled in <stage>: paused by Trevor`",
+                       "fails with `was paused by Trevor`", "Only `B set --unpause` with a `stage=`"):
+            self.assertIn(phrase, pause, phrase)
+        self.assertNotIn("the job becomes `needs-human`", pause)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("The job must have board `paused` true, or be `needs-human` with a reason starting with", resume)
 
     def test_resume_reentry_per_reason(self):
         text = self.rules()

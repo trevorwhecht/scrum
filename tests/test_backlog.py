@@ -83,6 +83,19 @@ class BacklogTest(unittest.TestCase):
         board.backlog_op(self.root, "move", index=1, delta=-1)  # only finished items above: no-op
         self.assertEqual(board.backlog_items(self.root)[1]["text"], "D")
 
+    def test_move_to_takes_that_items_place(self):
+        (self.root / "backlog.md").write_text("# Backlog\n\n- [ ] A\n- [x] B → 001-b\n- [ ] C\n- [ ] D\n")
+        texts = lambda: [i["text"] for i in board.backlog_items(self.root)]
+        board.backlog_op(self.root, "move", index=3, to=0)  # up to the top: before A
+        self.assertEqual(texts(), ["D", "A", "B", "C"])
+        board.backlog_op(self.root, "move", index=0, to=3)  # down to the bottom: after C
+        self.assertEqual(texts(), ["A", "B", "C", "D"])
+        board.backlog_op(self.root, "move", index=0, to=2)  # drag down past a finished item: after C
+        self.assertEqual(texts(), ["B", "C", "A", "D"])
+        with self.assertRaises(SystemExit):
+            board.backlog_op(self.root, "move", index=0, to=9)
+        self.assertTrue(self.text().startswith("# Backlog\n\n- [x] B"))
+
     def test_estimate_fills_only_the_unestimated_matching_item(self):
         board.backlog_set_estimate(self.root, "Dark mode", 3, "one toggle and a CSS variable set")
         item = board.backlog_items(self.root)[2]

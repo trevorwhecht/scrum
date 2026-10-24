@@ -23,4 +23,6 @@ Cleans the backlog, then runs every open item as a child job of one Run-all pare
 6. Run **BigBoy lane** step 2 for P's children.
 7. Run **BigBoy lane** step 3 for `P`, then give the final report. Never ask questions here outside step 5.
 
+Each child starts through `start <child>`, so **New job** step 3's Lilguy route (`B lilguy-fit`) routes a tiny child to **Lilguy lane** Worktree mode the same way.
+
 The final report lists the Run-all parent id, the children it created, which children started in this session, then what the triage merged, retired, moved to manual checks, estimated and added dependencies for (counts from `triage-apply`, `depends` included, or the failure line).

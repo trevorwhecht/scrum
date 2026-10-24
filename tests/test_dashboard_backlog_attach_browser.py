@@ -39,7 +39,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
               docScroll: document.documentElement.scrollWidth, docClient: document.documentElement.clientWidth,
               selHeight: sel.getBoundingClientRect().height, selFont: getComputedStyle(sel).fontSize};
     });
-    await page.fill("#blAdd input[name=text]", "Header broken");
+    await page.fill("#blAdd textarea[name=text]", "Header broken");
     // Watch the + button: it must go disabled while the upload is in flight and come back afterwards.
     await page.evaluate(() => {
       window.__seenDisabled = false;
@@ -50,22 +50,22 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       const dt = new DataTransfer();
       dt.items.add(new File([new Uint8Array(bytes)], name, {type}));
       const ev = new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true});
-      return !document.querySelector("#blAdd input[name=text]").dispatchEvent(ev);  // true = default (navigation) prevented
+      return !document.querySelector("#blAdd textarea[name=text]").dispatchEvent(ev);  // true = default (navigation) prevented
     }, [bytes, name, type]);
     const png = [...Buffer.from("\x89PNG\r\n\x1a\nbrowser drop", "latin1")];
     got.pngPrevented = await drop(png, "shot.png", "image/png");
-    await page.waitForFunction(() => document.querySelector("#blAdd input[name=text]").value.includes("[screenshot:"));
+    await page.waitForFunction(() => document.querySelector("#blAdd textarea[name=text]").value.includes("[screenshot:"));
     await page.waitForFunction(() => !document.querySelector("#blAdd button[type=submit]").disabled);
-    got.afterPng = await page.evaluate(() => ({value: document.querySelector("#blAdd input[name=text]").value,
+    got.afterPng = await page.evaluate(() => ({value: document.querySelector("#blAdd textarea[name=text]").value,
       seenDisabled: window.__seenDisabled, blError: document.getElementById("blError").textContent, url: location.href}));
     got.textPrevented = await drop([...Buffer.from("hello")], "notes.txt", "text/plain");
     await page.waitForFunction(() => document.getElementById("blError").textContent !== "");
-    got.afterText = await page.evaluate(() => ({value: document.querySelector("#blAdd input[name=text]").value,
+    got.afterText = await page.evaluate(() => ({value: document.querySelector("#blAdd textarea[name=text]").value,
       blError: document.getElementById("blError").textContent}));
     await page.selectOption("#blAdd select[name=points]", "8");
     got.pickedClass = await page.evaluate(() => document.querySelector("#blAdd select").className);
     await page.click("#blAdd button[type=submit]");
-    await page.waitForFunction(() => document.querySelector("#blAdd input[name=text]").value === "");
+    await page.waitForFunction(() => document.querySelector("#blAdd textarea[name=text]").value === "");
     got.afterAdd = await page.evaluate(() => ({points: document.querySelector("#blAdd select").value,
       cls: document.querySelector("#blAdd select").className, blError: document.getElementById("blError").textContent}));
     console.log(JSON.stringify(got));
@@ -123,7 +123,7 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
 
     def check(self, got):
         shot = self.repo / "scrum" / "attachments" / f"{PNG_HASH}.png"
-        self.assertEqual(got["layout"]["tags"], ["SELECT", "INPUT", "BUTTON"], got)
+        self.assertEqual(got["layout"]["tags"], ["SELECT", "TEXTAREA", "BUTTON"], got)
         self.assertEqual(got["layout"]["options"], ["?", "1", "2", "3", "5", "8", "13"], got)
         self.assertEqual(got["layout"]["value"], "", got)
         self.assertTrue(got["pngPrevented"], got)

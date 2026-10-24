@@ -45,7 +45,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
                         label: box && box.firstChild.textContent,
                         steps: ul && [...ul.children].map(s => s.textContent),
                         stepHtml: ul && [...ul.children].map(s => s.children.length),
-                        boxBelowInput: box && box.getBoundingClientRect().top >= li.querySelector("input").getBoundingClientRect().bottom};
+                        boxBelowInput: box && box.getBoundingClientRect().top >= li.querySelector("textarea").getBoundingClientRect().bottom};
               }),
               listScroll: list.scrollWidth, listClient: list.clientWidth,
               dlgScroll: dlg.scrollWidth, dlgClient: dlg.clientWidth,
@@ -120,7 +120,7 @@ class DashboardBacklogSetupBrowserTest(unittest.TestCase):
         self.assertEqual(sorted(before), ["1", "2"], got)
         plain = before["1"]
         self.assertEqual(plain["cls"], "", got)
-        self.assertEqual(plain["tags"], ["SELECT.pts", "INPUT", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn"], got)
+        self.assertEqual(plain["tags"], ["SPAN.grip", "SELECT.pts", "TEXTAREA", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn"], got)
         self.assertEqual(plain["buttons"], ["up:↑", "down:↓", "run:▶", "delete:✕"], got)
         marked = before["2"]
         self.assertEqual(marked["cls"], "setup", got)
