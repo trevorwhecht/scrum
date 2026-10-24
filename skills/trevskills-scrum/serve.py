@@ -627,10 +627,11 @@ def auto_continue(root: Path) -> int | None:
 
 
 def focus(root: Path) -> bool:
-    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). While any
-    project has it, it is auto continue's only target and the watchdog leaves every other project alone: no chaining,
-    no auto-resume (so their run-alls hold where they are and claim no session slot). Trevor's own starts, Resume and
-    Play still work everywhere."""
+    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). Focus =
+    priority, exclusive only while the Focus project can use the slot (focus_holds): then it is auto continue's only
+    target and the watchdog leaves every other project alone: no chaining, no auto-resume (so their run-alls hold where
+    they are and claim no session slot). A blocked Focus project lends the slot and the tick runs as if no project had
+    Focus. Trevor's own starts, Resume and Play still work everywhere."""
     try:
         return bool(FOCUS_RE.search((root / "project.md").read_text()))
     except (OSError, ValueError):
@@ -651,6 +652,21 @@ def claimable(root: Path) -> bool:
     return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
 
 
+def board_busy(project, root, jobs, by_id, alive) -> bool:
+    """Work in flight: some job not idle, other than a finished BigBoy parent or a parent parked on Trevor."""
+    return any(not board.idle(j) and not finished_bigboy(j, by_id)
+               and not parked_parent(project, root, j, by_id, alive) for j in jobs)
+
+
+def focus_holds(project: str, root: Path, busy: bool) -> bool:
+    """A Focus project can use the slot: busy, its auto-started run-all running, or a claimable backlog line. Any
+    error counts as holding."""
+    try:
+        return busy or running(project, "run-all") or claimable(root)
+    except (Exception, SystemExit):
+        return True
+
+
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """Start one headless run-all across opted-in projects when none of them has work in flight, no auto-started
     run-all is still running, and usage is not over pace. The project that just finished goes first, then the most
@@ -663,8 +679,11 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
         n = auto_continue(repo / "scrum")
         if n is not None:
             opted.append((project, repo / "scrum", n, last_active(repo / "scrum")))
-    if any(focus(root) for _, root, *_ in opted):  # a Focus project is the only target and the only busy gate
-        opted = [o for o in opted if focus(o[1])]
+    # Focus = priority, exclusive only while the Focus project can use the slot: a holding Focus project is the only
+    # target and the only busy gate; with none holding, every opted-in project competes as usual
+    holding = [o for o in opted if focus(o[1]) and focus_holds(o[0], o[1], busy.get(o[0], True))]
+    if holding:
+        opted = holding
     if any(busy.get(p) or running(p, "run-all") for p, *_ in opted) \
             or board.pace_cap(board.read_usage(), time.time(), None) is not None:
         return
@@ -747,7 +766,16 @@ def watchdog_tick():
     ones, and poll its cloud jobs (cloud_tick). Last, auto_continue_tick. One project's failure never stops the others."""
     busy, alive = {}, once(lambda: board.session_alive_fn())
     projects = board.projects()
-    focused = {p for p, repo in projects.items() if focus(repo / "scrum")}
+
+    def holds(project, root):  # from board state before this tick's sweep; a read or parse error holds
+        try:
+            jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
+            busy_now = board_busy(project, root, jobs, {j["id"]: j for j in jobs}, alive)
+        except (Exception, SystemExit):
+            return True
+        return focus_holds(project, root, busy_now)
+
+    focused = {p for p, repo in projects.items() if focus(repo / "scrum") and holds(p, repo / "scrum")}
     for project, repo in projects.items():
         try:
             root = repo / "scrum"
@@ -760,9 +788,8 @@ def watchdog_tick():
                 continue
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
-            busy[project] = any(not board.idle(j) and not finished_bigboy(j, by_id)
-                                and not parked_parent(project, root, j, by_id, alive) for j in jobs)
-            if focused and project not in focused:  # Focus elsewhere: bookkeeping only, no chaining or auto-resume
+            busy[project] = board_busy(project, root, jobs, by_id, alive)
+            if focused and project not in focused:  # a holding Focus elsewhere: bookkeeping only, no chaining or auto-resume
                 cloud_tick(project, root, jobs)
                 continue
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):

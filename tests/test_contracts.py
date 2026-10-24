@@ -2206,6 +2206,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_skill_md_size_budget(self):
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 83000)
 
+    def test_focus_is_priority_not_lock(self):
+        setup = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Setup", "## Commands")
+        self.assertIn("`- Focus: yes` (optional): first auto-continue target; while it can use the slot,", setup)
+        self.assertNotIn("sole auto-continue target", setup)
+
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         lane = self.lane("roadmap")
