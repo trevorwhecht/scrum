@@ -187,5 +187,42 @@ class ReadyPacingTest(unittest.TestCase):
             self.assertEqual((out["ready"], out["in_progress"]), (kids[6:6 + claims], 6 + claims), ram)
             self.assertEqual(self.jobs()[parent].get("reason"), reason, ram)
 
+    def held_board(self, held, pct):
+        """Run-all parent with 3 children sharing Likely file x: `held` of A, C limit-held in build, B waiting."""
+        self.usage.write_text(json.dumps(usage(five=(pct, 9000), written_at=int(time.time()))))
+        parent, (a, b, c) = self.runall(3)
+        for k in (a, b, c):
+            self.spec(k, "x")
+        for k in held:
+            job = {"A": a, "C": c}[k]
+            board.cmd_set(self.root, job, ["stage=build", "round=1", "builder=claude"])
+            self.set_hold(job)
+        return parent, b
+
+    def set_hold(self, job_id):
+        path = self.root / "board.json"
+        data = json.loads(path.read_text())
+        for j in data["jobs"]:
+            if j["id"] == job_id:
+                j["limitResetAt"] = int(time.time()) + 3600
+        path.write_text(json.dumps(data))
+
+    def claimed(self, held, pct):
+        parent, b = self.held_board(held, pct)
+        board.cmd_ready(self.root, parent)
+        return self.jobs()[b]["stage"] == "spec"
+
+    def test_ready_held_kids_yield_when_cap_below_held(self):
+        self.assertTrue(self.claimed("AC", 96))  # allowance 1 < 2 held
+
+    def test_ready_held_kids_keep_slot_when_cap_covers_them(self):
+        self.assertFalse(self.claimed("A", 96))  # allowance 1 >= 1 held
+
+    def test_ready_held_kids_keep_slot_without_taper(self):
+        self.assertFalse(self.claimed("A", 0))  # 0 % used: no taper
+
+    def test_ready_held_kids_yield_still_respects_zero_cap(self):
+        self.assertFalse(self.claimed("AC", 99))  # allowance 0: nothing is claimed
+
 if __name__ == "__main__":
     unittest.main()

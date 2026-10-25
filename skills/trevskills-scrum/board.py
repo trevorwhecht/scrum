@@ -2280,6 +2280,9 @@ def cmd_ready(root, parent_id, live=()):
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
+        limited = [k for k in busy if k.get("limitResetAt") and not idle(k)]
+        if cap is not None and allow < len(limited):  # held kids run no session: when the taper leaves fewer slots
+            busy = [k for k in busy if k not in limited]  # than there are held kids, they yield their claim slot
         room = ram_room() if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)
