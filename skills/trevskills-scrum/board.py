@@ -1961,8 +1961,9 @@ def slot_cap(runall):
 
 MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
 MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
-MAX_SWAP_PCT = 50  # ... or above this much swap in use: memory_pressure's free % counts inactive pages as free, so
-#                    19 sessions ran at "32% free" with swap 90% full (2026-10-24); swap is the honest signal
+MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
+#                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
+#                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
 
 
@@ -1981,19 +1982,18 @@ def free_ram_pct():
 
 
 def swap_used_pct():
-    """Swap in use in percent of swap allocated, or None when unknown (no sysctl, no vm.swapusage, or no swap). SCRUM_SWAP_PCT
-    stands in for the reading."""
+    """Swap in use as a percent of physical RAM, or None when unknown (no sysctl, as on Linux, or unreadable output).
+    SCRUM_SWAP_PCT stands in for the reading."""
     fake = os.environ.get("SCRUM_SWAP_PCT")
     if fake:
         return float(fake)
     try:
-        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10).stdout
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage", "hw.memsize"], capture_output=True, text=True,
+                             timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", out)
-    if not m or float(m.group(1)) == 0:
-        return None
-    return float(m.group(2)) / float(m.group(1)) * 100
+    m = re.search(r"used = ([\d.]+)M.*\n(\d+)\s*$", out)
+    return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
 
 
 def free_disk_gb(path):
@@ -2015,7 +2015,7 @@ def machine_ok(path):
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
     swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT:
-        return f"swap used {swap:g}% (> {MAX_SWAP_PCT}%)"
+        return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
