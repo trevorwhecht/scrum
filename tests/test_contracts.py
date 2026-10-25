@@ -907,10 +907,13 @@ class ContractTest(unittest.TestCase):
               "and its lines) run in one transaction, so a failure leaves none of them applied.")
         b9 = ("   - An update matches an existing row by its id, never by a display field such as a "
               "description or a name.")
+        code_map = ("   - When the change touches `skills/trevskills-scrum/board.py`, `serve.py` or "
+                    "`dashboard.html`, read `/Users/trevorhecht/Developer/repos/trevskills-scrum/.claude/"
+                    "skills/scrum-code-map/SKILL.md` first.")
         bad_json = "never a 500 from `req.json()` or Prisma; add a route test for it."
-        for line in (b1, b2, b3, b4, b5, b6, b8, b9, step2, must_fail, handoff):
+        for line in (b1, b2, b3, b4, b5, b6, b8, b9, code_map, step2, must_fail, handoff):
             self.assertEqual(text.count(line + "\n"), 1, line)
-        self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
+        self.assertIn(step2 + "\n" + code_map + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
         self.assertIn(bad_json + "\n" + b8 + "\n" + b9 + "\n" + step3, text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
         self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
