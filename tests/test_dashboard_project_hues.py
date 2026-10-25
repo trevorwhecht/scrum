@@ -1,0 +1,62 @@
+import json, shutil, subprocess, unittest
+
+from test_dashboard_roadmap_card import DASHBOARD, run
+
+SIX = ["trevskills-scrum", "onewitharts", "trevorhecht-skills", "boisepartyco", "imessageHelper", "the-ritzy-mist-google"]
+
+
+def hues(tail):
+    """Run tail in node over dashboard.html's fnv1a, projectHue, projectHues and hue lines; returns its one JSON log."""
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest("node not on PATH")
+    text = DASHBOARD.read_text()
+    lines = [l for l in text.splitlines() if l.startswith(("const fnv1a = ", "let projectHue = ", "const hue = "))]
+    start = text.index("function projectHues(")
+    fn = text[start:text.index("\n}\n", start) + 2]
+    script = "\n".join(lines) + "\n" + fn + f"\nconsole.log(JSON.stringify({tail}));"
+    return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=10).stdout)
+
+
+class ProjectHues(unittest.TestCase):
+    def test_hues_distinct_and_order_independent(self):
+        got = hues(f"[projectHues({json.dumps(SIX)}), projectHues({json.dumps(SIX[::-1])}), fnv1a('a'),"
+                   f" (projectHue = projectHues({json.dumps(SIX)}), hue('trevskills-scrum'))]")
+        fwd, rev, fa, read = got
+        # FNV-1a 32-bit slots, probed in name order: boisepartyco 1, imessageHelper 7, onewitharts 5,
+        # the-ritzy-mist-google 1 -> 2, trevorhecht-skills 4, trevskills-scrum 5 -> 6.
+        self.assertEqual(fwd, {"boisepartyco": 30, "imessageHelper": 210, "onewitharts": 150,
+                               "the-ritzy-mist-google": 60, "trevorhecht-skills": 120, "trevskills-scrum": 180})
+        self.assertEqual(len(set(fwd.values())), 6)
+        self.assertEqual(rev, fwd)
+        self.assertEqual(fa, 3826002220, "fnv1a returns the uint32 FNV-1a hash")
+        self.assertEqual(read, 180, "hue() reads the projectHue map, not the 150 fallback")
+
+    def test_hue_falls_back_for_unknown_name(self):
+        # fnv1a("a") = 3826002220, % 12 = 4, * 30 = 120.
+        self.assertEqual(hues("hue('a')"), 120)
+
+    def test_more_than_twelve_projects_terminates(self):
+        names = [f"p{i}" for i in range(14)]
+        got = hues(f"projectHues({json.dumps(names)})")
+        self.assertEqual(sorted(got), sorted(names))
+        self.assertTrue(all(h in range(0, 360, 30) for h in got.values()), got)
+        self.assertEqual(len(set(got.values())), 12, "the first 12 fill every slot; the rest repeat")
+
+    def test_poll_rebuilds_the_map(self):
+        text = DASHBOARD.read_text()
+        poll = text[text.index("async function poll()"):]
+        poll = poll[:poll.index("\n}\n")]
+        self.assertLess(poll.index("projects = (await res.json())"), poll.index("projectHue = projectHues(projects)"))
+
+
+class Header(unittest.TestCase):
+    def test_header_has_no_counts(self):
+        got, = run('render(); console.log(JSON.stringify(els.status.textContent));', {"p": None})
+        self.assertEqual(got, "")
+        none, = run('render(); console.log(JSON.stringify(els.status.textContent));', {}, projects=())
+        self.assertEqual(none, "No projects yet. Run /trevskills-scrum in a repo and it shows up here.")
+
+
+if __name__ == "__main__":
+    unittest.main()

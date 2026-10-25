@@ -17,6 +17,8 @@ header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
 #status,#routing,#machine{color:var(--muted);font-size:12px}
 #machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
+#machine .ring{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 4px,black 4.5px)}
+#machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -205,7 +207,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's free RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; orange marks a reading within 10 points (10 GB) of its limit, red one past it, and the trailing red text names the failing reading. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use, its label and tooltip the free %. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it (grey with no reading); swap and disk turn orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
@@ -295,7 +297,22 @@ let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, digests = 
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || (laneFilter === "roadmap" ? !!roadmapSteps[j.key] : laneOf(j) === laneFilter)));
-const hue = p => [...p].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 17);
+// 32-bit FNV-1a over the name's characters.
+const fnv1a = s => [...s].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0, 2166136261);
+// Twelve hues 30° apart. In name order each project takes its hash slot, or the next free one, so no two of up to 12 share
+// a colour and the map is the same whatever order the projects arrive in. A 13th onward reuses its hash slot.
+function projectHues(names) {
+  const taken = new Set(), out = {};
+  for (const n of [...names].sort()) {
+    let slot = fnv1a(n) % 12;
+    for (let i = 0; i < 12 && taken.has(slot); i++) slot = (slot + 1) % 12;
+    taken.add(slot);
+    out[n] = slot * 30;
+  }
+  return out;
+}
+let projectHue = {};  // poll() rebuilds it from projects
+const hue = p => projectHue[p] ?? fnv1a(p) % 12 * 30;
 const tag = p => `<span class="tag" style="--h:${hue(p)}">${esc(p)}</span>`;
 
 // Pinned by test_dashboard_lane_label.
@@ -437,6 +454,13 @@ function roadmapCard(p) {
     ${line(cur ? `P${cur.p}/${rm.phases.length} ${ph?.title ?? ""} · S${cur.s}/${ph?.steps.length ?? 0}` : "done")}
     ${cur ? line(st?.request ?? "") + line(next) + line(`blocker: ${block}`, "meta", `blocker: ${b ? `<b>${esc(block)}</b>` : "none"}`) : ""}</button>`;
 }
+// A roadmap card's column: done when finished, else its current step's job's column, else spec (no job yet, or not on the board).
+function roadmapCol(p) {
+  const rm = roadmaps[p], cur = rm?.current;
+  if (!cur) return "done";
+  const st = rm.phases.find(x => x.n === cur.p)?.steps.find(x => x.n === cur.s), job = st?.job && jobs.find(j => j.key === `${p}/${st.job}`);
+  return job ? colOf(job) : "spec";
+}
 // Projects whose roadmap card is visible: the project filter applies, and only All pipelines or roadmap show it.
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
@@ -488,29 +512,28 @@ let doneShown = DONE_STEP;
 const newestFirst = (a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
 
 function render() {
-  const list = shown(), dcards = digestCards(), rcards = roadmapShown().map(roadmapCard);
-  // The roadmap column leads the board, and only while it holds a card.
-  const cols = [...(rcards.length ? ["roadmap"] : []), ...STAGES, ...new Set(list.map(colOf).filter(s => !STAGES.includes(s)))];
-  const count = s => s === "roadmap" ? rcards.length : list.filter(j => colOf(j) === s).length + (s === "needs-human" ? dcards.length : 0);
+  const list = shown(), dcards = digestCards(), rcards = roadmapShown().map(p => [roadmapCol(p), roadmapCard(p)]);
+  const rIn = s => rcards.filter(([c]) => c === s).map(([, html]) => html);
+  const cols = [...STAGES, ...new Set([...list.map(colOf), ...rcards.map(([c]) => c)].filter(s => !STAGES.includes(s)))];
+  const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length + (s === "needs-human" ? dcards.length : 0);
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
   const rmFocused = document.activeElement?.matches?.("#board [data-roadmap]") && document.activeElement.dataset.roadmap;
   const optFocused = document.activeElement?.matches?.("#board [data-answer]") && [document.activeElement.closest(".card").dataset.key, document.activeElement.dataset.answer];
   $("board").innerHTML = cols.map(stage => {
-    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : stage === "roadmap" ? rcards.join("") : "";
+    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : "";
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
     const more = inCol.length < all.length ? `<button class="btn tall more" type="button" data-more>Load more</button>` : "";
     return `<section class="col${stage === "needs-human" ? " human" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
-      ${inCol.map(card).join("") + extra + more || '<p class="empty">—</p>'}</section>`;
+      ${rIn(stage).join("") + inCol.map(card).join("") + extra + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
   if (optFocused) focusOption($("board"), ...optFocused);
   if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus();
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
-  $("status").textContent = projects.length
-    ? `${list.length} job${list.length === 1 ? "" : "s"} · ${projects.length} project${projects.length === 1 ? "" : "s"} · updated ${new Date().toLocaleTimeString()}`
+  $("status").textContent = projects.length ? ""
     : "No projects yet. Run /trevskills-scrum in a repo and it shows up here.";
 }
 
@@ -548,9 +571,14 @@ function renderMachine(m) {
   if (!m) return;
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
-  el.innerHTML = [part("ram", "RAM", m.free_ram_pct, "% free"), part("swap", "swap", m.swap_pct, "%"),
+  // RAM is a ring: the filled arc is RAM in use, the free % is in its label.
+  const ram = m.free_ram_pct, ramLabel = ram == null ? "RAM —" : `RAM ${Math.round(ram)}% free`;
+  const ring = `<span class="ring ${ram == null ? "none" : machineLevel(ram, "ram", m)}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${ramLabel}" title="${ramLabel}"></span>`;
+  // A red reading already says what the verdict says, so the verdict shows only when it names something else (the session ceiling).
+  const shownRed = [["ram", ram], ["swap", m.swap_pct], ["disk", m.free_disk_gb]].some(([k, v]) => machineLevel(v, k, m) === "danger");
+  el.innerHTML = [ring, part("swap", "swap", m.swap_pct, "%"),
     part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
-    + (m.verdict ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
+    + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }
 
 async function poll() {
@@ -560,6 +588,7 @@ async function poll() {
     if (res.status === 404) return $("status").textContent = STALE;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     projects = (await res.json()).map(p => p.name);
+    projectHue = projectHues(projects);
     if (filter && !projects.includes(filter)) filter = "";
     const [boards, items, checks, runList, digestList, roadmapList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
@@ -629,8 +658,6 @@ function open(job) {
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   $("diverged").innerHTML = "";  // the previous job's bullets must not show while this job's files load
-  if (!termState[job.key]?.pending) delete termState[job.key];
-  if (!askState[job.key]?.pending) delete askState[job.key];
   renderActions(job);
   renderDiverged(job);
   loadRework(job);
@@ -707,51 +734,6 @@ const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
   : `<form data-act="reopen"><textarea name="note" required maxlength="2000" placeholder="What should the follow-up job do?" aria-label="Note for the reopened job"></textarea>
     <button class="btn" type="submit">Reopen</button></form>`;
 
-// Open terminal: kept per job outside the DOM, so a polling re-render keeps the pending state and the message.
-const termState = {};
-function termForm(job) {
-  if (!job.tty && !job.runlog && !runs[job.key]?.log) return "";
-  const st = termState[job.key] || {};
-  return `<form data-act="terminal"><button class="btn" type="submit"${st.pending ? " disabled" : ""}>Open terminal</button>${
-    st.err ? `<span class="error" role="alert">${esc(st.err)}</span>` : st.msg ? `<span class="note" role="status">${esc(st.msg)}</span>` : ""}</form>`;
-}
-const redrawTerm = key => {
-  const job = jobs.find(j => j.key === key), form = $("actions").querySelector('form[data-act="terminal"]');
-  if (job && form && $("viewer").dataset.key === key) form.outerHTML = termForm(job);
-};
-async function openTerminal(key) {
-  const job = jobs.find(j => j.key === key);
-  if (!job || termState[key]?.pending) return;
-  termState[key] = {pending: true}; redrawTerm(key);
-  try {
-    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/terminal`, {});
-    termState[key] = {msg: out.message || ""};
-  } catch (err) { termState[key] = {err: err.message}; }
-  redrawTerm(key);
-}
-
-// Ask Claude: like Open terminal, but on every job; it opens a new session, never the job's own.
-const askState = {};
-function askForm(job) {
-  const st = askState[job.key] || {};
-  return `<form data-act="ask"><button class="btn" type="submit" data-agent-hint="Opens a new interactive Claude session in the job's worktree (the repo's main checkout once that is gone), preloaded with the paths of the job's feature, spec, build, round and decision files and its board entry, to answer questions about the job."${st.pending ? " disabled" : ""}>Ask Claude</button>${
-    st.err ? `<span class="error" role="alert">${esc(st.err)}</span>` : st.msg ? `<span class="note" role="status">${esc(st.msg)}</span>` : ""}</form>`;
-}
-const redrawAsk = key => {
-  const job = jobs.find(j => j.key === key), form = $("actions").querySelector('form[data-act="ask"]');
-  if (job && form && $("viewer").dataset.key === key) form.outerHTML = askForm(job);
-};
-async function askClaude(key) {
-  const job = jobs.find(j => j.key === key);
-  if (!job || askState[key]?.pending) return;
-  askState[key] = {pending: true}; redrawAsk(key);
-  try {
-    const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/ask`, {});
-    askState[key] = {msg: out.message || ""};
-  } catch (err) { askState[key] = {err: err.message}; }
-  redrawAsk(key);
-}
-
 // Splits a needs-human reason into problem and fix on the first " Fix: " the orchestrator writes.
 const splitReason = reason => {
   const r = reason || "", i = r.indexOf(" Fix: ");
@@ -774,7 +756,7 @@ const waitingBanner = job => {
   if (!p && job.stage !== "needs-human") return "";
   const {problem, fix} = p ? {problem: job.waiting, fix: "Answer it in the job's terminal."} : splitReason(job.reason);
   return `<div class="waiting" role="status"
-    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for; Open terminal brings that session to the front."
+    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for."
       : "This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix."}">
     <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
 };
@@ -785,10 +767,10 @@ function renderActions(job) {
   const err = `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`, kids = waitingNote(job, "note") + childLinks(job);
   // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
   const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
-  if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + pauseForm(job) + abortForm(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + pauseForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
@@ -799,15 +781,13 @@ function renderActions(job) {
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + termForm(job) + askForm(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
   e.preventDefault();
   const form = e.target, btn = e.submitter || form.querySelector("button"), act = btn.dataset.act || form.dataset.act, key = $("viewer").dataset.key;
   const job = jobs.find(j => j.key === key);
-  if (act === "terminal") return openTerminal(key);
-  if (act === "ask") return askClaude(key);
   if (act === "goto") { const linked = jobs.find(j => j.key === form.dataset.key); if (linked) open(linked); return; }
   if (act === "approve" && !form.dataset.armed) {
     form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main";
