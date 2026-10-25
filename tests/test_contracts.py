@@ -114,9 +114,10 @@ class ContractTest(unittest.TestCase):
                  "specwriter" + "=local"]
         pattern = re.compile("|".join(map(re.escape, words)), re.I)
         pattern_exact = re.compile("|".join(map(re.escape, exact)))
-        paths = [ROOT / "README.md", ROOT / "CLAUDE.md"]
-        for folder in ("local", "skills", "agents"):
-            paths += [p for p in (ROOT / folder).rglob("*") if p.is_file()]
+        listed = subprocess.run(["git", "ls-files", "README.md", "CLAUDE.md", "local", "skills", "agents"],
+                                cwd=ROOT, check=True, capture_output=True, text=True).stdout.splitlines()
+        paths = [ROOT / name for name in listed]
+        self.assertTrue(paths)
         hits = []
         for path in paths:
             for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
