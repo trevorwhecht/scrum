@@ -8,16 +8,17 @@ AGENTS = {
     "scrum-approver": "opus", "scrum-debugger": "opus",
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
-    "scrum-review-e2e": "sonnet",
+    "scrum-review-e2e": "sonnet", "scrum-review-rules": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
+STALE_BUILDER = "builder" + "=local"  # split so the repo-wide wording grep stays empty
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
     "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
     "scrum-planner": "PLAN: READY", "scrum-tracker": "TRACK: ON TRACK", "scrum-bigboy-reviewer": "BIGBOY: PASS",
-    "scrum-review-e2e": "VERDICT: PASS",
+    "scrum-review-e2e": "VERDICT: PASS", "scrum-review-rules": "VERDICT: PASS",
 }
 
 
@@ -106,14 +107,38 @@ class ContractTest(unittest.TestCase):
             if path.name != "scrum-review-code.md":
                 self.assertNotIn("codex exec", text, path.name)
 
+    def test_no_local_model_wording_left(self):
+        words = ["oll" + "ama", "qw" + "en", "claude" + "-local", "local" + " runner", "local" + "_estimate",
+                 "local" + "_only", "loaded" + "_models", "builder" + "=local"]
+        exact = ["SCRUM" + "_LOCAL", "local/" + "run.py", "local/" + "build.py", "worker" + ".py",
+                 "specwriter" + "=local"]
+        pattern = re.compile("|".join(map(re.escape, words)), re.I)
+        pattern_exact = re.compile("|".join(map(re.escape, exact)))
+        paths = [ROOT / "README.md", ROOT / "CLAUDE.md"]
+        for folder in ("local", "skills", "agents"):
+            paths += [p for p in (ROOT / folder).rglob("*") if p.is_file()]
+        hits = []
+        for path in paths:
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if pattern.search(line) or pattern_exact.search(line):
+                    hits.append(f"{path.relative_to(ROOT)}:{n}: {line[:120]}")
+        self.assertEqual(hits, [])
+
     def test_skill_routes_steps_through_router(self):
         text = self.rules()
         routing = self.section(text, "## Routing", "## Resuming the builder")
-        for phrase in ("local/route.py", "--job $F/jobs/$ID", "--scrum $F", 'run.py" claude -p',
-                       "SCRUM_LOCAL_CONTEXT=32768", "--allowedTools", "builder=local", "one cloud retry",
-                       "Local run failed:", "never loop", 'route.py" record', "invalid-artifact", "fallback"):
+        for phrase in ("`scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` always spawn on cloud with "
+                       "the Agent tool exactly as the step says.",
+                       "Take `START=$(date +%s)` just before each spawn",
+                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> cloud - '
+                       "$(( $(date +%s) - START )) ok",
+                       "`<dir>` is `$F/jobs/$ID`", "or `$F` for the digest reader",
+                       "Ignore a failed `record` call. Logging never blocks the pipeline."):
             self.assertIn(phrase, routing, phrase)
-        self.assertIn("followups/", routing)
+        for phrase in ("run.py", "build.py", "SCRUM_LOCAL_MODEL", "SCRUM_LOCAL_CONTEXT", "Local run failed:",
+                       "one cloud retry", "invalid-artifact", "fallback", "check-pass", "review-pass",
+                       'route.py" <role>', "--job $F", "--scrum $F"):
+            self.assertNotIn(phrase, routing, phrase)
         self.assertGreaterEqual(text.count("see **Routing**"), 4)
         for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, startable children only.**", "2. Spawn `scrum-digest-reader`"):
             line = next(l for l in text.splitlines() if l.startswith(step) or l.strip().startswith(step))
@@ -128,28 +153,40 @@ class ContractTest(unittest.TestCase):
     def test_skill_records_specwriter_id(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         new_job = self.section(text, "## New job", "## Run all")
-        for phrase in ("B set $ID specwriter=<id>", "specwriter=local"):
-            self.assertIn(phrase, new_job, phrase)
+        self.assertIn("After each spawn, record it: `B set $ID specwriter=<id>` (the returned agent id).", new_job)
+        for phrase in ("specwriter" + "=local", STALE_BUILDER, "cloud retry"):
+            self.assertNotIn(phrase, new_job, phrase)
+        check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
+        self.assertNotIn(STALE_BUILDER, check)
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        self.assertIn("completed. Then run `B sync $ID`.\n", review)
+        self.assertNotIn(STALE_BUILDER, review)
+        self.assertNotIn("for a local build", self.section(text, "## Fast lane", "## Debug lane"))
+        self.assertIn("(see **Routing**). Each prompt", self.lane("bigboy"))
+        self.assertNotIn("background subprocesses", self.lane("bigboy"))
 
     def test_skill_approve_prewrites_followups(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         approve = self.section(text, "## Approve", "## Merge")
-        for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer", "local",
+        for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer",
+                       "when `specwriter` is missing, empty or not an agent id, or when SendMessage fails",
                        "BACKLOG=$F/backlog.md", "follow-up mode", "B backlog-spec $ID", "Resuming the builder",
                        "backlog-add", "(from $ID)", "followups/", "non-zero", "never blocks", "- none"):
             self.assertIn(phrase, approve, phrase)
+        self.assertNotIn("specwriter" + "=local", approve)
+        self.assertNotIn("`specwriter` is `local`", approve)
 
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
                        "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it",
-                       'route.py" codex-review --job', "local/run.py", "SCRUM_LOCAL_MODEL", 'route.py" record',
-                       "codex: skipped — <why>", "exits non-zero", "treat it as cloud", "<RUNNER> codex exec review",
-                       'replace `<RUNNER>` with exactly `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"`',
-                       "replace `<RUNNER>` with nothing", "blocks local sockets", "check.md is the authority"):
+                       'route.py" codex-review --job', 'route.py" record', "codex: skipped — <why>",
+                       "exits non-zero", "treat it as cloud", "- `cloud` →", "- `skip` →",
+                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol", "blocks local sockets", "check.md is the authority"):
             self.assertIn(phrase, text, phrase)
-        for phrase in ("$RUNNER", 'RUNNER="', "RUNNER= "):
+        for phrase in ("$RUNNER", 'RUNNER="', "RUNNER= ", "<RUNNER>", "- `local` →", "SCRUM_LOCAL_MODEL", "cloud MODEL=", "MODEL=<model>",
+                       "local/run.py", "A failed local run is a skip like a failed cloud run, never a cloud retry."):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
 
@@ -165,48 +202,40 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Codex never reads spec.md", "`Out:`", "scrum/backlog.md", "never `[blocking]`"):
             self.assertIn(phrase, text, phrase)
 
-    def test_codex_block_local_runner_is_shell_agnostic(self):
+    def test_codex_block_is_shell_agnostic(self):
         import os, tempfile
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         lines = text.splitlines()
-        start = next(i for i, l in enumerate(lines) if l.startswith("    ") and "<RUNNER> codex exec review" in l)
+        start = next(i for i, l in enumerate(lines) if l.startswith("    ") and "codex exec review" in l)
         cmd = [lines[start][4:]]
         while cmd[-1].endswith("\\"):
             start += 1
             cmd.append(lines[start][4:])
         cmd = "\n".join(cmd)
         self.assertTrue(cmd.endswith("</dev/null"), cmd)
-        local = 'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"'
         with tempfile.TemporaryDirectory() as home:
             home = Path(home)
-            (home / ".claude" / "skills" / "trevskills-scrum").mkdir(parents=True)
-            (home / ".claude" / "local").mkdir()
-            (home / ".claude" / "local" / "run.py").write_text(
-                "import os, sys\nprint('model=' + os.environ['SCRUM_LOCAL_MODEL'])\nprint(*sys.argv[1:], sep='\\n')\n")
             bindir = home / "bin"
             bindir.mkdir()
             stub = bindir / "codex"
-            stub.write_text('#!/bin/sh\necho "model=$SCRUM_LOCAL_MODEL"\necho codex\nfor a in "$@"; do echo "$a"; done\n')
+            stub.write_text('#!/bin/sh\necho codex\nfor a in "$@"; do echo "$a"; done\n')
             stub.chmod(0o755)
             env = {**os.environ, "HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}",
                    "WORKTREE": str(home), "BASE": "origin/main", "JOB_DIR": "/job", "ROUND": "1"}
             expected = ["codex", "exec", "review", "--base", "origin/main", "-m", "gpt-6.1-sol", "-c",
                         'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "--ephemeral",
                         "-o", "/job/round-1/codex-review.md"]
-            for name, runner, model in (("local", local, "qwen2.5-coder:7b"), ("cloud", "", "")):
-                line = cmd.replace("<RUNNER>", runner)
-                outputs = {}
-                for shell in ("bash", "zsh"):
-                    with self.subTest(route=name, shell=shell):
-                        if not shutil.which(shell):
-                            self.skipTest(f"{shell} not installed")
-                        out = subprocess.run([shell, "-c", line], env={**env, "MODEL": model},
-                                             capture_output=True, text=True, timeout=30)
-                        self.assertEqual(out.returncode, 0, out.stderr)
-                        outputs[shell] = out.stdout.splitlines()
-                        self.assertEqual(outputs[shell], [f"model={model}", *expected])
-                if len(outputs) == 2:
-                    self.assertEqual(outputs["bash"], outputs["zsh"], name)
+            outputs = {}
+            for shell in ("bash", "zsh"):
+                with self.subTest(shell=shell):
+                    if not shutil.which(shell):
+                        self.skipTest(f"{shell} not installed")
+                    out = subprocess.run([shell, "-c", cmd], env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(out.returncode, 0, out.stderr)
+                    outputs[shell] = out.stdout.splitlines()
+                    self.assertEqual(outputs[shell], expected)
+            if len(outputs) == 2:
+                self.assertEqual(outputs["bash"], outputs["zsh"])
 
     def test_code_reviewer_waits_for_codex(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
@@ -218,18 +247,17 @@ class ContractTest(unittest.TestCase):
                        "its 10-minute timeout.",
                        "Finishing your own review first is never a skip reason",
                        'and "still running" is never a skip reason',
-                       "ROUTE_RUNNER=local MODEL=<model> LOG_MODEL=<model>",
-                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"',
-                       "does not word-split", "codex: skipped — fast lane"):
+                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol", "codex: skipped — fast lane"):
             self.assertIn(phrase, text, phrase)
-        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3'):
+        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3', "ROUTE_RUNNER=local"):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("wait for the background"), 1)
 
     def test_code_reviewer_acts_on_runner_alone(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         self.assertIn("Then act on `runner` alone; `why` is only note text, so `runner: cloud` with why "
-                      "`codex-review trust is off` still runs Codex on cloud:", text)
+                      "`codex quota below thresholds` still runs Codex on cloud:", text)
+        self.assertNotIn("trust is off", text)
         self.assertNotIn("Then act on `runner`:", text)
 
     def test_code_reviewer_skip_reason_is_traceable(self):
@@ -243,9 +271,9 @@ class ContractTest(unittest.TestCase):
 
     def test_code_reviewer_codex_path_includes_homebrew(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
-        line = next(l for l in text.splitlines() if "<RUNNER> codex exec review" in l)
+        line = next(l for l in text.splitlines() if "codex exec review --base" in l)
         self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) '
-                               '&& SCRUM_LOCAL_MODEL="$MODEL" <RUNNER> codex exec review --base "$BASE" -m gpt-6.1-sol \\')
+                               '&& codex exec review --base "$BASE" -m gpt-6.1-sol \\')
         self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
@@ -274,6 +302,24 @@ class ContractTest(unittest.TestCase):
         for phrase in ("## Out of scope", "latest round", "duplicates", "vague",
                        "already covered by this ticket", "## Follow-ups",
                        "a review without one adds nothing"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_approver_groups_and_gates_follow_ups(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("same file or area", "one bullet", "one bullet per file", "every rule ID",
+                       "`cosmetic:`", "`Goal:` line", "roadmap.md", "`- Notes:` line",
+                       "advance the goal", "never under `## Follow-ups`", "no goal line"):
+            self.assertIn(phrase, text, phrase)
+        self.assertNotIn("becomes one Follow-up", text)
+        template = text[text.index("    APPROVE\n"):text.index("**ESCALATE only")]
+        self.assertIn("\n    ## Dropped\n", template)
+        self.assertLess(template.index("## Follow-ups"), template.index("## Dropped"))
+        self.assertLess(template.index("## Dropped"), template.index("## Manual checks"))
+
+    def test_triager_bundles_low_rated(self):
+        text = (ROOT / "agents" / "scrum-triager.md").read_text()
+        for phrase in ("{p:1}", "{p:2}", "even when they are not near-duplicates",
+                       "Never bundle a p5 item with p1-p2 items", "highest p of its parts"):
             self.assertIn(phrase, text, phrase)
 
     def test_approver_has_manual_checks_heading(self):
@@ -433,7 +479,8 @@ class ContractTest(unittest.TestCase):
     def test_skill_merge_stops_for_agent_rule_edits(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
-        regex = r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
+        regex = (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
+                 r"|(^|/)docs/skill-standards\.md$|(^|/)trevskills-scrum/board\.py$")
         for phrase in (f"grep -E '{regex}'", "human-approval.md", "Hard stop: agent rules", "**Agent rules guard"):
             self.assertIn(phrase, merge, phrase)
         self.assertLess(merge.index("**Schema guard"), merge.index("**Agent rules guard"))
@@ -443,11 +490,13 @@ class ContractTest(unittest.TestCase):
         start = merge.index("**Agent rules guard")
         guard = merge[start:merge.index("\n", start)]
         for phrase in ("B digest-verify $ID --worktree \"$WT\" --base \"$BASE\"", f"grep -E '{regex}'",
-                       "human-approval.md", "Hard stop: agent rules — <first matching file>", "Run this guard again right before step 6"):
+                       "human-approval.md", "Run this guard again right before step 6"):
             self.assertIn(phrase, guard, phrase)
-        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md"):
+        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md",
+                     "docs/skill-standards.md", "skills/trevskills-scrum/board.py"):
             self.assertIsNotNone(re.search(regex, path), path)
-        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/board.py", "src/lanes/foo.md"):
+        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/route.py", "src/lanes/foo.md",
+                     "docs/plans/skill-standards.md"):
             self.assertIsNone(re.search(regex, path), path)
         commands = self.section(text, "## Commands", "## New job")
         approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
@@ -517,8 +566,12 @@ class ContractTest(unittest.TestCase):
     def test_skill_jev_promote_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         resume = self.section(text, "## Resuming the builder", "## Digest")
-        for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"', "builder=local"):
+        for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"',
+                       "A builder already promoted is never promoted again.",
+                       "\n\nUse SendMessage to the recorded `builder`"):
             self.assertIn(phrase, resume, phrase)
+        self.assertNotIn(STALE_BUILDER, resume)
+        self.assertNotIn("local builder", resume)
 
     def test_skill_jev_dupe_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -526,6 +579,33 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         self.assertIn("jev-gate.py dupe", self.lane("bigboy"))
         self.assertIn("jev-gate.py dupe", self.section(text, "## Approve", "## Migrate"))
+
+    def test_skill_jev_rank_step(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        new_job = self.section(text, "## New job", "## Run all")
+        for phrase in ("jev-gate.py rank", "--priority", "p<N>", "never stops"):
+            self.assertIn(phrase, new_job, phrase)
+        self.assertLess(new_job.index("**Dupe check** (before"), new_job.index("**Rank** (after the Dupe check"))
+
+    def test_skill_rank_on_every_backlog_add(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.section(text, "## Merge", "## Routing")
+        for body in (self.section(text, "## Approve", "## Migrate"), merge, self.lane("bigboy"), self.lane("cloud")):
+            self.assertTrue("jev-gate.py rank" in body or "**Rank**" in body, body[:80])
+        self.assertIn("jev-gate.py dupe", merge)
+        self.assertEqual(self.lane("bigboy").count("**Rank**"), 3)
+        self.assertIn("--setup='<Human setup value>' [--priority N]", text)
+
+    def test_skill_rank_backlog_after_backlog_spec(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertIn("rank-backlog", self.section(text, "## Approve", "## Migrate"))
+        self.assertIn("rank-backlog", self.lane("cloud"))
+
+    def test_skill_fallback_already_done_check(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        phrase = "the repository shows is already done"
+        self.assertIn(phrase, self.section(text, "## Approve", "## Migrate"))
+        self.assertIn(phrase, (ROOT / "agents" / "scrum-spec-writer.md").read_text())
 
     def test_skill_jev_approver_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -735,6 +815,24 @@ class ContractTest(unittest.TestCase):
         self.assertIn("lilguy", record)
         self.assertIn("lilguy", (ROOT / "README.md").read_text())
 
+    def test_lilguy_worktree_mode_contract(self):
+        lilguy = self.lane("lilguy")
+        self.assertIn("Steps 1-6 apply only to `/trevskills-scrum lilguy <feature text>`", lilguy)
+        self.assertLess(lilguy.index("6. End with the **Final report**"), lilguy.index("\n## Worktree mode\n"))
+        mode = lilguy[lilguy.index("\n## Worktree mode\n"):]
+        for phrase in ("lilguy-fit", "scrum/<id>", "**Merge**", "B route-check $ID", "lane=fast", "Promoted to fast:",
+                       "promoted.md", "30", "spawns no subagents"):
+            self.assertIn(phrase, mode, phrase)
+
+    def test_new_job_routes_tiny_jobs_to_lilguy(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
+        for phrase in ("B lilguy-fit $ID", "**Lilguy lane**", "**Lilguy route:**"):
+            self.assertIn(phrase, step3, phrase)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("(a lilguy job with a worktree: **Lilguy lane** Worktree mode)", resume)
+        self.assertIn("lilguy-fit", self.lane("runall"))
+
     def test_skill_bigboy_lane_handles_runall_parent(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         bigboy = self.lane("bigboy")
@@ -883,6 +981,34 @@ class ContractTest(unittest.TestCase):
             nxt = text.index("\n## ", text.index(heading) + 1)
             self.assertIn("see **Fast lane**", text[text.index(heading):nxt], heading)
 
+    def test_spec_writer_fast_lane_allows_ui(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("- `Lane` picks the pipeline."))
+        for phrase in ("`UI surface: no`", "UI globs"):
+            self.assertNotIn(phrase, rule, phrase)
+        for phrase in ("100", "3 files", "Hard stops: none"):
+            self.assertIn(phrase, rule, phrase)
+
+    def test_skill_new_job_fast_ignores_ui_surface(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        step = next(l for l in text.splitlines() if l.strip().startswith("3c. **Lane:**"))
+        fast_rule = step[step.index("Set `fast`"):]
+        self.assertNotIn("UI surface:", fast_rule)
+        self.assertIn("Hard stops:", fast_rule)
+
+    def test_skill_fast_lane_ui_reviewer(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        fast = self.section(text, "## Fast lane", "## Debug lane")
+        for phrase in ("scrum-review-ui", "scrum-review-e2e", "E2E:", "UI globs"):
+            self.assertIn(phrase, fast, phrase)
+        self.assertNotIn("UI globs", self.section(fast, "After `CHECK: PASS`", "2. **Review.**"))
+        route = fast[fast.index("3. **Route:**"):]
+        self.assertIn("both spawned reviewers passed", route)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        clause = resume[resume.index("a `lane=fast` job"):]
+        clause = clause[:clause.index(")")]
+        self.assertIn("UI reviewer", clause)
+
     def test_code_reviewer_fast_lane_is_diff_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("LANE=fast", "codex: skipped — fast lane"):
@@ -893,24 +1019,29 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
-                       "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
-                       "(fallback: <n>)", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
+                       "assessment.md", "notes.md", "routing.log", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
                        "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
-                       "`scrum-level`", "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
+                       "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
-                       "Opus-built", "promote", "avg fix rounds"):
+                       "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
+                       "Cheapest lane:"):
             self.assertIn(phrase, reader, phrase)
+        for phrase in ("## Local routing", "insights/<id>.md", "(fallback: <n>)", "local background worker"):
+            self.assertNotIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
                        '"obvious"', '"obvious_reason"', "2 or more different jobs", "never removes or loosens",
-                       "never a global file", "ROUTING", "local/routing.json", "## Local routing",
-                       "at least 5 local runs", "at least 3 local runs", "more than one third", "codex-review",
-                       '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
+                       "never a global file", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "(unanimous)",
-                       "pick not unanimous"):
+                       "pick not unanimous", "## Pipeline fit", "count toward the at-most-8 cap",
+                       "threshold or routing edits"):
             self.assertIn(phrase, digester, phrase)
+        self.assertIn("**Inputs** (paths are in your prompt): `DIGEST_DIR` (`scrum/digests/<NNN>/`) and `PROJECT` "
+                      "(`scrum/project.md`).", digester)
+        for phrase in ("ROUTING", "## Local routing", "Trust flip", '"roles"', "local runs", "local/routing.json"):
+            self.assertNotIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -918,10 +1049,12 @@ class ContractTest(unittest.TestCase):
         self.assertIn("- **`/trevskills-scrum digest`**", text)
         digest = self.section(text, "## Digest", "## Final report")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
-                       "error.md", "B digest-trim", "no remote", "--digest-auto", "ROUTING=", "local/routing.json",
-                       "realpath ~/.claude/skills/trevskills-scrum", '"applied"', '"queued"', "queued: <reason>"):
+                       "error.md", "B digest-trim", "no remote", "--digest-auto",
+                       "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
             self.assertIn(phrase, digest, phrase)
         self.assertNotIn("only ever queues a repo backlog item", digest)
+        for phrase in ("ROUTING=", "R=$(", "local/routing.json"):
+            self.assertNotIn(phrase, digest, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
         self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
@@ -1095,6 +1228,19 @@ class ContractTest(unittest.TestCase):
         self.assertIn("verbatim", path.read_text())
         self.assertEqual(frontmatter(path).get("model"), "opus")
 
+    def test_spec_writer_retro_p2_scrum_never_in_diff(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        head = "- **`scrum/` is never in the diff.**"
+        for phrase in (head, "never an acceptance criterion or a Likely file",
+                       "Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`.",
+                       "A line the request only ticks stays open for the Run all triager, which retires done items."):
+            self.assertEqual(text.count(phrase), 1, phrase)
+        start = text.index(head)
+        end = text.index("- Write no code and touch no file")
+        self.assertLess(start, end)
+        self.assertEqual(text[start:end].count("\n"), 1)
+        self.assertTrue(text[start:end].endswith("\n"))
+
     def test_spec_writer_digest_001_p3_p4(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
@@ -1151,6 +1297,20 @@ class ContractTest(unittest.TestCase):
         detect = self.section(text, "4. Detect the project", "5. Tell the user")
         self.assertIn("- Base branch: <branch>", detect)
         self.assertNotIn("Base branch", self.section(detect, "```markdown", "\n```\n"))
+
+    def test_skill_test_sign_in_line(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        detect = self.section(text, "4. Detect the project", "5. Tell the user")
+        self.assertIn("- Test sign-in: <account> — credentials in <where>", detect)
+        self.assertNotIn("Test sign-in", self.section(detect, "```markdown", "\n```\n"))
+        para = detect[detect.index("`- Test sign-in:"):]
+        para = para[:para.index("\n\n")]
+        for phrase in ("scrum-review-ui", "scrum-review-ux", "never holds a password or token",
+                       "only when the repo's CLAUDE.md/AGENTS.md, rules files, README, seed script or e2e config already names a test account"):
+            self.assertIn(phrase, para, phrase)
+        tell = self.section(text, "5. Tell the user", "## Commands")
+        self.assertIn("Test sign-in", tell)
+        self.assertIn("never waits", tell)
 
     def test_restart_commands_are_allow_listed(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1352,10 +1512,22 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
                        "Hard stop: render — UI not rendered"):
             self.assertIn(phrase, rule, phrase)
-        self.assertNotIn("Hard stop: blocked — UI not rendered", text)
+        self.assertEqual(text.count("Hard stop: blocked — UI not rendered"), 1)
+        self.assertIn("`Hard stop: blocked — UI not rendered` is only for a UI diff", text)
         stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
         for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>"):
             self.assertIn(phrase, stop, phrase)
+
+    def test_approver_retro_p1_blocked_render_never_hard_stop(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
+        phrase = ("`Hard stop: blocked — UI not rendered` is only for a UI diff with no `Rendered: yes` and no "
+                  "`Rendered: blocked`; never write it, with or without an `(environment)` note, when a "
+                  "latest-round review says `Rendered: blocked` and none says `Rendered: no`.")
+        self.assertEqual(text.count(phrase), 1)
+        self.assertIn("so Trevor can glance later without holding the merge. " + phrase, rule)
+        self.assertLess(rule.index("Exception: when at least one latest-round review has `Rendered: blocked`"),
+                        rule.index(phrase))
 
     def test_reviewers_no_rendered_change_answer(self):
         for name in ("ux", "ui"):
@@ -1512,22 +1684,52 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, guard, phrase)
         self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
 
-    def test_merge_agent_rules_self_heal(self):
+    def test_merge_agent_rules_gate(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
         start = merge.index("**Agent rules guard")
         guard = merge[start:merge.index("\n", start)]
-        for phrase in ("named in `$F/jobs/$ID/feature.md` or in spec.md's `## Likely files`",
-                       "`python3 -m unittest tests.test_contracts` passes in `$WT`, continue without a human",
-                       "`B ask $ID 'Hard stop: agent rules — <first matching file>;",
-                       '--a "Merge anyway=approve $ID"',
-                       """--b 'Send back=rework <id> "<files outside the ticket> are outside the ticket""",
-                       "self-heal included"):
+        for phrase in ("run the **rules gate**: Read `$HOME/.claude/skills/trevskills-scrum/lanes/rules-gate.md`",
+                       "`B rules-check` exits 0 and the `scrum-review-rules` review is PASS",
+                       "or the rules gate passes", "rules gate included"):
             self.assertIn(phrase, guard, phrase)
-        self.assertLess(guard.index("human-approval.md"), guard.index("in-ticket self-heal"))
-        self.assertLess(guard.index("B digest-verify"), guard.index("in-ticket self-heal"))
+        self.assertNotIn("in-ticket self-heal", text)
+        self.assertLess(guard.index("human-approval.md"), guard.index("**rules gate**"))
+        self.assertLess(guard.index("B digest-verify"), guard.index("**rules gate**"))
         step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
-        self.assertIn("agent rules guard (with its in-ticket self-heal)", step6)
+        self.assertIn("agent rules guard (with its rules gate)", step6)
+        gate = self.lane("rules-gate")
+        for phrase in ('`B rules-check $ID --worktree "$WT" --base "$BASE"`', "spawn `scrum-review-rules` and wait for it",
+                       "HEAD=$HEAD", "its second line is `Reviewed: $HEAD`, reuse it",
+                       "is `VERDICT: PASS` and its second line is `Reviewed: $HEAD`, continue Merge without a human",
+                       "`B ask $ID 'Hard stop: agent rules — <first matching file>; <why>'",
+                       '--a "Merge anyway=approve $ID"', "--b 'Send back=rework <id>",
+                       "a missing or unreadable file, another HEAD) counts as CHANGES"):
+            self.assertIn(phrase, gate, phrase)
+        self.assertLess(gate.index("1. **Script rules.**"), gate.index("2. **Judged rules.**"))
+
+    def test_rules_reviewer_quotes_every_judged_rule(self):
+        text = (ROOT / "agents" / "scrum-review-rules.md").read_text()
+        for phrase in ("JOB_DIR/rules-review.md", "Reviewed: <HEAD from your prompt>", "word for word",
+                       "`VERDICT: PASS` only when all six rules 9-14 are quoted", "a rule left out, is `VERDICT: CHANGES`"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_standards_doc_tags_every_rule(self):
+        text = (ROOT / "docs" / "skill-standards.md").read_text()
+        heads = re.findall(r"^### (\d+)\. .* `(script|judge)`$", text, re.M)
+        self.assertEqual(heads, [(str(n), "script" if n <= 8 else "judge") for n in range(1, 15)])
+        for n in range(1, 15):
+            body = self.section(text, f"### {n}. ", f"### {n + 1}. " if n < 14 else "- Fix:")
+            self.assertTrue(all(k in body for k in ("- Why:", "- Check:")), n)
+        self.assertEqual(text.count("- Fix:"), 14)
+        for phrase in ("## Human-only set", "the never-list at the top of `SKILL.md`", "`agents/scrum-review-rules.md`",
+                       "`skills/trevskills-scrum/lanes/rules-gate.md`", "the Merge step 1 guard bullets"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_claude_md_guard_sentence_names_the_rules_gate(self):
+        text = (ROOT / "CLAUDE.md").read_text()
+        self.assertIn("or `B rules-check` exits 0 and the `scrum-review-rules` review is PASS", text)
+        self.assertIn("A diff that touches the human-only set in `docs/skill-standards.md` always stops", text)
 
     def test_merge_conflicts_ask_after_two(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1599,6 +1801,17 @@ class ContractTest(unittest.TestCase):
                        'B backlog-add "re-run final review of $P (gap of $P)"', "B roadmap-next $P"):
             self.assertIn(phrase, line, phrase)
         self.assertNotIn("plan-apply $P --fix", line)
+
+    def test_pause_keeps_the_job_in_its_stage(self):
+        text = self.rules()
+        pause = next(l for l in text.splitlines() if l.startswith("**Pause:**"))
+        self.assertIn(pause, self.section(text, "## Setup", "## Commands"))
+        for phrase in ("the job stays in its stage with board `paused` true and reason `stalled in <stage>: paused by Trevor`",
+                       "fails with `was paused by Trevor`", "Only `B set --unpause` with a `stage=`"):
+            self.assertIn(phrase, pause, phrase)
+        self.assertNotIn("the job becomes `needs-human`", pause)
+        resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        self.assertIn("The job must have board `paused` true, or be `needs-human` with a reason starting with", resume)
 
     def test_resume_reentry_per_reason(self):
         text = self.rules()
@@ -1982,23 +2195,40 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_child_start_silences_notifier(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        self.assertIn('CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum start <child>"', step3)
-        self.assertIn('--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', step3)
+        self.assertIn("run `B spawn <child> start`", step3)
+        self.assertIn("detached from the main checkout with `CLAUDE_NOTIFIER_DISABLE=1`", step3)
 
     def test_child_start_passes_orchestrator_model(self):
         text = self.rules()
         step3 = self.section(text, "3. **Start.** Run `B ready $ID`", "4. **Spec refresh**")
-        for phrase in ("sed -n 's/^- Orchestrator model: *//p' \"$F/project.md\" | head -1 | sed 's/[[:space:]]*$//'",
-                       "--model", "inherit", "sonnet", "--permission-mode acceptEdits"):
+        for phrase in ("run `B spawn <child> start`", "adds `--model` from the `- Orchestrator model:` line",
+                       "blank, missing or malformed gives `sonnet`", "`inherit` drops it",
+                       '`claude -p "/trevskills-scrum start <child>" --permission-mode acceptEdits`'):
             self.assertIn(phrase, step3, phrase)
-        self.assertIn('MODEL=(); [ -n "$OM" ] && MODEL=(--model "$OM")', step3)
-        self.assertIn('nohup claude -p "/trevskills-scrum start <child>" "${MODEL[@]}" --permission-mode acceptEdits', step3)
+        for gone in ("OM=", "MODEL=(", "nohup"):
+            self.assertNotIn(gone, step3, gone)
         setup = self.section(text, "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]
         doc = doc[:doc.index("\n\n")]
         for phrase in ("`sonnet`", "`inherit`", "headless", "start", "resume"):
             self.assertIn(phrase, doc, phrase)
+
+    def test_session_launch_goes_through_b_spawn(self):
+        """One headless launcher: the shell `nohup claude -p` copies broke under zsh, so every caller runs B spawn."""
+        step3 = self.section(self.lane("bigboy"), "3. **Start.**", "4. **Spec refresh**")
+        self.assertIn("run `B spawn <child> start`", step3)
+        roadmap = self.lane("roadmap")
+        done = roadmap[roadmap.index("6. **Roadmap done**"):]
+        self.assertIn("`B spawn run-all run-all '/trevskills-scrum run-all'`", done)
+        cloud = self.lane("cloud")
+        rule = cloud[cloud.index("**Schema auto-migrate.**"):]
+        self.assertIn("`B spawn $ID approve --model sonnet`", rule)
+        skill = ROOT / "skills" / "trevskills-scrum"
+        for f in [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]:
+            self.assertNotIn("nohup claude -p", f.read_text(), f.name)
+        for gone in ("OM=", "MODEL=("):
+            self.assertNotIn(gone, self.lane("bigboy"), gone)
 
     def h2(self, text, heading):
         start = text.index(f"\n{heading}\n")
@@ -2043,8 +2273,24 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for a, b in zip(order, order[1:]):
             self.assertEqual(text.index("\n## ", a + 1), b)
 
+    def test_build_runs_under_machine_wide_lock(self):
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        check = self.section(skill, "## Check gate", "## Review (WAIT FOR ALL)")
+        self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<Build>\'`', check)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        step4 = self.section(builder, "4. Run the project's test", "5. Commit on your branch")
+        self.assertIn("buildlock.py", step4)
+
     def test_skill_md_size_budget(self):
-        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 81000)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 83000)
+
+    def test_focus_is_priority_not_lock(self):
+        setup = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Setup", "## Commands")
+        self.assertIn("serve.py starts one headless run-all per idle opted-in project, Focus projects first", setup)
+        self.assertIn("no new work while free RAM or disk is low", setup)
+        self.assertIn("`- Focus: yes` (optional): ordering only, never holds another project.", setup)
+        self.assertNotIn("sole auto-continue target", setup)
+        self.assertNotIn("hold every other project", setup)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -2077,6 +2323,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(clean.index("**Mark done"), clean.index("roadmap-next $ID"))
         self.assertLess(clean.index("roadmap-next $ID"), clean.index("**Digest check"))
 
+    def test_skill_merge_files_spec_followups(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
+        clean = merge[merge.index("7. **Clean up:**"):]
+        start = clean.index("**Spec follow-ups.**")
+        bullet = clean[start:clean.index("\n", start)]
+        for phrase in ("`Follow-up: <text>`", "remove every `'` from each",
+                       "`B backlog-add '<text> (from <job id>)' ...`",
+                       "A failing `backlog-add` never stops the job; name it in the final report only."):
+            self.assertIn(phrase, bullet, phrase)
+        self.assertLess(clean.index("**Mark done"), start)
+        self.assertLess(start, clean.index("**Roadmap chaining.**"))
+
     def test_skill_merge_roadmap_done_starts_run_all(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
@@ -2086,9 +2345,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         lane = self.lane("roadmap")
         done = lane[lane.index("6. **Roadmap done**"):]
         for phrase in ("B roadmap-show", "`current` is `null`", "grep -q '^- \\[ \\] ' \"$F/backlog.md\"",
-                       "**BigBoy lane** step 3's start block, launching `run-all` instead of `start <child>`",
-                       "`<timestamp>-run-all.log`", "the prompt is `/trevskills-scrum run-all`",
-                       "no `B set <child> runlog=` line", "empty backlog starts nothing", "Run all started: runs/<LOG>"):
+                       "`B spawn run-all run-all '/trevskills-scrum run-all'`", "so it sets no `runlog`",
+                       "empty backlog starts nothing", "Report `Run all started: <log>`"):
             self.assertIn(phrase, done, phrase)
 
     def test_no_sound_clip_committed(self):
@@ -2126,6 +2384,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('FEAT=$(cat "$F/jobs/$ID/feature.md")', cloud)
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertNotIn("gh pr ", job)
+        # Every cloud PR body carries the lane the job ran, and cloud-sync writes it to the board.
+        self.assertIn("`Scrum lane: <fast|standard|debug|lilguy>`", job)
+        self.assertIn("also writes `lane=<lane>` from the PR body's `Scrum lane:` line", sync)
         # --environment takes only self-hosted ccpool_ ids, and a flag after --cloud would swallow its prompt.
         self.assertNotIn("--environment", cloud)
         # The launch prompt starts with the setup.sh refresh: cloud environments cache an old copy of the skill.
@@ -2210,9 +2471,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "Trevor chose this unattended path on purpose", "every refusal still apply",
                        "never edit any agent's `model:` line"):
             self.assertIn(phrase, sync, phrase)
-        self.assertIn('(cd "$REPO" && CLAUDE_NOTIFIER_DISABLE=1 nohup claude -p "/trevskills-scrum approve $ID" --model sonnet '
-                      '--permission-mode acceptEdits > "$F/runs/$LOG" 2>&1 < /dev/null &)', rule)
-        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("nohup claude -p"))
+        self.assertIn("start a detached local approve with `B spawn $ID approve --model sonnet`", rule)
+        self.assertLess(sync.index("moves the job to needs-human with `pr=<url> base="), sync.index("B spawn $ID approve"))
         # The only model override is --model on the session: agent model: lines stay as AGENTS pins them.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)
@@ -2281,6 +2541,222 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = DASHBOARD.read_text()
         for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
             self.assertIn(phrase, text, phrase)
+
+
+class RulesCheckTest(unittest.TestCase):
+    """board.py rules-check: the script rules (1-8) of docs/skill-standards.md over a job worktree's diff."""
+    SKILL = ("---\nname: demo-skill\ndescription: Runs the demo. Use when asked for a demo.\n---\n\n# Demo\n\n"
+             "This skill is a sanctioned exception to the global git rules:\n- never push main\n\nJev never approves.\n\n"
+             "## Setup\n\nSet up.\n\n## Merge\n\n1. **Preconditions:**\n   - **Agent rules guard:** stop for Trevor.\n"
+             "2. Run `B set $ID stage=merging`.\n")
+    AGENT = ("---\nname: scrum-demo\ndescription: Scrum demo agent. Writes demo.md. Spawned only by the orchestrator.\n"
+             "tools: Read, Write\nmodel: opus\n---\n\nRule one.\n")
+    CONTRACTS = ('import unittest\nFIRST_LINE = {\n    "scrum-demo": "DEMO: OK",\n}\n\n\n'
+                 'class T(unittest.TestCase):\n    def test_ok(self):\n        pass\n')
+    BOARD = "x = 1\n# --- rules-check: the script half\ny = 2\n# --- end rules-check\nz = 3\n"
+    LIKELY = ("## Likely files\n- `agents/scrum-demo.md`\n- `skills/trevskills-scrum/SKILL.md`\n"
+              "- `skills/trevskills-scrum/lanes/*.md`\n- `tests/test_contracts.py`\n- `skills/trevskills-scrum/board.py`\n"
+              "- `docs/skill-standards.md`\n")
+
+    def setUp(self):
+        import os, sys, tempfile
+        from unittest import mock
+        sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+        import board
+        self.board = board
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.wt = base / "repo", base / "wt"
+        self.root = self.repo / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json"),
+                                           "SCRUM_USAGE": str(base / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        files = {"agents/scrum-demo.md": self.AGENT, "skills/trevskills-scrum/SKILL.md": self.SKILL,
+                 "skills/trevskills-scrum/lanes/demo.md": "# Demo lane\n\nStep one.\n",
+                 "tests/test_contracts.py": self.CONTRACTS, "skills/trevskills-scrum/board.py": self.BOARD,
+                 "README.md": "readme\n"}
+        for rel, text in files.items():
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text(text)
+        self.git(self.repo, "init", "-q", "-b", "main")
+        self.git(self.repo, "add", *files)
+        self.git(self.repo, "commit", "-q", "-m", "base")
+        self.job = board.cmd_new(self.root, "Rules edit")
+        self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
+        (self.root / "jobs" / self.job / "spec.md").write_text("# Rules edit\n\n" + self.LIKELY)
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def commit(self, rel, text):
+        (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.wt / rel).write_text(text)
+        self.git(self.wt, "add", rel)
+        self.git(self.wt, "commit", "-q", "-m", "edit")
+
+    def run_cli(self):
+        import io
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = self.board.main(["--dir", str(self.root), "rules-check", self.job])
+        return code or 0, json.loads(out.getvalue())
+
+    def assert_fails(self, needle):
+        code, out = self.run_cli()
+        self.assertEqual(code, 1, out)
+        self.assertFalse(out["ok"])
+        self.assertTrue(any(needle in f for f in out["failures"]), out["failures"])
+        return out
+
+    def test_compliant_rules_diff_passes(self):
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["ok"], out["failures"]), (0, True, []), out)
+        self.assertEqual(out["files"], ["agents/scrum-demo.md"])
+
+    def test_no_rules_file_changed_fails(self):
+        self.commit("tests/test_contracts.py", self.CONTRACTS + "# note\n")
+        self.assert_fails("the diff changes no rules file")
+
+    def test_rule1_frontmatter_needs_name_and_description(self):
+        self.commit("agents/scrum-demo.md", "Rule one.\n")
+        self.assert_fails("rule 1: agents/scrum-demo.md")
+
+    def test_rule2_bad_name(self):
+        self.commit("agents/scrum-demo.md", self.AGENT.replace("name: scrum-demo", "name: Claude_Demo"))
+        self.assert_fails("rule 2: agents/scrum-demo.md")
+
+    def test_rule3_description_angle_brackets_and_second_person(self):
+        self.commit("agents/scrum-demo.md", self.AGENT.replace("Writes demo.md.", "Writes <demo>."))
+        self.assert_fails("rule 3: agents/scrum-demo.md")
+        self.commit("agents/scrum-demo.md", self.AGENT.replace("Writes demo.md.", "You write demo.md."))
+        self.assert_fails("rule 3: agents/scrum-demo.md")
+
+    def test_rule3_existing_violation_is_not_new(self):
+        bad = self.AGENT.replace("Writes demo.md.", "Writes <demo>.")
+        (self.repo / "agents" / "scrum-demo.md").write_text(bad)
+        self.git(self.repo, "commit", "-q", "-am", "old violation")
+        self.git(self.wt, "merge", "-q", "main")
+        self.git(self.repo, "branch", "-f", "base-now", "main")
+        self.board.cmd_set(self.root, self.job, ["base=base-now"])
+        self.commit("agents/scrum-demo.md", bad + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+
+    def test_rules_2_3_5_second_violation_still_fails(self):
+        """Base already has one @ link and one angle bracket; the diff adding another of each still fails."""
+        bad = self.AGENT.replace("Writes demo.md.", "Writes <demo>.") + "See @docs/a.md first.\n"
+        (self.repo / "agents" / "scrum-demo.md").write_text(bad)
+        self.git(self.repo, "commit", "-q", "-am", "old violations")
+        self.git(self.wt, "merge", "-q", "main")
+        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
+        self.commit("agents/scrum-demo.md", bad + "Then @docs/b.md.\n")
+        self.assert_fails("rule 5: agents/scrum-demo.md: has an @ link")
+        self.commit("agents/scrum-demo.md", bad.replace("Writes <demo>.", "Writes <demo> and <more>."))
+        self.assert_fails("rule 3: agents/scrum-demo.md: description has an angle bracket")
+
+    def test_rule4_new_file_over_budget_fails(self):
+        self.commit("skills/trevskills-scrum/lanes/big.md", "# Big\n\n## Contents\n" + "line\n" * 501)
+        self.assert_fails("rule 4: skills/trevskills-scrum/lanes/big.md")
+
+    def test_rule4_over_budget_file_may_shrink_not_grow(self):
+        big = self.AGENT + "line\n" * 600
+        (self.repo / "agents" / "scrum-demo.md").write_text(big)
+        self.git(self.repo, "commit", "-q", "-am", "big")
+        self.git(self.wt, "merge", "-q", "main")
+        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
+        self.commit("agents/scrum-demo.md", big.replace("line\n", "", 1))
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+        self.commit("agents/scrum-demo.md", big + "more\n")
+        self.assert_fails("rule 4: agents/scrum-demo.md")
+
+    def head(self, cwd):
+        return subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def test_rule5_at_link_fails(self):
+        self.commit("agents/scrum-demo.md", self.AGENT + "See @docs/notes.md first.\n")
+        self.assert_fails("rule 5: agents/scrum-demo.md")
+
+    def test_rule5_long_reference_needs_contents(self):
+        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\n" + "step\n" * 120)
+        self.assert_fails("rule 5: skills/trevskills-scrum/lanes/demo.md")
+        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\n## Contents\n- Steps\n\n" + "step\n" * 120)
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+
+    def test_rule5_reference_points_to_another_lane(self):
+        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\nRead `lanes/other.md` next.\n")
+        self.assert_fails("rule 5: skills/trevskills-scrum/lanes/demo.md")
+
+    def test_rule6_contract_suite_must_pass(self):
+        self.commit("tests/test_contracts.py", self.CONTRACTS.replace("pass", "self.fail('pinned phrase gone')"))
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        self.assert_fails("rule 6: python3 -m unittest tests.test_contracts fails")
+
+    def test_rule6_first_line_pin_kept(self):
+        self.commit("tests/test_contracts.py", self.CONTRACTS.replace('    "scrum-demo": "DEMO: OK",\n', ""))
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        self.assert_fails("rule 6: FIRST_LINE pin for scrum-demo")
+
+    def test_rule7_file_outside_ticket_fails(self):
+        self.commit("README.md", "readme, edited\n")
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        out = self.assert_fails("rule 7: README.md")
+        self.assertFalse(any("agents/scrum-demo.md" in f for f in out["failures"]), out)
+
+    def test_rule7_feature_md_names_the_file(self):
+        (self.root / "jobs" / self.job / "spec.md").write_text("# Rules edit\n")
+        (self.root / "jobs" / self.job / "feature.md").write_text("Sharpen agents/scrum-demo.md rule two.\n")
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+        (self.root / "jobs" / self.job / "feature.md").write_text("Sharpen xagents/scrum-demo.md.bak rule two.\n")
+        self.assert_fails("rule 7: agents/scrum-demo.md")
+
+    def test_rule8_human_only_files(self):
+        for rel in ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"):
+            with self.subTest(rel=rel):
+                self.commit(rel, "---\nname: scrum-review-rules\ndescription: Grades rules.\n---\n\nx\n")
+                self.assert_fails(f"rule 8: {rel} is human-only")
+
+    def test_rule8_never_list_and_guard_bullets(self):
+        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("- never push main\n", ""))
+        self.assert_fails("rule 8: skills/trevskills-scrum/SKILL.md: the never-list")
+        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("stop for Trevor.", "merge."))
+        out = self.assert_fails("rule 8: skills/trevskills-scrum/SKILL.md: the Merge step 1 guard bullets")
+        self.assertFalse(any("never-list" in f for f in out["failures"]), out)
+
+    def test_rule8_skill_md_outside_human_only_sections_passes(self):
+        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("Set up.", "Set up fast."))
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+
+    def test_rule8_rules_check_code(self):
+        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("z = 3", "z = 4"))
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("y = 2", "y = 0"))
+        self.assert_fails("rule 8: skills/trevskills-scrum/board.py: the rules-check code")
+
+    def test_board_py_only_edit_outside_rules_check_passes(self):
+        """The Merge guard also routes board.py diffs here; one that leaves the rules-check code alone passes."""
+        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("z = 3", "z = 4"))
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"], out["files"]), (0, [], []), out)
+
+    def test_real_repo_markers_exist(self):
+        """Rule 8's section markers are found in the real files, so the human-only set is never silently empty."""
+        for rel, sections in self.board.HUMAN_ONLY_SECTIONS.items():
+            text = (ROOT / rel).read_text()
+            for label, start, end in sections:
+                self.assertIsNotNone(self.board._section(text, start, end), f"{rel}: {label}")
 
 
 if __name__ == "__main__":

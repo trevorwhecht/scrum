@@ -34,7 +34,7 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       const rows = [...document.querySelectorAll("#blList li[data-i]")];
       const needs = li => { const n = li.querySelector(".needs"); return n && {text: n.textContent, title: n.title,
         muted: getComputedStyle(n).color === getComputedStyle(document.getElementById("status")).color,
-        afterInput: n.previousElementSibling && n.previousElementSibling.tagName === "INPUT"}; };
+        afterInput: n.previousElementSibling && n.previousElementSibling.tagName === "TEXTAREA"}; };
       const list = document.getElementById("blList"), dlg = document.getElementById("backlog");
       return {rows: rows.map(li => ({i: li.dataset.i, tags: [...li.children].map(c => c.tagName + (c.className ? "." + c.className.split(" ")[0] : "")),
                                      needs: needs(li)})),
@@ -75,7 +75,7 @@ class DashboardBacklogNeedsBrowserTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
-        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 1, "weekly": 1}, "ollama": "down",
+        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 1, "weekly": 1},
                                                                          "claude_exhausted_until": None})
         status.start()
         self.addCleanup(status.stop)
@@ -105,7 +105,7 @@ class DashboardBacklogNeedsBrowserTest(unittest.TestCase):
         self.assertEqual(sorted(rows), ["2", "3", "4"], got)
         plain = rows["2"]
         self.assertIsNone(plain["needs"], got)
-        self.assertEqual(plain["tags"], ["SELECT.pts", "INPUT", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn"], got)
+        self.assertEqual(plain["tags"], ["SPAN.grip", "SELECT.pts", "TEXTAREA", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn", "BUTTON.btn"], got)
         waiting = rows["3"]["needs"]
         self.assertEqual(waiting["text"], "waits on: Build the base API layer for every sing…, #gone", got)
         self.assertEqual(waiting["title"], "Build the base API layer for every single order endpoint; #gone", got)
