@@ -2774,6 +2774,24 @@ print("stub err", file=sys.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
                                                       "--permission-mode", "acceptEdits"])
 
+    def test_big_ticket_model(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-big", "stage": "plan", "lane": "bigboy"}, {"id": "002-pts", "stage": "spec"},
+            {"id": "003-small", "stage": "spec"}, {"id": "004-road", "stage": "running", "lane": "roadmap"}]}))
+        (self.root / "backlog.md").write_text("# Backlog\n\n- [x] [8] Big thing → 002-pts\n- [x] [3] Small → 003-small\n")
+        project = self.root / "project.md"
+        project.write_text("- Orchestrator model: sonnet\n- Big ticket model: claude-fable-5-1\n")
+        for job_id, model in (("001-big", "claude-fable-5-1"), ("002-pts", "claude-fable-5-1"),
+                              ("004-road", "claude-fable-5-1"), ("003-small", "sonnet"), ("999-gone", "sonnet"),
+                              (None, "sonnet")):
+            self.assertEqual(board.orchestrator_model(self.root, job_id), model, job_id)
+        for line in ("", "- Big ticket model: so net\n", "- Big ticket model:\n"):
+            project.write_text("- Orchestrator model: sonnet\n" + line)
+            self.assertEqual(board.orchestrator_model(self.root, "001-big"), "sonnet", line)
+        project.write_text("- Big ticket model: opus\n")
+        self.assertEqual(board.orchestrator_model(self.root, "002-pts"), "opus")
+        self.assertEqual(board.orchestrator_model(self.root, "003-small"), "sonnet")
+
     def test_spawn_model_selection(self):
         project = self.root / "project.md"
         plain = ["-p", "/p", "--permission-mode", "acceptEdits"]
