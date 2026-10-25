@@ -189,6 +189,25 @@ def resumable(job):
     return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE))
 
 
+def limit_held(job):
+    """Held in its WATCHED stage until a usage limit resets (hold_limited), and not paused by Trevor."""
+    return bool(job.get("limitResetAt")) and job["stage"] in board.WATCHED and not job.get("paused")
+
+
+RESUME_ROOM: int | None = None  # watchdog_tick's resume pass budget (board.ram_room()); None outside a tick = unlimited
+
+
+def take_room() -> bool:
+    """Spend one session of the tick's resume budget. False when it is used up (the job waits on a slot)."""
+    global RESUME_ROOM
+    if RESUME_ROOM is None:
+        return True
+    if RESUME_ROOM <= 0:
+        return False
+    RESUME_ROOM -= 1
+    return True
+
+
 PLAY_QUEUED = "queued, starts next"
 
 
@@ -202,7 +221,8 @@ def unqueue(root, job):
 def play_queue_tick(project, root, jobs) -> bool:
     """Start the Play clicks the machine guard queued, oldest first, before any other start this tick. A job no
     longer resumable (or already running) is dropped from the queue; another kind of refusal keeps it queued and
-    moves on; a machine-guard refusal stops here and keeps it and every later one queued. True when it started one."""
+    moves on; a machine-guard refusal or a spent resume budget (take_room) stops here and keeps it and every later one
+    queued. True when it started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
         if running(project, job["id"]) or not resumable(job):
@@ -213,6 +233,8 @@ def play_queue_tick(project, root, jobs) -> bool:
             break
         if refusal:
             continue
+        if not take_room():
+            return True
         resume_job(project, root, job, jobs)
         unqueue(root, job)
         started = True
@@ -230,7 +252,10 @@ def resume_refusal(project, root, job, manual=False):
     rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
+    global RESUME_ROOM
     machine = board.machine_ok(root, manual=manual)
+    if machine and RESUME_ROOM is not None:
+        RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
     if machine == board.COOLING:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume work in the header."
     if machine:
@@ -407,8 +432,8 @@ def auto_resume(project, root, jobs):
     stage (limitResetAt) is resumed 120 s after that reset, under the same slot cap and try counter; a limit-killed
     job stalled in a WATCHED stage is moved back to that stage and held the same way (as respawn_exited does). True
     when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
-    its next try or a free slot), so watchdog_tick counts the project busy and auto continue starts no run-all
-    beside it."""
+    its next try or a free slot), so watchdog_tick claims nothing new this tick. Each resume first takes a session
+    from the tick's budget (take_room); with none left the job waits on a slot without spending a try."""
     now, busy = time.time(), False
     for job in jobs:
         reason = job.get("reason") or ""
@@ -431,8 +456,10 @@ def auto_resume(project, root, jobs):
         if not hit:
             if net_error(root, job):
                 if resume_refusal(project, root, job) is None:
-                    AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
-                    resume_job(project, root, job, jobs)
+                    busy = True
+                    if take_room():
+                        AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
+                        resume_job(project, root, job, jobs)
                 continue
             m = re.match(rf"{board.STALLED}(\w+):", reason)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
@@ -441,9 +468,11 @@ def auto_resume(project, root, jobs):
                 and parent.get("lane") in ("runall", "bigboy")
             if m and (run_child or not job.get("parent")) \
                     and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
+                busy = True
+                if not take_room():
+                    continue
                 STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child or a standalone job gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
-                busy = True
             continue
         busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
         stage = re.match(rf"{board.STALLED}(\w+):", reason)
@@ -454,7 +483,7 @@ def auto_resume(project, root, jobs):
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
             continue
-        if resume_refusal(project, root, job):  # a sibling holds its slot: retry next tick without spending a try
+        if resume_refusal(project, root, job) or not take_room():  # no slot: retry next tick without spending a try
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
@@ -475,8 +504,8 @@ def resume_held(project, root, job, jobs, now):
         if flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes. Fix: click Resume."):
             board.play(board.sound("needs-human"))
         return False
-    if resume_refusal(project, root, job):
-        return True  # a sibling holds its slot: no try spent
+    if resume_refusal(project, root, job) or not take_room():
+        return True  # a sibling or the tick's budget holds its slot: no try spent
     if not flag_stalled(root, job, LIMIT_RESET):
         return False  # the job moved on
     AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
@@ -657,13 +686,14 @@ def parked_parent(project, root, job, by_id, alive):
     return ids
 
 
-def sweep_parents(project, root, jobs, alive=None):
+def sweep_parents(project, root, jobs, alive=None, claim=True):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
     child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
     mark a parent parked on Trevor (parked_parent) with the WAITING_ON reason and one needs-human sound, else start its
     waiting children when no child session is alive and no chaining session holds the lock. A runall with a child
-    still in progress tops up its free slots each tick, unless a chaining session holds the lock."""
+    still in progress tops up its free slots each tick, unless a chaining session holds the lock. claim=False (this
+    tick resumed or Played a job) skips both start_ready calls; everything else still runs."""
     alive = alive or once(lambda: board.session_alive_fn())
     by_id = {j["id"]: j for j in jobs}
     for p in jobs:
@@ -675,7 +705,7 @@ def sweep_parents(project, root, jobs, alive=None):
             continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
             if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
-                    and not board.chain_lock_live(root, p["id"]):
+                    and not board.chain_lock_live(root, p["id"]) and claim:
                 start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
             continue
         if finished_bigboy(p, by_id):
@@ -692,7 +722,7 @@ def sweep_parents(project, root, jobs, alive=None):
                 board.play(board.sound("needs-human"))
             continue
         if not any(k.get("stage") == "waiting" for k in kids) or board.chain_lock_live(root, p["id"]) \
-                or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids):
+                or any(running(project, k["id"]) for k in kids) or any(alive()(k) for k in kids) or not claim:
             continue
         start_ready(project, root, p["id"])
 
@@ -741,7 +771,8 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
-    """Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
+    """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
+    Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
     job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
     first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
     (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
@@ -852,42 +883,105 @@ def discuss_runs():
     return listed
 
 
+AUTO_PLAYED = ("auto-played because no sessions were running; a pause left by an overload is no longer needed. "
+               "Fix: click Pause to hold it again.")
+
+
+def updated_at(job) -> float:
+    """job's updatedAt as epoch seconds; a missing or bad one sorts last."""
+    try:
+        return datetime.fromisoformat(job["updatedAt"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return float("inf")
+
+
+def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
+    """With no session running anywhere, Play the oldest paused job (updatedAt) that resume_refusal lets through: a
+    pause Trevor left during an overload is no longer needed. A candidate refused for another reason (a sibling, a
+    lilguy job) is skipped; a machine refusal (cool-down included) stops here. True when it Played one."""
+    for project, root, job, jobs in sorted(candidates, key=lambda c: updated_at(c[2])):
+        refusal = resume_refusal(project, root, job)
+        if refusal and refusal.startswith(board.MACHINE_WAIT):
+            return False
+        if refusal:
+            continue
+        if not job.get("children"):  # the `stalled in <stage>` prefix lets the resume session re-enter that stage
+            with board.locked_board(root) as b:
+                board.find(b, job["id"]).update(reason=f"{board.STALLED}{job['stage']}: {AUTO_PLAYED}",
+                                                updatedAt=board.now())
+        resume_job(project, root, job, jobs)
+        if job.get("children") and not board.find(board.read_board(root), job["id"]).get("reason"):
+            board.cmd_set(root, job["id"], [f"reason={AUTO_PLAYED}"], expect="running")
+        return True
+    return False
+
+
 def watchdog_tick():
-    """Sweep every registered project for stalled jobs and auto-resume them first, so resumes take the free slots;
-    then a flagged child frees its Run-all/BigBoy slot, so start whatever siblings are now ready (board.cmd_ready claims
-    nothing while board.resume_first counts a paused or stalled job), restart or close idle parents (sweep_parents),
-    poll its cloud jobs (cloud_tick) and prune finished worktrees. Last, auto_continue_tick. One project's failure
-    never stops the others."""
-    busy, alive = {}, once(lambda: board.session_alive_fn())
-    for project, repo in board.projects().items():
+    """Three passes over every registered project; one project's failure never stops the others.
+    1. Resume: per project, flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
+       Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
+       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project.
+    2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
+    3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
+       let sweep_parents claim, and run auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick
+       and prune_worktrees run every tick."""
+    global RESUME_ROOM
+    busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
+    pending = False
+    RESUME_ROOM = board.ram_room()
+    try:
+        for project, repo in board.projects().items():
+            try:
+                root = repo / "scrum"
+                board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
+                respawn_exited(project, root)
+                record_outcomes(project, root)
+                flagged = set(board.cmd_watchdog(root))
+                if not (root / "board.json").exists():
+                    busy[project] = False
+                    continue
+                jobs = json.loads((root / "board.json").read_text())["jobs"]
+                by_id = {j["id"]: j for j in jobs}
+                busy[project] = board_busy(project, root, jobs, by_id, alive)
+                seen.append((project, repo, root, jobs, flagged))
+                if RESUME_ROOM and board.machine_ok(root):
+                    RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
+                resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
+                resumed = auto_resume(project, root, jobs) or resumed
+                busy[project] = resumed or busy[project]
+                pending = pending or resumed
+                candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
+                               and j["stage"] not in ("done", "aborted") and not running(project, j["id"])
+                               and not by_id.get(j.get("parent"), {}).get("paused")]
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+    finally:
+        RESUME_ROOM = None
+    played = False
+    if not pending and candidates and board.live_sessions() == 0:
         try:
-            root = repo / "scrum"
-            board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
-            respawn_exited(project, root)
-            record_outcomes(project, root)
-            flagged = set(board.cmd_watchdog(root))
-            if not (root / "board.json").exists():
-                busy[project] = False
-                continue
-            jobs = json.loads((root / "board.json").read_text())["jobs"]
-            by_id = {j["id"]: j for j in jobs}
-            busy[project] = board_busy(project, root, jobs, by_id, alive)
-            busy[project] = play_queue_tick(project, root, jobs) or busy[project]  # Trevor's queued Play goes first
-            busy[project] = auto_resume(project, root, jobs) or busy[project]  # resumes take the free slots first
-            for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
-                start_ready(project, root, parent)
+            played = auto_play(candidates)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: auto play: {e}", file=sys.stderr, flush=True)
+    claim = not pending and not played
+    for project, repo, root, jobs, flagged in seen:
+        try:
+            if claim:  # a flagged child frees its Run-all/BigBoy slot
+                for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
+                    start_ready(project, root, parent)
             try:  # its own guard: a sweep failure must not skip the cloud poll
-                sweep_parents(project, root, jobs, alive)
+                sweep_parents(project, root, jobs, alive, claim=claim)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
             prune_worktrees(repo, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
-    try:
-        auto_continue_tick(busy)
-    except (Exception, SystemExit) as e:
-        print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
+    if claim:
+        try:
+            auto_continue_tick(busy)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
     cooldown_chime()
 
 
@@ -2852,11 +2946,19 @@ class Handler(BaseHTTPRequestHandler):
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"), body.get("note"))
         if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
-            if not job or running(project, job_id) or not resumable(job):
+            if not job or running(project, job_id) or not resumable(job) and not limit_held(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
             if not manual and board.cooling_down():
                 return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
+            if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
+                if refusal := resume_refusal(project, root, job, manual=manual):
+                    return 409, {"error": refusal}
+                if not flag_stalled(root, job, LIMIT_RESET):
+                    return 409, {"error": "job moved on"}
+                jobs = json.loads((root / "board.json").read_text())["jobs"]
+                resume_job(project, root, job, jobs, manual=manual)
+                return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT):
                     return 409, {"error": refusal}

@@ -505,6 +505,32 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
         self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
 
+    def test_resume_endpoint_accepts_limit_held_job(self):
+        """continue.py's {} brings back a job held in its stage on a usage limit (limitResetAt, no paused)."""
+        b = self.serve.board
+        held = b.cmd_new(self.root, "Held on a limit")
+        self.edit_job(held, stage="build", reason=None, limitResetAt=int(time.time()) + 3600)
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{held}/resume", {}), (202, {"id": held, "action": "resume"}))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(held, "resume", f"/trevskills-scrum resume {held}")])
+        job = self.stage_of(held)
+        self.assertEqual((job["stage"], job["reason"]), ("needs-human", "stalled in build: usage limit reset. Fix: click Resume."))
+        self.assertNotIn("limitResetAt", job)
+        lil = b.cmd_new(self.root, "Held lilguy")
+        self.edit_job(lil, lane="lilguy", stage="build", reason=None, limitResetAt=1_800_000_000)
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {})
+        self.assertEqual(code, 409)
+        self.assertTrue(out["error"].startswith("lilguy job: there is no pipeline to resume."), out)
+        spawn.assert_not_called()
+        self.assertEqual((self.stage_of(lil)["stage"], self.stage_of(lil)["limitResetAt"]), ("build", 1_800_000_000))
+        live = b.cmd_new(self.root, "Held but running")
+        self.edit_job(live, stage="build", reason=None, limitResetAt=1_800_000_000)
+        with mock.patch.object(self.serve, "running", return_value=True), mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{live}/resume", {})[0], 409)
+        spawn.assert_not_called()
+        self.assertEqual(self.stage_of(live)["limitResetAt"], 1_800_000_000)
+
     def test_resume_accepts_resumable_reasons(self):
         b = self.serve.board
         for reason in ("stalled in build: no board update for 30 min and no live session. Fix: click Resume.",
@@ -5004,6 +5030,88 @@ class WatchdogIdleParentTest(unittest.TestCase):
         (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}))
 
     PAUSED = "stalled in build: paused by Trevor. Fix: click Play."
+    STALLED = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+
+    def claimable_board(self, kid, *extra):
+        """A running Run-all parent with children 002-kid (`kid` fields) and a waiting 003-wait, an auto-continue
+        backlog line, plus `extra` jobs."""
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
+        self.serve.AUTO_RESUME.clear(); self.serve.STALL_RESUMED.clear()
+        self.queue_board({"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-kid", "003-wait"]},
+                         {"id": "002-kid", "parent": "001-par", **kid},
+                         {"id": "003-wait", "stage": "waiting", "parent": "001-par"}, *extra)
+
+    def ps_file(self, text):
+        ps = self.repo / "ps.txt"
+        ps.write_text(text)
+        return mock.patch.dict(os.environ, SCRUM_PS=str(ps))
+
+    def two_paused(self):
+        self.queue_board({"id": "011-new", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "updatedAt": "2026-10-25T10:00:00+00:00"},
+                         {"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "updatedAt": "2026-10-25T09:00:00+00:00"})
+
+    def test_watchdog_tick_resume_blocks_claims(self):
+        held = {"id": "010-held", "stage": "build", "limitResetAt": int(time.time()) - 300}  # reset + 120 s is past
+        cases = {"stalled child": ("002-kid", {"stage": "needs-human", "reason": self.STALLED}, ()),
+                 "limit-held": ("010-held", {"stage": "done"}, (held,))}
+        for case, (job_id, kid, extra) in cases.items():
+            with self.subTest(case=case):
+                self.claimable_board(kid, *extra)
+                spawn, ready, _ = self.tick()
+                self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                                 [(job_id, "resume", f"/trevskills-scrum resume {job_id}")])
+                ready.assert_not_called()
+                self.assertEqual(self.job("003-wait")["stage"], "waiting")
+
+    def test_watchdog_tick_auto_plays_oldest_paused_when_idle(self):
+        self.two_paused()
+        with self.ps_file(""):
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args for c in spawn.call_args_list],
+                         [("idle", self.root, "010-old", "resume", "/trevskills-scrum resume 010-old")])
+        self.assertEqual(self.job("010-old")["reason"],
+                         "stalled in build: auto-played because no sessions were running; a pause left by an overload is "
+                         "no longer needed. Fix: click Pause to hold it again.")
+        self.assertEqual((self.job("011-new")["paused"], self.job("011-new")["reason"]), (True, self.PAUSED))
+
+    def test_watchdog_tick_no_auto_play_with_live_session(self):
+        self.two_paused()
+        with self.ps_file("claude -p /trevskills-scrum start 9-x\n"):
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list if c.args[3] == "resume"], [])
+        for k in ("010-old", "011-new"):
+            self.assertEqual((self.job(k)["paused"], self.job(k)["reason"]), (True, self.PAUSED))
+
+    def test_watchdog_tick_machine_refusal_resumes_and_claims_nothing(self):
+        self.claimable_board({"stage": "done"}, {"id": "010-stalled", "stage": "needs-human", "reason": self.STALLED},
+                             {"id": "011-paused", "stage": "build", "paused": True, "reason": self.PAUSED})
+        with self.ps_file(""), mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            spawn, _, _ = self.tick()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("003-wait")["stage"], "waiting")
+        self.assertEqual((self.job("011-paused")["paused"], self.job("011-paused")["reason"]), (True, self.PAUSED))
+        self.assertEqual(self.job("010-stalled")["reason"], self.STALLED)
+
+    def test_watchdog_tick_resume_budget_and_usage(self):
+        self.serve.AUTO_RESUME.clear()
+        self.queue_board({"id": "010-a", "stage": "needs-human", "reason": self.STALLED},
+                         {"id": "011-b", "stage": "needs-human", "reason": self.STALLED})
+        with mock.patch.object(self.board, "ram_room", return_value=1):
+            spawn, _, _ = self.tick()
+        self.assertEqual(len([c for c in spawn.call_args_list if c.args[3] == "resume"]), 1)
+        self.assertIsNone(self.serve.RESUME_ROOM, "the budget only lives for one tick")
+        usage, now = self.repo / "usage.json", time.time()
+        usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 99, "resets_at": now + 7200},
+            "seven_day": {"used_percentage": 10, "resets_at": now + 3 * 86400}}}))
+        self.queue_board({"id": "012-c", "stage": "needs-human", "reason": self.STALLED})
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            self.assertEqual(self.board.usage_allowance(self.board.read_usage(), now, 0), 0)
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("012-c", "resume")])
 
     def test_watchdog_starts_play_queued_first(self):
         s = self.serve
@@ -5024,7 +5132,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
                           "play_queued": "2026-10-25T10:00:00+00:00"})
         with mock.patch.object(s, "auto_continue_tick") as cont, mock.patch.object(s, "board_busy", return_value=False):
             self.tick()
-        self.assertEqual(cont.call_args.args, ({"idle": True},), "a queued start counts the project busy")
+        cont.assert_not_called()  # a queued start is a resume: the tick claims nothing new
 
     def test_watchdog_play_queue_waits_and_drops_stale(self):
         s = self.serve
@@ -5152,9 +5260,12 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 self.write(stage, {"002-done": "done", "003-wait": "waiting"})
                 data = json.loads((self.root / "board.json").read_text()); data["jobs"][0]["reason"] = reason
                 (self.root / "board.json").write_text(json.dumps(data))
-                self.assert_no_start()
+                with self.ps_file("claude -p /trevskills-scrum start 9-x\n"):  # a live session: no auto-play
+                    self.assert_no_start()
 
     def test_sweep_parents_skips_paused_parent(self):
+        live = self.ps_file("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
+        live.start(); self.addCleanup(live.stop)
         self.write("running", {"002-done": "done", "003-wait": "waiting"})
         data = json.loads((self.root / "board.json").read_text())
         data["jobs"][0].update(paused=True, reason="stalled in running: paused by Trevor. Fix: click Play.")
@@ -5366,7 +5477,9 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1, jobs=[{"id": "9-pz", "stage": "build", "paused": True,
                                       "reason": "stalled in build: paused by Trevor. Fix: click Play."}])
         self.project("b", n=2)
-        self.assertEqual(self.tick(), self.started("b"), "a holds its paused job; b still starts this tick")
+        (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
+        with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")):
+            self.assertEqual(self.tick(), self.started("b"), "a holds its paused job; b still starts this tick")
 
     def test_auto_continue_machine_guard(self):
         """Low RAM or disk: no run-all starts; the next tick with room starts it as before. A guard that fails partway
@@ -5626,7 +5739,9 @@ class AutoContinueTest(unittest.TestCase):
         self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                      {"id": "002-k", "stage": "build", "paused": True, "parent": "001-p"}])
         del self.projects["b"], self.projects["a"]
-        self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
+        (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
+        with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")):
+            self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
 
     def test_no_start_while_auto_run_all_running(self):
         self.project("a", n=1); self.project("b", n=2)
