@@ -485,7 +485,10 @@ def claim_item(lines, item, job_id):
 
 
 def cmd_next(root, index=None):
-    """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
+    """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
+    Cool-down refuses the automatic claim (no index); an explicit index is Trevor's Run now and still claims."""
+    if index is None and cooling_down():
+        raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
@@ -515,6 +518,8 @@ def cmd_cloud_claim(root, n) -> dict:
     anything, so it blocks every item."""
     if n < 1:
         raise SystemExit("N must be at least 1")
+    if cooling_down():  # cool-down: no new backlog claim
+        return {"claimed": []}
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         taken, blocked_all = set(), False
@@ -2004,7 +2009,9 @@ def cmd_runall_start(root):
     """One Run-all parent whose waiting children are every open backlog item, claimed in priority order (priority_key) under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
-    open, and so does every item that needs it."""
+    open, and so does every item that needs it. Cool-down refuses it (COOLING_CLAIM)."""
+    if cooling_down():
+        raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         held = {i["index"] for i in items if not i["done"] and i["setup"]}  # indexes of open items left open
@@ -2091,11 +2098,13 @@ def free_disk_gb(path):
         return None
 
 
-COOLING = "cooling down"  # machine_ok's reason while Trevor's cool-down flag is on
+COOLING = "cooling down"  # machine_ok's reason (claim=True) while Trevor's cool-down flag is on
+COOLING_CLAIM = f"{COOLING}: no new backlog claim. Fix: click Resume work in the header."
 
 
 def cooldown_path():
-    """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no automatic start runs."""
+    """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no new work starts on its own (backlog
+    claims, Run-all child claims, auto-continue, cloud-claim, the next roadmap step); work already on the board finishes."""
     return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
 
@@ -2121,11 +2130,11 @@ def swap_grew(swap):
     return grew
 
 
-def machine_ok(path, manual=False):
-    """None when the machine has room for new work, else why not: cool-down (skipped for Trevor's manual clicks), then
-    free RAM, then swap, then free disk, then the session ceiling. Gates new claims, resumes and auto-continue starts
-    only; a running job is never touched. An unknown reading passes."""
-    if not manual and cooling_down():
+def machine_ok(path, manual=False, claim=False):
+    """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
+    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then the session ceiling. Gates new
+    claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
+    if claim and not manual and cooling_down():
         return COOLING
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
@@ -2265,7 +2274,7 @@ def cmd_ready(root, parent_id, live=()):
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
-        machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
+        machine = go and machine_ok(root, claim=runall)  # checked once: a machine-wide state, so it gates the whole call
         # paused or stalled work goes before new claims; a job with a live session is already being resumed
         first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper
@@ -3202,8 +3211,9 @@ def cmd_roadmap_link(root, p, s, job_id):
 
 
 def cmd_roadmap_next(root, job_id):
-    """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing."""
-    if not (Path(root) / "roadmap.md").is_file():
+    """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing.
+    Cool-down holds the next step: the step stays running and None is returned; Roadmap resume marks it done later."""
+    if cooling_down() or not (Path(root) / "roadmap.md").is_file():
         return None
     with locked_board(root):
         lines, rm = roadmap_locked(root)

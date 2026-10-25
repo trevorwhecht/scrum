@@ -608,9 +608,9 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve, "resume_refusal", return_value="waiting: free RAM 5% (< 20%)"), \
                 mock.patch.object(self.serve, "spawn"):
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {"manual": True})[0], 202)
-        with self.cooling():
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 409)
-        self.assertEqual(lines(queued), [], "a queued click and a cooling-down 409 are not refused stops")
+        with self.cooling(), mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 202)
+        self.assertEqual(lines(queued), [], "a queued click and a cooling-down resume are not refused stops")
         for j in (stalled, held, asked, queued):
             b.cmd_abort(self.root, j, False)
 
@@ -1218,29 +1218,25 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertNotIn("play_queued", self.stage_of(kid))
 
-    # --- cool down (job 305): a flag file that refuses every automatic start; Trevor's clicks still start work ---
+    # --- cool down (jobs 305, 421): a flag file that holds only new work; in-flight work and Trevor's clicks still start ---
     def cooling(self):
         flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
         flag.write_text("")
         return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
 
-    def test_cooldown_refuses_automatic_resume_post(self):
-        """continue.py POSTs {} to Resume: while cooling down that is an automatic start, refused before the queue."""
+    def test_cooldown_allows_automatic_resume_post(self):
+        """Job 421: continue.py POSTs {} to Resume; cool-down holds only new work, so a stalled or paused job resumes."""
         stalled = self.serve.board.cmd_new(self.root, "Cool stalled")
         self.edit_job(stalled, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
         self.addCleanup(self.serve.board.cmd_abort, self.root, stalled, False)
         paused = self.paused_job("Cool paused")
         with self.cooling(), mock.patch.object(self.serve, "spawn") as spawn:
             for job_id in (stalled, paused):
-                for body in ({}, {"manual": "yes"}, {"manual": 1}):
-                    with self.subTest(job=job_id, body=body):
-                        before = self.stage_of(job_id)
-                        code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", body)
-                        self.assertEqual(code, 409)
-                        self.assertIn("cooling down", out["error"])
-                        self.assertEqual(self.stage_of(job_id), before, "not queued, nothing changed")
-                        self.assertNotIn("play_queued", self.stage_of(job_id))
-        spawn.assert_not_called()
+                with self.subTest(job=job_id):
+                    self.assertEqual(self.serve.resume_refusal("repo", self.root, self.stage_of(job_id)), None)
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}),
+                                     (202, {"id": job_id, "action": "resume"}))
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(stalled, "resume"), (paused, "resume")])
 
     def test_cooldown_manual_play_allowed(self):
         b = self.serve.board
@@ -1321,9 +1317,9 @@ class ServeTest(unittest.TestCase):
             self.assertEqual((m["cooldown"], m["verdict"]), (False, None))
             flag.write_text("")  # left over from an earlier serve.py run: still counts
             self.assertEqual(self.req("GET", "/api/machine")[1]["cooldown"], True)
-            self.assertEqual(self.serve.board.machine_ok(self.root), "cooling down")
+            self.assertEqual(self.serve.board.machine_ok(self.root, claim=True), "cooling down")
             self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
-            self.assertIsNone(self.serve.board.machine_ok(self.root), "the next tick may start work, no restart")
+            self.assertIsNone(self.serve.board.machine_ok(self.root, claim=True), "the next tick may start work, no restart")
 
     def test_cooldown_chimes_once_at_zero(self):
         s, b = self.serve, self.serve.board
@@ -5346,26 +5342,39 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],
                          [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
 
-    def test_cooldown_refuses_automatic_starts(self):
-        """Job 305: with the cool-down flag on, no watchdog path starts anything; with it gone the same boards start."""
+    def test_cooldown_holds_only_new_work(self):
+        """Job 421: with the cool-down flag on, the watchdog finishes work in flight (the 189 BigBoy parent, queued Plays,
+        auto-resumes, orphan respawns) and holds only new work (Run-all claims, auto continue); with it gone the same
+        boards start."""
         flag = self.repo / "cooldown"
         old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
         stalled = "stalled in build: no live session. Fix: click Resume."
+        review = "stalled in review: no board update for 2 min and no live session. Fix: click Resume."
         (self.root / "runs").mkdir()
         (self.root / "runs" / "solo.log").write_text("Traceback: something else broke")
         boards = {
-            "claim and orphan": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-claimed", "003-wait"]},
-                                 {"id": "002-claimed", "stage": "spec", "parent": "001-par", "updatedAt": old},
-                                 {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
+            "orphan": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-claimed", "003-wait"]},
+                       {"id": "002-claimed", "stage": "spec", "parent": "001-par", "updatedAt": old},
+                       {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
+            "runall claim": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
+                             {"id": "002-done", "stage": "done", "parent": "001-par"},
+                             {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
             "queued play and auto-resume": [
                 {"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": "2026-10-25T09:00:00+00:00"},
                 {"id": "011-solo", "stage": "needs-human", "reason": stalled, "runlog": "runs/solo.log"}],
+            "bigboy review": [{"id": "020-big", "stage": "needs-human", "lane": "bigboy", "reason": review,
+                               "children": ["021-a", "022-b"]},
+                              {"id": "021-a", "stage": "done", "parent": "020-big"},
+                              {"id": "022-b", "stage": "done", "parent": "020-big"}],
             "auto continue": []}
+        want = {"orphan": [("002-claimed", "start")], "runall claim": [],
+                "queued play and auto-resume": [("010-q", "resume"), ("011-solo", "resume")],
+                "bigboy review": [("020-big", "resume")], "auto continue": []}
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
-        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
         for case, jobs in boards.items():
             for cooling in (True, False):
                 with self.subTest(case=case, cooling=cooling):
+                    (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
                     self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear(); self.serve.AUTO_RESUME.clear()
                     self.queue_board(*(dict(j) for j in jobs))
                     if cooling:
@@ -5374,14 +5383,15 @@ class WatchdogIdleParentTest(unittest.TestCase):
                         spawn, _, _ = self.tick()
                     flag.unlink(missing_ok=True)
                     if cooling:
-                        spawn.assert_not_called()
-                        if case == "claim and orphan":
+                        started = [c.args[2:4] for c in spawn.call_args_list]
+                        self.assertEqual(sorted(started), want[case])
+                        if case == "bigboy review":  # resumed, not re-flagged: its own session moves it on
+                            self.assertEqual(self.job("020-big")["reason"], review)
+                        if case in ("orphan", "runall claim"):
+                            self.assertEqual(self.job("003-wait")["stage"], "waiting")
+                        if case == "runall claim":  # a respawn skips that parent's claim for the tick, so its own board
                             self.assertTrue(self.job("001-par")["reason"].startswith("waiting: cooling down"))
-                            self.assertEqual((self.job("002-claimed")["stage"], self.job("003-wait")["stage"]),
-                                             ("spec", "waiting"))
-                        if case == "queued play and auto-resume":
-                            self.assertEqual(self.job("010-q")["play_queued"], "2026-10-25T09:00:00+00:00")
-                            self.assertEqual(self.job("011-solo")["reason"], stalled)
+                        self.assertIn("- [ ] Open item", (self.root / "backlog.md").read_text())
                     else:  # the control: the same board starts work once the flag is gone
                         self.assertTrue(spawn.called, case)
 
