@@ -50,7 +50,9 @@ def main(argv: list[str]) -> int:
                         return 124
         cmd = ["sh", "-c", argv[0]] if len(argv) == 1 else argv
         try:
-            return subprocess.call(cmd)
+            # the child inherits the lock fd, so the lock outlives a SIGKILLed wrapper until the build exits
+            # ponytail: a build that daemonizes a long-lived grandchild keeps the lock until that grandchild exits
+            return subprocess.call(cmd, pass_fds=(f.fileno(),))
         except (FileNotFoundError, PermissionError):
             return 127
 
