@@ -86,8 +86,8 @@ class MachineMeter(unittest.TestCase):
                          "a verdict that repeats no shown reading stays, after the usage segment")
         self.assertEqual(out["swap"], '<span class="ring danger" role="img" style="--pct:60" aria-label="RAM 40% free · swap 29%" title="RAM 40% free · swap 29%">40%</span> RAM'
                          + ' · <span class="ok">disk 100 GB</span>', "swap has no text: it turns the ring red and sits in its tooltip")
-        self.assertEqual(out["stale"], '<span class="ring ok" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span> RAM'
-                         + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict keeps the ring green")
+        self.assertEqual(out["stale"], '<span class="ring low" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span> RAM'
+                         + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict turns the ring yellow, not red")
 
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()
