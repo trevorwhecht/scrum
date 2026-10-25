@@ -1961,6 +1961,8 @@ def slot_cap(runall):
 
 MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
 MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
+MAX_SWAP_PCT = 50  # ... or above this much swap in use: memory_pressure's free % counts inactive pages as free, so
+#                    19 sessions ran at "32% free" with swap 90% full (2026-10-24); swap is the honest signal
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
 
 
@@ -1978,6 +1980,22 @@ def free_ram_pct():
     return float(m.group(1)) if m else None
 
 
+def swap_used_pct():
+    """Swap in use in percent of swap allocated, or None when unknown (no sysctl, no vm.swapusage, or no swap). SCRUM_SWAP_PCT
+    stands in for the reading."""
+    fake = os.environ.get("SCRUM_SWAP_PCT")
+    if fake:
+        return float(fake)
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", out)
+    if not m or float(m.group(1)) == 0:
+        return None
+    return float(m.group(2)) / float(m.group(1)) * 100
+
+
 def free_disk_gb(path):
     """Free disk in GB on path's volume, or None when unknown. SCRUM_FREE_DISK_GB stands in for the reading."""
     fake = os.environ.get("SCRUM_FREE_DISK_GB")
@@ -1990,11 +2008,14 @@ def free_disk_gb(path):
 
 
 def machine_ok(path):
-    """None when the machine has room for new work, else why not: free RAM, then free disk. Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown
-    reading passes."""
+    """None when the machine has room for new work, else why not: free RAM, then swap, then free disk. Gates new claims,
+    resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
+    swap = swap_used_pct()
+    if swap is not None and swap > MAX_SWAP_PCT:
+        return f"swap used {swap:g}% (> {MAX_SWAP_PCT}%)"
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
@@ -2003,9 +2024,13 @@ def machine_ok(path):
 
 def ram_room():
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
-    split into SESSION_RAM_PCT shares, at least 1. An unknown reading allows 1, so a batch never bursts blind."""
+    split into SESSION_RAM_PCT shares, at least 1. An unknown reading allows 1, so a batch never bursts blind, and so
+    does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping."""
     ram = free_ram_pct()
-    return 1 if ram is None else max(1, int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT))
+    swap = swap_used_pct()
+    if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
+        return 1
+    return max(1, int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT))
 
 
 SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")

@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 import board  # noqa: E402
@@ -1275,6 +1276,35 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):
             self.assertEqual(board.ram_room(), 1, "unknown RAM: one claim per call")
+
+    def test_machine_ok_high_swap(self):
+        """2026-10-24: 19 sessions ran at "32% free" with swap 90% full. memory_pressure's free % counts inactive
+        pages as free; swap is the honest signal."""
+        self.assertEqual(board.MAX_SWAP_PCT, 50)
+        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="60"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "swap used 60% (> 50%)")
+        with self.machine("14", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="60"):  # RAM first
+            self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def test_swap_used_pct_reads_sysctl(self):
+        with mock.patch.dict(os.environ, SCRUM_SWAP_PCT=""):
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(
+                    stdout="total = 10240.00M  used = 9027.31M  free = 1212.69M  (encrypted)\n")):
+                self.assertAlmostEqual(board.swap_used_pct(), 88.16, places=1)
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(
+                    stdout="total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)\n")):
+                self.assertIsNone(board.swap_used_pct(), "no swap allocated: unknown, passes")
+            with mock.patch.object(board.subprocess, "run", side_effect=FileNotFoundError("sysctl")):
+                self.assertIsNone(board.swap_used_pct())
+                self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def test_ram_room_is_one_while_swap_fills(self):
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
+            self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2: one claim per call")
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="20"):
+            self.assertEqual(board.ram_room(), 9)
 
     def test_ready_claims_only_up_to_ram_room(self):
         """The 2026-10-24 crash: one ready call claimed 7 children at once. Claims stop at the free RAM's room."""
