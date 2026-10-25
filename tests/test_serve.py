@@ -4171,6 +4171,9 @@ class AutoResumeTest(unittest.TestCase):
 
     def test_only_limit_killed_jobs_resume_and_wait_for_the_reset(self):
         s = self.serve
+        two = datetime.now().replace(hour=2, minute=0, second=0, microsecond=0)  # the next 2am, written 1h38m before it
+        two += timedelta(days=1) if two < datetime.now() else timedelta()
+        os.utime(self.root / "runs" / "limit.log", ((two - timedelta(hours=1, minutes=38)).timestamp(),) * 2)
         self.assertEqual(self.sweep(), ["crash", "epoch"], "a past reset retries now; crash once; paused never; 2am waits")
         due = s.AUTO_RESUME["p/limit"][1]
         self.assertGreater(due, time.time() + 60)
@@ -4321,6 +4324,43 @@ class AutoResumeTest(unittest.TestCase):
                              ("check", reset, f"stalled in check: no live session ({jid}). Fix: click Resume."), jid)
         self.assertEqual(live["crash"]["stage"], "needs-human")
         self.assertNotIn("limitResetAt", live["crash"])
+
+    def test_limit_reset_clock_time_after_log_mtime_stays_within_5h(self):
+        log, job = self.root / "runs" / "limit.log", {"runlog": "runs/limit.log"}
+        day = datetime.now().replace(second=0, microsecond=0)
+        log.write_text("You've hit your limit · resets 9:50pm (America/Los_Angeles)")
+        os.utime(log, (day.replace(hour=21, minute=57).timestamp(),) * 2)  # job 086: written 7 min after the reset
+        self.assertEqual(self.serve.limit_reset(self.root, job), (True, day.replace(hour=21, minute=50).timestamp(), False))
+        log.write_text("You've hit your limit · resets 2am (America/Los_Angeles)")
+        os.utime(log, (day.replace(hour=0, minute=22).timestamp(),) * 2)
+        self.assertEqual(self.serve.limit_reset(self.root, job), (True, day.replace(hour=2, minute=0).timestamp(), False))
+
+    def test_hold_limited_caps_a_clock_time_reset_at_5h(self):
+        s, now = self.serve, 1_800_000_000
+        self.jobs = [{"id": "c", "stage": "build"}, {"id": "f", "stage": "build"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=now + 0.5):
+            self.assertTrue(s.hold_limited(self.root, self.jobs[0], now + 10 * 3600))
+            self.assertTrue(s.hold_limited(self.root, self.jobs[1], now + 10 * 3600, fixed=True))
+        live = {j["id"]: j["limitResetAt"] for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual(live, {"c": 1_800_018_000, "f": 1_800_036_000})
+
+    def test_hold_limited_keeps_a_dated_or_epoch_reset(self):
+        s, now = self.serve, datetime(2030, 10, 15, 12, 0)
+        logs = {"dated": "You've hit your limit · resets Oct 17 at 6pm",
+                "epoch": "rate_limit: rejected (seven_day) resets_at=4102444800"}
+        self.jobs = []
+        for jid, text in logs.items():
+            (self.root / "runs" / f"{jid}.log").write_text(text)
+            os.utime(self.root / "runs" / f"{jid}.log", (now.timestamp(),) * 2)
+            self.jobs.append({"id": jid, "stage": "needs-human", "runlog": f"runs/{jid}.log",
+                              "reason": "stalled in check: no live session. Fix: click Resume."})
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=now.timestamp()):
+            self.assertEqual(self.sweep(), [])
+        live = {j["id"]: (j["stage"], j["limitResetAt"]) for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual(live, {"dated": ("check", int(datetime(2030, 10, 17, 18, 0).timestamp())),
+                                "epoch": ("check", 4102444800)})
 
     def test_auto_resume_standalone_stall_once_per_stage(self):
         stalled = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
