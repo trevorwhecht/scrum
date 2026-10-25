@@ -22,7 +22,7 @@ def run(expr, tz=None):
     text = DASHBOARD.read_text()
     esc = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "const when = ")))
     helpers = text[text.index("const setupWait = "):text.index("function bigboyLines(")] \
-        + text[text.index("const abortForm = "):text.index("// Splits a needs-human reason")]
+        + text[text.index("const abortForm = "):text.index("// A stop's issue in plain words")]
     script = f"{esc}\nlet jobs = {json.dumps(JOBS)};\n{helpers}\nconsole.log(JSON.stringify({expr}));"
     env = {**os.environ, "TZ": tz} if tz else None
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, env=env).stdout)
@@ -69,14 +69,14 @@ class JobModal(unittest.TestCase):
         for stage in ("waiting", "needs-human", "done", "aborted"):
             self.assertEqual(run(f'pauseForm({{stage: "{stage}"}})'), "", stage)
         resume = '<form data-act="resume"><button class="btn primary tall" type="submit">{}</button></form>'
-        self.assertEqual(run('resumeForm("stalled in build: paused by Trevor. Fix: click Play.")'), resume.format("Play"))
-        self.assertEqual(run('resumeForm("stalled in check: no board update for 30 min. Fix: click Resume.")'),
+        self.assertEqual(run('resumeForm({reason: "stalled in build: paused by Trevor. Fix: click Play."})'), resume.format("Play"))
+        self.assertEqual(run('resumeForm({reason: "stalled in check: no board update for 30 min. Fix: click Resume."})'),
                          resume.format("Resume"))
-        self.assertEqual(run('resumeForm("blocked: x. Fix: y")'), "")
+        self.assertEqual(run('resumeForm({reason: "blocked: x. Fix: y"})'), "")
         text = DASHBOARD.read_text()
         body = text[text.index("function renderActions(job)"):text.index('$("actions").addEventListener("submit"')]
-        self.assertEqual(body.count("pauseForm(job) + abortForm(job)"), 2)  # run alive, and no run
-        self.assertIn("resumeForm(reason)", body)
+        self.assertEqual(body.count("pauseForm(job) + moreMenu(job)"), 2)  # run alive, and no run
+        self.assertIn("resumeForm(job)", body)
         self.assertIn("|stalled)/.test(reason)", body)  # Approve stays hidden for a paused (stalled) job
         submit = text[text.index('$("actions").addEventListener("submit"'):]
         self.assertIn('act === "resume" ? {manual: true} : act === "pause" || act === "setup-done" ? {}', submit)
@@ -132,35 +132,35 @@ class JobModal(unittest.TestCase):
                {"key": "a", "label": "Ship it", "command": "approve 020-q"},
                {"key": "b", "label": "Redo", "command": 'rework 020-q "again"'}]
     TODAY_ACTIONS = (
-        '<div class="waiting" role="status"\n    data-agent-hint="This job stopped and needs Trevor. The first line is what is '
-        'wrong; the second is the exact fix.">\n    <b>Waiting on you</b><p>review: CHANGES after 3 rounds.</p><p>Pick one.</p>'
-        '</div><form data-act="approve">\n      \n      <button class="btn primary" type="submit">Approve &amp; merge</button>'
+        '<div class="stop" role="status"\n    data-agent-hint="This job stopped and needs Trevor. The first line is what is '
+        'wrong; then either the exact fix or the ways forward, the recommended one first.">\n    <b>Waiting on you</b>'
+        '<p>CHANGES after 3 rounds.</p><p>Pick one.</p></div><form data-act="approve">\n      \n      <button class="btn primary" type="submit">Approve &amp; merge</button>'
         '</form><form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the '
         'builder change?" aria-label="Feedback for the builder"></textarea>\n      <button class="btn" type="submit" '
         'data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window '
         'that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree '
         'on.">Discuss first</button>\n      <button class="btn" type="submit">Send back to builder</button></form>'
-        '<form data-act="abort">\n    <label hidden><input type="checkbox" name="requeue"> Put back in '
-        'backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button></form>'
-        '<p class="error" role="alert"></p>')
+        '<details class="more"><summary>More</summary><form data-act="abort">\n    <label hidden><input type="checkbox" '
+        'name="requeue"> Put back in backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button>'
+        '</form></details><p class="error" role="alert"></p>')
     TODAY_CARD = (
         '<button class="card human" data-key="p/020-q">\n    <span class="tag" style="--h:330">p</span><span class="lanechip">'
         'standard</span><span class="id">020-q</span><span class="title">Asked</span>\n    \n    \n    \n    \n    <span '
         'class="bar human" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="10" aria-label="Estimated '
-        'progress" title="~10% (estimate)"><span style="width:10%"></span></span>\n    \n    <span class="reason">review: '
-        'CHANGES after 3 rounds.</span>\n    \n    \n    \n    \n    \n    <span class="meta">T</span>\n  </button>')
+        'progress" title="~10% (estimate)"><span style="width:10%"></span></span>\n    \n    <span class="status">Waiting on '
+        'you: CHANGES after 3 rounds.</span>\n    \n    \n    \n    \n    <span class="meta">T</span>\n  </button>')
 
     def card_js(self, tail):
-        """Run tail in node over dashboard.html's top-level helpers, optionsRow, card and answer(), with $, post and poll
+        """Run tail in node over dashboard.html's top-level helpers, stopBox, card and answer(), with $, post and poll
         stubbed: post calls land in `posted`, poll calls in `polls`. Prints what tail logs."""
         node = shutil.which("node")
         if not node:
             raise unittest.SkipTest("node not on PATH")
         text = DASHBOARD.read_text()
         src = (text[text.index("const STAGES = "):text.index("function roadmapLookup(")]
-               + text[text.index("const splitReason = "):text.index("const waitingBanner = ")]
+               + text[text.index("// A stop's issue in plain words"):text.index("function renderActions(")]
                + text[text.index("function card(job)"):text.index("function render(")]
-               + text[text.index("const ofJob = "):text.index("// answer() end")])
+               + text[text.index("// Redraws only the open modal's stop box"):text.index("// answer() end")])
         src = src.replace("const $ = id => document.getElementById(id);", "const $ = id => stub;") \
             .replace("const post = (url, body) =>", "const realPost = (url, body) =>")
         script = ("const window = {}, document = {activeElement: null};\nconst stub = {open: false, dataset: {}, "
@@ -198,44 +198,29 @@ class JobModal(unittest.TestCase):
     def test_options_replace_needs_human_row(self):
         html = self.actions_html({**self.ASKED, "question": "Which way?", "options": self.OPTIONS,
                                   "reason": "stalled in build: x. Fix: click Resume."})
-        self.assertIn('<span class="reason">Which way?</span>', html)
+        self.assertIn('<b>Waiting on you</b><p>Which way?</p>', html)
         self.assertEqual(re.findall(r'<button class="btn tall" type="button" data-answer="(\w)">([^<]*)</button>', html),
                          [("a", "Ship it"), ("b", "Redo"), ("c", "Drop &lt;it&gt;")])
         for gone in ('data-act="resume"', 'data-act="approve"', "Discuss first", "Send back to builder"):
             self.assertNotIn(gone, html)
-        for kept in (">Abort job</button>",):
-            self.assertIn(kept, html)
+        self.assertIn(">Abort job</button></form></details>", html)  # Abort stays, in the More menu
         no_question = self.actions_html({**self.ASKED, "tty": "ttys001", "options": self.OPTIONS})
-        self.assertIn('<span class="reason">review: CHANGES after 3 rounds.</span>', no_question)  # no question: the problem line
+        self.assertIn('<b>Waiting on you</b><p>CHANGES after 3 rounds.</p><div class="acts">', no_question)  # no question: the issue
 
-    def test_option_buttons_post_answer(self):
+    def test_card_has_status_not_option_buttons(self):
         job = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}
         [html] = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")
-        self.assertTrue(html.startswith('<div class="card human" data-key="p/020-q" tabindex="0" role="button">'), html)
-        self.assertTrue(html.endswith("</div>"), html)
-        self.assertEqual(re.findall(r"<button[^>]*>", html),
-                         ['<button class="btn tall" type="button" data-answer="a">',
-                          '<button class="btn tall" type="button" data-answer="b">',
-                          '<button class="btn tall" type="button" data-answer="c">'])
-        self.assertIn('<span class="reason">Which way?</span>', html)
-        self.assertNotIn("review: CHANGES after 3 rounds.", html)  # the question replaces the reason line
-        setup = f"jobs = [{json.dumps(job)}];\nconst show = () => console.log(JSON.stringify([posted, polls.length, optionsRow(jobs[0])]));\n"
-        approve = self.card_js(setup + 'await answer("p/020-q", "a"); show();')
-        self.assertEqual(approve[0][:2], [[["api/p/p/jobs/020-q/answer", {"key": "a"}]], 1])
-        armed = self.card_js(setup + 'await answer("p/020-q", "c"); show(); await answer("p/020-q", "c"); show();')
-        self.assertEqual(armed[0][:2], [[], 0])  # the first click on an abort option only arms it
-        self.assertIn('<button class="btn tall danger" type="button" data-answer="c">Confirm: Drop &lt;it&gt;</button>', armed[0][2])
-        self.assertEqual(armed[1][:2], [[["api/p/p/jobs/020-q/answer", {"key": "c"}]], 1])
-        self.assertNotIn("Confirm:", armed[1][2])
-        failed = self.card_js(setup + 'postFails = "job isn\'t waiting <now>"; await answer("p/020-q", "b"); show();')
-        self.assertEqual(failed[0][1], 0)
-        self.assertIn('<p class="error" role="alert">job isn&#39;t waiting &lt;now&gt;</p>', failed[0][2])
-        self.assertNotIn(" disabled", failed[0][2])  # re-enabled
+        self.assertTrue(html.startswith('<button class="card human" data-key="p/020-q">'), html)
+        self.assertTrue(html.endswith("</button>"), html)
+        self.assertNotIn("data-answer", html)  # Trevor answers in the modal
+        self.assertIn('<span class="status">Waiting on you: Which way?</span>', html)
+        self.assertNotIn("CHANGES after 3 rounds", html)  # the question replaces the reason
         text = DASHBOARD.read_text()
-        opener = text[text.rindex('$("board").addEventListener("click", e => {'):]
-        self.assertIn('if (e.target.closest("button[data-answer]")) return;', opener)
-        new = text[text.index("const answerState = "):text.index("const waitingBanner = ")] \
-            + text[text.index("const ofJob = "):text.index("// answer() end")]
+        board = text[text.index('$("board").addEventListener("click"'):text.index('$("tabs").addEventListener("click"')]
+        self.assertNotIn("data-answer", board)
+        self.assertNotIn("div.card", board)
+        new = text[text.index("const answerState = "):text.index("function renderActions(")] \
+            + text[text.index("// Redraws only the open modal's stop box"):text.index("// answer() end")]
         self.assertIsNone(re.search(r"[^.\w](window\.)?(confirm|alert)\(", new))
 
     # --- needs-human: running line, outcome, feedback warning, Sent back list ---
@@ -263,10 +248,10 @@ class JobModal(unittest.TestCase):
         job = {**self.ASKED, "outcome": line}
         card = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")[0]
         self.assertIn('<span class="meta" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. Nothing changed.'
-                      '</span>\n    <span class="reason">review: CHANGES after 3 rounds.</span>', card)  # nothing between
+                      '</span>\n    <span class="status">Waiting on you: CHANGES after 3 rounds.</span>', card)  # nothing between
         modal = self.actions_html(job)
         self.assertTrue(modal.startswith('<p class="note" role="status">Approve refused at 4:21 PM: &lt;b&gt;budget&lt;/b&gt;. '
-                                         'Nothing changed.</p><div class="waiting" role="status"'), modal)
+                                         'Nothing changed.</p><div class="stop" role="status"'), modal)
         for other in ({**self.ASKED, "outcome": None}, {**self.ASKED, "stage": "build", "outcome": line}):
             self.assertNotIn("Nothing changed", self.actions_html(other))
             other_card = self.card_js(f"console.log(JSON.stringify(card({json.dumps(other)})));")[0]
@@ -304,7 +289,7 @@ class JobModal(unittest.TestCase):
                          '<div class="sentback"></div>')
         self.assertEqual(run(f"reworkList({json.dumps(self.ASKED)})"), "")  # no rework.md in files
         self.assertEqual(run(f"reworkList({json.dumps({**job, 'stage': 'build'})})"), "")
-        self.assertIn('<div class="sentback"></div><form data-act="abort">', self.actions_html(job))
+        self.assertIn('<div class="sentback"></div><details class="more">', self.actions_html(job))
 
 if __name__ == "__main__":
     unittest.main()

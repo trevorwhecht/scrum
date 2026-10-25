@@ -1086,7 +1086,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Waiting on you", DASHBOARD.read_text())
 
     def test_dashboard_waiting_banner_has_status_role(self):
-        self.assertRegex(DASHBOARD.read_text(), r'<div class="waiting"\s+role="status"')
+        self.assertRegex(DASHBOARD.read_text(), r'<div class="stop" role="status"')
 
     def test_skill_registers_waiting_hooks(self):
         fm = re.match(r"^---\n(.*?)\n---\n", (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), re.S).group(1)
@@ -1931,34 +1931,37 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`PARENT_DIR/rework.md`", tracker)
         self.assertIn("Trevor's decision there is authoritative", tracker)
 
-    def test_dashboard_split_reason(self):
+    def test_dashboard_stop_issue(self):
         node = shutil.which("node")
         if not node:
             self.skipTest("node not on PATH")
         text = DASHBOARD.read_text()
-        start = text.index("const splitReason = ")
-        src = text[start:text.index("\n};\n", start) + 3]
+        self.assertNotIn("splitReason", text)
+        start = text.index("const noPaths = ")
+        src = text[start:text.index("const VERBS = ", start)]
         cases = [
             ("Uncommitted change in x: a.json. Fix: commit + push it (or undo it), then click Approve & merge.",
-             {"problem": "Uncommitted change in x: a.json.", "fix": "Commit + push it (or undo it), then click Approve & merge."}),
-            ("a. Fix: one. Fix: two.", {"problem": "a.", "fix": "One. Fix: two."}),
-            ("worktree dirty", {"problem": "worktree dirty", "fix": "Click Discuss first."}),
-            ("", {"problem": "No reason recorded.", "fix": "Click Discuss first."}),
-            (None, {"problem": "No reason recorded.", "fix": "Click Discuss first."}),
+             "Uncommitted change in x: a.json."),
+            ("migrate needs your OK: drops scrum/jobs/x/spec.md. Fix: one. Fix: two.", "drops spec.md."),
+            ("Hard stop: auth — Login changes. Fix: x", "Login changes."),
+            ("worktree dirty", "worktree dirty"),
+            ("", "No reason recorded."),
+            (None, "No reason recorded."),
         ]
-        out = subprocess.run([node, "-e", f"{src}\nconsole.log(JSON.stringify([...{json.dumps([c[0] for c in cases])}.map(splitReason), splitReason(undefined)]))"],
+        out = subprocess.run([node, "-e", f"{src}\nconsole.log(JSON.stringify({json.dumps([c[0] for c in cases])}.map(stopIssue)))"],
                              capture_output=True, text=True, check=True).stdout
-        self.assertEqual(json.loads(out), [c[1] for c in cases] + [{"problem": "No reason recorded.", "fix": "Click Discuss first."}])
+        self.assertEqual(json.loads(out), [c[1] for c in cases])
 
-    def test_dashboard_banner_and_card_use_split_reason(self):
+    def test_dashboard_stop_box_and_card_use_stop_issue(self):
         text = DASHBOARD.read_text()
         self.assertNotIn("nextStep", text)
-        banner = text[text.index("const waitingBanner"):text.index("function renderActions")]
-        for phrase in ("splitReason(", "${esc(problem)}", "${esc(fix)}"):
-            self.assertIn(phrase, banner, phrase)
+        box = text[text.index("function stopBox(job)"):text.index("function renderActions")]
+        self.assertIn("esc(stopIssue(job.question || job.reason))", box)
+        status = text[text.index("const statusLine = "):text.index("function stopBox(job)")]
+        self.assertIn("`Waiting on you: ${stopIssue(job.question || job.reason)}`", status)
         card = text[text.index("function card(job)"):text.index("function render()")]
-        line = next(l for l in card.splitlines() if l.strip().startswith("${human &&") and 'class="reason"' in l)
-        self.assertIn("esc(splitReason(job.reason).problem)", line)
+        self.assertIn('<span class="status">${esc(statusLine(job))}</span>', card)
+        self.assertNotIn('<span class="reason">${esc(job.waiting)}', card)
 
     def test_dashboard_card_has_progress_bar(self):
         text = DASHBOARD.read_text()
@@ -2177,7 +2180,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertEqual(child, '<span class="meta">T3 of 001-big</span>')
         self.assertEqual(waits, [False, False, True, False, False, False, False])
         card = text[text.index("function card(job)"):text.index("function render()")]
-        for phrase in ('human || setup ? " human"', "Human setup: ${esc(job.setup_text", '"waiting", "plan", "running"'):
+        for phrase in ('human || setup ? " human"', "esc(statusLine(job))", '"waiting", "plan", "running"'):
             self.assertIn(phrase, card, phrase)
         for phrase in ('data-act="setup-done"', "btn primary tall", ">Setup done</button>", 'act === "setup-done" ? {}'):
             self.assertIn(phrase, text, phrase)

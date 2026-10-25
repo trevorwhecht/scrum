@@ -34,14 +34,17 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       console.log(JSON.stringify(got));
       return;
     }
-    if (mode === "options") {  // option buttons on the card, then in the modal (opened by clicking the card's title)
+    if (mode === "options") {  // the modal's stop box (opened by clicking the card's title); cards carry no option buttons
       const boxes = sel => page.evaluate(s => [...document.querySelectorAll(s)].map(b => {
         const r = b.getBoundingClientRect(); return {text: b.textContent, top: r.top, left: r.left, right: r.right, bottom: r.bottom, height: r.height};
       }), sel);
-      const card = await boxes(".card .answer button");
+      const card = await boxes(".card button");
       await page.click(".card[data-key] .title");
-      await page.waitForFunction(() => document.getElementById("viewer").open && document.querySelector("#actions .answer button"));
-      console.log(JSON.stringify({card, modal: await boxes("#actions .answer button")}));
+      await page.waitForFunction(() => document.getElementById("viewer").open && document.querySelector("#actions .stop button"));
+      const modal = await boxes("#actions .stop button[data-answer], #actions .stop .note, #actions .stop > p");
+      const fit = await page.evaluate(() => { const s = document.querySelector("#actions .stop"), v = document.getElementById("viewer");
+        return {stop: s.scrollWidth <= s.clientWidth, viewer: v.scrollWidth <= v.clientWidth, right: s.getBoundingClientRect().right, width: innerWidth}; });
+      console.log(JSON.stringify({card, modal, fit}));
       return;
     }
     await page.click(".card[data-key]");
@@ -51,7 +54,8 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       return {overflow: tabs.scrollWidth > tabs.clientWidth, paddingRight: getComputedStyle(tabs).paddingRight,
               marginLeft: getComputedStyle(close).marginLeft, position: getComputedStyle(close).position,
               tabsRight: tabs.getBoundingClientRect().right, close: {width: c.width, height: c.height, right: c.right},
-              actions: [...document.querySelectorAll("#actions .btn")].map(b => ({text: b.textContent.trim(), height: b.getBoundingClientRect().height}))};
+              actions: [...document.querySelectorAll("#actions .btn, #actions summary")].filter(b => b.checkVisibility())
+                .map(b => { const r = b.getBoundingClientRect(); return {text: b.textContent.trim(), height: r.height, width: r.width}; })};
     });
     const before = await measure();
     await page.evaluate(() => { const t = document.getElementById("tabs"); t.scrollLeft = t.scrollWidth; });
@@ -137,9 +141,10 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
     def test_viewer_action_buttons_44px(self):
         actions = self.browse("actions")["before"]["actions"]
         self.assertEqual([a["text"] for a in actions],
-                         ["Approve & merge", "Discuss first", "Send back to builder", "Abort job"], actions)
+                         ["Approve & merge", "Discuss first", "Send back to builder", "More"], actions)  # Abort sits inside More
         for a in actions:
             self.assertGreaterEqual(a["height"], 44, a)
+            self.assertGreaterEqual(a["width"], 44, a)
 
     def test_viewer_tabs_desktop_unchanged(self):
         m = self.browse("desktop")["before"]
@@ -151,22 +156,26 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
     def test_option_buttons_390px(self):
         board = json.loads(self.board_path.read_text())
         board["jobs"] = [{**board["jobs"][0], "id": "008-asked", "question": "Which way?", "reason": "blocked: pick one",
+                          "recommend": {"key": "b", "why": "Small fix"},
                           "options": [{"key": "a", "label": "Ship it", "command": "approve 008-asked"},
                                       {"key": "b", "label": "Send it back with a much longer label", "command": 'rework 008-asked "again"'},
                                       {"key": "c", "label": "Drop it", "command": "abort 008-asked"}]}]
         self.board_path.write_text(json.dumps(board))
         for width in (390, 1440):
-            got = self.browse("options", width)
-            for where in ("card", "modal"):
-                with self.subTest(width=width, where=where):
-                    boxes = got[where]
-                    self.assertEqual([b["text"] for b in boxes], ["Ship it", "Send it back with a much longer label", "Drop it"])
-                    for i, a in enumerate(boxes):
+            with self.subTest(width=width):
+                got = self.browse("options", width)
+                self.assertEqual(got["card"], [])
+                boxes = got["modal"]
+                self.assertEqual([b["text"] for b in boxes], ["Which way?", "Send it back with a much longer labelRecommended",
+                                                              "Small fix", "Ship it", "Drop it"])
+                self.assertTrue(got["fit"]["stop"] and got["fit"]["viewer"], got["fit"])
+                self.assertLessEqual(got["fit"]["right"], got["fit"]["width"], got["fit"])
+                for i, a in enumerate(boxes):
+                    if a["text"] in ("Ship it", "Drop it") or a["text"].endswith("Recommended"):
                         self.assertGreaterEqual(a["height"], 44, a)
-                        for b in boxes[i + 1:]:
-                            overlap = a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]
-                            self.assertFalse(overlap, (a, b))
-
+                    for b in boxes[i + 1:]:
+                        overlap = a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]
+                        self.assertFalse(overlap, (a, b))
 
 if __name__ == "__main__":
     unittest.main()
