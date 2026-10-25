@@ -478,38 +478,31 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, debug, phrase)
         self.assertNotIn("must instead contain the", debug)
 
-    def test_skill_merge_stops_for_agent_rule_edits(self):
+    def test_agent_rule_edits_have_no_hard_stop(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
-        regex = (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$"
-                 r"|(^|/)docs/skill-standards\.md$|(^|/)trevskills-scrum/board\.py$")
-        for phrase in (f"grep -E '{regex}'", "human-approval.md", "Hard stop: agent rules", "**Agent rules guard"):
-            self.assertIn(phrase, merge, phrase)
-        self.assertLess(merge.index("**Schema guard"), merge.index("**Agent rules guard"))
-        self.assertLess(merge.index("**Agent rules guard"), merge.index("**Main checkout guard"))
-        step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
-        self.assertIn("agent rules guard", step6)
-        start = merge.index("**Agent rules guard")
-        guard = merge[start:merge.index("\n", start)]
-        for phrase in ("B digest-verify $ID --worktree \"$WT\" --base \"$BASE\"", f"grep -E '{regex}'",
-                       "human-approval.md", "Run this guard again right before step 6"):
-            self.assertIn(phrase, guard, phrase)
-        for path in ("agents/scrum-builder.md", "skills/trevskills-scrum/SKILL.md", "skills/trevskills-scrum/lanes/cloud.md",
-                     "docs/skill-standards.md", "skills/trevskills-scrum/board.py"):
-            self.assertIsNotNone(re.search(regex, path), path)
-        for path in ("agents/README.md", "tests/test_contracts.py", "skills/trevskills-scrum/route.py", "src/lanes/foo.md",
-                     "docs/plans/skill-standards.md"):
-            self.assertIsNone(re.search(regex, path), path)
-        commands = self.section(text, "## Commands", "## New job")
-        approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
-        self.assertNotIn("`Hard stop`", approve)
-
-    def test_lilguy_stops_for_agent_rule_edits(self):
+        for phrase in ("Agent rules guard", "agent rules guard", "rules gate", "rules-gate.md", "Hard stop: agent rules",
+                       "B digest-verify"):
+            self.assertNotIn(phrase, merge, phrase)
+        self.assertIn("re-run the schema guard", self.section(merge, "6. **Merge:**", "7. **Clean up:**"))
+        self.assertIn("**Schema guard", merge)
+        self.assertIn(r"prisma/(schema\.prisma|migrations/)", merge)
+        self.assertLess(merge.index("**Schema guard"), merge.index("**Main checkout guard"))
         lilguy = self.lane("lilguy")
+        for phrase in ("Hard stop: agent rules", "agent rules guard"):
+            self.assertNotIn(phrase, lilguy, phrase)
         check = self.section(lilguy, "4. **Check.**", "5. **Land.**")
-        for phrase in (r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$", "Hard stop: agent rules",
-                       "run /trevskills-commitpush yourself", "B ask $ID 'Hard stop: agent rules"):
+        for phrase in ("the **Merge** schema guard regex", "**Check gate** `.env` check"):
             self.assertIn(phrase, check, phrase)
+        skill = ROOT / "skills" / "trevskills-scrum"
+        files = [skill / "SKILL.md", *sorted(f for f in (skill / "lanes").glob("*.md") if f.name != "rules-gate.md")]
+        for f in files:
+            for span in re.findall(r"`(B ask [^`]+)`", f.read_text()):
+                self.assertNotIn("Hard stop: agent rules", span, f.name)
+        claude = (ROOT / "CLAUDE.md").read_text()
+        for phrase in ("stops at the Merge", "scrum-review-rules"):
+            self.assertNotIn(phrase, claude, phrase)
+        self.assertIn("Batch rule edits", claude)
 
     def test_skill_clean_round_skips_approver(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1699,19 +1692,6 @@ class ContractTest(unittest.TestCase):
         self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
 
     def test_merge_agent_rules_gate(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        merge = self.section(text, "## Merge", "## Routing")
-        start = merge.index("**Agent rules guard")
-        guard = merge[start:merge.index("\n", start)]
-        for phrase in ("run the **rules gate**: Read `$HOME/.claude/skills/trevskills-scrum/lanes/rules-gate.md`",
-                       "`B rules-check` exits 0 and the `scrum-review-rules` review is PASS",
-                       "or the rules gate passes", "rules gate included"):
-            self.assertIn(phrase, guard, phrase)
-        self.assertNotIn("in-ticket self-heal", text)
-        self.assertLess(guard.index("human-approval.md"), guard.index("**rules gate**"))
-        self.assertLess(guard.index("B digest-verify"), guard.index("**rules gate**"))
-        step6 = self.section(merge, "6. **Merge:**", "7. **Clean up:**")
-        self.assertIn("agent rules guard (with its rules gate)", step6)
         gate = self.lane("rules-gate")
         for phrase in ('`B rules-check $ID --worktree "$WT" --base "$BASE"`', "spawn `scrum-review-rules` and wait for it",
                        "HEAD=$HEAD", "its second line is `Reviewed: $HEAD`, reuse it",
@@ -1739,11 +1719,6 @@ class ContractTest(unittest.TestCase):
         for phrase in ("## Human-only set", "the never-list at the top of `SKILL.md`", "`agents/scrum-review-rules.md`",
                        "`skills/trevskills-scrum/lanes/rules-gate.md`", "the Merge step 1 guard bullets"):
             self.assertIn(phrase, text, phrase)
-
-    def test_claude_md_guard_sentence_names_the_rules_gate(self):
-        text = (ROOT / "CLAUDE.md").read_text()
-        self.assertIn("or `B rules-check` exits 0 and the `scrum-review-rules` review is PASS", text)
-        self.assertIn("A diff that touches the human-only set in `docs/skill-standards.md` always stops", text)
 
     def test_merge_conflicts_ask_after_two(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()

@@ -20,10 +20,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
 - Routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
-- A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` stops at the Merge
-  agent-rules guard for Trevor unless it is exactly a queued digest proposal,
-  or `B rules-check` exits 0 and the `scrum-review-rules` review is PASS (the rules gate, `lanes/rules-gate.md`).
-  A diff that touches the human-only set in `docs/skill-standards.md` always stops. Specs need not restate this.
+- Agent, SKILL.md and lane edits merge like any other job, with no agent-rules stop (Trevor's choice, 2026-10-15).
   Batch rule edits; do not mix them into feature jobs.
 
 ## Scrum map
