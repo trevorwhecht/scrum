@@ -564,6 +564,7 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {}), (202, {"id": lil, "action": "resume"}))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(lil, "resume", f"/trevskills-scrum resume {lil}")])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_child_waits_for_overlapping_sibling(self):
         b = self.serve.board
         reason = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
@@ -934,6 +935,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["stage"], "running")
         self.assertTrue(job["reason"].startswith("waiting: usage "), job["reason"])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_ignores_pace_and_session_count(self):
         """No usage pace and no session count stops a resume (job 282): only machine_ok and a Run-all/BigBoy child's
         overlap rules do."""
@@ -1463,7 +1465,7 @@ class ServeTest(unittest.TestCase):
         at(wt / "src" / "a.py", 400)  # within 10 s the cached walk is reused
         self.assertEqual(self.serve.activity(self.root, job), {"text": "files changed", "at": now + 300})
 
-    # --- runlog, Open terminal, activity line ---
+    # --- runlog, activity line ---
     def job(self, title, *pairs):
         job_id = self.serve.board.cmd_new(self.root, title)
         if pairs:
@@ -1476,12 +1478,6 @@ class ServeTest(unittest.TestCase):
         data = json.loads(path.read_text())
         next(j for j in data["jobs"] if j["id"] == job_id).update(fields)
         path.write_text(json.dumps(data))
-
-    def terminal(self, job_id, headers=None):
-        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
-            run.return_value = mock.Mock(returncode=0, stdout="ok\n", stderr="")
-            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {}, headers)
-        return code, out, run, popen
 
     def test_spawn_records_runlog(self):
         job_id = self.job("runlog me")
@@ -1497,72 +1493,21 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["runlog"], self.serve.RUNS[f"repo/{job_id}"]["log"])
 
     def test_spawn_clears_stale_tty(self):
-        job_id = self.job("was interactive", "tty=ttys004", "term=Apple_Terminal")
+        job_id = self.job("was interactive", "tty=ttys004")
         with mock.patch.object(self.serve.subprocess, "Popen"):
             rel = self.serve.spawn("repo", self.root, job_id, "approve", "x")
         self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
         job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
-        self.assertEqual((job.get("tty"), job["runlog"], job["term"]), (None, rel, "Apple_Terminal"))
-        code, out, run, _ = self.terminal(job_id)
-        self.assertEqual(code, 200, out)
-        run.assert_called_once()
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[-1], os.path.realpath(self.root / rel))
-        self.assertNotIn("/dev/ttys004", argv)
+        self.assertEqual((job.get("tty"), job["runlog"]), (None, rel))
 
-    def test_spawn_keeps_ghostty_term(self):
-        job_id = self.job("was ghostty", "tty=ttys006", "term=ghostty")
-        with mock.patch.object(self.serve.subprocess, "Popen"):
-            rel = self.serve.spawn("repo", self.root, job_id, "start", "x")
-        self.addCleanup(self.serve.RUNS.pop, f"repo/{job_id}", None)
-        job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
-        self.assertEqual(job["term"], "ghostty")
-        self.assertIsNone(job.get("tty"))
-        self.assertEqual(job["runlog"], rel)
-
-    def test_terminal_apple_terminal_passes_tty_as_argv(self):
-        code, out, run, popen = self.terminal(self.job("tab", "tty=ttys004", "term=Apple_Terminal"))
-        self.assertEqual(code, 200, out)
-        argv = run.call_args.args[0]
-        self.assertEqual((argv[0], argv[1], argv[-1]), ("osascript", "-e", "/dev/ttys004"))
-        self.assertIn("on run argv", argv[2])
-        self.assertIn("set index of w to 1", argv[2])
-        self.assertNotIn("ttys004", argv[2])
-        self.assertNotIn("shell", run.call_args.kwargs)
-        code, out, run, _ = self.terminal(self.job("iterm", "tty=ttys005", "term=iTerm.app"))
-        self.assertEqual(code, 200)
-        self.assertEqual(run.call_args.args[0][-1], "/dev/ttys005")
-        self.assertIn('application "iTerm"', run.call_args.args[0][2])
-
-    def test_terminal_ghostty_returns_message(self):
-        code, out, run, _ = self.terminal(self.job("ghost", "tty=ttys006", "term=ghostty"))
-        self.assertEqual(code, 200)
-        self.assertEqual(run.call_args.args[0], ["open", "-a", "Ghostty"])
-        self.assertIn("ttys006", out["message"])
-
-    def test_terminal_headless_tails_log(self):
-        (self.root / "runs").mkdir(exist_ok=True)
-        (self.root / "runs" / "h.log").write_text("x")
-        code, out, run, _ = self.terminal(self.job("headless", "runlog=runs/h.log"))
-        self.assertEqual(code, 200, out)
-        argv = run.call_args.args[0]
-        self.assertEqual((argv[0], argv[-1]), ("osascript", os.path.realpath(self.root / "runs" / "h.log")))
-        self.assertIn("quoted form of", argv[2])
-
-    def test_terminal_closed_tab_falls_back_to_log(self):
-        (self.root / "runs").mkdir(exist_ok=True)
-        (self.root / "runs" / "c.log").write_text("x")
-        job_id = self.job("closed tab", "tty=ttys007", "term=Apple_Terminal", "runlog=runs/c.log")
-        with mock.patch.object(self.serve.subprocess, "run") as run:
-            run.side_effect = [mock.Mock(returncode=0, stdout="missing\n", stderr=""), mock.Mock(returncode=0, stdout="", stderr="")]
-            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {})
-        self.assertEqual(code, 200, out)
-        self.assertIn("ttys007", out["message"])
-        self.assertEqual(run.call_args.args[0][-1], os.path.realpath(self.root / "runs" / "c.log"))
-        job_id = self.job("closed tab no log", "tty=ttys008")
-        with mock.patch.object(self.serve.subprocess, "run") as run:
-            run.return_value = mock.Mock(returncode=0, stdout="missing\n", stderr="")
-            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/terminal", {})[0], 404)
+    def test_terminal_and_ask_actions_removed(self):
+        job_id = self.job("no buttons", "tty=ttys007")
+        for action in ("terminal", "ask"):
+            with mock.patch.object(self.serve.subprocess, "run", side_effect=AssertionError("run")) as run, \
+                    mock.patch.object(self.serve.subprocess, "Popen", side_effect=AssertionError("popen")) as popen:
+                code, _ = self.req("POST", f"/api/p/repo/jobs/{job_id}/{action}", {})
+            self.assertEqual(code, 409, action)  # the router's fallback is rework with no feedback
+            run.assert_not_called(); popen.assert_not_called()
 
     def test_discuss_opens_interactive_claude_with_note_as_argv(self):
         job_id = self.job("discuss me")
@@ -1769,152 +1714,6 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(argv[:2], ["osascript", "-e"])
             self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE])
             self.assertEqual(len(argv), 8)
-
-    def test_terminal_none_errors(self):
-        code, out, run, popen = self.terminal(self.job("nothing"))
-        self.assertTrue(400 <= code < 500)
-        run.assert_not_called(); popen.assert_not_called()
-
-    def test_terminal_rejects_bad_id(self):
-        for bad in ("999-missing", "..%2F..%2Fx", "BAD"):
-            code, _, run, popen = self.terminal(bad)
-            self.assertTrue(400 <= code < 500, bad)
-            run.assert_not_called(); popen.assert_not_called()
-
-    def test_terminal_rejects_bad_tty(self):
-        for fields in ({"tty": "ttys1; rm -rf ~"}, {"tty": "/dev/ttys1"}, {"tty": 5},
-                       {"tty": "ttys1", "term": "xterm"}):
-            job_id = self.job("bad tty")
-            self.patch_board(job_id, **fields)
-            code, _, run, popen = self.terminal(job_id)
-            self.assertTrue(400 <= code < 500, fields)
-            run.assert_not_called(); popen.assert_not_called()
-
-    def test_terminal_rejects_log_outside_runs(self):
-        runs = self.root / "runs"
-        runs.mkdir(exist_ok=True)
-        link = runs / "escape.log"
-        if not link.is_symlink():
-            link.symlink_to(self.root / "board.json")
-        for log in ("runs/../board.json", "runs/escape.log", "runs/missing.log", "../calls.jsonl"):
-            job_id = self.job("bad log")
-            self.patch_board(job_id, runlog=log)
-            code, _, run, popen = self.terminal(job_id)
-            self.assertTrue(400 <= code < 500, log)
-            run.assert_not_called(); popen.assert_not_called()
-
-    def test_terminal_rejects_foreign_origin(self):
-        job_id = self.job("origin", "tty=ttys007")
-        for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}):
-            code, _, run, popen = self.terminal(job_id, headers)
-            self.assertEqual(code, 403)
-            run.assert_not_called(); popen.assert_not_called()
-
-    # --- Ask Claude ---
-    def ask(self, job_id, ghostty, headers=None, result=None):
-        real = os.path.isdir
-        isdir = lambda p: ghostty if p == "/Applications/Ghostty.app" else real(p)
-        with mock.patch.object(self.serve.os.path, "isdir", side_effect=isdir), \
-                mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
-            run.return_value = result or mock.Mock(returncode=0, stdout="", stderr="")
-            code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/ask", {}, headers)
-        return code, out, run, popen
-
-    def test_ask_opens_ghostty_in_worktree(self):
-        wt = Path(self.tmp.name) / "wt-ask-ghostty"
-        wt.mkdir(exist_ok=True)
-        job_id = self.job("ask ghostty")
-        self.patch_board(job_id, worktree=str(wt))
-        code, out, run, popen = self.ask(job_id, ghostty=True)
-        self.assertEqual((code, out), (200, {"id": job_id, "message": "Claude opened in Ghostty."}))
-        run.assert_called_once(); popen.assert_not_called()
-        prompt = run.call_args.args[0][-1]
-        self.assertTrue(prompt.startswith(f"Answer my questions about scrum job {job_id}."))
-        self.assertEqual(run.call_args.args[0], ["open", "-na", "Ghostty", "--args", f"--working-directory={wt}", "-e", "env",
-                                                 "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, prompt])
-
-    def test_ask_falls_back_to_terminal(self):
-        wt = Path(self.tmp.name) / "wt-ask-terminal"
-        wt.mkdir(exist_ok=True)
-        job_id = self.job("ask terminal")
-        self.patch_board(job_id, worktree=str(wt))
-        code, out, run, _ = self.ask(job_id, ghostty=False)
-        self.assertEqual((code, out), (200, {"id": job_id, "message": "Claude opened in a new Terminal window."}))
-        run.assert_called_once()
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[:2], ["osascript", "-e"])
-        self.assertEqual(argv[3], str(wt))
-        self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE])
-        self.assertEqual(len(argv), 8)
-        self.assertIn(f"scrum job {job_id}", argv[7])
-
-    def test_ask_uses_repo_root_when_worktree_missing(self):
-        gone = self.job("ask gone worktree")
-        self.patch_board(gone, worktree="/nonexistent/path", stage="done")
-        none = self.job("ask no worktree")
-        for job_id in (gone, none):
-            code, out, run, _ = self.ask(job_id, ghostty=True)
-            self.assertEqual(code, 200, job_id)
-            repo = os.path.realpath(self.root.parent)  # the registry holds the resolved path
-            self.assertEqual(run.call_args.args[0][4], f"--working-directory={repo}")
-            code, out, run, _ = self.ask(job_id, ghostty=False)
-            self.assertEqual(code, 200, job_id)
-            self.assertEqual(run.call_args.args[0][3], repo)
-
-    def test_ask_prompt_lists_existing_artifacts(self):
-        job_id = self.job("ask artifacts")
-        d = self.root / "jobs" / job_id
-        for rel in ("feature.md", "round-2/check.md", "round-1/review-code.md", "round-1/check.md", "decision.md",
-                    "round-10/check.md"):
-            (d / rel).parent.mkdir(parents=True, exist_ok=True)
-            (d / rel).write_text("x")
-        _, _, run, _ = self.ask(job_id, ghostty=True)
-        prompt = run.call_args.args[0][-1]
-        root = os.path.realpath(self.root)  # the registry holds the resolved path
-        self.assertEqual(prompt, f"Answer my questions about scrum job {job_id}. Its session has ended. Read these first:\n"
-                         f"{root}/jobs/{job_id}/feature.md\n"
-                         f"{root}/jobs/{job_id}/round-1/check.md\n"
-                         f"{root}/jobs/{job_id}/round-1/review-code.md\n"
-                         f"{root}/jobs/{job_id}/round-2/check.md\n"
-                         f"{root}/jobs/{job_id}/round-10/check.md\n"
-                         f"{root}/jobs/{job_id}/decision.md\n"
-                         f'Its board entry is the object with "id": "{job_id}" in {root}/board.json. '
-                         "Don't change any file unless I ask.")
-        self.assertNotIn("spec.md", prompt)
-        self.assertNotIn("build.md", prompt)
-
-    def test_ask_rejects_unknown_and_bad_id(self):
-        for bad, want in (("999-missing", 404), ("..%2F..%2Fx", 400), ("BAD", 400)):
-            code, _, run, popen = self.ask(bad, ghostty=True)
-            self.assertEqual(code, want, bad)
-            run.assert_not_called(); popen.assert_not_called()
-        with mock.patch.object(self.serve.subprocess, "run") as run:
-            self.assertEqual(self.serve.ask_claude("repo", self.root, "999-missing"), (404, {"error": "no such job"}))
-            run.assert_not_called()
-
-    def test_ask_launcher_failure_returns_500(self):
-        job_id = self.job("ask fails")
-        fail = mock.Mock(returncode=1, stdout="", stderr="first line\nUnable to find application named 'Ghostty'\n")
-        code, _, run, _ = self.ask(job_id, ghostty=True, result=fail)
-        self.assertEqual(code, 500)
-        run.assert_called_once()
-        with mock.patch.object(self.serve.os.path, "isdir", return_value=True), \
-                mock.patch.object(self.serve.subprocess, "run", return_value=fail):
-            with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
-                self.assertEqual(self.serve.ask_claude("repo", self.root, job_id),
-                                 (500, {"error": "couldn't open the terminal"}))
-        self.assertIn("Unable to find application named 'Ghostty'", log.getvalue(), "the detail is logged, not sent")
-        with mock.patch.object(self.serve.subprocess, "run", side_effect=OSError("no osascript")), \
-                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
-            self.assertEqual(self.serve.ask_claude("repo", self.root, job_id), (500, {"error": "couldn't open the terminal"}))
-        self.assertIn("no osascript", log.getvalue())
-
-    def test_ask_rejects_foreign_origin(self):
-        job_id = self.job("ask origin")
-        for headers in ({"Origin": "https://evil.example"}, {"Host": "evil.example"}):
-            code, _, run, popen = self.ask(job_id, True, headers)
-            self.assertEqual(code, 403)
-            run.assert_not_called(); popen.assert_not_called()
 
     def activity_of(self, job_id):
         code, data = self.req("GET", "/p/repo/board.json")
@@ -4415,6 +4214,7 @@ class AutoResumeTest(unittest.TestCase):
         self.assertNotIn("p/net", s.AUTO_RESUME)
         self.assertEqual(self.sweep(), ["net"])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: job["id"] == "sib"))  # the in-progress sibling has a live session
     def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
         s = self.serve
         stalled = "stalled in plan: no board update for 30 min and no live session. Fix: click Resume."
@@ -4817,7 +4617,7 @@ class ExitedRunSweepTest(unittest.TestCase):
             return "runs/y.log"
 
         with mock.patch.object(self.board, "projects", return_value={"p": self.repo}), \
-                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: alive), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive if callable(alive) else lambda job: alive), \
                 mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             s.watchdog_tick()
         return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
@@ -4860,7 +4660,7 @@ class ExitedRunSweepTest(unittest.TestCase):
                     {"id": "kid", "stage": "build", "parent": "par", "parallel": True},
                     {"id": "sib", "stage": "build", "parent": "par", "parallel": True}])
         self.run_entry("kid")
-        self.assertEqual(self.tick(), [], "kid waits on sib, which shares src/shared.py")
+        self.assertEqual(self.tick(alive=lambda job: job["id"] == "sib"), [], "kid waits on sib, which shares src/shared.py")
         self.assertEqual(self.job("kid")["stage"], "needs-human")
         self.assertEqual(self.job("kid")["reason"], self.STALLED)
         self.assertEqual(self.job("sib")["stage"], "build")
@@ -5216,7 +5016,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
         data["jobs"][2].update(parallel=True)
         (self.root / "board.json").write_text(json.dumps(data))
-        self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
+        self.assertEqual(self.spawned(alive=lambda job: job["id"] == "003-sib"), [], "003-sib is in progress: 002-claimed must wait")
         kid = self.job("002-claimed")
         self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
         self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
