@@ -776,7 +776,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
     first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
     (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
-    this tick's later starts.
+    this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -797,7 +797,10 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             continue
         try:
             if not running(project, "run-all") and claimable(root):
-                if board.machine_ok(root):  # no room on this machine; retry next tick
+                refused = board.machine_ok(root)
+                if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
+                    continue
+                if refused:  # no room on this machine; retry next tick
                     return
                 live = board.live_sessions()
                 allow = board.usage_allowance(board.read_usage(), time.time(), live)

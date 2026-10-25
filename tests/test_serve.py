@@ -5594,6 +5594,16 @@ class AutoContinueTest(unittest.TestCase):
         with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
             self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
+    def test_auto_continue_disk_refusal_tries_next_project(self):
+        self.project("a", n=1); self.project("b", n=2)
+        full = self.base / "a" / "scrum"
+        with mock.patch.object(self.board, "free_disk_gb", side_effect=lambda path: 5.0 if Path(path) == full else 500.0):
+            self.assertEqual(self.tick(), self.started("b"), "a's volume is full: only b starts")
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+                self.assertEqual(self.tick(), [], "low RAM stops the whole tick")
+        with mock.patch.object(self.board, "free_disk_gb", return_value=5.0):
+            self.assertEqual(self.tick(), [], "every project disk-refused: nothing starts")
+
     def test_auto_continue_usage_hold(self):
         """The usage ladder holds a run-all start like a machine_ok failure: none while live >= allowance, a start once
         a slot frees or usage.json is gone, and a hold partway through a tick stops the later starts."""
