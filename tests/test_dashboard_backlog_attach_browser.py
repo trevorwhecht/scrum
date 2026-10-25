@@ -45,22 +45,27 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       window.__seenDisabled = false;
       const b = document.querySelector("#blAdd button[type=submit]");
       new MutationObserver(() => { if (b.disabled) window.__seenDisabled = true; }).observe(b, {attributes: true});
+      // The project picker must lock with it: every state it settles into is logged.
+      const p = document.getElementById("blProject");
+      window.__proj = [];
+      new MutationObserver(() => window.__proj.push(p.disabled)).observe(p, {attributes: true});
     });
-    const drop = (bytes, name, type) => page.evaluate(([bytes, name, type]) => {
+    const drop = (bytes, name, type, copies = 1) => page.evaluate(([bytes, name, type, copies]) => {
       const dt = new DataTransfer();
-      dt.items.add(new File([new Uint8Array(bytes)], name, {type}));
+      for (let i = 0; i < copies; i++) dt.items.add(new File([new Uint8Array(copies > 1 ? bytes.concat(i) : bytes)], name, {type}));
       const ev = new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true});
       return !document.querySelector("#blAdd textarea[name=text]").dispatchEvent(ev);  // true = default (navigation) prevented
-    }, [bytes, name, type]);
+    }, [bytes, name, type, copies]);
     const png = [...Buffer.from("\x89PNG\r\n\x1a\nbrowser drop", "latin1")];
     got.pngPrevented = await drop(png, "shot.png", "image/png");
     await page.waitForFunction(() => document.querySelector("#blAdd textarea[name=text]").value.includes("[screenshot:"));
     await page.waitForFunction(() => !document.querySelector("#blAdd button[type=submit]").disabled);
-    got.afterPng = await page.evaluate(() => ({value: document.querySelector("#blAdd textarea[name=text]").value,
+    await page.waitForFunction(() => !document.getElementById("blProject").disabled);
+    got.afterPng = await page.evaluate(() => ({proj: window.__proj, projEnabled: !document.getElementById("blProject").disabled, value: document.querySelector("#blAdd textarea[name=text]").value,
       seenDisabled: window.__seenDisabled, blError: document.getElementById("blError").textContent, url: location.href}));
     got.textPrevented = await drop([...Buffer.from("hello")], "notes.txt", "text/plain");
     await page.waitForFunction(() => document.getElementById("blError").textContent !== "");
-    got.afterText = await page.evaluate(() => ({value: document.querySelector("#blAdd textarea[name=text]").value,
+    got.afterText = await page.evaluate(() => ({proj: window.__proj, value: document.querySelector("#blAdd textarea[name=text]").value,
       blError: document.getElementById("blError").textContent}));
     await page.selectOption("#blAdd select[name=points]", "8");
     got.pickedClass = await page.evaluate(() => document.querySelector("#blAdd select").className);
@@ -68,6 +73,19 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     await page.waitForFunction(() => document.querySelector("#blAdd textarea[name=text]").value === "");
     got.afterAdd = await page.evaluate(() => ({points: document.querySelector("#blAdd select").value,
       cls: document.querySelector("#blAdd select").className, blError: document.getElementById("blError").textContent}));
+    // A rejected upload (empty image, server 400) frees both controls and shows the error.
+    await page.evaluate(() => { window.__proj = []; });
+    await drop([], "empty.png", "image/png");
+    await page.waitForFunction(() => document.getElementById("blError").textContent !== "");
+    await page.waitForFunction(() => !document.getElementById("blProject").disabled);
+    got.afterReject = await page.evaluate(() => ({proj: window.__proj, blError: document.getElementById("blError").textContent,
+      add: document.querySelector("#blAdd button[type=submit]").disabled}));
+    // Two images at once: the picker locks once and frees once, after the second token lands.
+    await page.evaluate(() => { window.__proj = []; });
+    await drop(png, "two.png", "image/png", 2);
+    await page.waitForFunction(() => (document.querySelector("#blAdd textarea[name=text]").value.match(/\[screenshot:/g) || []).length === 2);
+    await page.waitForFunction(() => !document.getElementById("blProject").disabled);
+    got.afterTwo = await page.evaluate(() => ({proj: window.__proj, add: document.querySelector("#blAdd button[type=submit]").disabled}));
     console.log(JSON.stringify(got));
   } finally { await browser.close(); }
 })().catch(e => { console.log(JSON.stringify({error: String(e.stack)})); });
@@ -130,11 +148,21 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
         self.assertEqual(got["afterPng"]["value"], f"Header broken [screenshot: {shot}]", got)
         self.assertTrue(got["afterPng"]["seenDisabled"], got)
         self.assertEqual(got["afterPng"]["blError"], "", got)
+        self.assertEqual(got["afterPng"]["proj"], [True, False], got)  # picker locked during the upload, freed after
+        self.assertTrue(got["afterPng"]["projEnabled"], got)
         self.assertTrue(got["afterPng"]["url"].endswith("/dashboard.html"), got)
         self.assertEqual(shot.read_bytes(), b"\x89PNG\r\n\x1a\nbrowser drop")
         self.assertTrue(got["textPrevented"], got)
         self.assertEqual(got["afterText"]["value"], got["afterPng"]["value"], got)
         self.assertEqual(got["afterText"]["blError"], "Only images can be attached", got)
+        self.assertEqual(got["afterText"]["proj"], [True, False], got)  # a rejected non-image never touched the picker
+        self.assertEqual(got["afterReject"]["proj"], [True, False], got)
+        self.assertEqual(got["afterReject"]["blError"], "image data is empty", got)
+        self.assertFalse(got["afterReject"]["add"], got)
+        two = got["afterTwo"]["proj"]  # the second upload re-locks an already locked picker: no False until the end
+        self.assertEqual(two[-1], False, got)
+        self.assertTrue(two[:-1] and all(two[:-1]), got)
+        self.assertFalse(got["afterTwo"]["add"], got)
         self.assertEqual(got["pickedClass"], "pts p8", got)
         self.assertEqual(got["afterAdd"], {"points": "", "cls": "pts px", "blError": ""}, got)
         self.assertEqual((self.repo / "scrum" / "backlog.md").read_text(),
