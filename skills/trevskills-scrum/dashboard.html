@@ -95,7 +95,7 @@ header{flex-wrap:wrap}
 .stop{border:1px solid var(--human);border-radius:8px;padding:8px 12px;background:color-mix(in srgb,var(--human) 8%,var(--card));min-width:0}
 .stop b{color:var(--human)}.stop p{margin:4px 0 0;overflow-wrap:anywhere}
 .stop .acts{display:grid;gap:8px;margin-top:8px}.stop .acts .btn{width:100%;font-size:15px;text-align:left;overflow-wrap:anywhere}
-.stop .acts .badge{margin:0 0 0 6px;vertical-align:middle}.stop .acts .note{margin:-4px 0 0}
+.stop .acts .badge{margin:0 0 0 2px;vertical-align:middle}.stop .acts .note{margin:-4px 0 0}
 .stop .sendback{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
 details.more summary{display:flex;align-items:center;min-height:44px;min-width:44px;width:max-content;cursor:pointer;color:var(--muted);font-size:13px}
 details.more form{margin-top:4px}
@@ -788,7 +788,7 @@ function stopBox(job) {
   const rec = job.recommend, dis = off ? " disabled" : "";
   const buttons = stopOptions(job).map((o, i) => {
     const armed = st.armed === o.key, top = i === 0 && !!rec && o.key === rec.key;
-    return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${armed ? "Confirm: " : ""}${esc(o.label)}${top ? '<span class="badge">Recommended</span>' : ""}</button>`
+    return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}</button>`
       + (top && rec.why ? `<p class="note">${esc(rec.why)}</p>` : "");
   }).join("");
   // Without options the reason's own fix (after " Fix: ") stays as the box's second line, as before.

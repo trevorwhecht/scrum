@@ -166,12 +166,12 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
                 got = self.browse("options", width)
                 self.assertEqual(got["card"], [])
                 boxes = got["modal"]
-                self.assertEqual([b["text"] for b in boxes], ["Which way?", "Send it back with a much longer labelRecommended",
+                self.assertEqual([b["text"] for b in boxes], ["Which way?", "Send it back with a much longer label Recommended",
                                                               "Small fix", "Ship it", "Drop it"])
                 self.assertTrue(got["fit"]["stop"] and got["fit"]["viewer"], got["fit"])
                 self.assertLessEqual(got["fit"]["right"], got["fit"]["width"], got["fit"])
                 for i, a in enumerate(boxes):
-                    if a["text"] in ("Ship it", "Drop it") or a["text"].endswith("Recommended"):
+                    if a["text"] in ("Ship it", "Drop it") or a["text"].endswith(" Recommended"):
                         self.assertGreaterEqual(a["height"], 44, a)
                     for b in boxes[i + 1:]:
                         overlap = a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]

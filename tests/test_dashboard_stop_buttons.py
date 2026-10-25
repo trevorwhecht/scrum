@@ -89,7 +89,7 @@ class StopBox(unittest.TestCase):
         self.assertEqual(answers(html), ["b", "a", "c"])
         self.assertEqual(html.count("Recommended"), 1)
         first = html[html.index('data-answer="b"'):html.index('data-answer="a"')]
-        self.assertIn('Redo<span class="badge">Recommended</span></button><p class="note">Small fix</p>', first)
+        self.assertIn('Redo <span class="badge">Recommended</span></button><p class="note">Small fix</p>', first)
         two, = js(f'jobs = [{json.dumps({**job, "options": OPTIONS[1:]})}]; out(stopBox(jobs[0]));')
         self.assertEqual(answers(two), ["b", "a"])
 
