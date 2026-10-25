@@ -1252,6 +1252,53 @@ class ServeTest(unittest.TestCase):
             self.assertEqual((self.stage_of(k)["stage"], self.stage_of(k)["paused"]), ("build", True),
                              "its resume session clears the pause with B set --unpause")
 
+    def lilguy_play_parent(self, *kids):
+        """A paused run-all parent with one lilguy child per (stage, round, worktree) in kids. Returns (parent, ids)."""
+        self.settle_board()
+        b = self.serve.board
+        parent = b.cmd_new(self.root, "Lilguy play parent")
+        ids = [b.cmd_new(self.root, f"Lilguy kid {i}") for i in range(len(kids))]
+        self.edit_job(parent, lane="runall", stage="running", children=ids)
+        for k, (stage, rnd, wt) in zip(ids, kids):
+            self.edit_job(k, parent=parent, lane="lilguy", stage=stage, round=rnd, **({"worktree": wt} if wt else {}))
+        b.cmd_pause(self.root, parent)
+        return parent, ids
+
+    def test_play_on_paused_parent_sends_refused_lilguy_child_back_to_waiting(self):
+        parent, (k,) = self.lilguy_play_parent(("spec", 0, None))
+        self.assertTrue(self.stage_of(k)["paused"])
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "start_ready") as ready:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        job = self.stage_of(k)
+        self.assertEqual(job["stage"], "waiting")
+        self.assertNotIn("paused", job)
+        self.assertIsNone(job.get("reason"))
+        ready.assert_called_once()
+        self.assertEqual(ready.call_args.args, ("repo", self.root.resolve(), parent))
+        spawn.assert_not_called()
+
+    def test_play_reclaims_refused_lilguy_child(self):
+        parent, (k,) = self.lilguy_play_parent(("spec", 0, None))
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        self.assertEqual(self.stage_of(k)["stage"], "spec")
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(k, "start", f"/trevskills-scrum start {k}")])
+
+    def test_play_keeps_stalled_path_for_lilguy_child_past_spec(self):
+        wt = Path(self.tmp.name) / "wt-lilguy-pr"
+        wt.mkdir()
+        parent, (r1, built, pr) = self.lilguy_play_parent(("spec", 1, None), ("build", 0, None), ("spec", 0, str(wt)))
+        with mock.patch.object(self.serve, "spawn"), mock.patch.object(self.serve, "start_ready"), \
+                mock.patch.object(self.serve, "resume_refusal", wraps=self.serve.resume_refusal) as refusal:
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
+        for k, stage in ((r1, "spec"), (built, "build")):
+            job = self.stage_of(k)
+            self.assertEqual(job["stage"], "needs-human")
+            self.assertEqual(job["reason"], f"stalled in {stage}: waiting for a free slot after Play. Fix: click Resume.")
+            self.assertNotIn("paused", job)
+        self.assertNotEqual(self.stage_of(pr)["stage"], "waiting")
+        self.assertIn(pr, [c.args[2]["id"] for c in refusal.call_args_list])
+
     def test_activity_picks_newest_of_runlog_worktree_and_board(self):
         wt = Path(self.tmp.name) / "wt-newest"
         (wt / "src").mkdir(parents=True)

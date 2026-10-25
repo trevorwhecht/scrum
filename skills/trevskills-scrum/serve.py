@@ -157,7 +157,9 @@ def start_ready(project, root, parent_id):
 def resume_job(project, root, job, jobs):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
-    refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees."""
+    refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
+    child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
+    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good)."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -169,8 +171,11 @@ def resume_job(project, root, job, jobs):
                 with board.locked_board(root) as b:  # not cmd_set: it never parks at needs-human, and plays a sound
                     live = board.find(b, k)
                     live.pop("paused", None)
-                    live.update(stage="needs-human", updatedAt=board.now(), reason=f"{board.STALLED}{kid['stage']}: "
-                                "waiting for a free slot after Play. Fix: click Resume.")
+                    if board.lilguy_in_checkout(kid) and kid["stage"] == "spec" and int(kid.get("round") or 0) == 0:
+                        live.update(stage="waiting", reason=None, updatedAt=board.now())
+                    else:
+                        live.update(stage="needs-human", updatedAt=board.now(), reason=f"{board.STALLED}{kid['stage']}: "
+                                    "waiting for a free slot after Play. Fix: click Resume.")
             else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
         start_ready(project, root, job_id)
