@@ -552,6 +552,7 @@ def abort_job(root, job, requeue, reason):
     feature = folder / "feature.md"
     job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
     job.pop("paused", None)  # an aborted job is never played
+    job.pop("play_queued", None)  # nor started by serve.py's Play queue
     if not requeue:
         return
     lines, items = read_backlog(root)
@@ -2824,6 +2825,7 @@ def cmd_pause(root, job_id):
         for j in hit:
             j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
+            j.pop("play_queued", None)  # a pause cancels a queued Play
         return [j["id"] for j in hit]
 
 

@@ -205,7 +205,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's free RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; orange marks a reading within 10 points (10 GB) of its limit, red one past it, and the trailing red text names the failing reading."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's free RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; orange marks a reading within 10 points (10 GB) of its limit, red one past it, and the trailing red text names the failing reading. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
@@ -532,6 +532,15 @@ function machineLevel(value, kind, s) {
   return bad ? "danger" : near ? "low" : "ok";
 }
 
+// The meter's usage segment: red at allowance 0, orange at 1 or more, plain with no taper or no data.
+function usagePart(u) {
+  if (!u) return "";
+  if (u === "unknown") return '<span class="ok">usage: unknown</span>';
+  const pct = v => v == null ? "—" : Math.round(v) + "%";
+  const level = u.allowance == null ? "ok" : u.allowance === 0 ? "danger" : "low";
+  return `<span class="${level}">5h ${pct(u.five_hour_pct)} · 7d ${pct(u.seven_day_pct)}${u.allowance == null ? "" : ` · allowance ${esc(u.allowance)}`}</span>`;
+}
+
 function renderMachine(m) {
   const el = $("machine");
   if (!el) return;
@@ -540,7 +549,7 @@ function renderMachine(m) {
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
   el.innerHTML = [part("ram", "RAM", m.free_ram_pct, "% free"), part("swap", "swap", m.swap_pct, "%"),
-    part("disk", "disk", m.free_disk_gb, " GB")].join(" · ")
+    part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
     + (m.verdict ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }
 
@@ -773,7 +782,7 @@ const waitingBanner = job => {
 function renderActions(job) {
   const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + waitingBanner(job);
   const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  const err = '<p class="error" role="alert"></p>', kids = waitingNote(job, "note") + childLinks(job);
+  const err = `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`, kids = waitingNote(job, "note") + childLinks(job);
   // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
   const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
   if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;

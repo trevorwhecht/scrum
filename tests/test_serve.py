@@ -1,4 +1,4 @@
-import inspect, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -992,16 +992,19 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "swap_pct", "verdict"]
+        keys = ["free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "swap_pct", "usage",
+                "verdict"]
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
-                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)"})
+                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
+                               "usage": "unknown"})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25"):
             self.assertEqual(self.req("GET", "/api/machine")[1],
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
-                              "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)"})
+                              "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
+                              "usage": "unknown"})
         disk = []
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB=""), \
                 mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
@@ -1010,9 +1013,91 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
-                                             "verdict": None}))
+                                             "verdict": None, "usage": "unknown"}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
+
+    def test_api_machine_usage(self):
+        usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
+        now = time.time()
+        fresh = {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": now + 7200},
+                                                    "seven_day": {"used_percentage": 40, "resets_at": now + 3 * 86400}}}
+        usage.write_text(json.dumps(fresh))
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            code, out = self.req("GET", "/api/machine")
+            self.assertEqual(code, 200)
+            self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
+                                            "five_hour_resets_at": now + 7200, "allowance": 3})  # 7 % left: rung 1
+            self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
+            fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
+            del fresh["rate_limits"]["seven_day"]["used_percentage"]
+            usage.write_text(json.dumps(fresh))
+            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
+                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None})
+            fresh["written_at"] = time.time() - 301
+            usage.write_text(json.dumps(fresh))
+            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+            usage.write_text("{not json")
+            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+            usage.unlink()
+            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+
+    PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
+
+    def paused_job(self, title, **fields):
+        b = self.serve.board
+        job_id = b.cmd_new(self.root, title)
+        self.edit_job(job_id, stage="build", paused=True, reason=self.PAUSED_REASON, **fields)
+        self.addCleanup(lambda: self.stage_of(job_id)["stage"] == "aborted" or b.cmd_abort(self.root, job_id, False))
+        return job_id
+
+    def test_resume_machine_refusal_queues_play(self):
+        b = self.serve.board
+        job_id = self.paused_job("Queued play")
+        queued = {"id": job_id, "action": "resume", "queued": True, "message": "queued, starts next"}
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(self.serve, "spawn") as spawn:
+            with mock.patch.object(b, "now", return_value="2026-10-25T10:00:00+00:00"):
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}), (202, queued))
+            self.assertEqual(self.stage_of(job_id)["play_queued"], "2026-10-25T10:00:00+00:00")
+            with mock.patch.object(b, "now", return_value="2026-10-25T11:00:00+00:00"):
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}), (202, queued))
+            self.assertEqual(self.stage_of(job_id)["play_queued"], "2026-10-25T10:00:00+00:00", "the first click's time")
+            stalled = b.cmd_new(self.root, "Queued resume")
+            self.edit_job(stalled, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
+            self.addCleanup(b.cmd_abort, self.root, stalled, False)
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{stalled}/resume", {}), (202, {**queued, "id": stalled}))
+            self.assertIn("play_queued", self.stage_of(stalled))
+            lil = self.paused_job("Lil queued", lane="lilguy")
+            code, out = self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {})
+            self.assertEqual((code, out["error"][:12]), (409, "lilguy job: "))
+            self.assertNotIn("play_queued", self.stage_of(lil))
+        spawn.assert_not_called()
+        kid = self.paused_job("Blocked kid", parent="100-parent")
+        blocker = b.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
+        with mock.patch.object(b, "resume_blocker", return_value=blocker), mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (409, {
+                "error": "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish."}))
+        spawn.assert_not_called()
+        self.assertNotIn("play_queued", self.stage_of(kid))
+
+    def test_play_queued_cleared_on_abort_pause_and_play(self):
+        b = self.serve.board
+        gone = self.paused_job("Abort queued", play_queued="2026-10-25T10:00:00+00:00")
+        b.cmd_abort(self.root, gone, False)
+        self.assertNotIn("play_queued", self.stage_of(gone))
+        parent, kid = b.cmd_new(self.root, "Pause queued"), b.cmd_new(self.root, "Pause queued kid")
+        self.edit_job(parent, stage="running", lane="runall", children=[kid], play_queued="2026-10-25T10:00:00+00:00")
+        self.edit_job(kid, stage="build", parent=parent, play_queued="2026-10-25T10:00:00+00:00")
+        self.assertEqual(b.cmd_pause(self.root, parent), [parent, kid])
+        self.assertNotIn("play_queued", self.stage_of(parent))
+        self.assertNotIn("play_queued", self.stage_of(kid))
+        b.cmd_abort(self.root, kid, False); b.cmd_abort(self.root, parent, False)
+        played = self.paused_job("Play queued", play_queued="2026-10-25T10:00:00+00:00")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{played}/resume", {}),
+                             (202, {"id": played, "action": "resume"}))
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(played, "resume")])
+        self.assertNotIn("play_queued", self.stage_of(played))
 
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
@@ -1636,12 +1721,14 @@ class ServeTest(unittest.TestCase):
         run.assert_called_once()
         with mock.patch.object(self.serve.os.path, "isdir", return_value=True), \
                 mock.patch.object(self.serve.subprocess, "run", return_value=fail):
-            self.assertEqual(self.serve.ask_claude("repo", self.root, job_id),
-                             (500, {"error": "Unable to find application named 'Ghostty'"}))
-        with mock.patch.object(self.serve.subprocess, "run", side_effect=OSError("no osascript")):
-            code, out = self.serve.ask_claude("repo", self.root, job_id)
-        self.assertEqual(code, 500)
-        self.assertIn("no osascript", out["error"])
+            with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
+                self.assertEqual(self.serve.ask_claude("repo", self.root, job_id),
+                                 (500, {"error": "couldn't open the terminal"}))
+        self.assertIn("Unable to find application named 'Ghostty'", log.getvalue(), "the detail is logged, not sent")
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=OSError("no osascript")), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
+            self.assertEqual(self.serve.ask_claude("repo", self.root, job_id), (500, {"error": "couldn't open the terminal"}))
+        self.assertIn("no osascript", log.getvalue())
 
     def test_ask_rejects_foreign_origin(self):
         job_id = self.job("ask origin")
@@ -2254,6 +2341,18 @@ class AiSettingsTest(unittest.TestCase):
             self.assertEqual(len(self.backups()), before + 1, label)
             newest = [b for b in self.backups() if b.name.endswith(urllib.parse.quote(str(f), safe=""))]
             self.assertEqual(newest[-1].read_bytes(), f"old {label}\r\nline".encode(), label)
+
+    def test_save_and_undo_500_hide_the_os_error(self):
+        f, it = self.plant_markdown()["claude"]
+        self.assertEqual(self.save(it, "first")[0], 200)  # leaves a backup for undo
+        version = self.item(it["id"])[1]["version"]
+        boom = OSError("disk full at /Users/secret/path")
+        with mock.patch.object(Path, "write_bytes", side_effect=boom), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
+            self.assertEqual(self.serve.ai_settings_save(it["id"], "second", version),
+                             (500, {"error": "couldn't write the file"}))
+            self.assertEqual(self.serve.ai_settings_undo(it["id"], version), (500, {"error": "couldn't write the file"}))
+        self.assertEqual(log.getvalue().count("/Users/secret/path"), 2, "logged server-side")
 
     def test_save_follows_symlinked_rule(self):
         (self.user / "rules").mkdir()
@@ -4623,6 +4722,65 @@ class WatchdogIdleParentTest(unittest.TestCase):
             s.watchdog_tick()
         self.assertEqual([c[0] for c in calls.mock_calls], ["auto_resume", "start_ready", "sweep_parents"])
         self.assertEqual(calls.start_ready.call_args.args, ("idle", self.root, "001-par"))
+
+    def queue_board(self, *jobs):
+        for j in jobs:
+            j.setdefault("updatedAt", self.board.now()); j.setdefault("reason", None)
+        (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}))
+
+    PAUSED = "stalled in build: paused by Trevor. Fix: click Play."
+
+    def test_watchdog_starts_play_queued_first(self):
+        s = self.serve
+        stalled = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+        self.queue_board({"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-kid", "003-wait"]},
+                         {"id": "002-kid", "stage": "needs-human", "parent": "001-par", "reason": stalled},
+                         {"id": "003-wait", "stage": "waiting", "parent": "001-par"},
+                         {"id": "011-new", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "play_queued": "2026-10-25T11:00:00+00:00"},
+                         {"id": "010-old", "stage": "needs-human", "reason": stalled,
+                          "play_queued": "2026-10-25T10:00:00+00:00"})
+        spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list][:3],
+                         [("010-old", "resume"), ("011-new", "resume"), ("002-kid", "resume")])
+        self.assertNotIn("play_queued", self.job("010-old"))
+        self.assertNotIn("play_queued", self.job("011-new"))
+        self.queue_board({"id": "012-q", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "play_queued": "2026-10-25T10:00:00+00:00"})
+        with mock.patch.object(s, "auto_continue_tick") as cont, mock.patch.object(s, "board_busy", return_value=False):
+            self.tick()
+        self.assertEqual(cont.call_args.args, ({"idle": True},), "a queued start counts the project busy")
+
+    def test_watchdog_play_queue_waits_and_drops_stale(self):
+        s = self.serve
+        q = "2026-10-25T10:00:00+00:00"
+        self.queue_board({"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": q})
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            spawn, _, _ = self.tick()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("010-q")["play_queued"], q, "still queued while the guard refuses")
+        self.queue_board({"id": "020-run", "stage": "build", "play_queued": "2026-10-25T09:00:00+00:00"},
+                         {"id": "021-live", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "play_queued": "2026-10-25T09:01:00+00:00"},
+                         {"id": "022-blocked", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "play_queued": "2026-10-25T09:02:00+00:00"},
+                         {"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": q})
+        sib = "can't resume yet: sibling 9-x shares a.py. Fix: click Resume when 9-x finish."
+        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j: sib if j["id"] == "022-blocked" else None):
+            spawn, _, _ = self.tick(running=lambda project, job_id: job_id == "021-live")
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("010-q", "resume")])
+        self.assertNotIn("play_queued", self.job("020-run"), "no longer resumable: dropped")
+        self.assertNotIn("play_queued", self.job("021-live"), "already running: dropped")
+        self.assertEqual(self.job("022-blocked")["play_queued"], "2026-10-25T09:02:00+00:00", "another refusal keeps it")
+        self.assertNotIn("play_queued", self.job("010-q"))
+        ram = "waiting: free RAM 14% (< 20%). Fix: click Resume once memory or disk frees up."
+        self.queue_board(*({"id": k, "stage": "build", "paused": True, "reason": self.PAUSED,
+                            "play_queued": f"2026-10-25T10:0{n}:00+00:00"} for n, k in enumerate(("030-a", "031-b", "032-c"))))
+        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j: ram if j["id"] == "031-b" else None):
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("030-a", "resume")], "the guard stops the queue")
+        self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],
+                         [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
 
     def test_idle_runall_parent_starts_waiting_child(self):
         self.check_starts("runall")
