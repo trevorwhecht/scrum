@@ -6,7 +6,7 @@ and every 10 minutes, while a project has a job in stage cloud or awaiting its a
 
   python3 ~/.claude/skills/trevskills-scrum/serve.py      → http://localhost:8765   (or click the app icon)
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
-  python3 serve.py --digest-auto <NNN> --dir <scrum>      → apply (or queue) a digest's obvious proposals, print JSON, exit
+  python3 serve.py --digest-auto <NNN> --dir <scrum>      → apply, queue or skip every pending proposal of a digest, print JSON, exit
   python3 serve.py --digest-skill-check <NNN> <PID> --dir <scrum> → re-check a queued skill proposal, print JSON, exit 1 if stale
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
@@ -28,7 +28,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fnmatch, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2153,10 +2153,11 @@ def ai_research(item_id):
 
 
 # --- Digest: scrum/digests/<NNN>/proposals.json is agent-written, so it's untrusted. A target is written only when it is
-# an editable AI-Settings item outside every registered repo; a repo file becomes a backlog item instead, so main stays clean.
+# an editable AI-Settings item outside every registered repo, or a repo file digest_apply commits after its contract tests;
+# any other repo edit becomes a backlog item instead, so main stays clean.
 DIGEST_LOCK = threading.Lock()
 PROPOSAL_KEYS = ("id", "target", "why", "old", "new")
-PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected")
+PROPOSAL_STATUSES = ("pending", "applied", "queued", "rejected", "skipped", "reverted")
 PROPOSAL_ID_RE = re.compile(r"[\w-]+")  # the id lands in a URL path segment and in backlog item text
 DIGEST_DENIED_NAMES = ("settings.json", "settings.local.json")  # permissions and hooks: never a digest edit
 SKILL_MAX_LINES = 150
@@ -2164,7 +2165,7 @@ SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 
 
 def valid_proposal(p):
-    """The proposal with its status and kind, or None when a key is missing, a value isn't a string, it changes nothing,
+    """The proposal with its status, kind and any stored reason (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
     or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
     if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
         return None
@@ -2174,10 +2175,9 @@ def valid_proposal(p):
     if kind not in ("edit", "skill") or kind == "skill" and (
             p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
         return None
-    # "obvious" is the digester's claim; anything but a literal true is false, and never drops the proposal.
-    reason = p.get("obvious_reason")
-    return {k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "obvious": p.get("obvious") is True,
-                                               "obvious_reason": reason if isinstance(reason, str) else "", "kind": kind}
+    reason = p.get("reason")
+    return ({k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "kind": kind}
+            | ({"reason": reason} if isinstance(reason, str) else {}))
 
 
 def read_proposals(path):
@@ -2259,21 +2259,21 @@ def digest_item_spec(digest_id: str, prop: dict, rel: str) -> str:
     why = prop["why"].strip()
     if prop["kind"] == "skill":
         return (f"# Create digest {digest_id} {prop['id']} skill at {rel}\nUI surface: no\nHard stops: none\nLane: standard\n\n"
-                f"## Problem\nDigest {digest_id} proposal {prop['id']} (approved by Trevor) adds a new skill at `{rel}`. Why:\n\n"
+                f"## Problem\nDigest {digest_id} proposal {prop['id']} adds a new skill at `{rel}`. Why:\n\n"
                 f"{why}\n\n## Scope\nIn:\n- Create `{rel}` with the new content below.\n\nOut:\n- Any other file.\n\n"
                 f"New content:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
                 f"1. create `{rel}` with exactly the new content (the fenced block above, byte for byte); "
                 f"if `{rel}` already exists, the job is obsolete: change nothing and say so in build.md. "
                 f"(verify: compare the file to the fenced block)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
-                f"- The content is the digest proposal as approved; do not reword it.\n")
+                f"- The content is the digest proposal; do not reword it.\n")
     return (f"# Apply digest {digest_id} {prop['id']} to {rel}\nUI surface: no\nHard stops: none\nLane: fast\n\n"
-            f"## Problem\nDigest {digest_id} proposal {prop['id']} (approved by Trevor) changes `{rel}`. Why:\n\n{why}\n\n"
+            f"## Problem\nDigest {digest_id} proposal {prop['id']} changes `{rel}`. Why:\n\n{why}\n\n"
             f"## Scope\nIn:\n- `{rel}`: swap the old text below for the new text, once.\n\nOut:\n- Any other change.\n\n"
             f"Old text:\n{fence(prop['old'])}\n\nNew text:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
             f"1. replace the one occurrence of the old text in `{rel}` with the new text (the fenced blocks above, byte for byte); "
             f"if the old text does not occur exactly once, the job is obsolete: change nothing and say so in build.md. "
             f"(verify: diff `{rel}`)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
-            f"- The old and new text are the digest proposal as approved; do not reword them.\n")
+            f"- The old and new text are the digest proposal; do not reword them.\n")
 
 
 def queue_digest_item(scrum, text, spec):
@@ -2284,14 +2284,67 @@ def queue_digest_item(scrum, text, spec):
     board.backlog_op(scrum, "add", text=text)
 
 
+def digest_queue_skill(root: Path, digest_id: str, prop: dict) -> str | None:
+    """Queue a skill proposal as a backlog item with its pre-written spec: None when queued, else why it can't be."""
+    if not (rel := digest_skill_target(prop["target"])):
+        return "target is not editable"
+    if os.path.lexists(prop["target"]):
+        return "skill already exists"
+    queue_digest_item(repo_of(prop["target"])[0] / "scrum", f"Create digest {digest_id} {prop['id']} skill at {rel}: {prop['why']}",
+                      digest_item_spec(digest_id, prop, rel))
+    return None
+
+
+def digest_queue_repo_edit(digest_id: str, prop: dict) -> None:
+    """Queue an edit to a registered repo's file as a backlog item in that repo's scrum/, with its pre-written spec."""
+    repo, rel = repo_of(prop["target"])
+    queue_digest_item(repo / "scrum", f"Apply digest {digest_id} {prop['id']} to {rel}: {prop['why']}",
+                      digest_item_spec(digest_id, prop, rel))
+
+
+def digest_write_global(prop: dict) -> str | None:
+    """Write an edit outside every repo in place, after a backup: None when written, else why it wasn't."""
+    target = editable_path(prop["target"]) if os.path.isabs(prop["target"]) else None
+    if not target:
+        return "target is not editable"
+    try:
+        text = Path(target).read_bytes().decode()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if (n := text.count(prop["old"])) != 1:
+        return f"old text found {n} times"
+    try:
+        ai_backup(target)
+        Path(target).write_bytes(text.replace(prop["old"], prop["new"], 1).encode())  # in place: keeps a symlink
+    except OSError as e:
+        return f"write failed: {e}"
+    return None
+
+
+def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str, str | None]]) -> None:
+    """Set each still-pending id's status (and reason, when given), then trim the digest once nothing is pending.
+    The caller holds DIGEST_LOCK."""
+    d = root / "digests" / digest_id
+    data, raw = read_proposals(d / "proposals.json")
+    for entry in raw:
+        if (v := valid_proposal(entry)) and v["status"] == "pending" and v["id"] in updates:
+            entry["status"], reason = updates[v["id"]]
+            if reason is not None:
+                entry["reason"] = reason
+    tmp = d / "proposals.json.tmp"
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, d / "proposals.json")
+    if (d / "jobs.txt").is_file() and not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
+        board.cmd_digest_trim(root, digest_id)
+
+
 def digest_decide(root, digest_id, pid, decision):
     """Approve or reject one pending proposal. The last decision in a digest trims its job folders."""
     if decision not in ("approve", "reject"):
         return 400, {"error": "decision must be approve or reject"}
     path = root / "digests" / digest_id / "proposals.json"
     with DIGEST_LOCK:
-        data, raw = read_proposals(path)
-        entry = next((p for p in raw if (v := valid_proposal(p)) and v["id"] == pid), None)
+        entry = next((p for p in read_proposals(path)[1] if (v := valid_proposal(p)) and v["id"] == pid), None)
         if entry is None:
             return 404, {"error": "no such proposal"}
         prop = valid_proposal(entry)
@@ -2300,41 +2353,23 @@ def digest_decide(root, digest_id, pid, decision):
         if decision == "reject":
             status = "rejected"
         elif prop["kind"] == "skill":
-            if not (rel := digest_skill_target(prop["target"])):
-                return 403, {"error": "target is not editable"}
-            if os.path.lexists(prop["target"]):
-                return 409, {"error": "skill already exists"}
-            queue_digest_item(repo_of(prop["target"])[0] / "scrum", f"Create digest {digest_id} {pid} skill at {rel}: {prop['why']}",
-                              digest_item_spec(digest_id, prop, rel))
+            if why := digest_queue_skill(root, digest_id, prop):
+                return (403 if why == "target is not editable" else 409), {"error": why}
             status = "queued"
         elif digest_denied(prop["target"]):
             return 403, {"error": "target is not editable"}
-        elif repo := repo_of(prop["target"]):
-            queue_digest_item(repo[0] / "scrum", f"Apply digest {digest_id} {pid} to {repo[1]}: {prop['why']}",
-                              digest_item_spec(digest_id, prop, repo[1]))
+        elif repo_of(prop["target"]):
+            digest_queue_repo_edit(digest_id, prop)
             status = "queued"
         else:
-            target = editable_path(prop["target"]) if os.path.isabs(prop["target"]) else None
-            if not target:
-                return 403, {"error": "target is not editable"}
-            try:
-                text = Path(target).read_bytes().decode()
-            except (OSError, UnicodeDecodeError):
-                text = ""
-            if text.count(prop["old"]) != 1:
+            if (why := digest_write_global(prop)) == "target is not editable":
+                return 403, {"error": why}
+            if why and why.startswith("write failed"):
+                return server_error("couldn't write the file", why)
+            if why:
                 return 409, {"error": "proposal no longer applies"}
-            try:
-                ai_backup(target)
-                Path(target).write_bytes(text.replace(prop["old"], prop["new"], 1).encode())  # in place: keeps a symlink
-            except OSError as e:
-                return server_error("couldn't write the file", e)
             status = "applied"
-        entry["status"] = status
-        tmp = path.with_name("proposals.json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-        if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
-            board.cmd_digest_trim(root, digest_id)
+        digest_set_statuses(root, digest_id, {pid: (status, None)})
     return 200, prop | {"status": status}
 
 
@@ -2359,25 +2394,6 @@ def digest_skill_check(root, digest_id, pid):
     return {"ok": True, "target": rel}
 
 
-def digest_target_auto_ok(target):
-    """None when target may be auto-approved: a scrum agent or SKILL.md in a registered repo (rule 3) that is no global
-    file (rule 5), checked on both the given and the real path. Else a short reason it stays with Trevor."""
-    homes = {os.path.abspath(claude_home()), os.path.realpath(claude_home())}
-    for t in {os.path.abspath(target), os.path.realpath(target)}:
-        for h in homes:
-            rel = Path(os.path.relpath(t, h)).parts
-            if rel == ("CLAUDE.md",) or rel[:1] == ("rules",) or (rel[:1] == ("projects",) and "memory" in rel[2:]):
-                return "global file"
-    if digest_denied(target):
-        return "settings or hooks file"
-    if not repo_of(target):
-        return "outside every registered repo"
-    real = Path(os.path.realpath(target))
-    if real.name != "SKILL.md" and not (real.parent.name == "agents" and fnmatch.fnmatch(real.name, "scrum-*.md")):
-        return "not a scrum agent or SKILL.md"
-    return None
-
-
 DIGEST_CONTRACT_TESTS = [sys.executable, "-m", "unittest", "tests.test_contracts"]  # run from the target repo's root
 
 
@@ -2391,7 +2407,7 @@ def git_run(repo, *args):
 
 def digest_apply_ready(repo: Path) -> str | None:
     """None when digest_auto may edit and commit in repo: its own git work tree, on a branch, clean outside scrum/, with
-    tests/test_contracts.py. Else the reason its obvious proposals are queued instead."""
+    tests/test_contracts.py. Else the reason its edit proposals are queued instead."""
     top = git_run(repo, "rev-parse", "--show-toplevel")
     if top.returncode or os.path.realpath(top.stdout.strip()) != os.path.realpath(repo):
         return "not a git checkout"
@@ -2414,26 +2430,17 @@ def digest_contract_ok(repo):
 
 
 def digest_mark_applied(root, digest_id, pids):
-    """Set these still-pending proposals to applied; the last decision in the digest trims it, as in digest_decide."""
-    path = root / "digests" / digest_id / "proposals.json"
+    """Set these still-pending proposals to applied; once nothing is pending the digest is trimmed."""
     with DIGEST_LOCK:
-        data, raw = read_proposals(path)
-        for entry in raw:
-            if (v := valid_proposal(entry)) and v["id"] in pids and v["status"] == "pending":
-                entry["status"] = "applied"
-        tmp = path.with_name("proposals.json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-        if not any(v["status"] == "pending" for p in raw if (v := valid_proposal(p))):
-            board.cmd_digest_trim(root, digest_id)
+        digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids})
 
 
 def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[dict], list[dict], str | None]:
-    """Apply one repo's obvious edit proposals in place, running the contract tests after each, then commit the ones that
+    """Apply one repo's edit proposals in place, running the contract tests after each, then commit the ones that
     passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
     to-queue entry carries the reason it wasn't applied, and nothing of it is left written."""
     repo = repo_of(props[0]["target"])[0]
-    entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "obvious_reason")} | ({"reason": why} if why else {})
+    entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
     if why := digest_apply_ready(repo):
         return [], [entry(p, why) for p in props], None
     done, queued = [], []  # done: (proposal, path relative to repo, original bytes)
@@ -2472,7 +2479,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[di
 
     try:
         job_id = board.cmd_new(scrum, f"Apply digest {digest_id} {pids}")
-        (scrum / "jobs" / job_id / "feature.md").write_text(f"Apply digest {digest_id} obvious proposals:\n\n{lines}")
+        (scrum / "jobs" / job_id / "feature.md").write_text(f"Apply digest {digest_id} proposals:\n\n{lines}")
         board.cmd_set(scrum, job_id, ["lane=lilguy"])
     except (OSError, SystemExit) as e:
         return (*undo(f"board job failed: {e}"), None)
@@ -2491,30 +2498,55 @@ def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[di
 
 
 def digest_auto(root, digest_id):
-    """Apply each pending edit proposal the digester marked obvious and that passes digest_target_auto_ok (digest_apply),
-    queueing a backlog item through digest_decide for any it can't apply; the rest stay pending for Trevor, with the
-    digester's reason or the re-check's."""
-    out = {"applied": [], "queued": [], "human": [], "job": None}
+    """Apply, queue or skip every pending proposal, so none is left pending and the digest is trimmed. A repo edit is
+    applied and committed (digest_apply) or queued as a backlog item when it can't be; a file outside every repo is
+    written in place after a backup; a new skill is queued; a settings or hooks file, an uneditable target or stale old
+    text is skipped with its reason."""
+    out = {"applied": [], "queued": [], "skipped": [], "job": None}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
-    path = root / "digests" / digest_id / "proposals.json"
-    by_repo = {}
-    for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
-        reason = "new skill" if p["kind"] == "skill" else digest_target_auto_ok(p["target"]) if p["obvious"] else p["obvious_reason"]
-        if p["obvious"] and reason is None:
-            by_repo.setdefault(repo_of(p["target"])[0], []).append(p)
+    updates, by_repo = {}, {}
+
+    def skip(p, why):
+        out["skipped"].append({"id": p["id"], "target": p["target"], "reason": why})
+        updates[p["id"]] = ("skipped", why)
+
+    def queue(p, why):
+        out["queued"].append({"id": p["id"], "target": p["target"], "why": p["why"], "reason": why})
+        updates[p["id"]] = ("queued", None)
+
+    pending = [v for x in read_proposals(root / "digests" / digest_id / "proposals.json")[1]
+               if (v := valid_proposal(x)) and v["status"] == "pending"]
+    if not pending:
+        return out
+    for p in pending:
+        if p["kind"] == "skill":
+            if why := digest_queue_skill(root, digest_id, p):
+                skip(p, why)
+            else:
+                queue(p, "new skill")
+        elif digest_denied(p["target"]):
+            skip(p, "settings or hooks file")
+        elif repo := repo_of(p["target"]):
+            by_repo.setdefault(repo[0], []).append(p)
+        elif why := digest_write_global(p):
+            skip(p, why)
         else:
-            out["human"].append({"id": p["id"], "reason": reason})
+            out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
+            updates[p["id"]] = ("applied", None)
     for props in by_repo.values():
-        applied, to_queue, job_id = digest_apply(root, digest_id, props)
+        applied, not_applied, job_id = digest_apply(root, digest_id, props)
         out["applied"] += applied
         out["job"] = out["job"] or job_id
-        for q in to_queue:
-            code, res = digest_decide(root, digest_id, q["id"], "approve")
-            if code == 200:
-                out["queued"].append(q)
+        by_id = {p["id"]: p for p in props}
+        for q in not_applied:
+            if q["reason"].startswith("old text found"):
+                skip(by_id[q["id"]], q["reason"])
             else:
-                out["human"].append({"id": q["id"], "reason": res["error"]})
+                digest_queue_repo_edit(digest_id, by_id[q["id"]])
+                queue(by_id[q["id"]], q["reason"])
+    with DIGEST_LOCK:
+        digest_set_statuses(root, digest_id, updates)
     return out
 
 
@@ -2788,7 +2820,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
-    p.add_argument("--digest-auto", metavar="NNN", help="apply (or queue) this digest's obvious proposals, print JSON and exit")
+    p.add_argument("--digest-auto", metavar="NNN", help="apply, queue or skip every pending proposal of this digest, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
     p.add_argument("--dir", type=Path, default=Path("scrum"),

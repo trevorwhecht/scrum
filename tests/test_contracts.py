@@ -1040,12 +1040,13 @@ class ContractTest(unittest.TestCase):
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
-                       '"obvious"', '"obvious_reason"', "2 or more different jobs", "never removes or loosens",
-                       "never a global file", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
-                       "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "(unanimous)",
-                       "pick not unanimous", "## Pipeline fit", "count toward the at-most-8 cap",
-                       "threshold or routing edits"):
+                       "never removes or loosens", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/",
+                       "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "## Pipeline fit",
+                       "count toward the at-most-8 cap", "threshold or routing edits", "skipped, and so is one whose `old` text is stale"):
             self.assertIn(phrase, digester, phrase)
+        for phrase in ('"obvious"', '"obvious_reason"', '"obvious": false', "obvious_reason", "(unanimous)", "pick not unanimous",
+                       "auto-approves", "Trevor decides", "Trevor approves", "**Obvious.**"):
+            self.assertNotIn(phrase, digester, phrase)
         self.assertIn("**Inputs** (paths are in your prompt): `DIGEST_DIR` (`scrum/digests/<NNN>/`) and `PROJECT` "
                       "(`scrum/project.md`).", digester)
         for phrase in ("ROUTING", "## Local routing", "Trust flip", '"roles"', "local runs", "local/routing.json"):
@@ -1060,6 +1061,15 @@ class ContractTest(unittest.TestCase):
                        "error.md", "B digest-trim", "no remote", "--digest-auto",
                        "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
             self.assertIn(phrase, digest, phrase)
+        step4 = digest[digest.index("\n4. "):]
+        for phrase in ('"skipped"', "<pid> → <target>: <why>", "queued: <reason>", "skipped: <reason>"):
+            self.assertIn(phrase, step4, phrase)
+        for phrase in ("obvious", '"human"', "needs-human card", "last decision trims"):
+            self.assertNotIn(phrase, step4, phrase)
+            self.assertNotIn(phrase.lower(), digest.lower(), phrase)
+        serve = (ROOT / "skills" / "trevskills-scrum" / "serve.py").read_text()
+        for phrase in ("obvious", "approved by Trevor"):
+            self.assertNotIn(phrase, serve, phrase)
         self.assertNotIn("only ever queues a repo backlog item", digest)
         for phrase in ("ROUTING=", "R=$(", "local/routing.json"):
             self.assertNotIn(phrase, digest, phrase)
@@ -2528,7 +2538,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         cloud = self.lane("cloud")
         sync = cloud[cloud.index("3. **Sync**"):]
-        start = sync.index("**Digest-approved rules edits.**")
+        start = sync.index("**Digest rules edits.**")
         rule = sync[start:sync.index("\n", start)]
         for phrase in ("reason starts `Hard stop: agent rules`", "B digest-verify $ID", "exits 0", "run **Merge**",
                        "WT=$REPO/.claude/worktrees/scrum-$ID", "BASE=origin/<baseRefName>", "needs-human",
