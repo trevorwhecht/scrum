@@ -211,7 +211,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
   #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
@@ -378,7 +378,16 @@ const ago = at => {
   const s = Math.max(0, Math.round(Date.now() / 1000 - at));
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 };
-const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
+// Also re-runs statusLine on cards and the modal, so "Building, N min" advances with no board change.
+const tickAgo = () => {
+  document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
+  document.querySelectorAll(".card[data-key] > .status").forEach(el => {
+    const j = jobs.find(x => x.key === el.parentElement.dataset.key);
+    if (j) el.textContent = statusLine(j);
+  });
+  const j = $("viewer").open && jobs.find(x => x.key === $("viewer").dataset.key);
+  if (j && $("viewerStatus")) $("viewerStatus").textContent = statusLine(j);
+};
 
 // A running job whose interactive session is stopped on a permission prompt, a question or a reply (board.py hook).
 const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
@@ -723,18 +732,19 @@ const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form d
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
 // The one More menu: Abort sits behind it so it is never a top-level button.
-const moreMenu = job => { const a = abortForm(job); return a ? `<details class="more"><summary>More</summary>${a}</details>` : ""; };
+const moreMenu = job => { const a = abortForm(job); return a ? `<details class="more" data-key="${esc(job.key)}"><summary>More</summary>${a}</details>` : ""; };
 // Pause stops the job's session and holds it in its stage (board.py PAUSABLE); Play is the resume form below.
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
-// When serve.py says a click would be refused (job.resumeRefusal), the waiting status shows in its place.
+// When serve.py says a click would be refused (job.resumeRefusal), the waiting status shows in its place: what it waits
+// on, not "Paused by you", which the status line above already says.
 const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = job => {
   const reason = job.reason || "";
   if (!RESUMABLE.some(p => reason.startsWith(p))) return "";
-  if (job.resumeRefusal) return `<p class="note" role="status">${esc(statusLine(job))}</p>`;
+  if (job.resumeRefusal) return `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
   return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 };
 // A paused job keeps its stage, so its panel takes the not-needs-human branch: Play goes there in place of Pause.
@@ -801,7 +811,7 @@ function stopBox(job) {
 }
 
 function renderActions(job) {
-  const el = $("actions"), status = $("viewerStatus"), more = el.querySelector?.("details.more")?.open;
+  const el = $("actions"), status = $("viewerStatus"), d0 = el.querySelector?.("details.more"), more = d0?.open && d0.dataset?.key === job.key;  // never carry the open menu to another job
   if (status) status.textContent = statusLine(job);
   if (actionError[job.key] && actionError[job.key].stage !== job.stage) delete actionError[job.key];
   const fail = actionError[job.key], err = fail ? `<p class="error" role="alert">${esc(fail.msg)}</p>`

@@ -124,7 +124,7 @@ class StopBox(unittest.TestCase):
         self.assertEqual(done, [[ANSWER, {"key": "c"}]])
 
     def test_abort_only_in_more(self):
-        more = re.compile(r'<details class="more"><summary>More</summary><form data-act="abort">.*?Abort job</button></form></details>', re.S)
+        more = re.compile(r'<details class="more" data-key="p/020-q"><summary>More</summary><form data-act="abort">.*?Abort job</button></form></details>', re.S)
         cases = [({**ASKED, "options": OPTIONS}, {}), ({**ASKED}, {}),
                  ({**ASKED, "stage": "build", "reason": None}, {"p/020-q": {"action": "build", "started": 1767284460, "alive": True}})]
         for job, runs in cases:
@@ -178,8 +178,8 @@ class StopBox(unittest.TestCase):
                   "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
         stalled = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
         refusal = "can't resume yet: 222. Fix: click Resume when 222 finish."
-        # statusLine's rule order: a job Trevor paused says so before any refusal.
-        for job, label, want in ((paused, "Play", "Paused by you"), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222.")):
+        # The note names what blocks the click, even for a job Trevor paused (whose status line says "Paused by you").
+        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222.")):
             with self.subTest(label=label):
                 for missing in ({}, {"resumeRefusal": None}):
                     html, = js(f"renderActions({json.dumps({**job, **missing})}); out(els.actions.innerHTML);")
@@ -188,6 +188,34 @@ class StopBox(unittest.TestCase):
                 self.assertNotIn('data-act="resume"', html)
                 self.assertNotIn(f">{label}</button>", html)
                 self.assertIn(f'<p class="note" role="status">{want}</p>', html)
+
+    def test_more_menu_open_state_stays_with_its_job(self):
+        a, b = {**ASKED, "stage": "build", "reason": None}, {**ASKED, "key": "p/021-r", "id": "021-r", "stage": "build", "reason": None}
+        # Before each render the old menu (job a's, open) is in #actions; after it, a fresh closed one from the new markup.
+        same, other = js(f"""const real = els.actions.querySelector; let fresh = null;
+            const run = job => {{ let calls = 0; fresh = {{open: false}};
+              els.actions.querySelector = s => s !== "details.more" ? real(s) : calls++ ? fresh : {{open: true, dataset: {{key: "p/020-q"}}}};
+              renderActions(job); return fresh.open; }};
+            out(run({json.dumps(a)})); out(run({json.dumps(b)}));""")
+        self.assertTrue(same)  # a poll re-render of the same job keeps it open
+        self.assertFalse(other)  # another job's menu starts closed
+
+    def test_status_minutes_tick_without_board_change(self):
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        tick = text[text.index("const tickAgo = "):text.index("const paused = ")]
+        got, = js(f"""const ago = () => ""; const card = {{textContent: "Building, 0 min", parentElement: {{dataset: {{key: "p/1"}}}}}};
+            document.querySelectorAll = s => s.includes(".status") ? [card] : [];
+            jobs = [{{key: "p/1", stage: "build", updatedAt: new Date(Date.now() - 7 * 60000 - 5000).toISOString()}}];
+            els.viewer.dataset.key = "p/1"; {tick}; tickAgo(); out([card.textContent, els.viewerStatus.textContent]);""")
+        self.assertEqual(got, ["Building, 7 min", "Building, 7 min"])
+
+    def test_note_textarea_16px_on_mobile(self):
+        text = DASHBOARD.read_text()
+        mobile = [l for l in text.splitlines() if l.startswith("@media (max-width:640px)")]
+        self.assertTrue(any(re.search(r"#actions textarea[^{]*\{font-size:16px", l) for l in mobile))
 
     def test_post_error_survives_rerender(self):
         msg = "can't resume yet: 222. Fix: click Resume when 222 finish."

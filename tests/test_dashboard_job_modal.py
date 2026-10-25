@@ -140,7 +140,7 @@ class JobModal(unittest.TestCase):
         'data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window '
         'that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree '
         'on.">Discuss first</button>\n      <button class="btn" type="submit">Send back to builder</button></form>'
-        '<details class="more"><summary>More</summary><form data-act="abort">\n    <label hidden><input type="checkbox" '
+        '<details class="more" data-key="p/020-q"><summary>More</summary><form data-act="abort">\n    <label hidden><input type="checkbox" '
         'name="requeue"> Put back in backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button>'
         '</form></details><p class="error" role="alert"></p>')
     TODAY_CARD = (
@@ -289,7 +289,7 @@ class JobModal(unittest.TestCase):
                          '<div class="sentback"></div>')
         self.assertEqual(run(f"reworkList({json.dumps(self.ASKED)})"), "")  # no rework.md in files
         self.assertEqual(run(f"reworkList({json.dumps({**job, 'stage': 'build'})})"), "")
-        self.assertIn('<div class="sentback"></div><details class="more">', self.actions_html(job))
+        self.assertIn('<div class="sentback"></div><details class="more" data-key=', self.actions_html(job))
 
 if __name__ == "__main__":
     unittest.main()
