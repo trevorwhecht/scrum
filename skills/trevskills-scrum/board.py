@@ -2280,6 +2280,10 @@ def cmd_ready(root, parent_id, live=()):
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
+        # held kids run no session: when the taper leaves fewer slots than there are held kids, they yield their
+        # overlap slot; busy itself is kept so the parent stays running and in_progress counts them
+        limited = [k for k in busy if k.get("limitResetAt") and not idle(k) and k["id"] not in live]
+        slots = [k for k in busy if k not in limited] if cap is not None and allow < len(limited) else list(busy)
         room = ram_room() if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)
@@ -2290,7 +2294,7 @@ def cmd_ready(root, parent_id, live=()):
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
-            if slot_conflict(k, busy, files):
+            if slot_conflict(k, slots, files):
                 continue
             if first:  # a claim is due, but held like a machine wait (never needs-human) until those are dealt with
                 machine = f"{first} paused job needs Play or Abort first" if first == 1 \
@@ -2298,6 +2302,7 @@ def cmd_ready(root, parent_id, live=()):
                 break
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
+            slots.append(k)
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
