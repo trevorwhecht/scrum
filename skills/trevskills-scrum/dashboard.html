@@ -825,7 +825,7 @@ function renderActions(job) {
   el.innerHTML = actionsHtml(job, err);
   if (more) { const d = el.querySelector("details.more"); if (d) d.open = true; }
 }
-// The modal's actions for job; err is the error line, last, under the buttons.
+// The modal's actions for job; err is the error line: right under the Play/Resume part when there is one, else last, under the buttons.
 function actionsHtml(job, err) {
   const run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + stopBox(job);
   const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
@@ -835,18 +835,20 @@ function actionsHtml(job, err) {
   if (run?.alive && run.action !== "discuss") return banner + kids + now + pauseForm(job) + moreMenu(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + pauseForm(job) + moreMenu(job) + err;
+  if (job.stage !== "needs-human") { const held = heldByTrevor(job);  // Play and Reopen never show together, so err can follow both
+    return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + (held ? err : "") + pauseForm(job) + moreMenu(job) + (held ? "" : err); }
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
-  return banner + kids + last + (job.options?.length ? "" : resumeForm(job)
+  const resume = job.options?.length ? "" : resumeForm(job);
+  return banner + kids + last + (job.options?.length ? "" : resume + (resume ? err : "")
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + moreMenu(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + moreMenu(job) + (resume ? "" : err);
 }
 
 $("actions").addEventListener("submit", async e => {
