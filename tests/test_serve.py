@@ -284,6 +284,34 @@ class ServeTest(unittest.TestCase):
         self.addCleanup(path.write_text, path.read_text())
         self.addCleanup(shutil.rmtree, self.root / "attachments", True)
 
+    def raw_cl(self, cl, headers=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.putrequest("POST", "/api/p/repo/backlog")
+        for k, v in ({"Content-Type": "application/json", "Content-Length": str(cl)} | (headers or {})).items():
+            c.putheader(k, v)
+        c.endheaders(b"{}")
+        r = c.getresponse()
+        out = (r.status, json.loads(r.read()))
+        c.close()
+        return out
+
+    def test_post_body_over_cap_rejected(self):
+        self.assertEqual(self.raw_cl(self.serve.MAX_BODY + 1), (413, {"error": "body too large"}))
+        self.assertEqual(self.raw_cl(self.serve.MAX_BODY + 1, {"Origin": "https://evil.example"})[0], 403)
+
+    def test_post_bad_content_length_rejected(self):
+        for cl in ("-1", "abc"):
+            code, out = self.raw_cl(cl)
+            self.assertEqual((code, out), (400, {"error": "bad Content-Length"}))
+
+    def test_attachment_near_max_still_accepted(self):
+        import base64
+        self.keep_backlog()
+        data = b"\x89PNG\r\n\x1a\n" + b"a" * (10 * 1024 * 1024 - 9)
+        code, _ = self.post_raw("/api/p/repo/attachments", {"data": base64.b64encode(data).decode(), "type": "image/png"})
+        self.assertEqual(code, 200)
+
     def test_attachment_saved_by_content_hash(self):
         self.keep_backlog()
         shutil.rmtree(self.root / "attachments", ignore_errors=True)

@@ -1065,6 +1065,7 @@ def estimate(root, text):
 # "[screenshot: <absolute path>]" in the item text, so the path reaches feature.md and agents Read it.
 ATTACH_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
 ATTACH_MAX = 10 * 1024 * 1024
+MAX_BODY = 16 * 1024 * 1024  # 10 MB image as base64 JSON is ~13.4 MB
 
 
 def save_attachment(root, data, mime):
@@ -2845,7 +2846,17 @@ class Handler(BaseHTTPRequestHandler):
                 or (origin and urlparse(origin).hostname not in LOCAL)):
             return self.send_json(403, {"error": "forbidden"})
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0:
+                raise ValueError
+        except ValueError:
+            self.close_connection = True
+            return self.send_json(400, {"error": "bad Content-Length"})
+        if length > MAX_BODY:
+            self.close_connection = True  # the unread body would parse as the next request
+            return self.send_json(413, {"error": "body too large"})
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
             body, path = body if isinstance(body, dict) else {}, urlparse(self.path).path
             if a := re.fullmatch(r"/api/agents/([^/]+)/skills", path):
                 code, obj = self.route_skill(unquote(a.group(1)), body.get("skill"))
