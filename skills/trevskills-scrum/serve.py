@@ -29,7 +29,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -344,6 +344,16 @@ def option_command(command):
     return None
 
 
+def refused(root, job_id, refusal):
+    """The 409 for a resume_refusal text, logged to questions.log as a `refused` stop."""
+    # the board's flock, not locked_board: that rewrites board.json and migrates a legacy paused job, and a refusal
+    # must leave the job as it was (the cmd_chain_unlock pattern)
+    with open(Path(root) / ".board.lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        board.log_stop(root, job_id, "refused", str(refusal))
+    return 409, {"error": refusal}
+
+
 def answer_job(project, root, job, jobs, key, note=None):
     """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
     records the pick; the command it returns runs through the same helpers as the matching button, on this job.
@@ -355,7 +365,7 @@ def answer_job(project, root, job, jobs, key, note=None):
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        return 409, {"error": refusal}
+        return refused(root, job["id"], refusal)
     job_id = job["id"]
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
@@ -3037,7 +3047,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
             if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
                 if refusal := resume_refusal(project, root, job, manual=manual):
-                    return 409, {"error": refusal}
+                    return refused(root, job_id, refusal)
                 if not flag_stalled(root, job, LIMIT_RESET):
                     return 409, {"error": "job moved on"}
                 jobs = json.loads((root / "board.json").read_text())["jobs"]
@@ -3045,7 +3055,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT):
-                    return 409, {"error": refusal}
+                    return refused(root, job_id, refusal)
                 with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}

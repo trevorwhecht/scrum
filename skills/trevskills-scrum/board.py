@@ -2327,6 +2327,10 @@ def cmd_ready(root, parent_id, live=()):
                 new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
                     "then click Run now on a waiting child."
         if new != (parent["stage"], parent.get("reason")):
+            if (new[1] or "").startswith(MACHINE_WAIT) and not reason.startswith(MACHINE_WAIT):  # once per hold
+                log_stop(root, parent["id"], "machine", new[1])
+            elif (new[1] or "").startswith(BLOCKED):
+                log_stop(root, parent["id"], "bigboy", new[1])
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids)}
@@ -2474,6 +2478,8 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
+        if given.get("stage") == "done" and (given.get("reason") or "").startswith("merged + gaps"):
+            log_stop(root, job["id"], "bigboy", job["reason"])
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
         play(sound(job["stage"]))
 
@@ -2482,6 +2488,12 @@ def questions_log(root, entry):
     """Append one JSON line to <scrum>/questions.log. Caller holds the board lock, so lines never interleave."""
     with open(Path(root) / "questions.log", "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def log_stop(root, job_id, kind, reason):
+    """Append one stop line (kind: stall, machine, bigboy or refused) to questions.log. Caller holds the board lock."""
+    questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id, "kind": kind,
+                         "reason": reason})
 
 
 UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render")
@@ -2532,7 +2544,8 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
             job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
         job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
         entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                 "question": question, "options": parsed}
+                 "question": question, "options": parsed, "reason": reason,
+                 "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
         if recommend:
             job["recommend"] = entry["recommend"] = recommend
         else:
@@ -3041,6 +3054,7 @@ def cmd_watchdog(root, alive=None):
                 if live_idle:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board or job-dir "
                                f"change for {IDLE_HOURS} h (session alive but idle). Fix: click Resume.")
+                    log_stop(root, job["id"], "stall", job["reason"])
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
                 elif job["stage"] == "spec" and not job.get("parent") \
@@ -3050,6 +3064,7 @@ def cmd_watchdog(root, alive=None):
                 else:
                     job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
                                f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
+                    log_stop(root, job["id"], "stall", job["reason"])
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
             if not flagged and not requeued:

@@ -384,7 +384,8 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         opts = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id}"])
         [line] = self.log_lines()
-        self.assertEqual(set(line), {"date", "project", "job", "question", "options"})
+        self.assertEqual(set(line), {"date", "project", "job", "question", "options", "kind", "reason"})
+        self.assertEqual((line["kind"], line["reason"]), ("ask", "Ship it?"))
         self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual(line["project"], Path(self.tmp.name).name)
         self.assertEqual((line["job"], line["question"]), (job_id, "Ship it?"))
@@ -860,6 +861,48 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+    def test_ready_machine_hold_logs_once(self):
+        parent, _ = self.five()
+        board.cmd_ready(self.root, parent)
+        for text in ("free RAM 7% (< 20%)", "free RAM 6% (< 20%)"):
+            with mock.patch.object(board, "machine_ok", return_value=text):
+                board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(parent)["reason"], "waiting: free RAM 6% (< 20%)")
+        [line] = self.log_lines()
+        self.assertEqual(set(line), {"date", "project", "job", "kind", "reason"})
+        self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertEqual((line["project"], line["job"], line["kind"], line["reason"]),
+                         (Path(self.tmp.name).name, parent, "machine", "waiting: free RAM 7% (< 20%)"))
+
+    def test_bigboy_stops_log_kind_bigboy(self):
+        parent, (c1, c2, c3, c4, c5) = self.five()
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c1, ["stage=done"])
+        board.cmd_abort(self.root, c2, requeue=False)
+        board.cmd_ready(self.root, parent)
+        board.cmd_set(self.root, c3, ["stage=done"])
+        self.assertEqual(self.log_lines(), [])
+        board.cmd_ready(self.root, parent)
+        board.cmd_ready(self.root, parent)  # same blocked reason again: no second line
+        blocked = ("bigboy blocked: 003-part-2. Fix: click Resume to skip the children that depend on them and run "
+                   "the final review.")
+        [line] = self.log_lines()
+        self.assertEqual(set(line), {"date", "project", "job", "kind", "reason"})
+        self.assertEqual((line["project"], line["job"], line["kind"], line["reason"]),
+                         (Path(self.tmp.name).name, parent, "bigboy", blocked))
+        board.cmd_set(self.root, parent, ["stage=done", "reason=merged + gaps: review unreadable"])
+        self.assertEqual({k: self.log_lines()[1][k] for k in ("job", "kind", "reason")},
+                         {"job": parent, "kind": "bigboy", "reason": "merged + gaps: review unreadable"})
+        other = board.cmd_new(self.root, "y")
+        for q in ("bigboy review: main not updated; merge it?", "bigboy blocked: 009-x. Resume?", "bigboy off track?"):
+            board.cmd_ask(self.root, other, q, [f"R=resume {other}", f"A=abort {other}"])
+        asks = self.log_lines()[2:]
+        self.assertEqual([(l["kind"], l["reason"], l["question"]) for l in asks],
+                         [("bigboy", "bigboy review: main not updated; merge it?",
+                           "bigboy review: main not updated; merge it?"),
+                          ("bigboy", "bigboy blocked: 009-x. Resume?", "bigboy blocked: 009-x. Resume?"),
+                          ("ask", "bigboy off track?", "bigboy off track?")])
 
     def test_bigboy_aborted_child_blocks_with_resume(self):
         # Blocked: c2 aborted, and waiting c4 (and c5 through c4) depend on it; nothing else to act on.
@@ -2558,6 +2601,25 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(str(e.exception).startswith("bad field 'limitResetAt=1'"), str(e.exception))
         self.assertEqual(self.get(kept)["limitResetAt"], 1_800_000_000)
 
+    def test_watchdog_stall_logs_stop(self):
+        idle = self.aged("Idle build", 180, stage="build")
+        (self.root / "jobs" / idle).mkdir(parents=True, exist_ok=True)
+        (self.root / "jobs" / idle / "build.md").write_text("x")
+        self.age_job_dir(idle, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [idle])
+        dead = self.aged("Dead build", 45, stage="build")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [dead])
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])  # flags nothing: no line
+        lines = self.log_lines()
+        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason"}] * 2)
+        for l in lines:
+            self.assertRegex(l["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"]) for l in lines], [
+            (Path(self.tmp.name).name, idle, "stall", "stalled in build: no board or job-dir change for 2 h "
+             "(session alive but idle). Fix: click Resume."),
+            (Path(self.tmp.name).name, dead, "stall", "stalled in build: no board update for 30 min and no live "
+             "session. Fix: click Resume.")])
+
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
         old = self.get(job_id)["updatedAt"]
@@ -2612,6 +2674,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(),
                          "# Backlog\n- [ ] [3] Full item text, every detail {#ab12} <!-- why -->\n- [ ] Other\n")
         self.assertEqual(board.spec_path(self.root, "Full item text, every detail").read_text(), "pre-written spec")
+        self.assertFalse((self.root / "questions.log").exists(), "an orphaned requeue is not a stop")
 
     def test_watchdog_never_flags_cloud_jobs(self):
         cloud = self.aged("In cloud", 120, stage="cloud")
