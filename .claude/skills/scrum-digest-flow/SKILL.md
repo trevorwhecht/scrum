@@ -1,0 +1,54 @@
+---
+name: scrum-digest-flow
+description: Load before speccing or building a change to the digest flow (serve.py digest_* functions, lanes/digest.md, agents/scrum-digester.md, the dashboard Digest dialog, DigestTest). Names the lifecycle and helpers the scrum keeps re-deriving.
+---
+
+# Digest flow
+
+Find each name with `grep -n '<name>'`; never trust a line number. Every serve.py function below has a docstring: read it first.
+
+## Files
+- `skills/trevskills-scrum/lanes/digest.md`: the orchestrator steps (digest-start, reader, digester, `serve.py --digest-auto`).
+- `agents/scrum-digest-reader.md` writes `scrum/digests/<NNN>/notes.md`; `agents/scrum-digester.md` writes `proposals.json`.
+- `skills/trevskills-scrum/serve.py`: everything after the `# --- Digest:` comment.
+- `skills/trevskills-scrum/board.py`: `cmd_digest_due`, `cmd_digest_start`, `cmd_digest_trim`, `cmd_digest_verify` (the Merge agent rules guard uses verify).
+
+## Proposal shape
+- `proposals.json` is agent-written and untrusted.
+- `valid_proposal(p)`: keys `PROPOSAL_KEYS` (id, target, why, old, new), all strings, `old != new`, id matches `PROPOSAL_ID_RE`.
+- `kind` is `edit` (default) or `skill`; a skill has empty `old` and frontmatter, at most `SKILL_MAX_LINES` lines.
+- `status` is one of `PROPOSAL_STATUSES`; a missing status reads as `pending`. An optional `reason` string is kept.
+
+## Lifecycle
+- The digester writes every proposal as `pending`.
+- `digest_auto(root, digest_id)` (the `--digest-auto` CLI) moves every pending one to applied, queued or skipped, then the digest is trimmed:
+  - skill: `digest_queue_skill` queues a backlog item (`queued`, reason `new skill`), or `skipped` when the target is not creatable or exists.
+  - settings or hooks target (`digest_denied`): `skipped`.
+  - target inside a registered repo (`repo_of`): grouped per repo into `digest_apply`.
+  - any other target: `digest_write_global` (only an editable AI-Settings item, backed up by `ai_backup`, written in place).
+- `digest_apply(root, digest_id, props, title, feature, mark_applied)`:
+  - refuses the whole repo when `digest_apply_ready` gives a reason (not a checkout, detached HEAD, dirty outside scrum/, no tests/test_contracts.py);
+  - per proposal: old text must occur once, write, run `tests.test_contracts` (`digest_contract_ok`), restore the bytes on failure;
+  - commits the passing ones under one lilguy board job, `[scrum <job>] <title>`, never pushed; a commit failure undoes every write and asks.
+- In `digest_auto`, an `old text found N times` result is `skipped`; any other unapplied repo edit becomes a backlog item via `digest_queue_repo_edit` (`queued`).
+- Backlog items carry a pre-written spec from `digest_item_spec`; `queue_digest_item` writes the spec before the backlog line.
+- `digest_skill_check` re-checks a queued skill before its backlog job creates the file.
+
+## Statuses and the lock
+- `DIGEST_LOCK` is one `threading.Lock` in serve.py.
+- `digest_set_statuses(root, digest_id, updates, from_status="pending")` changes only entries still at `from_status`, writes tmp + `os.replace`, and trims once nothing is pending. The caller holds `DIGEST_LOCK`.
+- `digest_mark_applied` takes the lock and sets pending to applied.
+- `digest_revert(root, digest_id, pid)`: only an `applied` proposal; swaps old and new and re-applies through `digest_apply` (repo, `mark_applied=False`, its own `Revert digest` job) or `digest_write_global`; then sets `reverted` from `applied` under the lock.
+- Any read-modify-write you add re-checks the live status under `DIGEST_LOCK` right before writing.
+
+## HTTP (serve.py `Handler.route`)
+- `GET /api/p/<project>/digests` lists digests (`digests()`).
+- `POST /api/p/<project>/digest` starts one (`digest_now`; 409 when running or nothing new).
+- `POST /api/p/<project>/digests/<id>/<pid>` with `{"decision": "revert"}` calls `digest_revert`.
+
+## Tests
+- `tests/test_serve.py` `DigestTest` runs on the `AiSettingsTest` fake home; the registered project is `reg`.
+- Its helpers: `done_job`, `digest(proposals, digest_id, jobs)`, `prop(pid, target, old, new, **extra)`, `revert(pid)`, `statuses()`, `rule(text)` (a global rules file).
+- `board.merge_refusal` is mocked in its setUp so fixture jobs can go done.
+- `tests/test_contracts.py` pins wording in lanes/digest.md and the digester agent: grep the phrase before rewording.
+
