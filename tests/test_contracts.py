@@ -1507,6 +1507,16 @@ class ContractTest(unittest.TestCase):
             self.assertIn(harness, para, name)
             self.assertEqual(text.count("throwaway harness"), 1, name)
 
+    def test_review_ui_db_not_a_block(self):
+        text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        para = next(l for l in text.splitlines() if l.startswith("**Database.**"))
+        for phrase in ("DB port and start command that PROJECT's Notes name", "`docker start boisepartyco-pg`", "5433",
+                       "do not probe 5432", "start it, then sign in with the `Test sign-in:` line",
+                       "unmigrated or unreachable", "`/tmp` harness with mock data at 390 and 1440 px",
+                       "never write `Rendered: blocked` or `Rendered: no` for a database reason"):
+            self.assertIn(phrase, para, phrase)
+        self.assertNotIn("a required DB or session backend was unreachable", text)
+
     def test_review_ux_ui_find_cloud_chromium(self):
         lookup = ("If that binary is missing, look for Chromium under `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` "
                   "(`ls -d \"${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}\"/chromium-*/chrome-linux/chrome`) "
