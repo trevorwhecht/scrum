@@ -415,6 +415,7 @@ const jobTitle = job => `<span class="id">${esc(job.id)}</span> ${esc(job.title 
 // "4:21 PM", built by hand so every engine gives the same text (serve.py writes outcome times the same way).
 const clock = d => `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "AM" : "PM"}`;
 // A live /api/runs entry (dashboard run or Discuss session): "Rework running since 4:21 PM".
+const runsByKey = list => Object.fromEntries([...list].sort((a, b) => (b.action === "discuss") - (a.action === "discuss")).map(r => [`${r.project}/${r.id}`, r]));
 const runLine = run => `${run.action.charAt(0).toUpperCase()}${run.action.slice(1)} running since ${clock(new Date(run.started * 1000))}`;
 // serve.py's record_outcomes line: what the last dashboard run did when it left a needs-human job where it was.
 const outcomeLine = (job, tag, cls) => job.stage === "needs-human" && job.outcome ? `<${tag} class="${cls}" role="status">${esc(job.outcome)}</${tag}>` : "";
@@ -620,7 +621,7 @@ async function poll() {
     roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);
-    runs = Object.fromEntries(runList.map(r => [`${r.project}/${r.id}`, r]));
+    runs = runsByKey(runList);
     // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll.
     const final = j => ["done", "aborted"].includes(j.stage);
     await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key)))

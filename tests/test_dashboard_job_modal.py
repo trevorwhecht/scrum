@@ -29,6 +29,26 @@ def run(expr, tz=None):
 
 
 class JobModal(unittest.TestCase):
+    def test_runs_by_key_prefers_non_discuss(self):
+        text = DASHBOARD.read_text()
+        line = next(l for l in text.splitlines() if l.startswith("const runsByKey = "))
+        d = {"project": "p", "id": "1", "action": "discuss"}
+        r = {"project": "p", "id": "1", "action": "rework"}
+        o = {"project": "p", "id": "2", "action": "discuss"}
+
+        def go(lst):
+            return json.loads(subprocess.run([shutil.which("node") or "node", "-e", f"{line}\nconsole.log(JSON.stringify(runsByKey({json.dumps(lst)})))"],
+                                             capture_output=True, text=True, check=True).stdout)
+        if not shutil.which("node"):
+            self.skipTest("node not on PATH")
+        self.assertEqual(go([d, r]), {"p/1": r})
+        self.assertEqual(go([r, d]), {"p/1": r})
+        self.assertEqual(go([d]), {"p/1": d})
+        self.assertEqual(go([r, o]), {"p/1": r, "p/2": o})
+        self.assertEqual(go([]), {})
+        self.assertIn("runs = runsByKey(runList);", text)
+        self.assertNotIn("runs = Object.fromEntries", text)
+
     def test_modal_header_shows_job_id(self):
         self.assertEqual(run('jobTitle({id: "005-big", title: "Big <b>"})'),
                          '<span class="id">005-big</span> Big &lt;b&gt;')
