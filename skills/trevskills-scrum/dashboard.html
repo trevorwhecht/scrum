@@ -771,8 +771,9 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
   merging: "Merging", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
 // waitingOn(job) helper above.
-const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted" : job.paused ? "Paused by you"
+const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).join(", ")} (${job.waitingOn.why})`
+  : job.paused ? "Paused by you"
   : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
