@@ -53,6 +53,7 @@ Each card carries a project tag, and the **All projects** menu filters to one pr
 
 - Cards move across the stages, and each review round is one row of reviewer chips.
 - A stuck (needs-human) card opens with **Approve & merge** and **Send back to builder**. Each click starts a background `claude -p` run, logged to `scrum/runs/`, and the card shows "● running" until it finishes.
+- **Ask Claude** in any job's modal opens a new interactive `claude` in the job's worktree (the repo root once it's gone), in Ghostty if installed, else a new Terminal window, with a prompt listing the job's files and board entry.
 - **Backlog** opens the queue:
   - **+** adds an item, and Sonnet estimates it in Fibonacci points (1 2 3 5 8 13, colour-coded). Change the points or text inline.
   - ↑/↓ reorders the queue; `/trevskills-scrum next` takes the top item.
