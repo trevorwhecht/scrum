@@ -35,10 +35,10 @@ class SweepReproTest(unittest.TestCase):
     def job(self, job_id):
         return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
 
-    def tick(self):
+    def tick(self, alive=lambda job: False):
         s = self.serve
         with mock.patch.object(self.board, "projects", return_value={"p": self.repo}), \
-                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive), \
                 mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "spawn") as spawn:
             s.watchdog_tick()
         return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
@@ -80,7 +80,7 @@ class SweepReproTest(unittest.TestCase):
         self.write([{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-kid", "003-sib"]},
                     {"id": "002-kid", "stage": "spec", "parent": "001-par", "parallel": True, "updatedAt": stale},
                     {"id": "003-sib", "stage": "build", "parent": "001-par", "parallel": True}])
-        self.assertEqual(self.tick(), [], "003-sib shares src/shared.py: 002-kid must wait")
+        self.assertEqual(self.tick(alive=lambda job: job["id"] == "003-sib"), [], "003-sib shares src/shared.py: 002-kid must wait")
         self.assertEqual(self.job("002-kid")["stage"], "spec")
         self.assertNotIn("p/002-kid", self.serve.ORPHAN_RESPAWN, "a refused orphan keeps its one attempt")
 
