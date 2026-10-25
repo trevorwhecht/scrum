@@ -663,7 +663,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     """Start one headless run-all in every opted-in project with no work in flight, no auto-started run-all still
     running and a claimable backlog line. Focus projects go first, then the project that
     just finished, then the most recent board activity, then lowest n. board.machine_ok (RAM, disk, the session
-    ceiling) is checked before each start; the first failure stops this tick's later starts.
+    ceiling) and board.usage_allowance are checked before each start; the first failure stops this tick's later starts.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -679,6 +679,10 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
         try:
             if not running(project, "run-all") and claimable(root):
                 if board.machine_ok(root):  # no room on this machine; retry next tick
+                    return
+                live = board.live_sessions()
+                allow = board.usage_allowance(board.read_usage(), time.time(), live)
+                if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
                     return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
         except (Exception, SystemExit) as e:

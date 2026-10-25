@@ -43,7 +43,6 @@ class ParkedParentReproTest(unittest.TestCase):
     def run_alls(self):
         with mock.patch.object(self.board, "projects", return_value=self.projects), \
                 mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
-                mock.patch.object(self.board, "pace_cap", return_value=None), \
                 mock.patch.object(self.serve, "running", return_value=False), \
                 mock.patch.object(self.serve, "spawn") as spawn:
             self.serve.watchdog_tick()
