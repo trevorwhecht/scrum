@@ -336,6 +336,110 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
                                  ("needs-human", want, q, [f"resume {job_id}", f"abort {job_id}"]))
 
+    # --- ask --kind (scrum-unblocker) ---
+    def ask_cli(self, job_id, kind, question="Stuck?"):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "ask", job_id, question, "--kind", kind,
+                        "--a", f"Approve=approve {job_id}", "--b", f"Abort=abort {job_id}"])
+        return json.loads(buf.getvalue())
+
+    def test_ask_eligible_kind_unblocks_without_parking(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=approve", "reason=working"])
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(self.ask_cli(job_id, "round-limit", "Round limit hit"), {"unblock": True, "n": 1})
+            self.assertEqual(self.ask_cli(job_id, "ci-fail", "CI fails"), {"unblock": True, "n": 2})
+        play.assert_not_called()
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"], job["unblocks"], job["unblockKinds"]),
+                         ("approve", "working", 2, ["round-limit", "ci-fail"]))
+        self.assertNotIn("question", job)
+        lines = self.log_lines()
+        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "unblock", "question"}] * 2)
+        self.assertEqual([(l["job"], l["kind"], l["unblock"], l["question"]) for l in lines],
+                         [(job_id, "round-limit", 1, "Round limit hit"), (job_id, "ci-fail", 2, "CI fails")])
+        self.assertEqual(lines[0]["project"], Path(self.tmp.name).name)
+
+    def test_ask_hard_stop_kind_never_unblocks(self):
+        for kind in ("schema", "migrate", "agent-rules", "gh", "setup", "hard-stop", "secrets"):
+            with self.subTest(kind=kind):
+                job_id = board.cmd_new(self.root, kind)
+                board.cmd_set(self.root, job_id, ["stage=build"])
+                self.assertEqual(self.ask_cli(job_id, kind), {"unblock": False})
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["reason"]), ("needs-human", "Stuck?"))
+                self.assertNotIn("unblocks", job)
+
+    def test_ask_unblock_caps_at_two(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=check"])
+        self.assertEqual(self.ask_cli(job_id, "check-fail"), {"unblock": True, "n": 1})
+        self.assertEqual(self.ask_cli(job_id, "conflict"), {"unblock": True, "n": 2})
+        self.assertEqual(self.ask_cli(job_id, "render"), {"unblock": False})
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["unblocks"], job["unblockKinds"]),
+                         ("needs-human", 2, ["check-fail", "conflict"]))
+
+    def test_ask_repeat_kind_parks(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.assertEqual(self.ask_cli(job_id, "blocked", "blocked: one thing"), {"unblock": True, "n": 1})
+        self.assertEqual(self.ask_cli(job_id, "blocked", "blocked: something else entirely"), {"unblock": False})
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"], job["unblocks"]),
+                         ("needs-human", "blocked: something else entirely", 1))
+
+    def test_ask_bad_kind_rejected(self):
+        job_id = board.cmd_new(self.root, "x")
+        before = (self.root / "board.json").read_bytes()
+        ok = [f"A=approve {job_id}", f"B=abort {job_id}"]
+        for kind, opts in (("Round-Limit", ok), ("-x", ok), ("ci fail", ok), ("", ok), ("ci-fail", [f"A=merge {job_id}", ok[1]])):
+            with self.subTest(kind=kind):
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_ask(self.root, job_id, "Q?", opts, kind=kind)
+                self.assertTrue(str(e.exception.code))
+                self.assertEqual((self.root / "board.json").read_bytes(), before)
+                self.assertFalse((self.root / "questions.log").exists())
+
+    def test_unblock_fields_survive_sync(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.ask_cli(job_id, "blocked")
+        board.cmd_sync(self.root, job_id)
+        job = self.jobs()[0]
+        self.assertEqual((job["unblocks"], job["unblockKinds"]), (1, ["blocked"]))
+
+    def test_unblock_log_records_verdict(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.ask_cli(job_id, "check-fail")
+        self.ask_cli(job_id, "conflict")
+        for verdict in ("REWORK", "RESPEC", "ESCALATE"):
+            with self.subTest(verdict=verdict):
+                self.write(f"{job_id}/unblock-2.md", f"VERDICT: {verdict}\nSKILL.md copies BigBoy step 3\n## Evidence\n")
+                out = board.cmd_unblock_log(self.root, job_id)
+                self.assertEqual(out, {"verdict": verdict, "blocker": "SKILL.md copies BigBoy step 3",
+                                       "kind": "conflict", "n": 2})
+                line = self.log_lines()[-1]
+                self.assertEqual(set(line), {"date", "job", "kind", "verdict", "blocker"})
+                self.assertEqual((line["job"], line["kind"], line["verdict"], line["blocker"]),
+                                 (job_id, "conflict", verdict, "SKILL.md copies BigBoy step 3"))
+
+    def test_unblock_log_invalid(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        self.ask_cli(job_id, "blocked")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "unblock-log", job_id])
+        self.assertEqual(json.loads(buf.getvalue()), {"verdict": "INVALID", "blocker": "", "kind": "blocked", "n": 1})
+        self.write(f"{job_id}/unblock-1.md", "VERDICT: MAYBE\nno idea\n")
+        out = board.cmd_unblock_log(self.root, job_id)
+        self.assertEqual(out, {"verdict": "INVALID", "blocker": "no idea", "kind": "blocked", "n": 1})
+        self.assertEqual([(l["verdict"], l["blocker"]) for l in self.log_lines()[-2:]],
+                         [("INVALID", ""), ("INVALID", "no idea")])
+
     def test_stage_change_clears_question(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])

@@ -8,7 +8,7 @@ AGENTS = {
     "scrum-approver": "opus", "scrum-debugger": "opus",
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
-    "scrum-review-e2e": "sonnet", "scrum-review-rules": "opus",
+    "scrum-review-e2e": "sonnet", "scrum-review-rules": "opus", "scrum-unblocker": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -19,6 +19,7 @@ FIRST_LINE = {
     "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
     "scrum-planner": "PLAN: READY", "scrum-tracker": "TRACK: ON TRACK", "scrum-bigboy-reviewer": "BIGBOY: PASS",
     "scrum-review-e2e": "VERDICT: PASS", "scrum-review-rules": "VERDICT: PASS",
+    "scrum-unblocker": "VERDICT: REWORK | RESPEC | ESCALATE",
 }
 
 
@@ -1567,10 +1568,10 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         approve = self.section(text, "## Approve", "## Merge")
         self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' "
-                      "--a \"Approve & merge=approve $ID\" --b \"Send back=rework $ID \\\"render the changed page and "
+                      "--kind render --a \"Approve & merge=approve $ID\" --b \"Send back=rework $ID \\\"render the changed page and "
                       "see the change, or write Rendered: n/a when nothing on screen changed\\\"\" --c \"Abort=abort $ID\"`",
                       approve)
-        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --a \"Send back="
+        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --kind blocked --a \"Send back="
                       "rework $ID \\\"make the most reasonable call on the blocker in decision.md and record it as a "
                       "Ruling in build.md\\\"\" --b \"Abort=abort $ID\"`", approve)
         rule = self.section(text, "**Every stop is a closed question.**", "\n1. ")
@@ -1742,7 +1743,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         step5 = self.section(text, "5. **Conflicts.**", "6. **Merge:**")
         self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
-                      "$DEFAULT after 2 tries.\" --a \"Requeue=abort $ID --requeue\" --b \"Abort=abort $ID\"` and stop.", step5)
+                      "$DEFAULT after 2 tries.\" --kind conflict --a \"Requeue=abort $ID --requeue\" --b \"Abort=abort $ID\"` and stop.", step5)
         for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
             self.assertIn(phrase, step5, phrase)
 
@@ -2287,6 +2288,48 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the project's test", "5. Commit on your branch")
         self.assertIn("buildlock.py", step4)
+
+    def test_unblocker_has_no_edit(self):
+        path = ROOT / "agents" / "scrum-unblocker.md"
+        self.assertEqual(frontmatter(path).get("tools"), "Read, Grep, Glob, Bash, Write")
+        text = path.read_text()
+        for phrase in ("## Evidence", "## Options considered", "## Instructions", "Done when:", "## For Trevor",
+                       "<Label>=<command>", "recommended option first", "Measure before recommending",
+                       "never loosen the check", "Look for duplication first", "Stay inside the spec",
+                       "Write only `JOB_DIR/unblock-N.md`"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_points_to_unblock_lane(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        pointer = next(l for l in text.splitlines() if "lanes/unblock.md" in l)
+        self.assertIn("scrum-unblocker", pointer)
+        self.assertIn('"unblock": true', pointer)
+        step5 = self.section(text, "5. **Build:**", "## Fast lane")
+        self.assertIn("--kind blocked", step5)
+        check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
+        self.assertIn('B ask $ID "debug: 3 failed fixes — question the design." --kind check-fail', check)
+        approve = self.section(text, "## Approve", "## Migrate")
+        self.assertIn('B ask $ID "approver requested second rework; see decision.md." --kind round-limit', approve)
+        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --kind blocked", approve)
+        self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' --kind render", approve)
+        merge = self.section(text, "## Merge", "## Routing")
+        self.assertIn('B ask $ID "CI still fails after 2 fix attempts; see ci.md." --kind ci-fail', merge)
+        self.assertIn('B ask $ID "merge conflicts with $DEFAULT after 2 tries." --kind conflict', merge)
+        self.assertEqual(text.count("--kind "), 7)
+        for line in text.splitlines():
+            if any(p in line for p in ("Hard stop: schema", "migrate stopped", "Hard stop: agent rules")):
+                self.assertNotIn("--kind", line, line[:80])
+
+    def test_unblock_lane_covers_verdicts(self):
+        text = self.lane("unblock")
+        for phrase in ("scrum-unblocker", "B unblock-log $ID", "**REWORK:**", "**RESPEC:**", "**ESCALATE or INVALID:**",
+                       "Read JOB_DIR/unblock-N.md and follow Instructions.",
+                       "Revise spec.md from the Instructions in JOB_DIR/unblock-N.md.", "never raises `limit`",
+                       "same `--kind`", "skip the needs-human side steps", "BigBoy lane** step 6", "Roadmap lane** stop rule",
+                       "Cloud lane"):
+            self.assertIn(phrase, text, phrase)
+        for kind in ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render"):  # board.UNBLOCK_KINDS
+            self.assertIn(f"`{kind}`", text, kind)
 
     def test_skill_md_size_budget(self):
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 83000)
