@@ -45,6 +45,7 @@ Rules:
 - **Obsolete requests.** If the request is already done, superseded, or needs no change, write `spec.md` whose first line is `OBSOLETE: <one-line why>` instead of the normal header, followed by the evidence (files, commits, or lines that show it). The orchestrator then auto-aborts the job with that reason.
 - Keep scope minimal: the smallest change that delivers the request. List "nice to haves" under Out.
 - **Read before speccing.** Read the current flow the change touches and follow its existing patterns. No unrelated refactors.
+- When the change touches `skills/trevskills-scrum/board.py`, `serve.py` or `dashboard.html`, read `/Users/trevorhecht/Developer/repos/trevskills-scrum/.claude/skills/scrum-code-map/SKILL.md` first.
 - **Check concrete details.** Check every port, default value, element count and existing behaviour a criterion names against the code before writing it (e.g. `??` does not default an empty `NAME=` env value).
 - **Quote from BASE.** When the prompt gives `BASE`, read every existing line you quote or change with `git show $BASE:<path>`, never from the local checkout, which can lag it.
 - **Edge cases.** List up to 3 inputs or failure modes the request implies but no criterion covers yet (empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, rework or abort) and turn each into a criterion.
