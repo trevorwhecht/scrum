@@ -146,7 +146,8 @@ class StopBox(unittest.TestCase):
     def test_status_line_cases(self):
         twelve = "new Date(Date.now() - 12 * 60000 - 5000).toISOString()"
         got, = js(f"""const at = {twelve}, j = extra => ({{key: "p/1", project: "p", id: "1", stage: "build", updatedAt: at, ...extra}});
-          out([j({{stage: "done", paused: true}}), j({{stage: "aborted"}}), j({{paused: true, waitingOn: {{ids: ["9"], why: "x"}}}}),
+          out([j({{stage: "done", paused: true}}), j({{stage: "aborted", paused: true, waitingOn: {{ids: ["9"], why: "x"}}}}), j({{paused: true, waitingOn: {{ids: ["9"], why: "x"}}}}),
+            j({{paused: true}}), j({{paused: true, waitingOn: null}}),
             j({{waitingOn: {{ids: ["222", "223"], why: "shares SKILL.md"}}, resumeRefusal: "can't resume yet: 222. Fix: wait."}}),
             j({{resumeRefusal: "can't resume yet: 222. Fix: click Resume when 222 finish."}}),
             j({{stage: "needs-human", reason: "Hard stop: schema — The migration drops a column. Fix: x"}}),
@@ -154,7 +155,7 @@ class StopBox(unittest.TestCase):
             j({{waiting: "permission: Bash"}}), j({{stage: "waiting", setup: "pending"}}),
             j({{}}), j({{stage: "spec"}}), j({{stage: "cloud"}}), j({{stage: "waiting"}}), j({{stage: "odd"}}),
             j({{updatedAt: new Date(Date.now() + 60000).toISOString()}})].map(statusLine));""")
-        self.assertEqual(got, ["Done", "Aborted", "Paused by you", "Waiting on 222, 223 (shares SKILL.md)",
+        self.assertEqual(got, ["Done", "Aborted", "Waiting on 9 (x)", "Paused by you", "Paused by you", "Waiting on 222, 223 (shares SKILL.md)",
                                "Waiting: can't resume yet: 222.", "Waiting on you: The migration drops a column.",
                                "Waiting on you: Ship spec.md now?", "Waiting on you: permission: Bash",
                                "Waiting on you: setup", "Building, 12 min", "Writing spec, 12 min", "Running in cloud, 12 min",

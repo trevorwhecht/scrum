@@ -217,7 +217,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red only when the swap verdict blocks starts (stale swap with free RAM does not) and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it or on the swap verdict (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists board.machine_ok refuses every automatic start: the watchdog's claims, auto-resumes, queued Plays, orphan respawns, auto continue and continue.py's Resume POSTs. Sessions already running finish; nothing is stopped. Trevor's own Play, Resume, closed-question answers and Run now still start work. The state text counts the headless sessions still running (board.live_sessions) and reads idle at 0, when serve.py plays one done sound. Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
@@ -589,9 +589,9 @@ function renderMachine(m) {
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
   // RAM is a ring: the filled arc is RAM in use, the free % sits inside it. Swap has no text of its own: it only
-  // turns the ring red when board.machine_ok's verdict is the swap one (stale swap with free RAM blocks nothing),
+  // turns the ring red when board.machine_ok's verdict is the swap one, yellow when it is past its limit but blocks nothing,
   // and shows in its tooltip, since free RAM and swap are independent.
-  const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), /^swap used/.test(m.verdict || "") ? "danger" : "ok"];
+  const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), /^swap used/.test(m.verdict || "") ? "danger" : m.swap_pct > m.max_swap_pct ? "low" : "ok"];
   const level = ram == null ? "none" : levels.includes("danger") ? "danger" : levels.includes("low") ? "low" : "ok";
   const tip = `RAM ${ram == null ? "—" : Math.round(ram) + "% free"} · swap ${m.swap_pct == null ? "—" : Math.round(m.swap_pct) + "%"}`;
   const ring = `<span class="ring ${level}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${tip}" title="${tip}">${ram == null ? "—" : Math.round(ram) + "%"}</span> RAM`;
@@ -771,8 +771,9 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
   merging: "Merging", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
 // waitingOn(job) helper above.
-const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted" : job.paused ? "Paused by you"
+const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).join(", ")} (${job.waitingOn.why})`
+  : job.paused ? "Paused by you"
   : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
