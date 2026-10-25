@@ -2386,13 +2386,14 @@ def digest_write_global(prop: dict) -> str | None:
     return None
 
 
-def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str, str | None]]) -> None:
-    """Set each still-pending id's status (and reason, when given), then trim the digest once nothing is pending.
-    The caller holds DIGEST_LOCK."""
+def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str, str | None]],
+                        from_status: str = "pending") -> None:
+    """Set each id's status (and reason, when given) while it is still from_status, then trim the digest once nothing
+    is pending. The caller holds DIGEST_LOCK."""
     d = root / "digests" / digest_id
     data, raw = read_proposals(d / "proposals.json")
     for entry in raw:
-        if (v := valid_proposal(entry)) and v["status"] == "pending" and v["id"] in updates:
+        if (v := valid_proposal(entry)) and v["status"] == from_status and v["id"] in updates:
             entry["status"], reason = updates[v["id"]]
             if reason is not None:
                 entry["reason"] = reason
@@ -2406,7 +2407,7 @@ def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str
 def digest_decide(root, digest_id, pid, decision):
     """Approve or reject one pending proposal. The last decision in a digest trims its job folders."""
     if decision not in ("approve", "reject"):
-        return 400, {"error": "decision must be approve or reject"}
+        return 400, {"error": "decision must be approve, reject or revert"}
     path = root / "digests" / digest_id / "proposals.json"
     with DIGEST_LOCK:
         entry = next((p for p in read_proposals(path)[1] if (v := valid_proposal(p)) and v["id"] == pid), None)
@@ -2500,10 +2501,12 @@ def digest_mark_applied(root, digest_id, pids):
         digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids})
 
 
-def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[dict], list[dict], str | None]:
+def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
+                 mark_applied: bool = True) -> tuple[list[dict], list[dict], str | None]:
     """Apply one repo's edit proposals in place, running the contract tests after each, then commit the ones that
     passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
-    to-queue entry carries the reason it wasn't applied, and nothing of it is left written."""
+    to-queue entry carries the reason it wasn't applied, and nothing of it is left written. title (the job and commit
+    subject) and feature (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
     repo = repo_of(props[0]["target"])[0]
     entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
     if why := digest_apply_ready(repo):
@@ -2535,6 +2538,8 @@ def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[di
     scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel, _ in done))
     pids = ", ".join(p["id"] for p, _, _ in done)
     lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel, _ in done)
+    title = title or f"Apply digest {digest_id} {pids}"
+    feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
 
     def undo(why):
         for p, _, orig in reversed(done):  # reversed: two proposals on one file restore to its first bytes
@@ -2543,23 +2548,55 @@ def digest_apply(root: Path, digest_id: str, props: list[dict]) -> tuple[list[di
         return [], sorted(queued + [entry(p, why) for p, _, _ in done], key=lambda q: order[q["id"]])
 
     try:
-        job_id = board.cmd_new(scrum, f"Apply digest {digest_id} {pids}")
-        (scrum / "jobs" / job_id / "feature.md").write_text(f"Apply digest {digest_id} proposals:\n\n{lines}")
+        job_id = board.cmd_new(scrum, title)
+        (scrum / "jobs" / job_id / "feature.md").write_text(feature)
         board.cmd_set(scrum, job_id, ["lane=lilguy"])
     except (OSError, SystemExit) as e:
         return (*undo(f"board job failed: {e}"), None)
     r = git_run(repo, "add", "--", *files)
     if not r.returncode:
-        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] Apply digest {digest_id} {pids}\n\n{lines}", "--", *files)
+        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
     if r.returncode:
         first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
         applied, queued = undo(f"commit failed: {first}")
         board.cmd_ask(scrum, job_id, f"digest apply: git commit failed: {first}",
                       [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
         return applied, queued, job_id
-    digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
+    if mark_applied:
+        digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
     board.cmd_set(scrum, job_id, ["stage=done"])
     return [entry(p) for p, _, _ in done], queued, job_id
+
+
+def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
+    """Undo one applied edit proposal through the path that applied it: a repo file by digest_apply (its own lilguy job
+    and commit), any other file by digest_write_global (after a backup). Any failure is a 409 and leaves it applied."""
+    entry = None
+    with DIGEST_LOCK:
+        if board.DIGEST_RE.fullmatch(digest_id):
+            raw = read_proposals(root / "digests" / digest_id / "proposals.json")[1]
+            entry = next((v for p in raw if (v := valid_proposal(p)) and v["id"] == pid), None)
+    if entry is None:
+        return 404, {"error": "no such proposal"}
+    if entry["status"] != "applied":
+        return 409, {"error": f"proposal is {entry['status']}, not applied"}
+    if digest_denied(entry["target"]):  # proposals.json is untrusted: never edit a settings or hooks file
+        return 409, {"error": "target is not editable"}
+    rev = entry | {"old": entry["new"], "new": entry["old"]}
+    if repo := repo_of(entry["target"]):
+        title = f"Revert digest {digest_id} {pid}"
+        feature = f"{title}:\n\n- digest {digest_id} {pid} → {repo[1]}: {board.clean(entry['why'])}\n"
+        applied, not_applied, _ = digest_apply(root, digest_id, [rev], title=title, feature=feature, mark_applied=False)
+        why = None if applied else not_applied[0]["reason"]
+    else:
+        why = digest_write_global(rev)
+    if why and why.startswith("write failed"):  # an OSError names local paths: log it, never send it
+        return server_error("couldn't write the file", why)
+    if why:
+        return 409, {"error": why}
+    with DIGEST_LOCK:
+        digest_set_statuses(root, digest_id, {pid: ("reverted", None)}, from_status="applied")
+    return 200, entry | {"status": "reverted"}
 
 
 def digest_auto(root, digest_id):
@@ -2828,6 +2865,8 @@ class Handler(BaseHTTPRequestHandler):
             return digest_now(project, root)
         if rest.startswith("/digests/"):
             _, _, digest_id, pid = rest.split("/", 3)
+            if body.get("decision") == "revert":
+                return digest_revert(root, digest_id, unquote(pid))
             return digest_decide(root, digest_id, unquote(pid), body.get("decision"))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
         if action == "abort" and not isinstance(body.get("cascade", False), bool):
