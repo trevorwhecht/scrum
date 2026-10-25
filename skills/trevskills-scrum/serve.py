@@ -178,6 +178,41 @@ def resume_job(project, root, job, jobs):
     spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
 
+def resumable(job):
+    """Paused by Trevor (Play), or needs-human for a reason whose card offers Resume (RESUMABLE)."""
+    return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE))
+
+
+PLAY_QUEUED = "queued, starts next"
+
+
+def unqueue(root, job):
+    """Drop the job's play_queued flag, when it has one."""
+    if job.get("play_queued"):
+        with board.locked_board(root) as b:
+            board.find(b, job["id"]).pop("play_queued", None)
+
+
+def play_queue_tick(project, root, jobs) -> bool:
+    """Start the Play clicks the machine guard queued, oldest first, before any other start this tick. A job no
+    longer resumable (or already running) is dropped from the queue; another kind of refusal keeps it queued and
+    moves on; a machine-guard refusal stops here and keeps it and every later one queued. True when it started one."""
+    started = False
+    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
+        if running(project, job["id"]) or not resumable(job):
+            unqueue(root, job)
+            continue
+        refusal = resume_refusal(project, root, job)
+        if refusal and refusal.startswith(board.MACHINE_WAIT):
+            break
+        if refusal:
+            continue
+        resume_job(project, root, job, jobs)
+        unqueue(root, job)
+        started = True
+    return started
+
+
 LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
                  "/trevskills-commitpush, or discard it, then click Abort.")
 
@@ -270,7 +305,7 @@ def answer_job(project, root, job, jobs, key):
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
-STALL_RESUMED: set[str] = set()  # "project/child id/stage": the one non-limit resume a Run-all/BigBoy child gets per stage
+STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's one non-limit resume per stage
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
 NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
@@ -327,13 +362,14 @@ def limit_reset(root, job):
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
     that line names, else every 30 min; at most 12 tries per job. A job whose log ends on a network error resumes
-    at once and every 5 min, on the same try budget. A Run-all/BigBoy child of a running parent stalled
-    for any other reason is resumed once per stage; any other job stalled for another reason, or paused by Trevor,
-    is left on the board. A refused restart costs nothing. A job held in its stage (limitResetAt) is resumed 120 s
-    after that reset, under the same slot cap and try counter; a limit-killed job stalled in a WATCHED stage is moved
-    back to that stage and held the same way (as respawn_exited does). True when it resumed a job this tick or a
-    limit-stalled job is still in its auto-resume window (waiting for its reset, its next try or a free slot), so
-    watchdog_tick counts the project busy and auto continue starts no run-all beside it."""
+    at once and every 5 min, on the same try budget. A standalone job (no parent), or a Run-all/BigBoy child of a
+    running parent, stalled for any other reason is resumed once per stage; any other child stalled for another
+    reason, or a job paused by Trevor, is left on the board. A refused restart costs nothing. A job held in its
+    stage (limitResetAt) is resumed 120 s after that reset, under the same slot cap and try counter; a limit-killed
+    job stalled in a WATCHED stage is moved back to that stage and held the same way (as respawn_exited does). True
+    when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
+    its next try or a free slot), so watchdog_tick counts the project busy and auto continue starts no run-all
+    beside it."""
     now, busy = time.time(), False
     for job in jobs:
         reason = job.get("reason") or ""
@@ -362,10 +398,11 @@ def auto_resume(project, root, jobs):
             m = re.match(rf"{board.STALLED}(\w+):", reason)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             once_key = f"{key}/{m.group(1) if m else ''}"
-            if m and parent and parent.get("stage") == "running" and not parent.get("paused") \
-                    and parent.get("lane") in ("runall", "bigboy") \
+            run_child = parent and parent.get("stage") == "running" and not parent.get("paused") \
+                and parent.get("lane") in ("runall", "bigboy")
+            if m and (run_child or not job.get("parent")) \
                     and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
-                STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child gets one non-limit retry per stage
+                STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child or a standalone job gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
                 busy = True
             continue
@@ -504,12 +541,14 @@ def respawn_exited(project, root):
             now = time.time()
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY)
             continue
+        stage = job["stage"]
         if not flag_stalled(root, job, EXITED):
             continue
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(project, root, job):
             board.play(board.sound("needs-human"))
             continue
+        STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
         resume_job(project, root, job, jobs)
         with RUNS_LOCK:
             new = RUNS.get(key)
@@ -660,10 +699,11 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
-    """Start one headless run-all in every opted-in project with no work in flight, no auto-started run-all still
-    running and a claimable backlog line. Focus projects go first, then the project that
-    just finished, then the most recent board activity, then lowest n. board.machine_ok (RAM, disk, the session
-    ceiling) and board.usage_allowance are checked before each start; the first failure stops this tick's later starts.
+    """Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
+    job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
+    first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
+    (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
+    this tick's later starts.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -675,6 +715,12 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     # stable: ties keep projects() order
     for project, root, *_ in sorted(opted, key=lambda o: (not o[4], o[0] not in last, -o[3], o[2])):
         if busy.get(project, True):
+            continue
+        try:
+            jobs = json.loads((root / "board.json").read_text())["jobs"]
+        except (OSError, ValueError, KeyError, TypeError):
+            jobs = []  # an unreadable board holds nothing
+        if board.resume_first(jobs):  # paused or stalled work goes first; other projects still get a run-all
             continue
         try:
             if not running(project, "run-all") and claimable(root):
@@ -765,9 +811,10 @@ def discuss_runs():
 
 
 def watchdog_tick():
-    """Sweep every registered project for stalled jobs; a flagged child frees its Run-all/BigBoy slot, so start
-    whatever siblings are now ready, then restart or close idle parents (sweep_parents), auto-resume the stalled
-    ones, poll its cloud jobs (cloud_tick) and prune finished worktrees. Last, auto_continue_tick. One project's failure
+    """Sweep every registered project for stalled jobs and auto-resume them first, so resumes take the free slots;
+    then a flagged child frees its Run-all/BigBoy slot, so start whatever siblings are now ready (board.cmd_ready claims
+    nothing while board.resume_first counts a paused or stalled job), restart or close idle parents (sweep_parents),
+    poll its cloud jobs (cloud_tick) and prune finished worktrees. Last, auto_continue_tick. One project's failure
     never stops the others."""
     busy, alive = {}, once(lambda: board.session_alive_fn())
     for project, repo in board.projects().items():
@@ -783,13 +830,14 @@ def watchdog_tick():
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
             busy[project] = board_busy(project, root, jobs, by_id, alive)
+            busy[project] = play_queue_tick(project, root, jobs) or busy[project]  # Trevor's queued Play goes first
+            busy[project] = auto_resume(project, root, jobs) or busy[project]  # resumes take the free slots first
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
-            try:  # its own guard: a sweep failure must not skip auto-resume and the cloud poll
+            try:  # its own guard: a sweep failure must not skip the cloud poll
                 sweep_parents(project, root, jobs, alive)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
-            busy[project] = auto_resume(project, root, jobs) or busy[project]
             cloud_tick(project, root, jobs)
             prune_worktrees(repo, jobs)
         except (Exception, SystemExit) as e:
@@ -884,7 +932,19 @@ def machine_status():
     return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE)}
+            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time())}
+
+
+def machine_usage(now):
+    """The meter's usage segment: 5h and 7d used %, the 5h reset and usage_allowance's live-session cap (null for no
+    taper), or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
+    usage = board.read_usage() or {}
+    at = usage.get("written_at")
+    if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
+        return "unknown"
+    u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
+    return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
+            "allowance": None if allow is None else int(allow)}
 
 
 def claude_usage(now):
@@ -1387,7 +1447,7 @@ def ai_settings_save(item_id, content, version, confirm=False):
         ai_backup(it["path"])
         Path(it["path"]).write_text(json.dumps(data, indent=2) + "\n")  # in place, so a symlinked file keeps its link
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the file", e)
     except (ValueError, KeyError, IndexError, TypeError):
         return 409, {"error": "file changed on disk"}
     return ai_refind(it)
@@ -1410,7 +1470,7 @@ def ai_settings_undo(item_id, version):
         ai_backup(it["path"])
         Path(it["path"]).write_bytes(data)
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the file", e)
     return ai_refind(it)
 
 
@@ -1556,6 +1616,12 @@ NEW_WINDOW_SCRIPT = """on run argv
 end run"""  # argv: a directory, then the command's words; each is shell-quoted, so nothing in them runs as shell
 
 
+def server_error(message, detail):
+    """A 500 with a fixed message; the detail (an exception, stderr) goes to serve.py's log, never to the client."""
+    print(f"serve: {message}: {detail}", file=sys.stderr, flush=True)
+    return 500, {"error": message}
+
+
 def osa_new_window(cwd, *words):
     return ["osascript", "-e", NEW_WINDOW_SCRIPT, str(cwd), *words]
 
@@ -1566,9 +1632,9 @@ def run_terminal(tries):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
         except (subprocess.SubprocessError, OSError) as e:
-            return 500, {"error": f"couldn't open the terminal ({e})"}
+            return server_error("couldn't open the terminal", e)
         if out.returncode:
-            return 500, {"error": (out.stderr.strip().splitlines() or ["couldn't open the terminal"])[-1]}
+            return server_error("couldn't open the terminal", out.stderr.strip())
         if out.stdout.strip() != "missing":
             return 200, {"message": message}
     return None
@@ -2095,7 +2161,7 @@ def ai_toggle(item_id, enable):
         else:
             target.write_bytes(before)
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the settings file", e)
     return 409, {"error": "a higher-precedence settings file still decides this"}
 
 
@@ -2346,7 +2412,7 @@ def digest_decide(root, digest_id, pid, decision):
                 ai_backup(target)
                 Path(target).write_bytes(text.replace(prop["old"], prop["new"], 1).encode())  # in place: keeps a symlink
             except OSError as e:
-                return 500, {"error": str(e)}
+                return server_error("couldn't write the file", e)
             status = "applied"
         entry["status"] = status
         tmp = path.with_name("proposals.json.tmp")
@@ -2772,12 +2838,16 @@ class Handler(BaseHTTPRequestHandler):
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"))
         if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
-            if not job or running(project, job_id) or not (job.get("paused") or job["stage"] == "needs-human"
-                                                           and (job.get("reason") or "").startswith(board.RESUMABLE)):
+            if not job or running(project, job_id) or not resumable(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             if refusal := resume_refusal(project, root, job):
-                return 409, {"error": refusal}
+                if not refusal.startswith(board.MACHINE_WAIT):
+                    return 409, {"error": refusal}
+                with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
+                    board.find(b, job_id).setdefault("play_queued", board.now())
+                return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
             resume_job(project, root, job, jobs)
+            unqueue(root, job)
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}

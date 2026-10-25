@@ -552,6 +552,7 @@ def abort_job(root, job, requeue, reason):
     feature = folder / "feature.md"
     job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
     job.pop("paused", None)  # an aborted job is never played
+    job.pop("play_queued", None)  # nor started by serve.py's Play queue
     if not requeue:
         return
     lines, items = read_backlog(root)
@@ -1743,6 +1744,15 @@ WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Tr
 MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok) or usage
 
 
+def resume_first(jobs: list[dict]) -> int:
+    """How many jobs on this board must be played, resumed or aborted before any new claim in its project: the ones
+    Trevor paused (not done or aborted), plus the unpaused needs-human ones stalled in a stage (not
+    lilguy-in-checkout)."""
+    return sum(bool(j.get("paused")) and j.get("stage") not in ("done", "aborted")
+               or not j.get("paused") and j.get("stage") == "needs-human"
+               and (j.get("reason") or "").startswith(STALLED) and not lilguy_in_checkout(j) for j in jobs)
+
+
 def usage_path():
     return Path(os.environ.get("SCRUM_USAGE") or Path.home() / ".claude" / "usage.json")
 
@@ -2169,6 +2179,8 @@ def cmd_ready(root, parent_id, live=()):
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
         machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
+        # paused or stalled work goes before new claims; a job with a live session is already being resumed
+        first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper
         if go and not machine:
             n_live = live_sessions()
@@ -2193,6 +2205,10 @@ def cmd_ready(root, parent_id, live=()):
                 continue
             if slot_conflict(k, busy, files):
                 continue
+            if first:  # a claim is due, but held like a machine wait (never needs-human) until those are dealt with
+                machine = f"{first} paused job needs Play or Abort first" if first == 1 \
+                    else f"{first} paused jobs need Play or Abort first"
+                break
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
             ready.append(k["id"])
@@ -2809,6 +2825,7 @@ def cmd_pause(root, job_id):
         for j in hit:
             j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
+            j.pop("play_queued", None)  # a pause cancels a queued Play
         return [j["id"] for j in hit]
 
 
