@@ -1014,9 +1014,60 @@ def set_cooldown(on):
     return 200, {"cooldown": on}
 
 
+SELF_FILES = (HERE / "serve.py", HERE / "board.py", Path(route.__file__).resolve())
+
+
+def code_stamp() -> tuple:
+    """One st_mtime_ns per file this server runs from; None for a file that can't be stat'ed (mid-checkout)."""
+    out = []
+    for f in SELF_FILES:
+        try:
+            out.append(f.stat().st_mtime_ns)
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+CODE_STAMP = code_stamp()
+RELOAD_REFUSED = None  # the stamp whose pre-flight failed: no retry until the files change again
+
+
+def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
+    """Re-exec this server in place when serve.py, board.py or route.py changed on disk since it started, the new code
+    imports (a --help pre-flight) and no dashboard-started run is live. Returns False whenever it does not exec."""
+    global RELOAD_REFUSED
+    try:
+        stamp = code_stamp()
+        if stamp == CODE_STAMP or stamp == RELOAD_REFUSED:
+            return False
+        with RUNS_LOCK:
+            if any(r.get("proc") is not None and r["proc"].poll() is None for r in RUNS.values()):
+                return False
+        argv = [sys.executable, str(HERE / "serve.py")]
+        err = ""
+        try:
+            res = check([*argv, "--help"], capture_output=True, timeout=60)
+            ok = res.returncode == 0
+            err = (res.stderr or b"").decode(errors="replace")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            ok, err = False, str(e)
+        if not ok:
+            RELOAD_REFUSED = stamp
+            last = (err.strip().splitlines() or ["(no stderr)"])[-1]
+            print(f"serve.py: new code fails to load, still running the old code: {last}", file=sys.stderr, flush=True)
+            return False
+        print("serve.py: code changed on disk, reloading", flush=True)
+        execv(sys.executable, [*argv, *sys.argv[1:]])
+        return True  # only reached when execv is a test double
+    except Exception as e:  # the watchdog loop must go on whatever happens here
+        print(f"serve.py: reload check: {e}", file=sys.stderr, flush=True)
+    return False
+
+
 def watchdog_loop():
     while True:
         watchdog_tick()
+        reload_if_changed()
         time.sleep(60)
 
 
