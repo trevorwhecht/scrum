@@ -15,7 +15,8 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
-#status,#routing{color:var(--muted);font-size:12px}
+#status,#routing,#machine{color:var(--muted);font-size:12px}
+#machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -28,6 +29,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
 .card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
 .card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
+.card.paused{border:2px solid var(--human)}
 .card.roadmap{border:2px solid var(--roadmap);box-shadow:0 0 0 3px color-mix(in srgb,var(--roadmap) 15%,transparent)}
 .card.roadmap .lanechip{color:var(--roadmap);border-color:var(--roadmap)}.card.roadmap:hover,.card.roadmap:focus-visible{border-color:var(--accent)}
 .card.roadmap .line{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card.roadmap b{color:var(--human);font-weight:inherit}
@@ -82,6 +84,7 @@ body:has(dialog[open]){overflow:hidden}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
+.sentback:empty{display:none}.sentback h3{font-size:13px;margin:8px 0 4px}.sentback ul{margin:0;padding-left:18px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .error{font-size:12px;color:var(--human);margin:0}
 .error:empty{display:none}
 #actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
@@ -94,16 +97,19 @@ input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color
 textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #backlog article{display:grid;gap:10px;padding-top:14px}
 #backlog .tabs{align-items:center}#backlog .tabs select{min-height:44px}
-#blAdd{display:flex;gap:6px}
+#blAdd{display:flex;gap:6px;align-items:flex-start}
 #blRunAll,#blRunAllAskme button{font:inherit;font-size:13px;min-height:44px;min-width:44px}  /* .btn look; .tabs button would make it mono */
 #blRunAllAskme{display:flex;gap:4px}#blRunAllAskme[hidden]{display:none}
 #blTriage summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--muted);font-size:13px}
 #blTriageBody{font-size:13px;overflow-wrap:anywhere}
-#blAdd input{flex:1;min-width:0}#blAdd .pts{min-height:44px;flex:none}
+#blAdd textarea,#blList li textarea{flex:1;min-width:0;min-height:44px;resize:none;field-sizing:content;line-height:20px;padding:11px 8px}  /* one line empty, grows with the text */
+#blList li textarea:not(:focus){field-sizing:fixed;height:44px;white-space:nowrap;overflow:hidden}  /* a row collapses to one line until clicked */#blAdd .pts{min-height:44px;flex:none}
 #blList{list-style:none;margin:0;padding:0}
-#blList li{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
-#blList li input{flex:1;min-width:0}
+#blList li{display:flex;gap:6px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)}
+#blList .badge,#blList .lanechip{flex:none;margin-right:0}
 #blList .btn{min-height:44px;min-width:44px}
+#blList .grip{flex:none;align-self:stretch;display:flex;align-items:center;width:16px;cursor:grab;color:var(--muted);user-select:none}
+#blList li.drop-before{box-shadow:inset 0 2px 0 var(--accent)}#blList li.drop-after{box-shadow:inset 0 -2px 0 var(--accent)}
 #blList .needs{flex:0 1 auto;min-width:0;max-width:40%;font-size:12px;color:var(--changes);overflow-wrap:anywhere}#blList .needs.met{color:var(--muted)}
 #blList li.setup{flex-wrap:wrap;border-left:3px solid var(--changes);padding-left:8px;background:color-mix(in srgb,var(--changes) 8%,transparent)}
 #blList .setup-box{flex-basis:100%;order:1;min-width:0;font-size:12px;color:var(--changes);overflow-wrap:anywhere}
@@ -193,13 +199,14 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li input{flex-basis:100%;order:-1}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
   #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline); Codex 5h and weekly quota used, from the newest Codex rollout file; and whether local Ollama answers. local/route.py moves the Codex review to Ollama when either Codex window passes its threshold in local/routing.json. Refreshed every 60 s. Opens the Usage dialog."></button>
+  <span id="machine" hidden data-agent-hint="This Mac's free RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; orange marks a reading within 10 points (10 GB) of its limit, red one past it, and the trailing red text names the failing reading. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
   <button class="btn" id="backlogBtn" type="button">Backlog</button>
@@ -211,7 +218,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
-    <form id="blAdd"><select name="points" class="pts px" aria-label="Difficulty points"></select><input type="text" name="text" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
+    <form id="blAdd"><select name="points" class="pts px" aria-label="Difficulty points"></select><textarea name="text" rows="1" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Enter adds the item. Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."></textarea><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
     <section id="blManual" hidden aria-labelledby="blManualTitle"><h3 id="blManualTitle">Manual checks</h3><ul id="blManualList"></ul></section>
@@ -239,7 +246,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </dialog>
 <dialog id="usage" aria-label="Usage">
   <div class="tabs"><b>Usage</b><button class="close" type="button" aria-label="Close">✕</button></div>
-  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. Ollama: up or down, plus the models loaded right now. A window past its reset shows —.">
+  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
     <thead><tr><th scope="col">AI</th><th scope="col">5h</th><th scope="col">Week</th><th scope="col">Latest</th></tr></thead>
     <tbody id="usageRows"></tbody></table></article>
 </dialog>
@@ -349,8 +356,10 @@ const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.
 const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
 // A BigBoy child that can't start until Trevor clicks Setup done.
 const setupWait = job => job.stage === "waiting" && job.setup === "pending";
+// A job Trevor paused (board.py cmd_pause): it keeps its stage column until he clicks Play in its panel.
+const heldByTrevor = job => !!job.paused;
 const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
-const needsYou = kid => !!kid && (kid.stage === "needs-human" || setupWait(kid));
+const needsYou = kid => !!kid && (kid.stage === "needs-human" || heldByTrevor(kid) || setupWait(kid));
 // board.py WAITING_ON: a running parent whose children wait on Trevor. Only ids still waiting on him are kept.
 const WAITING_ON = "waiting on you in: ";
 const waitingOn = job => job.stage === "running" && (job.reason || "").startsWith(WAITING_ON)
@@ -366,6 +375,28 @@ const childLinks = job => !job.children?.length ? "" : `<div class="kids">${job.
     : `<form data-act="goto" data-key="${esc(k.key)}"><button class="btn tall kid${needsYou(k) ? " human" : ""}" type="submit">${esc(k.ticket || "Child")} <span class="id">${esc(k.id)}</span> ${esc(k.stage)}</button></form>`;
 }).join("")}</div>`;
 const jobTitle = job => `<span class="id">${esc(job.id)}</span> ${esc(job.title || job.id)}`;
+// "4:21 PM", built by hand so every engine gives the same text (serve.py writes outcome times the same way).
+const clock = d => `${d.getHours() % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "AM" : "PM"}`;
+// A live /api/runs entry (dashboard run or Discuss session): "Rework running since 4:21 PM".
+const runLine = run => `${run.action.charAt(0).toUpperCase()}${run.action.slice(1)} running since ${clock(new Date(run.started * 1000))}`;
+// serve.py's record_outcomes line: what the last dashboard run did when it left a needs-human job where it was.
+const outcomeLine = (job, tag, cls) => job.stage === "needs-human" && job.outcome ? `<${tag} class="${cls}" role="status">${esc(job.outcome)}</${tag}>` : "";
+// Approve & merge drops whatever is in the feedback box, so arming it says so.
+const feedbackWarning = text => (text || "").trim() ? '<span class="error" role="alert">You typed feedback. Send it back instead?</span>' : "";
+// rework.md entries (SKILL.md rework: `## <ISO date>` then the feedback), newest first. Text before the first heading is skipped.
+const reworkEntries = md => String(md ?? "").split(/^## /m).slice(1).map(entry => {
+  const [at, ...text] = entry.split(/\r?\n/);
+  return {at: at.trim(), text: text.join("\n").trim()};
+}).reverse();
+const sentAt = at => isNaN(new Date(at)) ? at : when(at);  // a heading that is no date shows as written
+// The modal's Sent back list, from reworkMd (filled by loadRework); the wrapper is always there so a late fetch can fill it.
+const reworkMd = {};
+const reworkList = job => {
+  if (job.stage !== "needs-human" || !(job.files || []).includes("rework.md")) return "";
+  const rows = reworkEntries(reworkMd[job.key]);
+  return `<div class="sentback">${!rows.length ? "" : `<h3>Sent back</h3><ul>${rows.map(r =>
+    `<li><span class="note">${esc(sentAt(r.at))}</span> ${esc(r.text)}</li>`).join("")}</ul>`}</div>`;
+};
 // When anything last happened: the board update or serve.py's newest activity event (run log, worktree files...).
 const staleAt = job => Math.max(Date.parse(job.updatedAt), (job.activity?.at || 0) * 1000);
 // Card meta "P1/2 · S2/10" for a roadmap job, "" for every other job. roadmapLookup() rebuilds it each poll.
@@ -411,25 +442,27 @@ const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p ===
 
 function card(job) {
   const human = job.stage === "needs-human" || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  // A job held in its stage until the usage limit resets (serve.py's limitResetAt) waits on the clock, so it is not stale.
+  const held = !human && job.limitResetAt, hold = heldByTrevor(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
-  const stale = !human && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
+  const stale = !human && !hold && !held && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   // A card with option buttons is a focusable div that opens like a button (see the board keydown handler): buttons can't nest.
   const opts = optionsRow(job), el = opts ? "div" : "button";
-  return `<${el} class="card${human || setup ? " human" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}"${opts ? ' tabindex="0" role="button"' : ""}>
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>
+  return `<${el} class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}"${opts ? ' tabindex="0" role="button"' : ""}>
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${held ? `<span class="badge">waiting for reset ${esc(when(job.limitResetAt))}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}
+    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}${outcomeLine(job, "span", "meta")}
     ${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
     ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
-    ${run?.alive ? `<span class="running">● ${esc(run.action)} running…</span>` : ""}
+    ${run?.alive ? `<span class="running">${esc(runLine(run))}</span>` : ""}
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
       : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
@@ -490,7 +523,38 @@ function renderSelect(sel, value, withAll) {
   sel.value = value;
 }
 
+// "danger" past board.machine_ok's limit, "low" within 10 points (10 GB) of it, else "ok"; an unknown reading is ok.
+function machineLevel(value, kind, s) {
+  if (value == null) return "ok";
+  const [bad, near] = kind === "swap" ? [value > s.max_swap_pct, value > s.max_swap_pct - 10]
+    : kind === "ram" ? [value < s.min_free_ram_pct, value < s.min_free_ram_pct + 10]
+    : [value < s.min_free_disk_gb, value < s.min_free_disk_gb + 10];
+  return bad ? "danger" : near ? "low" : "ok";
+}
+
+// The meter's usage segment: red at allowance 0, orange at 1 or more, plain with no taper or no data.
+function usagePart(u) {
+  if (!u) return "";
+  if (u === "unknown") return '<span class="ok">usage: unknown</span>';
+  const pct = v => v == null ? "—" : Math.round(v) + "%";
+  const level = u.allowance == null ? "ok" : u.allowance === 0 ? "danger" : "low";
+  return `<span class="${level}">5h ${pct(u.five_hour_pct)} · 7d ${pct(u.seven_day_pct)}${u.allowance == null ? "" : ` · allowance ${esc(u.allowance)}`}</span>`;
+}
+
+function renderMachine(m) {
+  const el = $("machine");
+  if (!el) return;
+  el.hidden = !m;
+  if (!m) return;
+  const part = (kind, label, v, unit) =>
+    `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
+  el.innerHTML = [part("ram", "RAM", m.free_ram_pct, "% free"), part("swap", "swap", m.swap_pct, "%"),
+    part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
+    + (m.verdict ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
+}
+
 async function poll() {
+  getJson("api/machine", null).then(renderMachine);  // not awaited: memory_pressure never delays the board
   try {
     const res = await fetch("api/projects", {cache: "no-store"});
     if (res.status === 404) return $("status").textContent = STALE;
@@ -527,6 +591,7 @@ async function poll() {
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
       if (openJob) renderDiverged(openJob);
+      if (openJob) loadRework(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
     if ($("digest").open) loadDigests();
@@ -568,6 +633,7 @@ function open(job) {
   if (!askState[job.key]?.pending) delete askState[job.key];
   renderActions(job);
   renderDiverged(job);
+  loadRework(job);
   if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
   if (first) show(job, first);
@@ -607,18 +673,31 @@ async function renderDiverged(job) {
     <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
 }
 
+// Fetches the open needs-human job's rework.md into reworkMd and swaps only the Sent back list, so typed feedback stays.
+async function loadRework(job) {
+  if (job.stage !== "needs-human" || !(job.files || []).includes("rework.md")) return;
+  const md = await fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/rework.md`, {cache: "no-store"})
+    .then(r => r.ok ? r.text() : "").catch(() => "");
+  if (md === reworkMd[job.key]) return;
+  reworkMd[job.key] = md;
+  const box = $("viewer").dataset.key === job.key && $("actions").querySelector(".sentback");
+  if (box) box.outerHTML = reworkList(job);
+}
+
 // Abort works on any unfinished job: it stops a dashboard-started run and marks the job aborted (code is kept).
 const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
-// Pause stops the job's session and parks it as a stalled job (board.py PAUSABLE); Play is the resume form below.
+// Pause stops the job's session and holds it in its stage (board.py PAUSABLE); Play is the resume form below.
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
-const pauseForm = job => !PAUSABLE.includes(job.stage) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
+const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
 const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = reason => !RESUMABLE.some(p => (reason || "").startsWith(p)) ? ""
   : `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
+// A paused job keeps its stage, so its panel takes the not-needs-human branch: Play goes there in place of Pause.
+const playForm = job => heldByTrevor(job) ? resumeForm(job.reason) : "";
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
     <button class="btn primary tall" type="submit">Setup done</button></form>`;
@@ -685,7 +764,7 @@ const splitReason = reason => {
 const answerState = {};
 function optionsRow(job) {
   if (job.stage !== "needs-human" || !job.options?.length) return "";
-  const st = answerState[job.key] || {}, off = st.pending || runs[job.key]?.alive;
+  const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const opts = [...job.options].sort((a, b) => String(a.key).localeCompare(String(b.key)));
   return `<div class="answer"><span class="reason">${esc(job.question || splitReason(job.reason).problem)}</span><div class="acts">${opts.map(o =>
     `<button class="btn tall${st.armed === o.key ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${off ? " disabled" : ""}>${st.armed === o.key ? "Confirm: " : ""}${esc(o.label)}</button>`).join("")}</div><p class="error" role="alert">${esc(st.err || "")}</p></div>`;
@@ -701,13 +780,15 @@ const waitingBanner = job => {
 };
 
 function renderActions(job) {
-  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = waitingBanner(job);
-  const log = run ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  const err = '<p class="error" role="alert"></p>', kids = waitingNote(job, "note") + childLinks(job);
-  if (run?.alive) return el.innerHTML = banner + kids + `<p class="running">● ${esc(run.action)} running…${log}</p>` + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
-  const last = run ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : "";
+  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + waitingBanner(job);
+  const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
+  const err = `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`, kids = waitingNote(job, "note") + childLinks(job);
+  // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
+  const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
+  if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + reopenForm(job) + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + termForm(job) + askForm(job) + pauseForm(job) + abortForm(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
@@ -718,7 +799,7 @@ function renderActions(job) {
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + termForm(job) + askForm(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + termForm(job) + askForm(job) + abortForm(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
@@ -728,7 +809,10 @@ $("actions").addEventListener("submit", async e => {
   if (act === "terminal") return openTerminal(key);
   if (act === "ask") return askClaude(key);
   if (act === "goto") { const linked = jobs.find(j => j.key === form.dataset.key); if (linked) open(linked); return; }
-  if (act === "approve" && !form.dataset.armed) { form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main"; return; }
+  if (act === "approve" && !form.dataset.armed) {
+    form.dataset.armed = "1"; btn.textContent = "Confirm: merge into main";
+    btn.insertAdjacentHTML("afterend", feedbackWarning($("actions").querySelector('textarea[name="feedback"]')?.value)); return;
+  }
   if (act === "abort" && !form.dataset.armed) {
     form.dataset.armed = "1"; form.querySelector("label").hidden = false;
     btn.textContent = "Confirm abort"; btn.className = "btn danger"; return;
@@ -784,7 +868,7 @@ $("actions").addEventListener("click", e => {
 });
 
 const blProject = () => $("blProject").value;
-const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("blList").contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName));
+const editingBacklog = () => !!$("blList").querySelector("[data-armed]") || ($("blList").contains(document.activeElement) && /TEXTAREA|SELECT/.test(document.activeElement.tagName)) || !!$("blList").querySelector(".dragging");
 
 // Open manual checks (scrum/manual-checks.md): human-only follow-ups that never run as jobs. Ticking one is final.
 function renderManual() {
@@ -802,6 +886,12 @@ function needsTag(it, all) {
   return `<span class="needs${it.waits?.length ? "" : " met"}" title="${esc(names.join("; "))}">waits on: ${esc(names.map(cut).join(", "))}</span>`;
 }
 
+// Importance chip (priority 1-5, from the {p:N} marker): .badge (warning) for 4-5, .lanechip (muted) for 1-3. Nothing otherwise.
+function prioTag(it) {
+  return Number.isInteger(it.priority) && it.priority >= 1 && it.priority <= 5
+    ? `<span class="${it.priority >= 4 ? "badge" : "lanechip"}">P${it.priority}</span>` : "";
+}
+
 // A Human setup item (" {setup: …}" in backlog.md): its checklist under the row. next and Run all skip it until Setup done.
 function setupTag(it) {
   if (!it.setup?.length) return "";
@@ -816,11 +906,12 @@ function renderBacklog() {
   const all = backlogs[blProject()] || [], open = all.filter(i => !i.done);
   $("blRunAll").disabled = !open.length;
   $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}"${it.setup?.length ? ' class="setup"' : ""}>
+      <span class="grip" draggable="true" aria-hidden="true" data-agent-hint="Drag to reorder.">⋮⋮</span>
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
-        ${ptsOptions(it.points)}</select>
-      <input type="text" value="${esc(it.text)}" maxlength="2000" aria-label="Item text">${needsTag(it, all)}
-      <button class="btn icon" type="button" data-do="up" aria-label="Move up"${n === 0 ? " disabled" : ""}>↑</button>
-      <button class="btn icon" type="button" data-do="down" aria-label="Move down"${n === open.length - 1 ? " disabled" : ""}>↓</button>
+        ${ptsOptions(it.points)}</select>${prioTag(it)}
+      <textarea rows="1" maxlength="2000" aria-label="Item text">${esc(it.text)}</textarea>${needsTag(it, all)}
+      <button class="btn icon" type="button" data-do="up" aria-label="Move to top"${n === 0 ? " disabled" : ""}>↑</button>
+      <button class="btn icon" type="button" data-do="down" aria-label="Move to bottom"${n === open.length - 1 ? " disabled" : ""}>↓</button>
       ${it.setup?.length ? '<button class="btn" type="button" data-do="setup-done">Setup done</button>'
         : '<button class="btn icon" type="button" data-do="run" aria-label="Run now">▶</button>'}
       <button class="btn icon" type="button" data-do="delete" aria-label="Delete">✕</button>${setupTag(it)}
@@ -913,6 +1004,7 @@ async function attachImages(files) {
     finally { if (!--uploads) add.disabled = false; }
   }
 }
+$("blAdd").text.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); $("blAdd").requestSubmit(); } });
 $("blAdd").text.addEventListener("dragover", e => e.preventDefault());
 $("blAdd").text.addEventListener("drop", e => {  // a text drag keeps the browser's own insert
   if (e.dataTransfer?.files.length) { e.preventDefault(); attachImages([...e.dataTransfer.files]); }
@@ -934,14 +1026,45 @@ $("blList").addEventListener("click", e => {
   b.disabled = true;
   backlogCall(url => act === "run" ? post(`${url}/run`, {index}).then(() => $("backlog").close())
     : post(url, act === "delete" ? {op: "delete", index} : act === "setup-done" ? {op: "setup-done", index}
-      : {op: "move", index, delta: act === "up" ? -1 : 1}));
+      : {op: "move", index, to: openIndexes().at(act === "up" ? 0 : -1)}));
 });
 $("blList").addEventListener("change", e => {
   const index = +e.target.closest("li").dataset.i;
   backlogCall(url => post(url, e.target.tagName === "SELECT"
     ? {op: "edit", index, points: e.target.value ? +e.target.value : null} : {op: "edit", index, text: e.target.value}));
 });
-$("blList").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.target.blur(); });
+$("blList").addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.target.tagName === "TEXTAREA") { e.preventDefault(); e.target.blur(); }
+});
+// Rows reorder by dragging the grip: the dropped item takes the target row's place (board.py move `to`).
+const openIndexes = () => [...$("blList").querySelectorAll(":scope > li[data-i]")].map(li => +li.dataset.i);
+let dragFrom = null;
+$("blList").addEventListener("dragstart", e => {
+  const li = e.target.closest?.(".grip") && e.target.closest("li");
+  if (!li) return;
+  dragFrom = +li.dataset.i; li.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setDragImage(li, 20, 20);
+});
+const clearDrop = () => $("blList").querySelectorAll(".drop-before,.drop-after").forEach(x => x.classList.remove("drop-before", "drop-after"));
+$("blList").addEventListener("dragover", e => {
+  const li = dragFrom !== null && e.target.closest("#blList > li[data-i]");
+  if (!li) return;
+  e.preventDefault();
+  clearDrop();
+  const to = +li.dataset.i;
+  if (to !== dragFrom) li.classList.add(to < dragFrom ? "drop-before" : "drop-after");
+});
+$("blList").addEventListener("drop", e => {
+  const li = dragFrom !== null && e.target.closest("#blList > li[data-i]");
+  if (!li) return;
+  e.preventDefault();
+  const index = dragFrom, to = +li.dataset.i;
+  if (to !== index) backlogCall(url => post(url, {op: "move", index, to}));
+});
+$("blList").addEventListener("dragend", () => {
+  dragFrom = null; clearDrop();
+  $("blList").querySelector(".dragging")?.classList.remove("dragging");
+});
 $("blManualList").addEventListener("change", async e => {
   const p = blProject(), box = e.target;
   box.disabled = true;
@@ -1514,20 +1637,18 @@ document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e =
 
 // Pinned by test_dashboard_routing.
 function routingText(s) {
-  return `Claude 5h ${pct(s.claude?.["5h"])} · wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)} · Ollama ${s.ollama === "up" ? "up" : "down"}`;
+  return `Claude 5h ${pct(s.claude?.["5h"])} · wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)}`;
 }
 // The Usage dialog's rows, one per AI the scrum calls. Pinned by test_dashboard_routing.
 function usageRows(s) {
   const c = s.claude || {}, x = s.codex || {}, j = s.jev || {};
   const cell = (v, reset) => `<td${reset ? ` title="resets ${esc(when(reset))}"` : ""}>${esc(v)}</td>`;
   const row = (ai, five, week, latest) => `<tr><th scope="row">${ai}</th>${five}${week}<td>${esc(latest)}</td></tr>`;
-  const models = (Array.isArray(s.ollama_models) ? s.ollama_models : []).map(String).join(", ");
   return row("Claude", cell(pct(c["5h"]), c["5h_resets_at"]), cell(pct(c.weekly), c.weekly_resets_at), when(c.as_of))
     + row("Codex", cell(pct(x["5h"])), cell(pct(x.weekly)), "—")
-    + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`)
-    + row("Ollama", cell("—"), cell("—"), (s.ollama === "up" ? "up" : "down") + (models ? ` · ${models}` : ""));
+    + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`);
 }
-// Status reads a rollout file, usage.json and every jev.log, and pings Ollama: too much for the 2 s poll. A 404 (older
+// Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. A 404 (older
 // serve.py) or an error hides the button; an open Usage dialog keeps its last rows until a status arrives.
 let usage = null;
 async function loadRouting() {

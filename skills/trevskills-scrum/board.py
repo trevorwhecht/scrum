@@ -2,9 +2,10 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud (empty = null);
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/term/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
                                    stage=needs-human is refused: park a job with ask
-  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only)
+  board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
+                                   clears the pause
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
                                    closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
                                    shell: <cmd>), log it to questions.log
@@ -15,9 +16,12 @@
   board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
-  board.py backlog-add [--setup "<step>; <step>"] "<item>"...  append "- [ ] <item>" lines to backlog.md (--setup adds a
-                                   " {setup: step; step}" marker: next and runall-start skip the item until Trevor clicks
-                                   Setup done), then estimate each in the background
+  board.py backlog-add [--setup "<step>; <step>"] [--priority N] "<item>"...  append "- [ ] <item>" lines to backlog.md
+                                   (--setup adds a " {setup: step; step}" marker: next and runall-start skip the item until
+                                   Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5), then
+                                   estimate each in the background
+  board.py rank-backlog            one-off backfill: Jev rates each open backlog item with no {p:N} marker (jev-gate.py
+                                   rank, logged to jev.log), writes {p:N} where it gave one, print {"rated","unrated","skipped"}
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
@@ -36,27 +40,35 @@
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
+  board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
+                                   and whether a cheaper lane would have done (read-only; Digest step 1)
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
                                    cited queued digest edits; else exit 1 and print {"ok": false, "error"}
                                    (SKILL.md Merge's Agent rules guard).
                                    --worktree/--base override the board's values (an empty one fails, never falls back)
+  board.py rules-check <id> [--worktree PATH] [--base REF]
+                                   exit 0 and print {"ok","files","failures"} when the job's diff changes a rules file and
+                                   passes docs/skill-standards.md script rules 1-8; else exit 1 (lanes/rules-gate.md)
   board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
                                    --incremental) or full review, write round-N's carried-forward or UI/UX and security
                                    skip files, print {"spawn","since"} (since null = full review)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
+  board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
+                                   answer score < 1.5 at confidence >= 0.7) with no hard-stop word in feature.md
+                                   (SKILL.md New job step 3's Lilguy route)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
-                                   Fast lane promotion trigger (or null), whether a PASS round is a clean round, and
+                                   Fast or Lilguy Worktree mode promotion trigger (or null), whether a PASS round is a clean round, and
                                    whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
   board.py triage-start            claim triage/<NNN>/ for the scrum-triager, print {"id","open"} (id null = backlog empty)
   board.py triage-apply <NNN>      apply triage/<NNN>/plan.json (merge/retire/manual/estimate/depends) to backlog.md (manual
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
-  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
-                                   by ~/.claude/usage.json), print
+  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; gated by machine_ok, free RAM
+                                   per batch and the file-overlap rules), print
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
@@ -74,13 +86,18 @@
                                    its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
                                    re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
                                    error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
+  board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
+                                   "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
+                                   Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
+                                   board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, json, os, re, secrets, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import permutations
@@ -90,7 +107,7 @@ REVIEWERS = ("security", "ux", "ui", "code")
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "term", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
 TERMS = ("Apple_Terminal", "iTerm.app", "ghostty")
 # Where the job's terminal is: serve.py's Open terminal button passes these to osascript/tail, so they're strict.
@@ -171,6 +188,7 @@ def locked_board(root):
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = root / "board.json"
         board = read_board(root)
+        migrate_paused(board)
         yield board
         for job in board["jobs"]:  # a question lives only while its job waits on Trevor, whoever moved it on
             if job.get("stage") != "needs-human":
@@ -200,7 +218,7 @@ def live(board, job_id, unpause=False):
     job = find(board, job_id)
     if job["stage"] == "aborted":
         raise SystemExit(f"job {job_id} was aborted by Trevor; stop working on it")
-    if not unpause and job["stage"] == "needs-human" and PAUSED_RE.match(job.get("reason") or ""):
+    if not unpause and job.get("paused"):
         raise SystemExit(f"job {job_id} was paused by Trevor; stop working on it")
     return job
 
@@ -233,11 +251,11 @@ def cmd_new(root, title, job_id=None):
         return add_job(root, board, title, job_id)
 
 
-# --- backlog.md: "- [ ] [5] Text {#k3f9} {needs #a1b2} {setup: step; step} → 003-id <!-- why -->"; points, the id, needs
-# and setup markers, the job and the estimate's reason are optional. An item's text excludes the markers, so its spec_path
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} → 003-id <!-- why -->"; points, the id,
+# priority (1-5, highest claimed first), needs and setup markers, the job and the estimate's reason are optional. An item's text excludes the markers, so its spec_path
 # never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
-ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
+ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{p:([1-5])\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
                      r"(?: \{setup: ([^{}]*)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
@@ -255,10 +273,10 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if m := ITEM_RE.match(line):
-            done, pts, text, item_id, needs, setup, job, why = m.groups()
+            done, pts, text, item_id, prio, needs, setup, job, why = m.groups()
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
-                          "id": item_id, "needs": needs.replace("#", "").split() if needs else [],
+                          "id": item_id, "priority": int(prio) if prio else None, "needs": needs.replace("#", "").split() if needs else [],
                           "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else []})
     return lines, items
 
@@ -266,6 +284,7 @@ def read_backlog(root):
 def format_item(item):
     return (f"- [{'x' if item['done'] else ' '}] " + (f"[{item['points']}] " if item["points"] else "") + item["text"]
             + (f" {{#{item['id']}}}" if item.get("id") else "")
+            + (f" {{p:{item['priority']}}}" if item.get("priority") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
             + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
@@ -318,12 +337,22 @@ def pick(items, index):
     return items[index]
 
 
+def check_priority(priority):
+    if priority is not None and (isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 5):
+        raise SystemExit(f"priority must be 1-5 or null, got {priority!r}")
+
+
+def priority_key(item) -> float:
+    """sorted() key: highest priority first, unmarked items between p2 and p3; sorted is stable, so ties keep file order."""
+    return -(item.get("priority") or 2.5)
+
+
 def check_points(points):
     if points is not None and (isinstance(points, bool) or points not in FIB):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None):
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
     with locked_board(root):
@@ -333,7 +362,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
                 raise SystemExit("backlog item text is empty")
             if points is not KEEP:
                 check_points(points)
-            lines.append(format_item({"done": False, "points": None if points is KEEP else points,
+            check_priority(priority)
+            lines.append(format_item({"done": False, "points": None if points is KEEP else points, "priority": priority,
                                       "text": clean(text, ITEM_MAX), "job": None, "why": None,
                                       "setup": None if setup is None else setup_steps(setup)}))
         elif op == "edit":
@@ -353,6 +383,10 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             item = pick(items, index)
             del lines[item["line"]]
             drop_spec(root, item["text"], [i for i in items if i is not item])
+        elif op == "move" and to is not None:
+            # Take item `to`'s place: lands after it when moving down, before it when moving up (top, bottom, drag).
+            a, b = pick(items, index), pick(items, to)
+            lines.insert(b["line"], lines.pop(a["line"]))
         elif op == "move":
             a = pick(items, index)
             # Swap with the nearest open item that way; finished items are hidden in the dashboard.
@@ -366,7 +400,7 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
                 raise SystemExit(f"backlog item {index} has no Human setup")
             line = lines[item["line"]]
             m = ITEM_RE.match(line)  # cut just the marker, so the rest of the line stays byte for byte
-            lines[item["line"]] = line[:m.start(6) - len(" {setup: ")] + line[m.end(6) + 1:]
+            lines[item["line"]] = line[:m.start(7) - len(" {setup: ")] + line[m.end(7) + 1:]
         else:
             raise SystemExit(f"unknown backlog op {op!r}")
         write_backlog(root, lines)
@@ -385,6 +419,35 @@ def backlog_set_estimate(root, text, points, why):
                 write_backlog(root, lines)
                 return True
     return False
+
+
+def cmd_rank_backlog(root) -> dict:
+    """Rate every open, unmarked backlog item with jev-gate's rank step, one Jev call at a time outside the lock, then
+    write each {p:N} under the lock on the first open, unmarked item with the exact same text (gone or edited = skip)."""
+    # jev-gate.py has a hyphen, so no plain import; loaded only for this one-off
+    spec = importlib.util.spec_from_file_location("jev_gate", Path(__file__).resolve().with_name("jev-gate.py"))
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    items = [i for i in read_backlog(root)[1] if not i["done"]]
+    todo = [i["text"] for i in items if i["priority"] is None]
+    rated = []
+    for text in todo:
+        decision = gate.run("rank", lambda asked, t=text: gate.rank_ticket(t, Path(root), asked), Path(root) / "jev.log")
+        if m := re.fullmatch(r"p([1-5]) \S+", decision):
+            rated.append((text, int(m[1])))
+    written = 0
+    if rated:
+        with locked_board(root):
+            lines, items_now = read_backlog(root)
+            for text, n in rated:
+                item = next((i for i in items_now if not i["done"] and i["priority"] is None and i["text"] == text), None)
+                if item:
+                    item["priority"] = n
+                    lines[item["line"]] = format_item(item)
+                    written += 1
+            if written:
+                write_backlog(root, lines)
+    return {"rated": written, "unrated": len(todo) - written, "skipped": len(items) - len(todo)}
 
 
 def spec_path(root, text):
@@ -413,11 +476,11 @@ def claim_item(lines, item, job_id):
 
 
 def cmd_next(root, index=None):
-    """Claim the first open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
+    """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in items if not i["done"] and not i["setup"] and not waiting_on(i, items, board)), None)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board)), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
@@ -436,7 +499,7 @@ def cmd_next(root, index=None):
 
 
 def cmd_cloud_claim(root, n) -> dict:
-    """Claim up to n open backlog items for cloud sessions, in backlog order, under one lock and one backlog write.
+    """Claim up to n open backlog items for cloud sessions, in priority order (priority_key), under one lock and one backlog write.
     An item is skipped (left open) when it waits on a prerequisite or Human setup, has no pre-written spec with readable Likely files,
     or shares a Likely file with an item claimed in this call or with a board job in stage cloud or build, or in stage spec
     carrying cloudClaim (claimed here, not yet moved to cloud). Such a job with no readable Likely files may touch
@@ -453,7 +516,7 @@ def cmd_cloud_claim(root, n) -> dict:
                 blocked_all |= not files
                 taken |= files
         claimed = []
-        for item in items:
+        for item in sorted(items, key=priority_key):
             if blocked_all or len(claimed) >= n:
                 break
             if item["done"] or item["setup"] or waiting_on(item, items, board):
@@ -488,6 +551,8 @@ def abort_job(root, job, requeue, reason):
     folder = Path(root) / "jobs" / job["id"]
     feature = folder / "feature.md"
     job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    job.pop("paused", None)  # an aborted job is never played
+    job.pop("play_queued", None)  # nor started by serve.py's Play queue
     if not requeue:
         return
     lines, items = read_backlog(root)
@@ -578,15 +643,16 @@ def projects():
     return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
 
 
-def cmd_backlog_add(root, items, setup=None):
+def cmd_backlog_add(root, items, setup=None, priority=None):
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
     texts as stored. An empty checklist adds nothing."""
     if setup is not None:
         setup_steps(setup)
+    check_priority(priority)
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item, setup=setup)
+            backlog_op(root, "add", text=item, setup=setup, priority=priority)
             added.append(clean(item, ITEM_MAX))
     return added
 
@@ -800,6 +866,69 @@ def cmd_digest_trim(root, digest_id):
     return trimmed
 
 
+# --- pipeline-fit: per-job routing facts for the digest reader's ## Pipeline fit section. Read-only. ---
+FAST_STUB = "Skipped by orchestrator: fast lane."
+
+
+def _real_review(p):
+    """True when p is a review a reviewer wrote, not an orchestrator skip or carried-forward stub."""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return not ORCH_REVIEW_RE.fullmatch(text) and FAST_STUB not in text
+
+
+def _fit_diff(root, job):
+    """(added, deleted, files) from the worktree, else the PR's REST totals; (None, None, None) when unreadable."""
+    if job.get("worktree") and Path(job["worktree"]).is_dir():
+        diff = _route_diff(job)
+        if diff is None or any(a is None for a, _, _ in diff[0]):
+            return None, None, None
+        rows, names = diff
+        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names)
+    m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", job.get("pr") or "")
+    if not m:
+        return None, None, None
+    try:
+        pr = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}")
+        out = tuple(pr[k] for k in ("additions", "deletions", "changed_files"))
+    except (GhError, TypeError, KeyError):
+        return None, None, None
+    return out if all(type(v) is int for v in out) else (None, None, None)
+
+
+def cmd_pipeline_fit(root, digest_id: str) -> dict:
+    """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
+    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed."""
+    d = Path(root) / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
+        raise SystemExit(f"no digest {digest_id!r}")
+    listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
+    jobs = {j["id"]: j for j in read_board(root)["jobs"]}
+    out = []
+    for job_id in listed:
+        job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
+        lane = job.get("lane") or "standard"
+        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
+                        if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+        agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
+        agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
+                                                           for n in rounds)]
+        agents += ["approver"] if (folder / "decision.md").is_file() else []
+        verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
+                             for r in REVIEWERS} for n in rounds}
+        added, deleted, files = _fit_diff(root, job)
+        size = None if added is None else added + deleted
+        over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES)
+        fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+        out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
+                    "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
+                    "fit": fit})
+    return {"digest": str(digest_id), "jobs": out}
+
+
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
 # the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
 CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
@@ -909,12 +1038,162 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
         return {"ok": False, "error": str(e)}
 
 
+# --- rules-check: the script rules (1-8) of docs/skill-standards.md over a job's rules diff. Merge's Agent rules guard
+# merges without a human when this exits 0 and scrum-review-rules writes VERDICT: PASS (lanes/rules-gate.md). Rule 8:
+# this block and every board.py line naming rules-check are human-only, so no unattended diff can loosen them.
+NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+PERSON_RE = re.compile(r"\b(I|[Yy]ou|[Yy]our|[Ww]e|[Oo]ur)\b")  # rule 3: descriptions are third person
+AT_LINK_RE = re.compile(r"(^|\s)@[\w.~/-]*/[\w./-]*\.md\b", re.M)  # rule 5: an @path import loads the file eagerly
+OTHER_LANE_RE = re.compile(r"lanes/([\w-]+)\.md")
+NAME_MAX, DESC_MAX, AGENT_DESCS_MAX_TOKENS = 64, 1024, 15000  # the skill spec's limits; sub-agents warn past 15k tokens
+BODY_MAX_LINES, BODY_MAX_TOKENS = 500, 5000  # skill best practices: under 500 lines; agentskills.io: 5k-token body
+REF_TOC_LINES, TOC_WITHIN = 100, 10  # best practices: a reference over 100 lines starts with a contents list
+HUMAN_ONLY_FILES = ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md")
+HUMAN_ONLY_SECTIONS = {
+    "skills/trevskills-scrum/SKILL.md": [
+        ("the never-list", "This skill is a sanctioned exception", "\n## Setup"),
+        ("the Merge step 1 guard bullets", "1. **Preconditions:**", "\n2. Run `B set $ID stage=merging`")],
+    "skills/trevskills-scrum/board.py": [("the rules-check code", "# --- rules-check:", "# --- end rules-check")],
+}
+
+
+def _section(text, start, end):
+    """text from start up to end, or None when either marker is missing."""
+    i = text.find(start) if text is not None else -1
+    j = text.find(end, i) if i >= 0 else -1
+    return text[i:j] if j >= 0 else None
+
+
+def _frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    return dict(l.split(": ", 1) for l in m.group(1).splitlines() if ": " in l) if m else None
+
+
+def _tokens(text):
+    return len(text) // 4  # ponytail: chars/4 estimate, a real tokenizer is not stdlib
+
+
+def _file_problems(rel, text):
+    """Rules 1, 2, 3 and 5 for one rules file's text. Messages carry no line numbers, so base and HEAD compare."""
+    out = []
+    if rel.endswith("SKILL.md") or rel.startswith("agents/") or "/agents/" in rel:
+        fm = _frontmatter(text) or {}
+        name, desc = fm.get("name", ""), fm.get("description", "")
+        if not name or not desc:
+            out.append(f"rule 1: {rel}: frontmatter needs name and description")
+        if name and (not NAME_RE.match(name) or len(name) > NAME_MAX or re.search("claude|anthropic", name, re.I)):
+            out.append(f"rule 2: {rel}: name must be lowercase-hyphenated, {NAME_MAX} chars or less, without claude or anthropic")
+        if len(desc) > DESC_MAX:
+            out.append(f"rule 3: {rel}: description is over {DESC_MAX} chars")
+        out += [f"rule 3: {rel}: description has an angle bracket" for _ in re.findall("[<>]", desc)]
+        out += [f"rule 3: {rel}: description is not third person ({m})" for m in PERSON_RE.findall(desc)]
+    out += [f"rule 5: {rel}: has an @ link; name the file instead" for _ in AT_LINK_RE.finditer(text)]
+    if "/lanes/" in rel:
+        if text.count("\n") > REF_TOC_LINES and not re.search(r"contents", "\n".join(text.splitlines()[:TOC_WITHIN]), re.I):
+            out.append(f"rule 5: {rel}: over {REF_TOC_LINES} lines with no contents list in its first {TOC_WITHIN} lines")
+        if any(m != Path(rel).stem for m in OTHER_LANE_RE.findall(text)):
+            out.append(f"rule 5: {rel}: points to another lanes file; keep references one level deep from SKILL.md")
+    return out
+
+
+def _over_budget(text):
+    return text.count("\n") > BODY_MAX_LINES or _tokens(text) > BODY_MAX_TOKENS
+
+
+def _human_only_parts(rel, text):
+    parts = {label: _section(text, start, end) for label, start, end in HUMAN_ONLY_SECTIONS.get(rel, [])}
+    if rel.endswith("board.py") and rel in HUMAN_ONLY_SECTIONS and text is not None:
+        parts["the rules-check code"] = (parts["the rules-check code"], sorted(
+            l for l in text.splitlines() if "rules-check" in l or "rules_check" in l))
+    return parts
+
+
+def _named(rel, texts):
+    """Rule 7 (job 180's in-ticket rule): rel appears verbatim in one of texts, or a `<dir>/*.md` mention covers it."""
+    for text in texts:
+        if re.search(rf"(?<![\w./-]){re.escape(rel)}(?![\w/-]|\.\w)", text):
+            return True
+        if rel.endswith(".md") and any(g[:-5] == os.path.dirname(rel) for g in re.findall(r"[\w./-]+/\*\.md", text)):
+            return True
+    return False
+
+
+def _first_line_pins(text):
+    block = re.search(r"^FIRST_LINE = \{(.*?)^\}", text or "", re.M | re.S)
+    return set(re.findall(r'"([\w-]+)": "([^"]*)"', block.group(1))) if block else set()
+
+
+def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
+    """{"ok", "files", "failures"}: ok only when the job's diff changes a rules file and breaks none of the script rules.
+    worktree/base, when not None, replace the board's values, as in digest-verify; empty fails."""
+    try:
+        job = find(read_board(root), check_id(job_id))
+        wt = job.get("worktree") if worktree is None else worktree
+        base = job.get("base") if base is None else base
+        if not wt or not base:
+            raise ValueError(f"no {'worktree' if not wt else 'base'}")
+        if base.startswith("-"):
+            raise ValueError(f"bad base {base!r}")
+        diff = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
+        rules = [f for f in diff if RULES_RE.search(f)]
+        mb = _git(wt, "merge-base", base, "HEAD").decode().strip()
+
+        def show(rev, f):
+            try:
+                return _git(wt, "show", f"{rev}:{f}").decode()
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        guarded = rules or [f for f in diff if f in HUMAN_ONLY_FILES or f in HUMAN_ONLY_SECTIONS]
+        fails = [] if guarded else ["the diff changes no rules file"]
+        for f in rules:
+            before, after = show(mb, f), show("HEAD", f)
+            if after is None:
+                continue
+            # one message per occurrence, so a second @ link or bracket still fails when the base has one
+            fails += list((Counter(_file_problems(f, after)) - Counter(_file_problems(f, before) if before else [])).elements())
+            if _over_budget(after) and (before is None or after.count("\n") > before.count("\n")
+                                        or len(after) > len(before)):
+                fails.append(f"rule 4: {f}: {after.count(chr(10))} lines, ~{_tokens(after)} tokens: over the "
+                             f"{BODY_MAX_LINES}-line / {BODY_MAX_TOKENS}-token budget and new or grown")
+        descs = sum(len((_frontmatter(p.read_text(errors="replace")) or {}).get("description", ""))
+                    for p in Path(wt).glob("agents/scrum-*.md"))
+        if descs // 4 > AGENT_DESCS_MAX_TOKENS:
+            fails.append(f"rule 3: agent descriptions total ~{descs // 4} tokens, over {AGENT_DESCS_MAX_TOKENS}")
+        try:
+            suite = subprocess.run([sys.executable, "-m", "unittest", "tests.test_contracts"], cwd=wt,
+                                   capture_output=True, timeout=540).returncode  # under the 600 s Bash cap
+        except subprocess.TimeoutExpired:
+            suite = "timeout"
+        if suite != 0:
+            fails.append("rule 6: python3 -m unittest tests.test_contracts fails in the worktree")
+        pins = _first_line_pins(show("HEAD", "tests/test_contracts.py"))
+        for name, _ in sorted(_first_line_pins(show(mb, "tests/test_contracts.py")) - pins):
+            fails.append(f"rule 6: FIRST_LINE pin for {name} removed or changed")
+        jd = Path(root) / "jobs" / job_id
+        feature, spec = (p.read_text(errors="replace") if p.is_file() else "" for p in (jd / "feature.md", jd / "spec.md"))
+        likely = md_section(spec, "Likely files") or ""
+        fails += [f"rule 7: {f} is not named in feature.md or spec.md ## Likely files" for f in diff
+                  if not _named(f, (feature, likely))]
+        for f in diff:
+            if f in HUMAN_ONLY_FILES:
+                fails.append(f"rule 8: {f} is human-only")
+            before, after = _human_only_parts(f, show(mb, f)), _human_only_parts(f, show("HEAD", f))
+            fails += [f"rule 8: {f}: {label} changed; it is human-only" for label in before
+                      if before[label] != after.get(label) or after.get(label) is None]
+        return {"ok": not fails, "files": rules, "failures": fails}
+    except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
+        return {"ok": False, "files": [], "failures": [str(e)]}
+# --- end rules-check
+
+
 # --- route-check: the Fast lane promotion, Review clean-round and Approve model decisions (SKILL.md), from files ---
 SCHEMA_RE = re.compile(r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$")  # SKILL.md Merge's schema guard
 ENV_RE = re.compile(r"(^|/)\.env")
 SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
                           r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
 FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
+LILGUY_MAX_LINES, LILGUY_MAX_FILES = 30, 3
 
 
 # --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
@@ -930,6 +1209,8 @@ SECURITY_RES = tuple(re.compile(p, re.I) for p in (
 CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n"
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
+DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+DELETION_MIN_RATIO = 0.9
 
 
 def ui_globs(root):
@@ -974,7 +1255,8 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP)) + "|" + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP)) + "|"
+    + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
 
 
 def _drop_stale(rd, spawn):
@@ -1008,7 +1290,8 @@ def _incremental_since(prev, wt, base):
 
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
-    (incremental) or UI/UX and security skip files (full); never writes board.json."""
+    (incremental) or UI/UX (no UI file, or a deletion-dominated diff) and security skip files (full); never writes
+    board.json."""
     job = live(read_board(root), check_id(job_id))
     wt, base = job.get("worktree"), job.get("base")
     if not wt or not base:
@@ -1038,6 +1321,8 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         globs = ui_globs(root)
         if globs and not any(glob_match(f, globs) for f in files):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
+        elif _deletion_dominated((_route_diff(job) or ([], []))[0]):
+            skips.update(ui=DELETION_SKIP, ux=DELETION_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
@@ -1066,18 +1351,41 @@ def _route_diff(job):
     return None if names is None else (rows, sorted(n for n in names if n))
 
 
-def _promote_trigger(rows, names, globs):
+def _deletion_dominated(rows):
+    """True when at least DELETION_MIN_RATIO of the numstat rows' changed lines are deletions; False with no rows, a
+    binary row or no changed lines."""
+    if not rows or any(a is None for a, _, _ in rows):
+        return False
+    added, deleted = sum(a for a, _, _ in rows), sum(d for _, d, _ in rows)
+    return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
+
+
+def _promote_trigger(rows, names):
     """The first Fast lane promotion trigger the diff hits after CHECK: PASS, else None."""
     if binary := next((p for a, _, p in rows if a is None), None):
         return f"binary file {binary}"
-    if (lines := sum(a + d for a, d, _ in rows)) > FAST_MAX_LINES:
+    if (lines := sum(a for a, _, _ in rows)) > FAST_MAX_LINES:  # size counts added lines only
         return f"diff over {FAST_MAX_LINES} lines ({lines})"
-    if len(names) > FAST_MAX_FILES:
-        return f"more than {FAST_MAX_FILES} files ({len(names)})"
+    if (files := len({p for a, _, p in rows if a})) > FAST_MAX_FILES:
+        return f"more than {FAST_MAX_FILES} files ({files})"
     for label, hit in (("schema path", SCHEMA_RE.search), ("env file", ENV_RE.search),
-                       ("UI file", lambda p: glob_match(p, globs or [])), ("sensitive path", SENSITIVE_RE.search)):
+                       ("sensitive path", SENSITIVE_RE.search)):
         if path := next((p for p in names if hit(p)), None):
             return f"{label} {path}"
+    return None
+
+
+def _lilguy_trigger(rows, names, feature_text: str) -> str | None:
+    """The first Lilguy Worktree mode promotion trigger the diff hits, else None. Deleted lines never count."""
+    if binary := next((p for a, _, p in rows if a is None), None):
+        return f"binary file {binary}"
+    if (lines := sum(a for a, _, _ in rows)) > LILGUY_MAX_LINES:
+        return f"diff over {LILGUY_MAX_LINES} added lines ({lines})"
+    if (files := len({p for a, _, p in rows if a})) > LILGUY_MAX_FILES:
+        return f"more than {LILGUY_MAX_FILES} files with added lines ({files})"
+    for p in names:
+        if RULES_RE.search(p) and p not in feature_text and f"{p.rpartition('/')[0]}/*.md" not in feature_text:
+            return f"rules file {p} not in feature.md"
     return None
 
 
@@ -1101,7 +1409,12 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     if lane == "fast" and check == "FAIL" and check_fails >= 2:
         promote = "check failed twice"
     elif lane == "fast" and check == "PASS":
-        promote = _promote_trigger(*diff, ui_globs(root)) if diff else "diff unreadable"
+        promote = _promote_trigger(*diff) if diff else "diff unreadable"
+    elif lane == "lilguy" and job.get("worktree"):
+        feature = d / "feature.md"
+        feature = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
+        promote = "check failed 3 times" if check_fails >= 3 else \
+            _lilguy_trigger(*diff, feature) if diff else "diff unreadable"
     spec = d / "spec.md"
     hard = re.search(r"^\s*Hard stops:(.*)$", spec.read_text(encoding="utf-8", errors="replace"), re.M) \
         if spec.is_file() else None
@@ -1112,6 +1425,53 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     clean_round = green and lane == "standard" and last_n == 1 and bool(hard) and hard.group(1).strip() == "none" \
         and not blocked and not any(ENV_RE.search(p) or SENSITIVE_RE.search(p) for p in names)
     return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
+
+
+# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, or Jev confident it is trivial) and no hard-stop
+# word in feature.md. Anything unreadable counts as not tiny.
+LILGUY_HARD_STOP_RE = re.compile(
+    r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
+    r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
+    r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
+LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
+
+
+def _jev_model(folder: Path) -> dict | None:
+    """The raw JSON answer of the last `model` line in folder/jev.log (fields: time, step, question, raw, decision,
+    seconds), or None when there is no such line or it isn't a JSON object."""
+    try:
+        lines = (folder / "jev.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    fields = next((f for f in (l.split("\t") for l in reversed(lines)) if len(f) > 3 and f[1] == "model"), None)
+    try:
+        raw = json.loads(fields[3]) if fields else None
+    except ValueError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def cmd_lilguy_fit(root, job_id: str) -> dict:
+    """{"fit", "why"}: fit only for a job on no lane (or lilguy) that is tiny by backlog points or by Jev, with no
+    LILGUY_HARD_STOP_RE word in its feature.md."""
+    job = find(read_board(root), check_id(job_id))
+    lane = job.get("lane")
+    if lane and lane != "lilguy":
+        return {"fit": False, "why": f"already on {lane} lane"}
+    folder = Path(root) / "jobs" / job_id
+    feature = folder / "feature.md"
+    if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
+        return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
+    item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+    if item and item["points"] == 1:
+        return {"fit": True, "why": "backlog item is 1 point"}
+    raw = _jev_model(folder) or {}
+    score, conf = raw.get("score"), raw.get("confidence")
+    if is_num(score) and is_num(conf) and score < LILGUY_JEV_MAX_SCORE and conf >= LILGUY_JEV_MIN_CONFIDENCE:
+        return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
+    pts = f"{item['points']} points" if item and item["points"] else "no points"
+    jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
+    return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
 
 
 # --- move-ratio: SKILL.md Review gives reviewers MOVE_ONLY=yes when nearly every added line is a verbatim move.
@@ -1269,6 +1629,7 @@ def cmd_triage_apply(root, triage_id):
                     text = clean(e["text"], ITEM_MAX)
                     own = {i["id"] for i in got if i["id"]}
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
+                            "priority": max((i["priority"] for i in got if i["priority"]), default=None),
                             "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
                             "setup": list(dict.fromkeys(st for i in got for st in i["setup"]))}  # still waits on setup
                     merged.append(item)
@@ -1367,15 +1728,29 @@ def cmd_triage_apply(root, triage_id):
 PLAN_FIELDS = {"Depends on": "depends", "Parallel": "parallel", "Exposure": "exposure", "Hard stops": "hard",
                "Human setup": "setup"}
 TICKET_RE = re.compile(r"^### (T\d+):[ \t]*(.*?)\s*$")
-PATH_RE = re.compile(r"^[\w.@~+/-]*[./][\w.@~+/-]*$")  # a backticked token with a / or . and nothing code-like
+PATH_RE = re.compile(r"^[\w.@~+/()\[\]-]*[./][\w.@~+/()\[\]-]*$")  # a backticked token with a / or . and nothing code-like; () and [] for Next.js route folders
 IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage counts as in progress
+
+
+def idle(job) -> bool:
+    """Not in progress: an IDLE stage, or paused by Trevor (it keeps its stage but holds no slot)."""
+    return job.get("stage") in IDLE or bool(job.get("paused"))
+
+
 BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
-RUNALL_MAX_IN_PROGRESS = 3  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
-WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
-USAGE_FRESH = 300  # seconds; an older usage.json means no status line is running, so no pacing
+MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok) or usage
+
+
+def resume_first(jobs: list[dict]) -> int:
+    """How many jobs on this board must be played, resumed or aborted before any new claim in its project: the ones
+    Trevor paused (not done or aborted), plus the unpaused needs-human ones stalled in a stage (not
+    lilguy-in-checkout)."""
+    return sum(bool(j.get("paused")) and j.get("stage") not in ("done", "aborted")
+               or not j.get("paused") and j.get("stage") == "needs-human"
+               and (j.get("reason") or "").startswith(STALLED) and not lilguy_in_checkout(j) for j in jobs)
 
 
 def usage_path():
@@ -1394,34 +1769,64 @@ def is_num(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+USAGE_LOW_PCT = 10  # remaining % below which automated claims taper (USAGE_STEPS[0])
+USAGE_LOWER_PCT = 5  # remaining % below which the taper drops to USAGE_STEPS[1]
+USAGE_STOP_PCT = 2  # remaining % below which automated claims stop (USAGE_STEPS[2])
+USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the ladder) means unlimited
+USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
+USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
+USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
+
+
+class Allowance(int):
+    """usage_allowance's number of live sessions; .reason says which window bound it and why."""
+    def __new__(cls, n, reason):
+        self = super().__new__(cls, n)
+        self.reason = reason
+        return self
+
+
+def usage_allowance(usage, now, live):
+    """How many live headless sessions automated claims may run under the 5h and 7d budgets (an Allowance), or None
+    for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
+    one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
+    missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
+    only feeds the reason text. Trevor's own Play/Resume never call this."""
+    if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
+        return None
+    at = usage.get("written_at")
+    if not is_num(at) or now - at > USAGE_STALE_SECS:
+        return None
+    rungs = (None,) + USAGE_STEPS
+    best = None
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = usage["rate_limits"].get(key)
+        if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
+            continue
+        used, resets = w["used_percentage"], w["resets_at"]
+        left = 100 - used
+        if left >= USAGE_LOW_PCT or resets <= now:
+            continue
+        i = 3 if left < USAGE_STOP_PCT else 2 if left < USAGE_LOWER_PCT else 1
+        if resets - now <= USAGE_RELAX_SECS:
+            i -= 1
+        elif resets - now > USAGE_TIGHTEN_SECS:
+            i = min(i + 1, len(USAGE_STEPS))
+        n = rungs[i]
+        if n is not None and (best is None or n < best[0]):
+            best = n, label, used, resets
+    if best is None:
+        return None
+    n, label, used, resets = best
+    count = live if isinstance(live, int) else len(live)
+    return Allowance(n, f"usage {label} {round(used)}% used, resets {datetime.fromtimestamp(resets):%H:%M} "
+                        f"(allowance {n}, {count} live)")
+
+
 def pace_cap(usage, now, base):
-    """The in-progress cap for this `ready` call from usage.json, or None (no pacing, so base stands). Each usable
-    window is projected to its reset at the current burn rate; the highest projection P picks the tier."""
-    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
-    at = usage.get("written_at") if isinstance(limits, dict) else None
-    if not is_num(at) or now - at > USAGE_FRESH:
-        return None
-    projected = []
-    for name, length in WINDOWS.items():
-        w = limits.get(name)
-        used, resets = (w.get("used_percentage"), w.get("resets_at")) if isinstance(w, dict) else (None, None)
-        if not (is_num(used) and 0 <= used <= 100 and is_num(resets) and resets > now):
-            continue
-        left = resets - now
-        elapsed = length - left
-        if elapsed < length / 10:  # a few minutes of data extrapolate wildly
-            continue
-        projected.append(used + used / elapsed * left)
-    if not projected:
-        return None
-    p = max(projected)
-    if p < 60:
-        return None if base is None else base + 2
-    if p < 100:
-        return base
-    if p < 125:
-        return 2 if base is None else min(base, 2)
-    return 1
+    """Always None: usage pacing no longer caps sessions (job 282); machine_ok and the overlap rules gate instead.
+    Kept for continue.py (outside this repo), which skips its tick when this is not None."""
+    return None
 
 
 def cmd_statusline(text):
@@ -1549,7 +1954,7 @@ def cmd_plan_apply(root, parent_id, fix=False):
 
 
 def cmd_runall_start(root):
-    """One Run-all parent whose waiting children are every open backlog item, claimed in backlog order under the lock.
+    """One Run-all parent whose waiting children are every open backlog item, claimed in priority order (priority_key) under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
     open, and so does every item that needs it."""
@@ -1563,7 +1968,7 @@ def cmd_runall_start(root):
             if not more:
                 break
             held |= more
-        todo = [i for i in items if not i["done"] and i["index"] not in held]
+        todo = sorted((i for i in items if not i["done"] and i["index"] not in held), key=priority_key)
         if not todo:
             return {"id": None, "children": []}
         parent_id = add_job(root, board, "Run all")
@@ -1584,20 +1989,121 @@ def cmd_runall_start(root):
         return {"id": parent_id, "children": kids}
 
 
-def slot_cap(runall):
-    """The in-progress cap for a parent's children, or None (no cap). Usage pacing only gates new claims (and
-    resumes); it is always >= 1, so with nothing in progress one child still starts."""
-    cap = pace_cap(read_usage(), time.time(), RUNALL_MAX_IN_PROGRESS if runall else None)
-    return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
+MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
+MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
+MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
+#                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
+#                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
+SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
+MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
+#                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24).
+#                   14, not 12: Trevor keeps it as a backstop until further notice in case the RAM reading misleads (job 284)
+SESSION_RAMP_SECS = 120  # ram_room: a session younger than this has not grown into its RAM yet, so free RAM % overstates
+#                          the room; two projects claiming within that minute both burst (the 2026-10-24 pile-up)
 
 
-def slot_conflict(k, busy, files, cap):
+def free_ram_pct():
+    """System-wide free memory in percent, or None when unknown (no memory_pressure, as on Linux). SCRUM_FREE_RAM
+    stands in for the reading."""
+    fake = os.environ.get("SCRUM_FREE_RAM")
+    if fake:
+        return float(fake)
+    try:
+        out = subprocess.run(["/usr/bin/memory_pressure"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"System-wide memory free percentage: (\d+(?:\.\d+)?)%", out)
+    return float(m.group(1)) if m else None
+
+
+def swap_used_pct():
+    """Swap in use as a percent of physical RAM, or None when unknown (no sysctl, as on Linux, or unreadable output).
+    SCRUM_SWAP_PCT stands in for the reading."""
+    fake = os.environ.get("SCRUM_SWAP_PCT")
+    if fake:
+        return float(fake)
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "vm.swapusage", "hw.memsize"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"used = ([\d.]+)M.*\n(\d+)\s*$", out)
+    return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
+
+
+def free_disk_gb(path):
+    """Free disk in GB on path's volume, or None when unknown. SCRUM_FREE_DISK_GB stands in for the reading."""
+    fake = os.environ.get("SCRUM_FREE_DISK_GB")
+    if fake:
+        return float(fake)
+    try:
+        return shutil.disk_usage(path).free / 1e9
+    except OSError:
+        return None
+
+
+def machine_ok(path):
+    """None when the machine has room for new work, else why not: free RAM, then swap, then free disk. Gates new claims,
+    resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
+    ram = free_ram_pct()
+    if ram is not None and ram < MIN_FREE_RAM_PCT:
+        return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
+    swap = swap_used_pct()
+    if swap is not None and swap > MAX_SWAP_PCT:
+        return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
+    disk = free_disk_gb(path)
+    if disk is not None and disk < MIN_FREE_DISK_GB:
+        return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
+    live = live_sessions()
+    if live >= MAX_SESSIONS:
+        return f"{live} sessions running (ceiling {MAX_SESSIONS})"
+    return None
+
+
+def ram_room():
+    """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
+    split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
+    for but not used yet), never past MAX_SESSIONS in all, at least 1. An unknown reading allows 1, so a batch never
+    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping."""
+    ram = free_ram_pct()
+    swap = swap_used_pct()
+    if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
+        return 1
+    ages = session_ages()
+    room = int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - sum(a < SESSION_RAMP_SECS for a in ages)
+    return max(1, min(room, MAX_SESSIONS - len(ages)))
+
+
+SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")
+ETIME_RE = re.compile(r"\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+) (.*)")  # ps etime: [[dd-]hh:]mm:ss, then the command
+
+
+def session_ages():
+    """Age in seconds of every headless `/trevskills-scrum <action>` session (start, resume, approve, run-all, ...) on
+    this machine, any project and any launcher (ps sees them all; serve.py's RUNS only knows its own). SCRUM_PS names
+    a file read in place of ps's output; its lines may start with an etime token, and a line without one is old."""
+    fake = os.environ.get("SCRUM_PS")
+    out = Path(fake).read_text() if fake else \
+        subprocess.run(["ps", "-Ao", "etime=,command="], capture_output=True, text=True).stdout
+    ages = []
+    for line in out.splitlines():
+        m = ETIME_RE.match(line)
+        d, h, mi, sec, cmd = m.groups() if m else (None, None, None, None, line)
+        if SESSION_RE.match(cmd):
+            ages.append(int(d or 0) * 86400 + int(h or 0) * 3600 + int(mi) * 60 + int(sec) if m else 10 ** 9)
+    return ages
+
+
+def live_sessions():
+    """How many headless scrum sessions run on this machine (see session_ages)."""
+    return len(session_ages())
+
+
+def slot_conflict(k, busy, files):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
-    child id to its Likely files. The rules `ready` and `resume_blocker` share: the in-progress cap; parallel=no, or
+    child id to its Likely files. The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file."""
     busy = [o for o in busy if o["id"] != k["id"]]
-    if cap is not None and len(busy) >= cap:
-        return f"{len(busy)} siblings in progress (cap {cap})", [o["id"] for o in busy]
     if not busy:
         return None
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
@@ -1616,9 +2122,10 @@ class Blocker(str):
         return self
 
 
-def resume_blocker(root, job_id):
-    """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s cap and overlap rules
-    (slot_conflict) against its in-progress siblings. Reads the board without writing or claiming anything."""
+def resume_blocker(root, job_id, live=()):
+    """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s overlap rules
+    (slot_conflict) against its in-progress siblings: any not IDLE, plus the ids in `live` (serve.py's running
+    sessions, which still read needs-human until they write the board). Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     job = jobs.get(job_id)
@@ -1631,10 +2138,10 @@ def resume_blocker(root, job_id):
     spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
         if (jobs_dir / k["id"] / "spec.md").is_file() else ""
     files = {k["id"]: likely_files(spec(k)) for k in kids}
-    busy = [k for k in kids if k["stage"] not in IDLE and k["id"] != job_id]
+    busy = [k for k in kids if (not idle(k) or k["id"] in live) and k["id"] != job_id]
     if not busy:
         return None
-    hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
+    hit = slot_conflict(job, busy, files)
     return Blocker(*hit) if hit else None
 
 
@@ -1651,8 +2158,9 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
-def cmd_ready(root, parent_id):
-    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice."""
+def cmd_ready(root, parent_id, live=()):
+    """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
+    `live` ids count as in progress whatever their stage (see resume_blocker)."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -1661,34 +2169,59 @@ def cmd_ready(root, parent_id):
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
         stage = {k["id"]: k["stage"] for k in kids}
-        runall = parent.get("lane") == "runall"  # aborted children count as finished, and a count cap always applies
+        runall = parent.get("lane") == "runall"  # aborted children count as finished
         reason = parent.get("reason") or ""
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
         # re-evaluated so existing boards recover.
         legacy = parent["stage"] == "needs-human" and reason.startswith((BLOCKED, RUNALL_BLOCKED, CHAIN_LOCKED))
-        blocked = legacy or (parent["stage"] == "running" and reason.startswith(WAITING_ON))
+        held = bool(parent.get("paused"))  # a paused parent claims nothing and keeps its stage and reason
+        blocked = not held and (legacy or (parent["stage"] == "running"
+                                           and reason.startswith((WAITING_ON, MACHINE_WAIT))))
+        go = not held and (parent["stage"] == "running" or legacy)
+        machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
+        # paused or stalled work goes before new claims; a job with a live session is already being resumed
+        first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
+        cap = None  # the usage ladder's slots left this call; None = no taper
+        if go and not machine:
+            n_live = live_sessions()
+            allow = usage_allowance(read_usage(), time.time(), n_live)
+            if allow is not None:
+                cap = max(0, allow - n_live)
+                if not cap:  # no slot under the budget: held like a machine wait, never needs-human
+                    machine = allow.reason
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
-        busy = [k for k in kids if k["stage"] not in IDLE]
-        cap = slot_cap(runall)
+        busy = [k for k in kids if not idle(k) or k["id"] in live]
+        room = ram_room() if go and not machine else 0  # one claim = one new session
+        if cap is not None:
+            room = min(room, cap)
         ready = []
-        for k in kids if parent["stage"] == "running" or legacy else []:
+        for k in kids if go and not machine else []:
+            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
+                break
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
-            if slot_conflict(k, busy, files, cap):
+            if slot_conflict(k, busy, files):
                 continue
+            if first:  # a claim is due, but held like a machine wait (never needs-human) until those are dealt with
+                machine = f"{first} paused job needs Play or Abort first" if first == 1 \
+                    else f"{first} paused jobs need Play or Abort first"
+                break
             k.update(stage="spec", updatedAt=now())
             busy.append(k)
             ready.append(k["id"])
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if blocked and (ready or busy or finished == len(kids)):
+        if machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
+            if parent["stage"] == "running" and finished < len(kids):
+                new = "running", MACHINE_WAIT + machine
+        elif blocked and (ready or busy or finished == len(kids)):
             new = "running", None
-        elif not ready and not busy and finished < len(kids) and (parent["stage"] == "running" or legacy):
-            human = [k["id"] for k in kids if k["stage"] == "needs-human"]
+        elif not ready and not busy and finished < len(kids) and go:
+            human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
             waits = human or [k["id"] for k in kids
                            if k.get("setup") == "pending" and k["stage"] not in ("done", "aborted")]
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
@@ -1711,6 +2244,14 @@ def cmd_ready(root, parent_id):
 
 
 CHAIN_LOCK_STALE = 1800  # seconds; a crashed chaining session's lock is taken over after this
+
+
+def chain_lock_live(root, parent_id) -> bool:
+    """True when jobs/<parent>/.chain.lock exists and is no older than CHAIN_LOCK_STALE (a crashed holder's lock is not)."""
+    try:
+        return time.time() - (Path(root) / "jobs" / parent_id / ".chain.lock").stat().st_mtime <= CHAIN_LOCK_STALE
+    except OSError:
+        return False
 
 
 def cmd_chain_lock(root, parent_id, holder, wait=540):
@@ -1761,12 +2302,18 @@ def cmd_chain_unlock(root, parent_id, holder):
     return {"released": False}
 
 
+def lilguy_in_checkout(job: dict) -> bool:
+    """True for a manual lilguy job: it runs in the main checkout with no worktree, builder or PR to wait on. A lilguy
+    job with a worktree (Lilguy lane Worktree mode) is a normal PR job."""
+    return job.get("lane") == "lilguy" and not job.get("worktree")
+
+
 def merge_refusal(job: dict) -> str | None:
     """Why `job` may not move to done, or None. Its PR must be MERGED; a PR-less job may finish only on a parent
-    (bigboy/runall) or lilguy lane."""
+    (bigboy/runall) lane or a lilguy job in the main checkout."""
     pr = job.get("pr")
     if not pr:
-        return None if job.get("lane") in ("bigboy", "runall", "lilguy") else "not done: no PR recorded"
+        return None if job.get("lane") in ("bigboy", "runall") or lilguy_in_checkout(job) else "not done: no PR recorded"
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr)
     if not m:
         return f"not done: could not confirm PR {pr} is merged: not a GitHub pull request URL"
@@ -1788,9 +2335,9 @@ def merge_refusal(job: dict) -> str | None:
 
 def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
-    `set --unpause`, which resume and rework use. An empty reason= alone never un-pauses. expect: write only while the
-    job is still in that stage (checked under the lock), else raise SystemExit and write nothing. stage=needs-human is
-    refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
+    `set --unpause`, which resume and rework use. Only an unpause write with stage= clears `paused`. expect: write only
+    while the job is still in that stage (checked under the lock), else raise SystemExit and write nothing.
+    stage=needs-human is refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
     if "stage=needs-human" in pairs and not internal:
         raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command": '
                          "set never parks a job at needs-human")
@@ -1822,9 +2369,17 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
                 raise SystemExit(f"bad field {pair!r}; {key} must match {SHAPES[key].pattern}")
             if key == "waiting":
                 value = clean(value, 200)
+            if key == "outcome":
+                value = clean(value, 300)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
+        if unpause and "stage" in given:
+            job.pop("paused", None)  # resume and rework re-enter a stage; spawn bookkeeping keeps the pause
+        if job["stage"] != was and "outcome" not in given:
+            job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
             job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
+        if job["stage"] != was:
+            job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
@@ -1858,7 +2413,11 @@ def cmd_ask(root, job_id, question, options):
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         was = job["stage"]
-        job.update(stage="needs-human", reason=question, question=question, options=parsed, updatedAt=now())
+        # a session that did not load the scrum agent types is a session fault: stalled, so auto_resume retries it
+        reason = f"{STALLED}{was}: {question}" if was in WATCHED and AGENT_TYPES_RE.search(question) else question
+        if job.get("reason") != reason:
+            job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
+        job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
         questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                              "question": question, "options": parsed})
     if was != "needs-human":
@@ -1915,6 +2474,7 @@ CLOUD_MARK = "<!-- scrum needs-human -->"  # second line of the cloud session's 
 CLOUD_LABEL = "scrum:needs-human"
 CLOUD_CLOSED = "requeue: cloud PR closed without merging"
 CLOUD_SELF_ABORT = ("requeue:", "obsolete:", "looks already fixed:")  # the cloud job aborted itself (Auto-abort)
+CLOUD_LANE = re.compile(r"^Scrum lane: (fast|standard|debug|lilguy)[ \t]*$", re.M)  # the PR body's lane line
 CLOUD_PENDING_HOURS = 24  # how long a moved job waits for its scrum-artifacts/<id> push; fixed, not a setting
 
 
@@ -2023,10 +2583,11 @@ def _cloud_plan(repo, job_id, prs):
     if not pr:
         return None
     url = pr.get("html_url") or ""
+    lane = [f"lane={m[1]}"] if (m := CLOUD_LANE.search(str(pr.get("body") or ""))) else []  # first line wins
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="], None, False, None
+        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None
     if pr.get("state") == "closed":
-        return "CLOSED", [f"pr={url}"], CLOUD_CLOSED, False, (True, None)
+        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None)
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -2041,21 +2602,24 @@ def _cloud_plan(repo, job_id, prs):
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
-        return "ABORTED", [f"pr={url}"], reason, False, (reason.startswith("requeue:"), number)
+        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number)
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + [f"reason={reason}"], reason, True, None
+    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None
 
 
-def _cloud_abort(root, job_id, url, requeue, reason):
-    """Record pr= and abort a job still in stage cloud, atomically; requeue skips a BigBoy child (Auto-abort rule)."""
+def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
+    """Record pr= (and lane= when given) and abort a job still in stage cloud, atomically; requeue skips a BigBoy
+    child (Auto-abort rule)."""
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         if job["stage"] != "cloud":
             raise SystemExit(f"job {job_id} is {job['stage']}, not cloud; left alone")
         job["pr"] = url
+        if lane:
+            job["lane"] = lane
         abort_job(root, job, requeue and not job.get("parent"), reason)
 
 
@@ -2086,7 +2650,8 @@ def cmd_cloud_sync(root: Path) -> dict:
             if live(read_board(root), job_id)["stage"] != "cloud":
                 continue  # moved meanwhile: add no worktree for it
             if abort:
-                _cloud_abort(root, job_id, url, abort[0], reason)
+                lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
+                _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
                 worktree = cloud_worktree(repo, job_id) if wants_worktree else None
                 cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
@@ -2209,29 +2774,58 @@ def cmd_hook(event, tty, pid=None):
 
 
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
-WATCHED = ("spec", "build", "check", "review", "approve")
+WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
-# Pause reuses the watchdog's stalled reason, so Play is the existing resume path unchanged.
+# Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
+# existing resume path.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
-PAUSED_RE = re.compile(rf"^{STALLED}\w+: {PAUSED}")
+PAUSED_RE = re.compile(rf"^{STALLED}(\w+): {PAUSED}")
 ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
 
 
+def migrate_paused(board: dict) -> list[str]:
+    """Rewrite each legacy paused job (needs-human with a PAUSED_RE reason) to its stage plus `paused`, keeping the
+    reason. Returns the migrated ids; a second run finds none."""
+    out = []
+    for job in board["jobs"]:
+        m = job.get("stage") == "needs-human" and PAUSED_RE.match(job.get("reason") or "")
+        if m:
+            job.update(stage=m.group(1), paused=True)
+            out.append(job["id"])
+    return out
+
+
+def cmd_migrate_paused(root) -> list[str]:
+    """migrate_paused on board.json, written only when something migrated (locked_board migrates on every write)."""
+    ids = migrate_paused(read_board(root))  # a read first: most ticks find nothing and write nothing
+    if ids:
+        with locked_board(root):
+            pass
+    return ids
+
+
 def cmd_pause(root, job_id):
-    """Mark a job in progress (and its children in progress) needs-human with a stalled reason naming its stage.
-    Every other field is kept, so resume picks up where it stopped. Returns the paused ids; plays no sound."""
+    """Pause a job in progress (and its children in progress): it keeps its stage, gets `paused` and a stalled reason
+    naming its stage. Every other field is kept, so resume picks up where it stopped. Returns the paused ids; plays no
+    sound."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] not in PAUSABLE:
             raise SystemExit(f"job {job_id} is {job['stage']}; only a job in progress can be paused")
+        if job.get("paused"):
+            raise SystemExit(f"job {job_id} is already paused; click Play to restart it")
         by_id = {j["id"]: j for j in board["jobs"]}
-        hit = [job] + [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k]["stage"] in PAUSABLE]
+        hit = [job] + [by_id[k] for k in job.get("children") or []
+                       if k in by_id and by_id[k]["stage"] in PAUSABLE and not by_id[k].get("paused")]
         for j in hit:
-            j.update(stage="needs-human", reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+            j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
+            j.pop("limitResetAt", None)
+            j.pop("play_queued", None)  # a pause cancels a queued Play
         return [j["id"] for j in hit]
 
 
@@ -2277,9 +2871,11 @@ def cmd_watchdog(root, alive=None):
     flagged, requeued = [], []
     try:
         with locked_board(root) as board:
-            # lilguy has no pipeline to resume: its session runs in the main checkout with no worktree or builder.
+            # a lilguy job in the main checkout has no pipeline to resume: no worktree or builder.
+            # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
-                     and j.get("lane") != "lilguy" and stalled_since(j, cutoff)]
+                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
+                     and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             for job in stale:
                 if alive(job):
@@ -2370,8 +2966,9 @@ def roadmap_show(root):
     blocker = None
     if cur and cur[1]["job"]:
         job_id, jobs = cur[1]["job"], read_board(root)["jobs"]
-        hit = next((j for j in jobs if j.get("id") == job_id and j.get("stage") == "needs-human"), None) \
-            or next((j for j in jobs if j.get("parent") == job_id and j.get("stage") == "needs-human"), None)
+        stopped = lambda j: j.get("stage") == "needs-human" or j.get("paused")
+        hit = next((j for j in jobs if j.get("id") == job_id and stopped(j)), None) \
+            or next((j for j in jobs if j.get("parent") == job_id and stopped(j)), None)
         blocker = hit and {"job": hit["id"], "reason": hit.get("reason") or ""}
     return {"name": rm["name"],
             "phases": [{"n": ph["n"], "title": ph["title"],
@@ -2530,8 +3127,10 @@ def main(argv=None):
     sub.add_parser("cloud-claim").add_argument("n", type=int)
     ba = sub.add_parser("backlog-add")
     ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
+    ba.add_argument("--priority", type=int, metavar="N", help="importance 1-5, highest claimed first")
     ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
+    sub.add_parser("rank-backlog")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
     rl.add_argument("p", type=int)
@@ -2556,11 +3155,17 @@ def main(argv=None):
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
+    sub.add_parser("pipeline-fit").add_argument("digest")
     dv = sub.add_parser("digest-verify")
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
     dv.add_argument("--base", default=None)
+    rules_check = sub.add_parser("rules-check")
+    rules_check.add_argument("id")
+    rules_check.add_argument("--worktree", default=None)
+    rules_check.add_argument("--base", default=None)
     sub.add_parser("move-ratio").add_argument("id")
+    sub.add_parser("lilguy-fit").add_argument("id")
     rc = sub.add_parser("route-check")
     rc.add_argument("id")
     rc.add_argument("--check-fails", type=int, default=0)
@@ -2586,6 +3191,11 @@ def main(argv=None):
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
+    sp = sub.add_parser("spawn")
+    sp.add_argument("id")
+    sp.add_argument("action")
+    sp.add_argument("prompt", nargs="?")
+    sp.add_argument("--model")
     a = p.parse_args(argv)
     if a.cmd == "hook":
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
@@ -2638,20 +3248,30 @@ def main(argv=None):
         print(json.dumps(cmd_digest_start(a.dir)))
     elif a.cmd == "digest-trim":
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
+    elif a.cmd == "pipeline-fit":
+        print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
+        print(json.dumps(out))
+        return 0 if out["ok"] else 1
+    elif a.cmd == "rules-check":
+        out = cmd_rules_check(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
         return 0 if out["ok"] else 1
     elif a.cmd == "move-ratio":
         out = cmd_move_ratio(a.dir, a.id)
         print(json.dumps(out))
         return 1 if out.get("ok") is False else 0
+    elif a.cmd == "lilguy-fit":
+        print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
     elif a.cmd == "route-check":
         print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":
         print(json.dumps(cmd_triage_start(a.dir)))
     elif a.cmd == "triage-apply":
         print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
+    elif a.cmd == "rank-backlog":
+        print(json.dumps(cmd_rank_backlog(a.dir)))
     elif a.cmd == "manual-add":
         print(json.dumps(cmd_manual_add(a.dir, a.items)))
     elif a.cmd == "plan-apply":
@@ -2672,12 +3292,15 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "spawn":
+        proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
+        print(json.dumps({"log": log, "pid": proc.pid}))
     elif a.cmd == "backlog-spec":
         out = cmd_backlog_spec(a.dir, a.id)
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup))
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority))
 
 
 def spawn_estimates(root, texts):
@@ -2686,6 +3309,77 @@ def spawn_estimates(root, texts):
         subprocess.Popen([sys.executable, str(Path(__file__).resolve().with_name("serve.py")), f"--estimate={text}",
                           "--dir", str(Path(root).resolve())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# Started from the app icon, PATH can be bare, so look in the usual install spots too. Tests set SCRUM_CLAUDE.
+CLAUDE = os.environ.get("SCRUM_CLAUDE") or shutil.which("claude") or next(
+    (str(p) for p in (Path.home() / ".local/bin/claude", Path("/opt/homebrew/bin/claude"), Path.home() / ".claude/local/claude")
+     if p.exists()), "claude")
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]+")
+SPAWN_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # job ids plus run-all, digest, research-<hash>; it names the log file
+SPAWN_ACTION_RE = re.compile(r"[a-z-]+")
+
+
+BIG_LANES = ("bigboy", "roadmap")
+BIG_POINTS = 5
+
+
+def big_ticket(root: Path, job_id: str) -> bool:
+    """A job on a BIG_LANES lane, or claimed from a backlog line of BIG_POINTS or more."""
+    try:
+        job = find(read_board(root), job_id)
+    except SystemExit:  # not on the board (run-all, digest) or a broken board.json
+        job = {}
+    if job.get("lane") in BIG_LANES:
+        return True
+    return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in read_backlog(root)[1])
+
+
+def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
+    """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
+    Missing, blank or malformed values give `sonnet`. The optional `- Big ticket model:` line wins for a big_ticket
+    job; the board and backlog are only read when that line is present and valid."""
+    try:
+        text = (root / "project.md").read_text()
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return "sonnet"
+    big = re.search(r"^- Big ticket model: *(.*?) *$", text, re.M)
+    if job_id and big and MODEL_RE.fullmatch(big.group(1)) and big_ticket(root, job_id):
+        return big.group(1)
+    m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    if value.lower() == "inherit":
+        return None
+    return value if MODEL_RE.fullmatch(value) else "sonnet"
+
+
+def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
+          model: str | None = None) -> tuple[subprocess.Popen, str]:
+    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog.
+    start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given. Returns (proc, log path relative to root)."""
+    if not SPAWN_ID_RE.fullmatch(job_id):
+        raise SystemExit(f"bad spawn id {job_id!r}")
+    if not SPAWN_ACTION_RE.fullmatch(action):
+        raise SystemExit(f"bad spawn action {action!r}")
+    if model is not None and not MODEL_RE.fullmatch(model):
+        raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
+    if model is None and action in ("start", "resume"):
+        model = orchestrator_model(root, job_id)
+    prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
+    logs = root / "runs"
+    logs.mkdir(exist_ok=True)
+    log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
+    with open(log, "w") as fh:
+        proc = subprocess.Popen(argv, cwd=root.parent,
+                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    try:  # the Open terminal button tails this; a job that isn't on the board (run-all, digest) has no row to set
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would win over the log tail
+    except SystemExit:
+        pass
+    return proc, f"runs/{log.name}"
 
 
 if __name__ == "__main__":
