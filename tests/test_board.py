@@ -251,7 +251,8 @@ class BoardTest(unittest.TestCase):
     def test_ask_accepts_each_command_form(self):
         job_id = board.cmd_new(self.root, "x")
         for cmd in ("approve 012-other-job", 'rework 012-other-job "fix the tests"', "abort 012-other-job",
-                    "abort 012-other-job --requeue", "resume 012-other-job", "shell: git status"):
+                    "abort 012-other-job --requeue", "abort 012-other-job --cascade", "resume 012-other-job",
+                    "shell: git status"):
             with self.subTest(cmd=cmd):
                 out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"])
                 self.assertEqual(out[0]["command"], cmd)
@@ -283,14 +284,83 @@ class BoardTest(unittest.TestCase):
             "empty question": (job_id, "  ", [f"A=approve {job_id}", ok]),
             "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
         }
+        allowed = ('allowed: approve <id>, rework <id> "<text>", abort <id> [--requeue|--cascade], resume <id>, '
+                   "shell: <command>")
+        cases["cascade and requeue"] = (job_id, "Q?", [f"Go=abort {job_id} --cascade --requeue", ok])
+        cases["misspelt cascade"] = (job_id, "Q?", [f"Go=abort {job_id} --cascad", ok])
         for name, (jid, q, opts) in cases.items():
             with self.subTest(name):
                 before = (self.root / "board.json").read_bytes()
                 with self.assertRaises(SystemExit) as e:
                     board.cmd_ask(self.root, jid, q, opts)
                 self.assertTrue(str(e.exception.code))
+                if name in ("cascade and requeue", "misspelt cascade"):
+                    self.assertIn(allowed, str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertEqual(len(self.log_lines()), 1)
+
+    def test_ask_recommend_stored_and_logged(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
+                      recommend=("b", "  safest\n path "))
+        self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "safest path"})
+        self.assertEqual(self.log_lines()[-1]["recommend"], {"key": "b", "why": "safest path"})
+
+    def test_ask_cli_recommend(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.main(["--dir", str(self.root), "ask", job_id, "Q?", "--a", f"A=approve {job_id}",
+                    "--b", f"B=resume {job_id}", "--recommend", "b", "it is the safest path"])
+        self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "it is the safest path"})
+        self.assertEqual(self.log_lines()[-1]["recommend"], {"key": "b", "why": "it is the safest path"})
+
+    def test_ask_without_recommend_has_no_field(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"])
+        self.assertNotIn("recommend", self.jobs()[0])
+        self.assertNotIn("recommend", self.log_lines()[-1])
+
+    def test_reask_drops_stale_recommend(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("a", "why"))
+        board.cmd_ask(self.root, job_id, "Q2?", [f"A=approve {job_id}", f"B=resume {job_id}"])
+        self.assertNotIn("recommend", self.jobs()[0])
+        self.assertNotIn("recommend", self.log_lines()[-1])
+
+    def test_ask_recommend_bad_key_rejected(self):
+        job_id = board.cmd_new(self.root, "x")
+        for key in ("c", "x"):
+            with self.subTest(key=key):
+                before = (self.root / "board.json").read_bytes()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
+                                  recommend=(key, "because"))
+                self.assertIn("bad recommend key", str(e.exception.code))
+                self.assertEqual((self.root / "board.json").read_bytes(), before)
+                self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_recommend_empty_why_rejected(self):
+        job_id = board.cmd_new(self.root, "x")
+        for why in ("", "  \n\t "):
+            with self.subTest(why=why):
+                before = (self.root / "board.json").read_bytes()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
+                                  recommend=("a", why))
+                self.assertIn("recommend needs a reason", str(e.exception.code))
+                self.assertEqual((self.root / "board.json").read_bytes(), before)
+                self.assertFalse((self.root / "questions.log").exists())
+
+    def test_recommend_cleared_after_answer_moves_job(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("b", "safe"))
+        picked = board.cmd_answer(self.root, job_id, "b")
+        self.assertEqual(picked, {"key": "b", "label": "B", "command": f"resume {job_id}"})
+        self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "safe"})  # still asked until it moves
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "build")
+        for key in ("question", "options", "recommend"):
+            self.assertNotIn(key, job)
 
     def test_ask_rejects_without_creating_log(self):
         job_id = board.cmd_new(self.root, "x")
@@ -1902,6 +1972,88 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         board.main(["--dir", str(self.root), "abort", job_id])
         self.assertTrue(self.jobs()[0]["reason"].startswith("Aborted by Trevor "))
+
+    def edit_jobs(self, **fields):
+        """Set raw fields on board jobs: edit_jobs(**{job_id: {"stage": ...}})."""
+        with board.locked_board(self.root) as b:
+            for job in b["jobs"]:
+                job.update(fields.get(job["id"], {}))
+
+    def by_id(self):
+        return {j["id"]: j for j in self.jobs()}
+
+    def test_abort_cascade_two_level_chain(self):
+        a, b, c, other = (board.cmd_new(self.root, t) for t in ("a", "b", "c", "other"))
+        self.edit_jobs(**{b: {"stage": "waiting", "depends_on": [a]}, c: {"stage": "needs-human", "depends_on": [b]},
+                          other: {"stage": "waiting", "depends_on": []}})
+        self.assertEqual(board.cmd_abort(self.root, a, False, reason="dup", cascade=True), [a, b, c])
+        jobs = self.by_id()
+        self.assertEqual([(jobs[j]["stage"], jobs[j]["reason"]) for j in (a, b, c)],
+                         [("aborted", "dup"), ("aborted", "Removed with 001-a"), ("aborted", "Removed with 001-a")])
+        self.assertEqual(jobs[other]["stage"], "waiting")
+
+    def test_abort_without_cascade_touches_only_root(self):
+        a, b = board.cmd_new(self.root, "a"), board.cmd_new(self.root, "b")
+        self.edit_jobs(**{b: {"stage": "waiting", "depends_on": [a]}})
+        self.assertEqual(board.cmd_abort(self.root, a, False), [a])
+        self.assertEqual(self.by_id()[b]["stage"], "waiting")
+        self.assertTrue(self.by_id()[a]["reason"].startswith("Aborted by Trevor "))
+
+    def test_abort_cli_cascade_prints_ids(self):
+        a, b, c = (board.cmd_new(self.root, t) for t in ("a", "b", "c"))
+        self.edit_jobs(**{b: {"stage": "waiting", "depends_on": [a]}})
+        run = lambda *args: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "abort", *args],
+                                           capture_output=True, text=True)
+        out = run(a, "--cascade")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"aborted": ["001-a", "002-b"]})
+        out = run(c)
+        self.assertEqual((out.returncode, out.stdout), (0, ""))
+
+    def test_abort_cascade_skips_done_running_and_parent(self):
+        parent, a, done, gone, running, behind = (board.cmd_new(self.root, t)
+                                                  for t in ("p", "a", "done", "gone", "running", "behind"))
+        kid = {"parent": parent}
+        self.edit_jobs(**{parent: {"lane": "bigboy", "stage": "running", "reason": "kept", "children": [a, done, gone]},
+                          a: {**kid, "stage": "build"},
+                          done: {**kid, "stage": "done", "depends_on": [a]},
+                          gone: {**kid, "stage": "aborted", "reason": "old", "depends_on": [a]},
+                          running: {**kid, "stage": "build", "depends_on": [a]},
+                          behind: {**kid, "stage": "waiting", "depends_on": [running]}})
+        self.assertEqual(board.cmd_abort(self.root, a, False, cascade=True), [a])
+        jobs = self.by_id()
+        self.assertEqual((jobs[parent]["stage"], jobs[parent]["reason"]), ("running", "kept"))
+        self.assertEqual([jobs[j]["stage"] for j in (done, gone, running, behind)], ["done", "aborted", "build", "waiting"])
+        self.assertEqual(jobs[gone]["reason"], "old")
+
+    def test_abort_cascade_takes_paused_and_queued(self):
+        a, paused, queued = (board.cmd_new(self.root, t) for t in ("a", "paused", "queued"))
+        board.cmd_set(self.root, paused, ["stage=build"])
+        board.cmd_pause(self.root, paused)
+        self.edit_jobs(**{paused: {"depends_on": [a]}, queued: {"stage": "spec", "play_queued": True, "depends_on": [a]}})
+        self.assertEqual(board.cmd_abort(self.root, a, False, cascade=True), [a, paused, queued])
+        jobs = self.by_id()
+        for j in (paused, queued):
+            self.assertEqual(jobs[j]["stage"], "aborted")
+            self.assertNotIn("paused", jobs[j])
+            self.assertNotIn("play_queued", jobs[j])
+
+    def test_abort_cascade_reopens_runall_child_backlog_line(self):
+        self.root.mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Add schema {#sch2}\n- [ ] Add API {needs #sch2}\n")
+        run = board.cmd_runall_start(self.root)
+        schema, api = run["children"]
+        bb, bb_a, bb_b = (board.cmd_new(self.root, t) for t in ("bb", "bb a", "bb b"))
+        self.edit_jobs(**{bb: {"lane": "bigboy", "stage": "running", "children": [bb_a, bb_b]},
+                          bb_a: {"parent": bb, "stage": "waiting"},
+                          bb_b: {"parent": bb, "stage": "waiting", "depends_on": [bb_a]}})
+        self.assertEqual(board.cmd_abort(self.root, schema, False, cascade=True), [schema, api])
+        lines = (self.root / "backlog.md").read_text().splitlines()
+        self.assertEqual(lines[-1], "- [ ] Add API")  # abort_job's requeue: the feature text, as --requeue writes it
+        self.assertNotIn("- [ ] Add schema", lines)  # the root follows its own (absent) --requeue
+        before = (self.root / "backlog.md").read_text()
+        self.assertEqual(board.cmd_abort(self.root, bb_a, False, cascade=True), [bb_a, bb_b])
+        self.assertEqual((self.root / "backlog.md").read_text(), before)
 
     # --- pause ---
     def test_pause_records_stage_in_reason_and_keeps_fields(self):
