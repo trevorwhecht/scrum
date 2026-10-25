@@ -379,6 +379,52 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(), before)
         est.assert_not_called()
 
+    def with_tailnet(self, name="box.tail1.ts.net"):
+        old = self.serve.TAILNET
+        self.serve.TAILNET = {name} if name else set()
+        self.addCleanup(setattr, self.serve, "TAILNET", old)
+
+    def test_tailnet_host_allowed(self):
+        self.with_tailnet()
+        for h in ("box.tail1.ts.net", "box.tail1.ts.net:443"):
+            self.assertEqual(self.req("GET", "/api/projects", headers={"Host": h})[0], 200)
+
+    def test_tailnet_origin_post_allowed(self):
+        self.with_tailnet()
+        code = self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                        {"Host": "box.tail1.ts.net", "Origin": "https://box.tail1.ts.net"})[0]
+        self.assertNotEqual(code, 403)
+
+    def test_tailnet_other_hosts_still_forbidden(self):
+        self.with_tailnet()
+        for h in ("evil.example", "other.tail1.ts.net", "evil.ts.net"):
+            self.assertEqual(self.req("GET", "/api/projects", headers={"Host": h})[0], 403)
+        for o in ("https://evil.example", "https://other.tail1.ts.net"):
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                                      {"Host": "box.tail1.ts.net", "Origin": o})[0], 403)
+
+    def test_tailnet_unset_unchanged(self):
+        self.with_tailnet("")
+        self.assertEqual(self.req("GET", "/api/projects", headers={"Host": "box.tail1.ts.net"})[0], 403)
+        self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                                  {"Origin": "https://box.tail1.ts.net"})[0], 403)
+
+    def test_tailnet_host_detection(self):
+        ok = mock.Mock(returncode=0, stdout='{"Self": {"DNSName": "Box.Tail1.ts.net."}}')
+        with mock.patch.dict(os.environ, {"SCRUM_TAILNET_HOST": ""}):
+            with mock.patch.object(self.serve.subprocess, "run", return_value=ok):
+                self.assertEqual(self.serve.tailnet_host(), "box.tail1.ts.net")
+            with mock.patch.dict(os.environ, {"SCRUM_TAILNET_HOST": "env.ts.net"}):
+                self.assertEqual(self.serve.tailnet_host(), "env.ts.net")
+                self.assertEqual(self.serve.tailnet_host("arg.ts.net"), "arg.ts.net")
+            bad = [mock.Mock(returncode=1, stdout=ok.stdout), mock.Mock(returncode=0, stdout="not json"),
+                   mock.Mock(returncode=0, stdout='{"Self": {}}'), mock.Mock(returncode=0, stdout='{"Self": {"DNSName": ""}}')]
+            for r in bad:
+                with mock.patch.object(self.serve.subprocess, "run", return_value=r):
+                    self.assertEqual(self.serve.tailnet_host(), "")
+            with mock.patch.object(self.serve.subprocess, "run", side_effect=FileNotFoundError):
+                self.assertEqual(self.serve.tailnet_host(), "")
+
     def test_writes_need_json_and_localhost(self):
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog", method="POST",
                                    data=b"op=delete&index=0", headers={"Content-Type": "application/x-www-form-urlencoded"})
