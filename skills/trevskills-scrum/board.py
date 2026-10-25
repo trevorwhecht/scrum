@@ -67,8 +67,8 @@
                                    items move to manual-checks.md; depends adds {#id} and {needs #id} markers), write report.md
   board.py plan-apply <id> [--fix] turn a bigboy parent's plan.md into waiting child jobs, print {"children"};
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
-  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; the in-progress cap is paced
-                                   by ~/.claude/usage.json), print
+  board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; gated by machine_ok, free RAM
+                                   per batch and the file-overlap rules), print
                                    {"ready","merged","total","in_progress","all_merged"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
@@ -1741,9 +1741,6 @@ RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
 MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok)
-RUNALL_MAX_IN_PROGRESS = 5  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
-WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
-USAGE_FRESH = 300  # seconds; an older usage.json means no status line is running, so no pacing
 
 
 def usage_path():
@@ -1763,33 +1760,9 @@ def is_num(x):
 
 
 def pace_cap(usage, now, base):
-    """The in-progress cap for this `ready` call from usage.json, or None (no pacing, so base stands). Each usable
-    window is projected to its reset at the current burn rate; the highest projection P picks the tier."""
-    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
-    at = usage.get("written_at") if isinstance(limits, dict) else None
-    if not is_num(at) or now - at > USAGE_FRESH:
-        return None
-    projected = []
-    for name, length in WINDOWS.items():
-        w = limits.get(name)
-        used, resets = (w.get("used_percentage"), w.get("resets_at")) if isinstance(w, dict) else (None, None)
-        if not (is_num(used) and 0 <= used <= 100 and is_num(resets) and resets > now):
-            continue
-        left = resets - now
-        elapsed = length - left
-        if elapsed < length / 10:  # a few minutes of data extrapolate wildly
-            continue
-        projected.append(used + used / elapsed * left)
-    if not projected:
-        return None
-    p = max(projected)
-    if p < 60:
-        return None if base is None else base + 2
-    if p < 100:
-        return base
-    if p < 125:
-        return 2 if base is None else min(base, 2)
-    return 1
+    """Always None: usage pacing no longer caps sessions (job 282); machine_ok and the overlap rules gate instead.
+    Kept for continue.py (outside this repo), which skips its tick when this is not None."""
+    return None
 
 
 def cmd_statusline(text):
@@ -1952,13 +1925,6 @@ def cmd_runall_start(root):
         return {"id": parent_id, "children": kids}
 
 
-def slot_cap(runall):
-    """The in-progress cap for a parent's children, or None (no cap). Usage pacing only gates new claims (and
-    resumes); it is always >= 1, so with nothing in progress one child still starts."""
-    cap = pace_cap(read_usage(), time.time(), RUNALL_MAX_IN_PROGRESS if runall else None)
-    return RUNALL_MAX_IN_PROGRESS if runall and cap is None else cap
-
-
 MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
 MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
 MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
@@ -2010,13 +1976,15 @@ def free_disk_gb(path):
 def machine_ok(path):
     """None when the machine has room for new work, else why not: free RAM, then swap, then free disk. Gates new claims,
     resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
-    ram = free_ram_pct()
+    return machine_verdict(free_ram_pct(), swap_used_pct(), free_disk_gb(path))
+
+
+def machine_verdict(ram, swap, disk):
+    """machine_ok's answer for readings already taken (serve.py's /api/machine reads each once)."""
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
-    swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT:
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
-    disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
     return None
@@ -2046,13 +2014,11 @@ def live_sessions():
     return sum(1 for line in out.splitlines() if SESSION_RE.match(line))
 
 
-def slot_conflict(k, busy, files, cap):
+def slot_conflict(k, busy, files):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
-    child id to its Likely files. The rules `ready` and `resume_blocker` share: the in-progress cap; parallel=no, or
+    child id to its Likely files. The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file."""
     busy = [o for o in busy if o["id"] != k["id"]]
-    if cap is not None and len(busy) >= cap:
-        return f"{len(busy)} siblings in progress (cap {cap})", [o["id"] for o in busy]
     if not busy:
         return None
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
@@ -2072,7 +2038,7 @@ class Blocker(str):
 
 
 def resume_blocker(root, job_id, live=()):
-    """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s cap and overlap rules
+    """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s overlap rules
     (slot_conflict) against its in-progress siblings: any not IDLE, plus the ids in `live` (serve.py's running
     sessions, which still read needs-human until they write the board). Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
@@ -2090,7 +2056,7 @@ def resume_blocker(root, job_id, live=()):
     busy = [k for k in kids if (not idle(k) or k["id"] in live) and k["id"] != job_id]
     if not busy:
         return None
-    hit = slot_conflict(job, busy, files, slot_cap(parent.get("lane") == "runall"))
+    hit = slot_conflict(job, busy, files)
     return Blocker(*hit) if hit else None
 
 
@@ -2118,7 +2084,7 @@ def cmd_ready(root, parent_id, live=()):
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
         stage = {k["id"]: k["stage"] for k in kids}
-        runall = parent.get("lane") == "runall"  # aborted children count as finished, and a count cap always applies
+        runall = parent.get("lane") == "runall"  # aborted children count as finished
         reason = parent.get("reason") or ""
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
         # re-evaluated so existing boards recover.
@@ -2132,7 +2098,6 @@ def cmd_ready(root, parent_id, live=()):
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
-        cap = slot_cap(runall)
         room = ram_room() if go and not machine else 0  # one claim = one new session
         ready = []
         for k in kids if go and not machine else []:
@@ -2141,7 +2106,7 @@ def cmd_ready(root, parent_id, live=()):
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
-            if slot_conflict(k, busy, files, cap):
+            if slot_conflict(k, busy, files):
                 continue
             k.update(stage="spec", updatedAt=now())
             busy.append(k)

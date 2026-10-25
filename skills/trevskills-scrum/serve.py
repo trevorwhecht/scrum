@@ -156,8 +156,8 @@ def start_ready(project, root, parent_id):
 
 def resume_job(project, root, job, jobs):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
-    paused parent resumes its paused children up to the cap and starts whatever is ready instead. A child over the cap
-    is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees."""
+    paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
+    refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -185,17 +185,12 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok), or, while usage pacing is active, when the machine already runs the pace cap's worth of
-    sessions; a Run-all/BigBoy child also waits for the same cap and overlap rules `ready` applies to new claims."""
+    (board.machine_ok); a Run-all/BigBoy child also waits for the overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     machine = board.machine_ok(root)
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
-    live = board.live_sessions()
-    cap = board.pace_cap(board.read_usage(), time.time(), board.RUNALL_MAX_IN_PROGRESS)
-    if cap is not None and live >= cap:
-        return f"can't resume yet: {live} sessions running (usage cap {cap}). Fix: click Resume when one finishes."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
 
@@ -666,7 +661,7 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """Start one headless run-all in every opted-in project with no work in flight, no auto-started run-all still
-    running and a claimable backlog line, unless usage is over pace. Focus projects go first, then the project that
+    running and a claimable backlog line. Focus projects go first, then the project that
     just finished, then the most recent board activity, then lowest n. board.machine_ok (RAM, disk, the session
     ceiling) is checked before each start; the first failure stops this tick's later starts.
     A project missing from busy (its sweep failed this tick) is never a target."""
@@ -677,15 +672,13 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
         n = auto_continue(repo / "scrum")
         if n is not None:
             opted.append((project, repo / "scrum", n, last_active(repo / "scrum"), focus(repo / "scrum")))
-    if board.pace_cap(board.read_usage(), time.time(), None) is not None:
-        return
     # stable: ties keep projects() order
     for project, root, *_ in sorted(opted, key=lambda o: (not o[4], o[0] not in last, -o[3], o[2])):
         if busy.get(project, True):
             continue
         try:
             if not running(project, "run-all") and claimable(root):
-                if board.machine_ok(root):  # no room on this machine; retry next tick, like the pace gate
+                if board.machine_ok(root):  # no room on this machine; retry next tick
                     return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
         except (Exception, SystemExit) as e:
@@ -877,6 +870,16 @@ def save_attachment(root, data, mime):
         tmp.write_bytes(raw)
         os.replace(tmp, path)
     return {"path": str(path)}
+
+
+def machine_status():
+    """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
+    file's volume (the dashboard spans every project, and they share one disk)."""
+    ram, swap, disk = board.free_ram_pct(), board.swap_used_pct(), board.free_disk_gb(HERE)
+    r = lambda v: None if v is None else round(v, 1)
+    return {"free_ram_pct": r(ram), "swap_pct": r(swap), "free_disk_gb": r(disk),
+            "min_free_ram_pct": board.MIN_FREE_RAM_PCT, "max_swap_pct": board.MAX_SWAP_PCT,
+            "min_free_disk_gb": board.MIN_FREE_DISK_GB, "verdict": board.machine_verdict(ram, swap, disk)}
 
 
 def claude_usage(now):
@@ -2611,6 +2614,8 @@ class Handler(BaseHTTPRequestHandler):
             s = route.status()  # only the keys the dashboard shows: route.py may still report its local model server
             return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
                                         "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
+        if path == "/api/machine":
+            return self.send_json(200, machine_status())
         if path == "/api/runs":
             discusses = discuss_runs()
             with RUNS_LOCK:
