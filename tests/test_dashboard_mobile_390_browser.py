@@ -89,13 +89,10 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
-        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 42, "weekly": 17}, "ollama": "down",
+        status = mock.patch.object(serve.route, "status", return_value={"codex": {"5h": 42, "weekly": 17},
                                                                          "claude_exhausted_until": None})
         status.start()
         self.addCleanup(status.stop)
-        models = mock.patch.object(serve.route, "loaded_models", return_value=[])
-        models.start()
-        self.addCleanup(models.stop)
         self.server = serve.make_server(0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -116,7 +113,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_fits_390px(self):
         got = self.browse("header")
-        self.assertEqual(got["routing"], "Claude 5h — · wk — · Codex 5h 42% · wk 17% · Ollama down", got)
+        self.assertEqual(got["routing"], "Claude 5h — · wk — · Codex 5h 42% · wk 17%", got)
         self.assertIn(PROJECT, got["options"], got)
         self.assertGreaterEqual(len(PROJECT), 30)
         self.assertLessEqual(got["scrollWidth"], 390, got)
