@@ -14,7 +14,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - SKILL.md: locate sections by heading (`grep -n '^## ' skills/trevskills-scrum/SKILL.md`), never by line number.
   Headings: Setup, Commands, New job, Run all, Fast lane, Debug lane, BigBoy lane, Roadmap lane, Lilguy lane,
   Cloud lane, Check gate, Review (WAIT FOR ALL), Approve, Migrate, Merge, Routing, Resuming the builder, Digest, Final report.
-- SKILL.md must stay under 80,000 bytes (`test_skill_md_size_budget` in `tests/test_contracts.py`); check `wc -c` before adding text.
+- SKILL.md must stay under 83,000 bytes, as enforced by `test_skill_md_size_budget` in `tests/test_contracts.py` (read the test for the live number; do not re-measure with `wc -c`). It is about 77,300 bytes now, so little headroom. It is also already over rule 4's 5,000-token budget (`BODY_MAX_LINES, BODY_MAX_TOKENS = 500, 5000` in `board.py`; about 19k tokens, 430 lines), so any growth fails B rules-check. Put new text in `lanes/<lane>.md`.
 - Lane bodies live in `skills/trevskills-scrum/lanes/<lane>.md` (runall, debug, bigboy, roadmap, lilguy, cloud); their SKILL.md section is one `Read ... when this lane runs.` line. New lane text goes in the lane file, not SKILL.md.
 - Dashboard: `skills/trevskills-scrum/dashboard.html` is one file served by `serve.py` on :8765. The UI rules in
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
