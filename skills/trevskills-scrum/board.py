@@ -1851,6 +1851,21 @@ def pace_cap(usage, now, base):
     return None
 
 
+def merge_limits(old, new, now):
+    """New rate_limits over old: per window the later resets_at wins (tie: higher used_percentage); expired old windows drop."""
+    def ok(w):
+        return isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
+    merged = dict(new)
+    for key in ("five_hour", "seven_day"):
+        o = old.get(key) if isinstance(old, dict) else None
+        if not ok(o) or o["resets_at"] <= now:
+            continue
+        n = new.get(key)
+        if not ok(n) or (n["resets_at"], n["used_percentage"]) < (o["resets_at"], o["used_percentage"]):
+            merged[key] = o
+    return merged
+
+
 def cmd_statusline(text):
     """Claude Code's status line: save stdin's rate_limits to usage.json (temp file + os.replace), return the line."""
     try:
@@ -1861,9 +1876,19 @@ def cmd_statusline(text):
         return ""  # no rate_limits (yet): leave the old file alone
     path = usage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_name(f"{path.name}.lock")
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # pid: several sessions may write at once
-    tmp.write_text(json.dumps({"rate_limits": limits, "written_at": int(time.time())}))
-    os.replace(tmp, path)
+    with open(lock, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)  # read old, merge, write as one step
+        try:
+            old = json.loads(path.read_text()).get("rate_limits")
+        except (OSError, ValueError, AttributeError):
+            old = None
+        now = int(time.time())
+        tmp.write_text(json.dumps({"rate_limits": merge_limits(old, limits, now), "written_at": now}))
+        os.replace(tmp, path)
+        # ponytail: unlinking under the lock can let a racing session lock a new inode; the worst case is one lost merge
+        lock.unlink(missing_ok=True)
     return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 

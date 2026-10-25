@@ -84,6 +84,49 @@ class StatuslineTest(unittest.TestCase):
         self.assertEqual(board.cmd_statusline('{"rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": 1}}}'),
                          "5h 99%")
 
+    def merge(self, old, new):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if old is not None:
+            self.path.write_text(old if isinstance(old, str) else json.dumps({"rate_limits": old, "written_at": 1}))
+        board.cmd_statusline(json.dumps({"rate_limits": new}))
+        return json.loads(self.path.read_text())
+
+    def test_statusline_stale_partial_payload_keeps_higher(self):
+        t = int(time.time()) + 5000
+        got = self.merge({"five_hour": {"used_percentage": 80, "resets_at": t},
+                          "seven_day": {"used_percentage": 50, "resets_at": t + 9}},
+                         {"seven_day": {"used_percentage": 29, "resets_at": t + 9}})
+        self.assertEqual(got["rate_limits"], {"five_hour": {"used_percentage": 80, "resets_at": t},
+                                              "seven_day": {"used_percentage": 50, "resets_at": t + 9}})
+
+    def test_statusline_merge_drops_expired_keeps_unexpired(self):
+        t = int(time.time())
+        got = self.merge({"five_hour": {"used_percentage": 80, "resets_at": t - 5},
+                          "seven_day": {"used_percentage": 50, "resets_at": t + 500}}, {"extra": 1})
+        self.assertEqual(got["rate_limits"], {"extra": 1, "seven_day": {"used_percentage": 50, "resets_at": t + 500}})
+
+    def test_statusline_merge_later_resets_at_wins(self):
+        t = int(time.time()) + 500
+        old = {"five_hour": {"used_percentage": 80, "resets_at": t}}
+        new = {"five_hour": {"used_percentage": 3, "resets_at": t + 100}}
+        self.assertEqual(self.merge(old, new)["rate_limits"], new)
+        older = {"five_hour": {"used_percentage": 1, "resets_at": t - 100}}
+        self.assertEqual(self.merge(old, older)["rate_limits"], old)
+
+    def test_statusline_merge_equal_resets_higher_used(self):
+        t = int(time.time()) + 500
+        lo, hi = {"five_hour": {"used_percentage": 10, "resets_at": t}}, {"five_hour": {"used_percentage": 60, "resets_at": t}}
+        self.assertEqual(self.merge(lo, hi)["rate_limits"], hi)
+        self.assertEqual(self.merge(hi, lo)["rate_limits"], hi)
+
+    def test_statusline_merge_bad_or_missing_old_file(self):
+        new = {"five_hour": {"used_percentage": 5, "resets_at": 1}}
+        for old in (None, "not json", "[1]", '{"rate_limits": 3}'):
+            self.path.unlink(missing_ok=True)
+            got = self.merge(old, new)
+            self.assertEqual(got["rate_limits"], new, old)
+            self.assertTrue(abs(got["written_at"] - time.time()) < 60, old)
+
 
 class ReadyPacingTest(unittest.TestCase):
     def setUp(self):
