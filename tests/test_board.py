@@ -2261,6 +2261,7 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(self.get(wt)["reason"].startswith("stalled in build"), self.get(wt)["reason"])
         self.assertEqual(self.get(here)["stage"], "build")
 
+    @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
         # No parent: never blocked.
@@ -2320,6 +2321,93 @@ class BoardTest(unittest.TestCase):
             self.assertIsNone(board.resume_blocker(self.root, a))
         board.cmd_set(self.root, b, ["stage=done"])
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
+
+    STALLED = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+
+    def hold(self, k, until=4_000_000_000):
+        """Set (or clear, until=None) limitResetAt, which cmd_set does not allow."""
+        data = json.loads((self.root / "board.json").read_text())
+        for j in data["jobs"]:
+            if j["id"] == k:
+                j.pop("limitResetAt", None)
+                if until:
+                    j["limitResetAt"] = until
+        (self.root / "board.json").write_text(json.dumps(data))
+
+    def shared_kids(self, n):
+        _, kids = self.runall(n)
+        for k in kids:
+            self.spec(k, "src/shared.py")
+        return kids
+
+    def test_resume_blocker_live_sibling_always_busy(self):
+        a, b = self.shared_kids(2)
+        for sets in (self.STALLED, ["stage=waiting"], ["stage=done"], ["stage=build"]):
+            board.cmd_set(self.root, b, sets, internal=True)
+            self.hold(b)
+            self.assertEqual(board.resume_blocker(self.root, a, live={b}), f"sibling {b} shares src/shared.py", sets)
+        board.cmd_pause(self.root, b)
+        self.assertEqual(board.resume_blocker(self.root, a, live={b}).ids, [b])
+
+    def test_resume_blocker_sessionless_siblings_idle(self):
+        a, b = self.shared_kids(2)
+        dead = lambda: (lambda job: False)
+        with mock.patch.object(board, "session_alive_fn", dead):
+            board.cmd_set(self.root, b, self.STALLED, internal=True)
+            self.assertIsNone(board.resume_blocker(self.root, a))
+            board.cmd_set(self.root, b, ["stage=build"], internal=True)
+            self.hold(b)
+            self.assertIsNone(board.resume_blocker(self.root, a))  # held
+            self.hold(b, None)
+            self.assertIsNone(board.resume_blocker(self.root, a))  # WATCHED, dead session
+            board.cmd_pause(self.root, b)
+            self.assertIsNone(board.resume_blocker(self.root, a))  # paused
+
+    def test_resume_blocker_limit_held_siblings_no_deadlock(self):
+        kids = self.shared_kids(3)
+        for k in kids:
+            board.cmd_set(self.root, k, ["stage=build"], internal=True)
+            self.hold(k)
+        with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: False)):
+            live, resumed = set(), []
+            for k in kids:  # serve.py resumes one at a time, adding it to live
+                if board.resume_blocker(self.root, k, live=live) is None:
+                    resumed.append(k)
+                    live.add(k)
+            self.assertEqual(resumed, [kids[0]])
+            for k in kids[1:]:
+                self.assertEqual(board.resume_blocker(self.root, k, live=live), f"sibling {kids[0]} shares src/shared.py")
+
+    def test_resume_blocker_stalled_siblings_dont_block(self):
+        a, b = self.shared_kids(2)
+        for k in (a, b):
+            board.cmd_set(self.root, k, self.STALLED, internal=True)
+        self.assertIsNone(board.resume_blocker(self.root, a))
+        self.assertIsNone(board.resume_blocker(self.root, b))
+
+    def test_resume_blocker_alive_watched_sibling_blocks(self):
+        a, b = self.shared_kids(2)
+        board.cmd_set(self.root, b, ["stage=review"])
+        with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: job["id"] == b)):
+            self.assertEqual(board.resume_blocker(self.root, a), f"sibling {b} shares src/shared.py")
+        with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: False)):
+            self.assertIsNone(board.resume_blocker(self.root, a))
+
+    def test_resume_blocker_skips_ps_scan_when_no_watched_sibling(self):
+        a, b, c = self.shared_kids(3)
+        calls = []
+        def scan():
+            calls.append(1)
+            return lambda job: True
+        with mock.patch.object(board, "session_alive_fn", scan):
+            board.cmd_set(self.root, b, self.STALLED, internal=True)
+            board.cmd_set(self.root, c, ["stage=build"], internal=True)
+            self.hold(c)
+            board.resume_blocker(self.root, a, live={b})
+            self.assertEqual(calls, [])
+            self.hold(c, None)
+            board.resume_blocker(self.root, a)
+            self.assertEqual(calls, [1])
 
     def test_live_sessions_count_as_busy_siblings(self):
         """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so

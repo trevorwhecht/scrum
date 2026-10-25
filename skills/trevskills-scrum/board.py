@@ -2124,8 +2124,8 @@ class Blocker(str):
 
 def resume_blocker(root, job_id, live=()):
     """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s overlap rules
-    (slot_conflict) against its in-progress siblings: any not IDLE, plus the ids in `live` (serve.py's running
-    sessions, which still read needs-human until they write the board). Reads the board without writing anything."""
+    (slot_conflict) against its in-progress siblings: the ids in `live` (serve.py's running sessions, which still
+    read needs-human until they write the board) and the non-idle ones with a live session (see below). Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     job = jobs.get(job_id)
@@ -2138,7 +2138,12 @@ def resume_blocker(root, job_id, live=()):
     spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
         if (jobs_dir / k["id"] / "spec.md").is_file() else ""
     files = {k["id"]: likely_files(spec(k)) for k in kids}
-    busy = [k for k in kids if (not idle(k) or k["id"] in live) and k["id"] != job_id]
+    # A sibling holds a slot only with a live session: `live`, or a WATCHED stage whose claude process is alive.
+    # Needs-human, paused and limit-held (limitResetAt) siblings run nothing, so they never block each other.
+    maybe = [k for k in kids if k["id"] not in live and k["id"] != job_id and not idle(k) and not k.get("limitResetAt")]
+    alive = session_alive_fn() if any(k.get("stage") in WATCHED for k in maybe) else None  # ps only when needed
+    busy = [k for k in kids if k["id"] != job_id and (k["id"] in live or (
+        k in maybe and (alive(k) if k.get("stage") in WATCHED else True)))]
     if not busy:
         return None
     hit = slot_conflict(job, busy, files)
