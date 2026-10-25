@@ -79,7 +79,7 @@ class JobModal(unittest.TestCase):
         self.assertIn("resumeForm(reason)", body)
         self.assertIn("|stalled)/.test(reason)", body)  # Approve stays hidden for a paused (stalled) job
         submit = text[text.index('$("actions").addEventListener("submit"'):]
-        self.assertIn('act === "resume" || act === "pause" || act === "setup-done" ? {}', submit)
+        self.assertIn('act === "resume" ? {manual: true} : act === "pause" || act === "setup-done" ? {}', submit)
 
     def actions_html(self, job, runs=None):
         """renderActions(job) evaluated in node with a stub #actions element; returns the HTML it wrote."""

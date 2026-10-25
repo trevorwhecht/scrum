@@ -25,6 +25,7 @@ class CooldownButton(unittest.TestCase):
         click = click[:click.index("\n});\n")]
         self.assertIn('post("api/cooldown", {on: !btn.dataset.on})', click, "the opposite of the shown state")
         self.assertIn("renderCooldown({cooldown: out.cooldown", click, "re-renders from the response")
+        self.assertIn("if (focused) btn.focus()", click, "disabling during the POST drops focus; it comes back")
         self.assertIn('act === "resume" ? {manual: true}', text, "the Play/Resume form marks the click manual")
         self.assertIn("renderCooldown(m)", fn_body(text, "poll"))
         css = " ".join(re.findall(r"#cooldown[^{]*\{[^}]*\}", text))

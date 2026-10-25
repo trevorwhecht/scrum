@@ -1677,7 +1677,7 @@ async function loadRouting() {
 }
 $("routing").addEventListener("click", () => { if (usage) $("usage").showModal(); });
 $("cooldown").addEventListener("click", async e => {
-  const btn = e.currentTarget;
+  const btn = e.currentTarget, focused = document.activeElement === btn;  // disabling drops focus; give it back
   btn.disabled = true;
   try {
     const out = await post("api/cooldown", {on: !btn.dataset.on});
@@ -1686,6 +1686,7 @@ $("cooldown").addEventListener("click", async e => {
     $("cooldownState").textContent = err.message;
   } finally {
     btn.disabled = false;
+    if (focused) btn.focus();
   }
 });
 
