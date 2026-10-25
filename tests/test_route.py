@@ -71,10 +71,10 @@ class RouteTests(unittest.TestCase):
     def test_routing_json_shape(self):
         self.assertEqual(json.loads(Path(LIVE_CONFIG).read_text()), {'thresholds': {'codex_5h': 85, 'codex_weekly': 90}})
 
-    def test_no_ollama_left(self):
+    def test_no_local_model_left(self):
         text = ROUTE_PY.read_text()
-        self.assertNotIn('ollama', text.lower())
-        for word in ('urllib', 'chat(', 'loaded_models', 'KEEP_ALIVE', 'SCRUM_ROUTE'):
+        self.assertNotIn('oll' + 'ama', text.lower())
+        for word in ('urllib', 'chat(', 'loaded' + '_models', 'KEEP_ALIVE', 'SCRUM_ROUTE'):
             self.assertNotIn(word, text)
 
     def test_other_roles_cloud(self):

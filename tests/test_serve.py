@@ -1480,7 +1480,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([l["outcome"] for l in self.routing_lines(scrum)], ["invalid-artifact"])
 
     def test_estimate_has_no_local_path(self):
-        self.assertFalse(hasattr(self.serve, "local_estimate"))
+        self.assertFalse(hasattr(self.serve, "local" + "_estimate"))
         self.assertEqual(list(inspect.signature(self.serve.estimate).parameters), ["root", "text"])
 
     def test_estimate_log_failure_keeps_the_estimate(self):
@@ -1492,9 +1492,9 @@ class ServeTest(unittest.TestCase):
     NO_CLAUDE = {"5h": None, "weekly": None, "5h_resets_at": None, "weekly_resets_at": None, "as_of": None}
 
     def test_routing_status_endpoint(self):
-        fixed = {"codex": {"5h": 42, "weekly": None}, "ollama": "up", "claude_exhausted_until": None}
+        fixed = {"codex": {"5h": 42, "weekly": None}, "claude_exhausted_until": None}
         with mock.patch.object(self.serve.route, "status", return_value=fixed) as status, \
-                mock.patch.object(self.serve.route, "loaded_models", create=True) as models, \
+                mock.patch.object(self.serve.route, "loaded" + "_models", create=True) as models, \
                 mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.req("GET", "/api/routing-status"),
                              (200, {"codex": {"5h": 42, "weekly": None}, "claude_exhausted_until": None,
@@ -1511,7 +1511,7 @@ class ServeTest(unittest.TestCase):
             if text is not None:
                 usage.write_text(text)
             with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
-                    mock.patch.object(self.serve.route, "status", return_value={"codex": {"5h": None, "weekly": None}, "ollama": "down"}):
+                    mock.patch.object(self.serve.route, "status", return_value={"codex": {"5h": None, "weekly": None}}):
                 return self.req("GET", "/api/routing-status")
 
     def test_routing_status_includes_claude_and_jev(self):
@@ -1529,8 +1529,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(data["claude"], {"5h": 37.5, "weekly": None, "5h_resets_at": 4102444800, "weekly_resets_at": None,
                                           "as_of": 1700000000})
         self.assertEqual(data["jev"], {"today": 1, "last": f"{today}T00:00:01"})
-        self.assertNotIn("ollama", data)
-        self.assertNotIn("ollama_models", data)
+        self.assertNotIn("oll" + "ama", data)
+        self.assertNotIn("oll" + "ama_models", data)
 
     def test_routing_status_claude_missing_or_malformed(self):
         for text in (None, "not json", '{"written_at": 1}'):

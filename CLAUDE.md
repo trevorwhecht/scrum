@@ -9,8 +9,8 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   heading range and `assertIn(phrase, ...)` checks phrases. Before rewording an agent or SKILL.md line, grep the
   phrase there and change both in the same commit. `FIRST_LINE` pins each agent's first output line.
 - `skills/trevskills-scrum/board.py` conventions: errors are `raise SystemExit("<message>")`; every board write is a
-  tmp file + `os.replace` under the board lock; `SCRUM_*` env vars (`SCRUM_OLLAMA_URL`, `SCRUM_CODEX_SESSIONS`,
-  `SCRUM_ROUTE`, ...) override paths and URLs so tests stay hermetic.
+  tmp file + `os.replace` under the board lock; `SCRUM_*` env vars (`SCRUM_CODEX_SESSIONS`,
+  `SCRUM_REGISTRY`, ...) override paths and URLs so tests stay hermetic.
 - SKILL.md: locate sections by heading (`grep -n '^## ' skills/trevskills-scrum/SKILL.md`), never by line number.
   Headings: Setup, Commands, New job, Run all, Fast lane, Debug lane, BigBoy lane, Roadmap lane, Lilguy lane,
   Cloud lane, Check gate, Review (WAIT FOR ALL), Approve, Migrate, Merge, Routing, Resuming the builder, Digest, Final report.
@@ -18,7 +18,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - Lane bodies live in `skills/trevskills-scrum/lanes/<lane>.md` (runall, debug, bigboy, roadmap, lilguy, cloud); their SKILL.md section is one `Read ... when this lane runs.` line. New lane text goes in the lane file, not SKILL.md.
 - Dashboard: `skills/trevskills-scrum/dashboard.html` is one file served by `serve.py` on :8765. The UI rules in
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
-- Local routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
+- Routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
 - A diff that touches `agents/scrum-*.md`, `SKILL.md` or `skills/trevskills-scrum/lanes/*.md` stops at the Merge
   agent-rules guard for Trevor unless it is exactly an approved digest proposal,
@@ -27,7 +27,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   Batch rule edits; do not mix them into feature jobs.
 
 ## Scrum map
-- `~/.claude/scrum-map.md` is the one-page reference for how the pipeline actually works (processes, Ollama use,
+- `~/.claude/scrum-map.md` is the one-page reference for how the pipeline actually works (processes, Codex routing,
   lanes, pacing/caps, Focus, idle checklist). Any change to those (board.py, serve.py, continue.py, routing.json,
   LaunchAgents, lanes, agent models) updates the map in the same job or chat. It lives outside the repo, so editing
   it never dirties this checkout.

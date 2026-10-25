@@ -12,6 +12,7 @@ AGENTS = {
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
+STALE_BUILDER = "builder" + "=local"  # split so the repo-wide wording grep stays empty
 FIRST_LINE = {
     "scrum-builder": "STATUS: READY", "scrum-approver": "ESCALATE", "scrum-review-security": "VERDICT: PASS",
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
@@ -106,14 +107,38 @@ class ContractTest(unittest.TestCase):
             if path.name != "scrum-review-code.md":
                 self.assertNotIn("codex exec", text, path.name)
 
+    def test_no_local_model_wording_left(self):
+        words = ["oll" + "ama", "qw" + "en", "claude" + "-local", "local" + " runner", "local" + "_estimate",
+                 "local" + "_only", "loaded" + "_models", "builder" + "=local"]
+        exact = ["SCRUM" + "_LOCAL", "local/" + "run.py", "local/" + "build.py", "worker" + ".py",
+                 "specwriter" + "=local"]
+        pattern = re.compile("|".join(map(re.escape, words)), re.I)
+        pattern_exact = re.compile("|".join(map(re.escape, exact)))
+        paths = [ROOT / "README.md", ROOT / "CLAUDE.md"]
+        for folder in ("local", "skills", "agents"):
+            paths += [p for p in (ROOT / folder).rglob("*") if p.is_file()]
+        hits = []
+        for path in paths:
+            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if pattern.search(line) or pattern_exact.search(line):
+                    hits.append(f"{path.relative_to(ROOT)}:{n}: {line[:120]}")
+        self.assertEqual(hits, [])
+
     def test_skill_routes_steps_through_router(self):
         text = self.rules()
         routing = self.section(text, "## Routing", "## Resuming the builder")
-        for phrase in ("local/route.py", "--job $F/jobs/$ID", "--scrum $F", 'run.py" claude -p',
-                       "SCRUM_LOCAL_CONTEXT=32768", "--allowedTools", "builder=local", "one cloud retry",
-                       "Local run failed:", "never loop", 'route.py" record', "invalid-artifact", "fallback"):
+        for phrase in ("`scrum-spec-writer`, `scrum-builder` and `scrum-digest-reader` always spawn on cloud with "
+                       "the Agent tool exactly as the step says.",
+                       "Take `START=$(date +%s)` just before each spawn",
+                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record <dir> <role> cloud - '
+                       "$(( $(date +%s) - START )) ok",
+                       "`<dir>` is `$F/jobs/$ID`", "or `$F` for the digest reader",
+                       "Ignore a failed `record` call. Logging never blocks the pipeline."):
             self.assertIn(phrase, routing, phrase)
-        self.assertIn("followups/", routing)
+        for phrase in ("run.py", "build.py", "SCRUM_LOCAL_MODEL", "SCRUM_LOCAL_CONTEXT", "Local run failed:",
+                       "one cloud retry", "invalid-artifact", "fallback", "check-pass", "review-pass",
+                       'route.py" <role>', "--job $F", "--scrum $F"):
+            self.assertNotIn(phrase, routing, phrase)
         self.assertGreaterEqual(text.count("see **Routing**"), 4)
         for step in ("3. **Spec:**", "5. **Build:**", "2. **Child specs, startable children only.**", "2. Spawn `scrum-digest-reader`"):
             line = next(l for l in text.splitlines() if l.startswith(step) or l.strip().startswith(step))
@@ -128,28 +153,40 @@ class ContractTest(unittest.TestCase):
     def test_skill_records_specwriter_id(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         new_job = self.section(text, "## New job", "## Run all")
-        for phrase in ("B set $ID specwriter=<id>", "specwriter=local"):
-            self.assertIn(phrase, new_job, phrase)
+        self.assertIn("After each spawn, record it: `B set $ID specwriter=<id>` (the returned agent id).", new_job)
+        for phrase in ("specwriter" + "=local", STALE_BUILDER, "cloud retry"):
+            self.assertNotIn(phrase, new_job, phrase)
+        check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
+        self.assertNotIn(STALE_BUILDER, check)
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        self.assertIn("completed. Then run `B sync $ID`.\n", review)
+        self.assertNotIn(STALE_BUILDER, review)
+        self.assertNotIn("for a local build", self.section(text, "## Fast lane", "## Debug lane"))
+        self.assertIn("(see **Routing**). Each prompt", self.lane("bigboy"))
+        self.assertNotIn("background subprocesses", self.lane("bigboy"))
 
     def test_skill_approve_prewrites_followups(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         approve = self.section(text, "## Approve", "## Merge")
-        for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer", "local",
+        for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer",
+                       "when `specwriter` is missing, empty or not an agent id, or when SendMessage fails",
                        "BACKLOG=$F/backlog.md", "follow-up mode", "B backlog-spec $ID", "Resuming the builder",
                        "backlog-add", "(from $ID)", "followups/", "non-zero", "never blocks", "- none"):
             self.assertIn(phrase, approve, phrase)
+        self.assertNotIn("specwriter" + "=local", approve)
+        self.assertNotIn("`specwriter` is `local`", approve)
 
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
                        "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it",
-                       'route.py" codex-review --job', "local/run.py", "SCRUM_LOCAL_MODEL", 'route.py" record',
-                       "codex: skipped — <why>", "exits non-zero", "treat it as cloud", "<RUNNER> codex exec review",
-                       'replace `<RUNNER>` with exactly `python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"`',
-                       "replace `<RUNNER>` with nothing", "blocks local sockets", "check.md is the authority"):
+                       'route.py" codex-review --job', 'route.py" record', "codex: skipped — <why>",
+                       "exits non-zero", "treat it as cloud", "- `cloud` →", "- `skip` →",
+                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol", "blocks local sockets", "check.md is the authority"):
             self.assertIn(phrase, text, phrase)
-        for phrase in ("$RUNNER", 'RUNNER="', "RUNNER= "):
+        for phrase in ("$RUNNER", 'RUNNER="', "RUNNER= ", "<RUNNER>", "- `local` →", "SCRUM_LOCAL_MODEL", "cloud MODEL=", "MODEL=<model>",
+                       "local/run.py", "A failed local run is a skip like a failed cloud run, never a cloud retry."):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("codex exec"), 1)
 
@@ -165,48 +202,40 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Codex never reads spec.md", "`Out:`", "scrum/backlog.md", "never `[blocking]`"):
             self.assertIn(phrase, text, phrase)
 
-    def test_codex_block_local_runner_is_shell_agnostic(self):
+    def test_codex_block_is_shell_agnostic(self):
         import os, tempfile
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         lines = text.splitlines()
-        start = next(i for i, l in enumerate(lines) if l.startswith("    ") and "<RUNNER> codex exec review" in l)
+        start = next(i for i, l in enumerate(lines) if l.startswith("    ") and "codex exec review" in l)
         cmd = [lines[start][4:]]
         while cmd[-1].endswith("\\"):
             start += 1
             cmd.append(lines[start][4:])
         cmd = "\n".join(cmd)
         self.assertTrue(cmd.endswith("</dev/null"), cmd)
-        local = 'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"'
         with tempfile.TemporaryDirectory() as home:
             home = Path(home)
-            (home / ".claude" / "skills" / "trevskills-scrum").mkdir(parents=True)
-            (home / ".claude" / "local").mkdir()
-            (home / ".claude" / "local" / "run.py").write_text(
-                "import os, sys\nprint('model=' + os.environ['SCRUM_LOCAL_MODEL'])\nprint(*sys.argv[1:], sep='\\n')\n")
             bindir = home / "bin"
             bindir.mkdir()
             stub = bindir / "codex"
-            stub.write_text('#!/bin/sh\necho "model=$SCRUM_LOCAL_MODEL"\necho codex\nfor a in "$@"; do echo "$a"; done\n')
+            stub.write_text('#!/bin/sh\necho codex\nfor a in "$@"; do echo "$a"; done\n')
             stub.chmod(0o755)
             env = {**os.environ, "HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}",
                    "WORKTREE": str(home), "BASE": "origin/main", "JOB_DIR": "/job", "ROUND": "1"}
             expected = ["codex", "exec", "review", "--base", "origin/main", "-m", "gpt-6.1-sol", "-c",
                         'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "--ephemeral",
                         "-o", "/job/round-1/codex-review.md"]
-            for name, runner, model in (("local", local, "qwen2.5-coder:7b"), ("cloud", "", "")):
-                line = cmd.replace("<RUNNER>", runner)
-                outputs = {}
-                for shell in ("bash", "zsh"):
-                    with self.subTest(route=name, shell=shell):
-                        if not shutil.which(shell):
-                            self.skipTest(f"{shell} not installed")
-                        out = subprocess.run([shell, "-c", line], env={**env, "MODEL": model},
-                                             capture_output=True, text=True, timeout=30)
-                        self.assertEqual(out.returncode, 0, out.stderr)
-                        outputs[shell] = out.stdout.splitlines()
-                        self.assertEqual(outputs[shell], [f"model={model}", *expected])
-                if len(outputs) == 2:
-                    self.assertEqual(outputs["bash"], outputs["zsh"], name)
+            outputs = {}
+            for shell in ("bash", "zsh"):
+                with self.subTest(shell=shell):
+                    if not shutil.which(shell):
+                        self.skipTest(f"{shell} not installed")
+                    out = subprocess.run([shell, "-c", cmd], env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(out.returncode, 0, out.stderr)
+                    outputs[shell] = out.stdout.splitlines()
+                    self.assertEqual(outputs[shell], expected)
+            if len(outputs) == 2:
+                self.assertEqual(outputs["bash"], outputs["zsh"])
 
     def test_code_reviewer_waits_for_codex(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
@@ -218,18 +247,17 @@ class ContractTest(unittest.TestCase):
                        "its 10-minute timeout.",
                        "Finishing your own review first is never a skip reason",
                        'and "still running" is never a skip reason',
-                       "ROUTE_RUNNER=local MODEL=<model> LOG_MODEL=<model>",
-                       'python3 "$HOME/.claude/skills/trevskills-scrum/../../local/run.py"',
-                       "does not word-split", "codex: skipped — fast lane"):
+                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol", "codex: skipped — fast lane"):
             self.assertIn(phrase, text, phrase)
-        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3'):
+        for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3', "ROUTE_RUNNER=local"):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("wait for the background"), 1)
 
     def test_code_reviewer_acts_on_runner_alone(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         self.assertIn("Then act on `runner` alone; `why` is only note text, so `runner: cloud` with why "
-                      "`codex-review trust is off` still runs Codex on cloud:", text)
+                      "`codex quota below thresholds` still runs Codex on cloud:", text)
+        self.assertNotIn("trust is off", text)
         self.assertNotIn("Then act on `runner`:", text)
 
     def test_code_reviewer_skip_reason_is_traceable(self):
@@ -243,9 +271,9 @@ class ContractTest(unittest.TestCase):
 
     def test_code_reviewer_codex_path_includes_homebrew(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
-        line = next(l for l in text.splitlines() if "<RUNNER> codex exec review" in l)
+        line = next(l for l in text.splitlines() if "codex exec review --base" in l)
         self.assertEqual(line, '    cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) '
-                               '&& SCRUM_LOCAL_MODEL="$MODEL" <RUNNER> codex exec review --base "$BASE" -m gpt-6.1-sol \\')
+                               '&& codex exec review --base "$BASE" -m gpt-6.1-sol \\')
         self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
@@ -538,8 +566,12 @@ class ContractTest(unittest.TestCase):
     def test_skill_jev_promote_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         resume = self.section(text, "## Resuming the builder", "## Digest")
-        for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"', "builder=local"):
+        for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"',
+                       "A builder already promoted is never promoted again.",
+                       "\n\nUse SendMessage to the recorded `builder`"):
             self.assertIn(phrase, resume, phrase)
+        self.assertNotIn(STALE_BUILDER, resume)
+        self.assertNotIn("local builder", resume)
 
     def test_skill_jev_dupe_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -987,26 +1019,29 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("jobs.txt", "decision.md", "round-*/review-*.md", "round-*/check.md", "rework.md", "promoted.md",
-                       "assessment.md", "notes.md", "routing.log", "## Local routing", "invalid-artifact", "check-pass",
-                       "(fallback: <n>)", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
+                       "assessment.md", "notes.md", "routing.log", "DIGEST NOTES", "150 lines", "## Rediscovery", "3 or more different jobs",
                        "## Assumptions", "## Likely files", "JOBS_DIR/../routing.log", "scrum-level",
-                       "`scrum-level`", "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
+                       "JOBS_DIR/../questions.log", '"pick"', "## Repeated questions",
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
                        "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
                        "Cheapest lane:"):
             self.assertIn(phrase, reader, phrase)
+        for phrase in ("## Local routing", "insights/<id>.md", "(fallback: <n>)", "local background worker"):
+            self.assertNotIn(phrase, reader, phrase)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
                        '"obvious"', '"obvious_reason"', "2 or more different jobs", "never removes or loosens",
-                       "never a global file", "ROUTING", "local/routing.json", "## Local routing",
-                       "at least 5 local runs", "at least 3 local runs", "more than one third", "codex-review",
-                       '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
+                       "never a global file", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/", '"obvious": false',
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "(unanimous)",
                        "pick not unanimous", "## Pipeline fit", "count toward the at-most-8 cap",
                        "threshold or routing edits"):
             self.assertIn(phrase, digester, phrase)
+        self.assertIn("**Inputs** (paths are in your prompt): `DIGEST_DIR` (`scrum/digests/<NNN>/`) and `PROJECT` "
+                      "(`scrum/project.md`).", digester)
+        for phrase in ("ROUTING", "## Local routing", "Trust flip", '"roles"', "local runs", "local/routing.json"):
+            self.assertNotIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -1014,10 +1049,12 @@ class ContractTest(unittest.TestCase):
         self.assertIn("- **`/trevskills-scrum digest`**", text)
         digest = self.section(text, "## Digest", "## Final report")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
-                       "error.md", "B digest-trim", "no remote", "--digest-auto", "ROUTING=", "local/routing.json",
-                       "realpath ~/.claude/skills/trevskills-scrum", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
+                       "error.md", "B digest-trim", "no remote", "--digest-auto",
+                       "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
             self.assertIn(phrase, digest, phrase)
         self.assertNotIn("only ever queues a repo backlog item", digest)
+        for phrase in ("ROUTING=", "R=$(", "local/routing.json"):
+            self.assertNotIn(phrase, digest, phrase)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
         self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
