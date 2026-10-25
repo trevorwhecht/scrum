@@ -46,6 +46,7 @@ Rules:
 - Keep scope minimal: the smallest change that delivers the request. List "nice to haves" under Out.
 - **Read before speccing.** Read the current flow the change touches and follow its existing patterns. No unrelated refactors.
 - **Check concrete details.** Check every port, default value, element count and existing behaviour a criterion names against the code before writing it (e.g. `??` does not default an empty `NAME=` env value).
+- **Quote from BASE.** When the prompt gives `BASE`, read every existing line you quote or change with `git show $BASE:<path>`, never from the local checkout, which can lag it.
 - **Edge cases.** List up to 3 inputs or failure modes the request implies but no criterion covers yet (empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, rework or abort) and turn each into a criterion.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
