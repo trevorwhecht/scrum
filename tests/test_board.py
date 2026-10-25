@@ -3396,13 +3396,22 @@ class HookTest(unittest.TestCase):
         self.hook(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_input": {}}))
         self.assertEqual(self.get(self.job)["waiting"], "question")
 
-    def test_hook_stop_sets_waiting(self):
-        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "\n  \nShip it?\nMore text"}))
-        self.assertEqual(self.get(self.job)["waiting"], "reply needed: Ship it?")
-        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "  "}))
-        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
-        self.hook(json.dumps({"hook_event_name": "Stop"}))
-        self.assertEqual(self.get(self.job)["waiting"], "reply needed")
+    def test_hook_stop_action_needed_sets_waiting(self):
+        for msg, want in (("**Action Needed:** Ship it?", "reply needed: Ship it?"),
+                          ("Summary\n\n- __action needed__ - Pick one\nAction Needed: later", "reply needed: Pick one"),
+                          ("Action Needed: " + "x" * 200, "reply needed: " + "x" * 160),
+                          ("**Action Needed**", "reply needed")):
+            self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": msg}))
+            self.assertEqual(self.get(self.job)["waiting"], want)
+
+    def test_hook_stop_without_action_needed_clears_waiting(self):
+        for msg in ("Summary\nOptional Follow-up: none", "Complete", "  ", None):
+            self.patch(self.job, waiting="reply needed: old")
+            event = {"hook_event_name": "Stop"}
+            if msg is not None:
+                event["last_assistant_message"] = msg
+            self.hook(json.dumps(event))
+            self.assertIsNone(self.get(self.job)["waiting"], msg)
 
     def test_hook_prompt_clears_waiting(self):
         self.patch(self.job, waiting="question: Which lane?")
@@ -3451,7 +3460,7 @@ class HookTest(unittest.TestCase):
                         mock.patch.object(board, "sound", lambda kind: f"/clips/{kind}"):
                     board.cmd_hook(ask, tty)
                     board.cmd_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash"}, tty)
-                    board.cmd_hook({"hook_event_name": "Stop"}, tty)
+                    board.cmd_hook({"hook_event_name": "Stop", "last_assistant_message": "Action Needed:"}, tty)
                 self.assertEqual(play.call_args_list, [mock.call("/clips/question")] if funk else [],
                                  (value, tty))
         self.assertEqual(self.get(self.job)["waiting"], "reply needed")
@@ -3461,14 +3470,14 @@ class HookTest(unittest.TestCase):
         board.cmd_set(self.root, self.job, ["tty=ttys005"])
         done = board.cmd_new(self.root, "done job")
         board.cmd_set(self.root, done, ["stage=done", "tty=ttys004"])
-        self.assert_untouched(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "hi"}))
-        self.hook(json.dumps({"hook_event_name": "Stop"}), "ttys005")
+        self.assert_untouched(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Action Needed: hi"}))
+        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Action Needed:"}), "ttys005")
         self.assertEqual(self.get(self.job)["waiting"], "reply needed")
         self.assertNotIn("waiting", self.get(self.old))
 
 
     def test_hook_skips_reused_tty_with_other_pid(self):
-        stop = json.dumps({"hook_event_name": "Stop", "last_assistant_message": "hi"})
+        stop = json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Action Needed: hi"})
         self.patch(self.old, stage="done")
         self.patch(self.job, pid=111, updatedAt="2001-01-01T00:00:00+00:00")
         self.assert_untouched(stop, pid=222)  # a later chat on the dead job's tty
@@ -3480,7 +3489,7 @@ class HookTest(unittest.TestCase):
         board.cmd_set(self.root, legacy, ["stage=build", "tty=ttys004"])
         self.patch(legacy, updatedAt="2002-01-01T00:00:00+00:00")
         self.patch(self.job, updatedAt="2001-01-01T00:00:00+00:00")
-        self.hook(json.dumps({"hook_event_name": "Stop"}), pid=222)  # pid-less job still matches by tty
+        self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Action Needed:"}), pid=222)  # pid-less job still matches by tty
         self.assertEqual(self.get(legacy)["waiting"], "reply needed")
         self.assertEqual(self.get(self.job)["waiting"], "reply needed: hi")
         # under the lock: the job's pid changed between the scan and the write
@@ -3490,7 +3499,7 @@ class HookTest(unittest.TestCase):
             return real(root)
         self.patch(legacy, waiting=None)
         with mock.patch.object(board, "locked_board", swap):
-            self.hook(json.dumps({"hook_event_name": "Stop"}), pid=222)
+            self.hook(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Action Needed:"}), pid=222)
         self.assertIsNone(self.get(legacy)["waiting"])
 
 

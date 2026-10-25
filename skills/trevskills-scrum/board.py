@@ -2819,6 +2819,9 @@ def caller_claude_pid():
     return None
 
 
+ACTION_NEEDED_RE = re.compile(r"[\s*_>•-]*action needed[\s*_:–—-]*(.*)", re.I)
+
+
 def waiting_text(event):
     """The `waiting` value a hook event sets, None for an event that clears it, KEEP for one that changes nothing."""
     name, tool, inp = event.get("hook_event_name"), event.get("tool_name"), event.get("tool_input") or {}
@@ -2831,8 +2834,12 @@ def waiting_text(event):
         except (KeyError, IndexError, TypeError):
             return "question"
     if name == "Stop":
-        line = next((l.strip() for l in str(event.get("last_assistant_message") or "").splitlines() if l.strip()), "")
-        return f"reply needed: {line}" if line else "reply needed"
+        for line in str(event.get("last_assistant_message") or "").splitlines():
+            m = ACTION_NEEDED_RE.match(line)
+            if m:  # only a session that asks Trevor something waits; a plain status report clears it
+                rest = m.group(1).rstrip("*_ \t")[:160]
+                return f"reply needed: {rest}" if rest else "reply needed"
+        return None
     if name in ("UserPromptSubmit", "PostToolUse"):
         return None
     return KEEP
