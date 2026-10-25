@@ -563,6 +563,7 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{lil}/resume", {}), (202, {"id": lil, "action": "resume"}))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(lil, "resume", f"/trevskills-scrum resume {lil}")])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_child_waits_for_overlapping_sibling(self):
         b = self.serve.board
         reason = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
@@ -933,6 +934,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["stage"], "running")
         self.assertTrue(job["reason"].startswith("waiting: usage "), job["reason"])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_ignores_pace_and_session_count(self):
         """No usage pace and no session count stops a resume (job 282): only machine_ok and a Run-all/BigBoy child's
         overlap rules do."""
@@ -4685,7 +4687,7 @@ class ExitedRunSweepTest(unittest.TestCase):
             return "runs/y.log"
 
         with mock.patch.object(self.board, "projects", return_value={"p": self.repo}), \
-                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: alive), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive if callable(alive) else lambda job: alive), \
                 mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             s.watchdog_tick()
         return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
@@ -4728,7 +4730,7 @@ class ExitedRunSweepTest(unittest.TestCase):
                     {"id": "kid", "stage": "build", "parent": "par", "parallel": True},
                     {"id": "sib", "stage": "build", "parent": "par", "parallel": True}])
         self.run_entry("kid")
-        self.assertEqual(self.tick(), [], "kid waits on sib, which shares src/shared.py")
+        self.assertEqual(self.tick(alive=lambda job: job["id"] == "sib"), [], "kid waits on sib, which shares src/shared.py")
         self.assertEqual(self.job("kid")["stage"], "needs-human")
         self.assertEqual(self.job("kid")["reason"], self.STALLED)
         self.assertEqual(self.job("sib")["stage"], "build")
@@ -5045,7 +5047,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
         data["jobs"][2].update(parallel=True)
         (self.root / "board.json").write_text(json.dumps(data))
-        self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
+        self.assertEqual(self.spawned(alive=lambda job: job["id"] == "003-sib"), [], "003-sib is in progress: 002-claimed must wait")
         kid = self.job("002-claimed")
         self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
         self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
