@@ -1055,7 +1055,7 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertIn("digest", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
         self.assertIn("- **`/trevskills-scrum digest`**", text)
-        digest = self.section(text, "## Digest", "## Final report")
+        digest = self.lane("digest")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
                        "error.md", "B digest-trim", "no remote", "--digest-auto",
                        "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
@@ -2254,12 +2254,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "runall": ("Run all", ("2. Spawn", "3. Run")),
             "debug": ("Debug lane", ("1. **Diagnose.**", "5. **Build.**")),
             "bigboy": ("BigBoy lane", ("1. **Plan.**", "6. **After a child stops.**")),
+            "digest": ("Digest", ("1. Run `B digest-start`", "2. Spawn `scrum-digest-reader`", "3. Spawn `scrum-digester`", "4. If the `proposals` list is empty")),
         }
         for name, (title, phrases) in steps.items():
             path = ROOT / "skills" / "trevskills-scrum" / "lanes" / f"{name}.md"
             self.assertTrue(path.is_file(), path)
             lines = path.read_text().split("\n")
-            self.assertEqual(lines[0], f"# {title}" if name in ("runall", "debug", "bigboy") else f"# {title} lane", name)
+            self.assertEqual(lines[0], f"# {title}" if name in ("runall", "debug", "bigboy", "digest") else f"# {title} lane", name)
             self.assertEqual(lines[1], "", name)
             self.assertNotEqual(lines[2], "", name)
             for phrase in phrases:
@@ -2267,8 +2268,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_skill_lane_pointers(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        for title, name in (("Run all", "runall"), ("Debug", "debug"), ("BigBoy", "bigboy"), ("Roadmap", "roadmap"), ("Lilguy", "lilguy"), ("Cloud", "cloud")):
-            heading = "## Run all" if name == "runall" else f"## {title} lane"
+        for title, name in (("Run all", "runall"), ("Debug", "debug"), ("BigBoy", "bigboy"), ("Roadmap", "roadmap"), ("Lilguy", "lilguy"), ("Cloud", "cloud"), ("Digest", "digest")):
+            heading = "## Run all" if name == "runall" else "## Digest" if name == "digest" else f"## {title} lane"
             body = [l for l in self.h2(text, heading).splitlines()[2:] if l.strip()]
             self.assertEqual(body, [f"Read `$HOME/.claude/skills/trevskills-scrum/lanes/{name}.md` when this lane runs."], title)
         heads = ["Run all", "Fast lane", "Debug lane", "BigBoy lane", "Roadmap lane", "Lilguy lane", "Cloud lane", "Check gate"]

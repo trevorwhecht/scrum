@@ -9,7 +9,7 @@ def digest_cards(calls):
     if not node:
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
-    lines = [l for l in text.splitlines() if l.startswith(("const esc = ", "const hue = ", "const tag = "))]
+    lines = [l for l in text.splitlines() if l.startswith(("const esc = ", "const fnv1a = ", "let projectHue = ", "const hue = ", "const tag = "))]
     start = text.index("function digestCard(")
     fn = text[start:text.index("\n}\n", start) + 2]
     script = "\n".join(lines) + "\n" + fn + f"\nconsole.log(JSON.stringify({json.dumps(calls)}.map(a => digestCard(...a))));"

@@ -144,7 +144,7 @@ class JobModal(unittest.TestCase):
         'backlog</label>\n    <button class="btn danger-outline" type="submit">Abort job</button></form>'
         '<p class="error" role="alert"></p>')
     TODAY_CARD = (
-        '<button class="card human" data-key="p/020-q">\n    <span class="tag" style="--h:279">p</span><span class="lanechip">'
+        '<button class="card human" data-key="p/020-q">\n    <span class="tag" style="--h:330">p</span><span class="lanechip">'
         'standard</span><span class="id">020-q</span><span class="title">Asked</span>\n    \n    \n    \n    \n    <span '
         'class="bar human" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="10" aria-label="Estimated '
         'progress" title="~10% (estimate)"><span style="width:10%"></span></span>\n    \n    <span class="reason">review: '
