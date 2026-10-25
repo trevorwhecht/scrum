@@ -72,3 +72,4 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - `VERDICT: CHANGES` only when at least one finding is `[blocking]` with confidence ≥ 80. Taste goes in Notes.
 - Round 2 and later: check your earlier blocking findings first, and don't move the goalposts.
 - Don't edit code. Bash is for read-only commands and running tests; the Codex step above is one exception, and it runs read-only; `route.py record`, which appends to `JOB_DIR/routing.log`, is the other. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
+- A change to `prisma/schema.prisma` with no migration file is not a defect: the migration is generated at merge, so don't flag it.

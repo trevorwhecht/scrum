@@ -379,6 +379,52 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((self.root / "backlog.md").read_text(), before)
         est.assert_not_called()
 
+    def with_tailnet(self, name="box.tail1.ts.net"):
+        old = self.serve.TAILNET
+        self.serve.TAILNET = {name} if name else set()
+        self.addCleanup(setattr, self.serve, "TAILNET", old)
+
+    def test_tailnet_host_allowed(self):
+        self.with_tailnet()
+        for h in ("box.tail1.ts.net", "box.tail1.ts.net:443"):
+            self.assertEqual(self.req("GET", "/api/projects", headers={"Host": h})[0], 200)
+
+    def test_tailnet_origin_post_allowed(self):
+        self.with_tailnet()
+        code = self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                        {"Host": "box.tail1.ts.net", "Origin": "https://box.tail1.ts.net"})[0]
+        self.assertNotEqual(code, 403)
+
+    def test_tailnet_other_hosts_still_forbidden(self):
+        self.with_tailnet()
+        for h in ("evil.example", "other.tail1.ts.net", "evil.ts.net"):
+            self.assertEqual(self.req("GET", "/api/projects", headers={"Host": h})[0], 403)
+        for o in ("https://evil.example", "https://other.tail1.ts.net"):
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                                      {"Host": "box.tail1.ts.net", "Origin": o})[0], 403)
+
+    def test_tailnet_unset_unchanged(self):
+        self.with_tailnet("")
+        self.assertEqual(self.req("GET", "/api/projects", headers={"Host": "box.tail1.ts.net"})[0], 403)
+        self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "nope"},
+                                  {"Origin": "https://box.tail1.ts.net"})[0], 403)
+
+    def test_tailnet_host_detection(self):
+        ok = mock.Mock(returncode=0, stdout='{"Self": {"DNSName": "Box.Tail1.ts.net."}}')
+        with mock.patch.dict(os.environ, {"SCRUM_TAILNET_HOST": ""}):
+            with mock.patch.object(self.serve.subprocess, "run", return_value=ok):
+                self.assertEqual(self.serve.tailnet_host(), "box.tail1.ts.net")
+            with mock.patch.dict(os.environ, {"SCRUM_TAILNET_HOST": "env.ts.net"}):
+                self.assertEqual(self.serve.tailnet_host(), "env.ts.net")
+                self.assertEqual(self.serve.tailnet_host("arg.ts.net"), "arg.ts.net")
+            bad = [mock.Mock(returncode=1, stdout=ok.stdout), mock.Mock(returncode=0, stdout="not json"),
+                   mock.Mock(returncode=0, stdout='{"Self": {}}'), mock.Mock(returncode=0, stdout='{"Self": {"DNSName": ""}}')]
+            for r in bad:
+                with mock.patch.object(self.serve.subprocess, "run", return_value=r):
+                    self.assertEqual(self.serve.tailnet_host(), "")
+            with mock.patch.object(self.serve.subprocess, "run", side_effect=FileNotFoundError):
+                self.assertEqual(self.serve.tailnet_host(), "")
+
     def test_writes_need_json_and_localhost(self):
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog", method="POST",
                                    data=b"op=delete&index=0", headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -532,6 +578,41 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum resume {stalled}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
         self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
+
+    def test_refused_resume_logs_stop(self):
+        b = self.serve.board
+        log = self.root / "questions.log"
+        lines = lambda j: [l for l in map(json.loads, log.read_text().splitlines()) if l.get("job") == j] \
+            if log.exists() else []
+        stalled = b.cmd_new(self.root, "Refused stalled")
+        self.edit_job(stalled, stage="needs-human", reason="stalled in build: x. Fix: click Resume.")
+        held = b.cmd_new(self.root, "Refused held")
+        self.edit_job(held, stage="build", reason=None, limitResetAt=1_800_000_000)
+        asked = self.asked("resume 1", "abort 1")
+        with mock.patch.object(self.serve, "resume_refusal", return_value="can't resume yet: sib. Fix: x"), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            for j in (stalled, held):
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{j}/resume", {"manual": True}),
+                                 (409, {"error": "can't resume yet: sib. Fix: x"}))
+            code, out, _ = self.answer(asked, {"key": "a"})
+            self.assertEqual((code, out), (409, {"error": "can't resume yet: sib. Fix: x"}))
+        spawn.assert_not_called()
+        for j in (stalled, held, asked):
+            [line] = lines(j)
+            self.assertEqual(set(line), {"date", "project", "job", "kind", "reason"})
+            self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+            self.assertEqual((line["project"], line["kind"], line["reason"]),
+                             ("repo", "refused", "can't resume yet: sib. Fix: x"))
+        queued = b.cmd_new(self.root, "Refused queued")
+        self.edit_job(queued, stage="needs-human", reason="stalled in build: x. Fix: click Resume.")
+        with mock.patch.object(self.serve, "resume_refusal", return_value="waiting: free RAM 5% (< 20%)"), \
+                mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {"manual": True})[0], 202)
+        with self.cooling():
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 409)
+        self.assertEqual(lines(queued), [], "a queued click and a cooling-down 409 are not refused stops")
+        for j in (stalled, held, asked, queued):
+            b.cmd_abort(self.root, j, False)
 
     def test_resume_endpoint_accepts_limit_held_job(self):
         """continue.py's {} brings back a job held in its stage on a usage limit (limitResetAt, no paused)."""
@@ -3441,6 +3522,18 @@ class AiAuditTest(unittest.TestCase):
             self.assertEqual(self.toggle("disable", idle)[0], 409)
         self.assertFalse(user_settings.exists())
 
+    def test_toggle_500_hides_the_os_error(self):
+        self.plant()
+        idle = self.row(self.audit()[0], "skills", "idle")["id"]
+        settings = self.user / "settings.json"
+        before = settings.read_bytes()
+        boom = OSError("disk full at /Users/secret/path")
+        with mock.patch.object(Path, "write_text", side_effect=boom), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
+            self.assertEqual(self.serve.ai_toggle(idle, False), (500, {"error": "couldn't write the settings file"}))
+        self.assertIn("/Users/secret/path", log.getvalue())
+        self.assertEqual(settings.read_bytes(), before)
+
 
 class AiResearchTest(unittest.TestCase):
     """Page 5: Research this on Audit rows, on the AiAuditTest fake home. The registered "reg" project is the research home."""
@@ -5581,6 +5674,16 @@ class AutoContinueTest(unittest.TestCase):
         answers = iter([None, "free RAM 14% (< 20%)", None])
         with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
             self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
+
+    def test_auto_continue_disk_refusal_tries_next_project(self):
+        self.project("a", n=1); self.project("b", n=2)
+        full = self.base / "a" / "scrum"
+        with mock.patch.object(self.board, "free_disk_gb", side_effect=lambda path: 5.0 if Path(path) == full else 500.0):
+            self.assertEqual(self.tick(), self.started("b"), "a's volume is full: only b starts")
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+                self.assertEqual(self.tick(), [], "low RAM stops the whole tick")
+        with mock.patch.object(self.board, "free_disk_gb", return_value=5.0):
+            self.assertEqual(self.tick(), [], "every project disk-refused: nothing starts")
 
     def test_auto_continue_usage_hold(self):
         """The usage ladder holds a run-all start like a machine_ok failure: none while live >= allowance, a start once

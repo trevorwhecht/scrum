@@ -11,7 +11,8 @@ and every 10 minutes, while a project has a job in stage cloud or awaiting its a
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
-origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
+origin or a localhost origin; the Host and Origin checks also accept the one configured tailnet hostname (for
+`tailscale serve`), from --tailnet-host, else SCRUM_TAILNET_HOST, else tailscale's own name, found once at start; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
 and a change to what runs (a hook or plugin entry, an MCP server's command/args/type/url, a settings file's
@@ -28,7 +29,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -42,6 +43,20 @@ import route  # noqa: E402
 
 CLAUDE = board.CLAUDE  # the cloud estimate and terminal launches; board.spawn reads board.CLAUDE
 LOCAL = {"localhost", "127.0.0.1"}
+TAILNET = set()  # the one extra hostname main() allows (the Mac's tailnet name); empty = localhost only
+
+
+def tailnet_host(explicit=""):
+    """The tailnet hostname to also accept: explicit, else $SCRUM_TAILNET_HOST, else tailscale's Self.DNSName ("" if none)."""
+    name = explicit or os.environ.get("SCRUM_TAILNET_HOST") or ""
+    if not name:
+        try:
+            exe = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=3)
+            name = json.loads(out.stdout)["Self"]["DNSName"] if out.returncode == 0 else ""
+        except Exception:
+            name = ""
+    return name.strip().rstrip(".").lower() if isinstance(name, str) else ""
 TYPES = {".json": "application/json", ".md": "text/markdown; charset=utf-8", ".log": "text/plain; charset=utf-8",
          ".html": "text/html; charset=utf-8"}
 RUNS, RUNS_LOCK = {}, threading.Lock()  # "project/job id" -> {"action", "started", "proc", "log"[, "reason"]}
@@ -329,6 +344,16 @@ def option_command(command):
     return None
 
 
+def refused(root, job_id, refusal):
+    """The 409 for a resume_refusal text, logged to questions.log as a `refused` stop."""
+    # the board's flock, not locked_board: that rewrites board.json and migrates a legacy paused job, and a refusal
+    # must leave the job as it was (the cmd_chain_unlock pattern)
+    with open(Path(root) / ".board.lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        board.log_stop(root, job_id, "refused", str(refusal))
+    return 409, {"error": refusal}
+
+
 def answer_job(project, root, job, jobs, key, note=None):
     """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
     records the pick; the command it returns runs through the same helpers as the matching button, on this job.
@@ -340,7 +365,7 @@ def answer_job(project, root, job, jobs, key, note=None):
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        return 409, {"error": refusal}
+        return refused(root, job["id"], refusal)
     job_id = job["id"]
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
@@ -776,7 +801,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
     first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
     (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
-    this tick's later starts.
+    this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
     last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
@@ -797,7 +822,10 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             continue
         try:
             if not running(project, "run-all") and claimable(root):
-                if board.machine_ok(root):  # no room on this machine; retry next tick
+                refused = board.machine_ok(root)
+                if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
+                    continue
+                if refused:  # no room on this machine; retry next tick
                     return
                 live = board.live_sessions()
                 allow = board.usage_allowance(board.read_usage(), time.time(), live)
@@ -1014,9 +1042,60 @@ def set_cooldown(on):
     return 200, {"cooldown": on}
 
 
+SELF_FILES = (HERE / "serve.py", HERE / "board.py", Path(route.__file__).resolve())
+
+
+def code_stamp() -> tuple:
+    """One st_mtime_ns per file this server runs from; None for a file that can't be stat'ed (mid-checkout)."""
+    out = []
+    for f in SELF_FILES:
+        try:
+            out.append(f.stat().st_mtime_ns)
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+CODE_STAMP = code_stamp()
+RELOAD_REFUSED = None  # the stamp whose pre-flight failed: no retry until the files change again
+
+
+def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
+    """Re-exec this server in place when serve.py, board.py or route.py changed on disk since it started, the new code
+    imports (a --help pre-flight) and no dashboard-started run is live. Returns False whenever it does not exec."""
+    global RELOAD_REFUSED
+    try:
+        stamp = code_stamp()
+        if stamp == CODE_STAMP or stamp == RELOAD_REFUSED:
+            return False
+        with RUNS_LOCK:
+            if any(r.get("proc") is not None and r["proc"].poll() is None for r in RUNS.values()):
+                return False
+        argv = [sys.executable, str(HERE / "serve.py")]
+        err = ""
+        try:
+            res = check([*argv, "--help"], capture_output=True, timeout=60)
+            ok = res.returncode == 0
+            err = (res.stderr or b"").decode(errors="replace")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            ok, err = False, str(e)
+        if not ok:
+            RELOAD_REFUSED = stamp
+            last = (err.strip().splitlines() or ["(no stderr)"])[-1]
+            print(f"serve.py: new code fails to load, still running the old code: {last}", file=sys.stderr, flush=True)
+            return False
+        print("serve.py: code changed on disk, reloading", flush=True)
+        execv(sys.executable, [*argv, *sys.argv[1:]])
+        return True  # only reached when execv is a test double
+    except Exception as e:  # the watchdog loop must go on whatever happens here
+        print(f"serve.py: reload check: {e}", file=sys.stderr, flush=True)
+    return False
+
+
 def watchdog_loop():
     while True:
         watchdog_tick()
+        reload_if_changed()
         time.sleep(60)
 
 
@@ -2753,7 +2832,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(code, json.dumps(obj).encode(), "application/json")
 
     def local_host(self):
-        return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL
+        return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL | TAILNET
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -2843,7 +2922,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         origin = self.headers.get("Origin")
         if (not self.local_host() or "application/json" not in (self.headers.get("Content-Type") or "")
-                or (origin and urlparse(origin).hostname not in LOCAL)):
+                or (origin and urlparse(origin).hostname not in LOCAL | TAILNET)):
             return self.send_json(403, {"error": "forbidden"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -2968,7 +3047,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
             if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
                 if refusal := resume_refusal(project, root, job, manual=manual):
-                    return 409, {"error": refusal}
+                    return refused(root, job_id, refusal)
                 if not flag_stalled(root, job, LIMIT_RESET):
                     return 409, {"error": "job moved on"}
                 jobs = json.loads((root / "board.json").read_text())["jobs"]
@@ -2976,7 +3055,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT):
-                    return 409, {"error": refusal}
+                    return refused(root, job_id, refusal)
                 with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
@@ -3014,6 +3093,7 @@ def main():
     p.add_argument("--digest-auto", metavar="NNN", help="apply, queue or skip every pending proposal of this digest, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
+    p.add_argument("--tailnet-host", default="", help="also accept this tailnet hostname in Host/Origin (else SCRUM_TAILNET_HOST, else detected)")
     p.add_argument("--dir", type=Path, default=Path("scrum"),
                    help="the project's scrum/ folder, for --estimate, --digest-auto and --digest-skill-check")
     a = p.parse_args()
@@ -3025,10 +3105,13 @@ def main():
         return print(json.dumps(digest_auto(a.dir.resolve(), a.digest_auto)))
     if a.estimate is not None:
         return estimate(a.dir.resolve(), a.estimate)
+    global TAILNET
+    tn = tailnet_host(a.tailnet_host)
+    TAILNET = {tn} if tn else set()
     server = make_server(a.port)
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
-    print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}", flush=True)
+    print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -53,6 +53,15 @@ class ContractTest(unittest.TestCase):
             self.assertIn("prisma migrate", text, name)
             self.assertIn("git merge", text, name)
 
+    def test_schema_jobs_migrate_at_merge(self):
+        for name in ("scrum-review-code", "scrum-review-ux"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            self.assertIn("with no migration file is not a defect", text, name)
+            self.assertIn("the migration is generated at merge", text, name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertIn("runs `/trevskills-migrate` at merge", builder)
+        self.assertNotIn("after Trevor approves", builder)
+
     def test_skill_references_every_agent_and_board_command(self):
         text = self.rules()
         for name in AGENTS:
@@ -723,6 +732,13 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+
+    def test_spec_writer_checks_earlier_work(self):
+        t = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("check earlier jobs", "`git log $BASE`", "Do not restate `RULES_RE`",
+                       "List every test file the build edits", "Scrum map: <section heading>",
+                       "never an acceptance criterion, a Likely file or a manual step"):
+            self.assertIn(phrase, t)
 
     def test_spec_writer_documents_lane_line(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
@@ -1490,6 +1506,16 @@ class ContractTest(unittest.TestCase):
             para = next(l for l in text.splitlines() if l.startswith("You must see the new element"))
             self.assertIn(harness, para, name)
             self.assertEqual(text.count("throwaway harness"), 1, name)
+
+    def test_review_ui_db_not_a_block(self):
+        text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        para = next(l for l in text.splitlines() if l.startswith("**Database.**"))
+        for phrase in ("DB port and start command that PROJECT's Notes name", "`docker start boisepartyco-pg`", "5433",
+                       "do not probe 5432", "start it, then sign in with the `Test sign-in:` line",
+                       "unmigrated or unreachable", "`/tmp` harness with mock data at 390 and 1440 px",
+                       "never write `Rendered: blocked` or `Rendered: no` for a database reason"):
+            self.assertIn(phrase, para, phrase)
+        self.assertNotIn("a required DB or session backend was unreachable", text)
 
     def test_review_ux_ui_find_cloud_chromium(self):
         lookup = ("If that binary is missing, look for Chromium under `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` "

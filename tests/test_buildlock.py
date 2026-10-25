@@ -151,6 +151,34 @@ class BuildLockTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertTrue(r.stderr.startswith("usage: buildlock.py"), r.stderr)
 
+    def test_killed_wrapper_keeps_lock_until_build_exits(self):
+        log = self.dir / "log.txt"
+        child = ("import os, sys, time\n"
+                 "open(sys.argv[1], 'a').write('start %d\\n' % os.getpid())\n"
+                 "time.sleep(2)\n"
+                 "open(sys.argv[1], 'a').write('end\\n')\n")
+        a = self.start_wrap(sys.executable, "-c", child, str(log))
+        try:
+            for _ in range(100):
+                if log.exists() and log.read_text().endswith("\n"):
+                    break
+                time.sleep(0.1)
+            self.assertTrue(log.read_text().startswith("start "))
+            a.send_signal(signal.SIGKILL)  # orphans the child
+            b = self.start_wrap(sys.executable, "-c", "open(%r, 'a').write('B\\n')" % str(log),
+                                SCRUM_BUILD_LOCK_TIMEOUT="20")
+            out, err = b.communicate(timeout=30)
+            self.assertEqual(b.returncode, 0)
+            self.assertEqual(err, f"buildlock: waiting for the build lock ({self.lock})\n")
+            self.assertEqual(log.read_text().split("\n")[1:], ["end", "B", ""])
+        finally:
+            first = log.read_text().split("\n")[0].split()
+            if len(first) == 2:
+                try:
+                    os.kill(int(first[1]), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_missing_command_returns_127(self):
         self.assertEqual(self.run_wrap("no-such-cmd-buildlock-xyz", "arg").returncode, 127)
         self.assertEqual(self.run_wrap("no-such-cmd-buildlock-xyz").returncode, 127)
