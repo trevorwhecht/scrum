@@ -533,6 +533,41 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{stalled}/resume", {})[0], 409)  # its run is still alive
         self.assertFalse(any(f"resume {blocked}" in a or f"resume {active}" in a for c in self.calls() for a in c))
 
+    def test_refused_resume_logs_stop(self):
+        b = self.serve.board
+        log = self.root / "questions.log"
+        lines = lambda j: [l for l in map(json.loads, log.read_text().splitlines()) if l.get("job") == j] \
+            if log.exists() else []
+        stalled = b.cmd_new(self.root, "Refused stalled")
+        self.edit_job(stalled, stage="needs-human", reason="stalled in build: x. Fix: click Resume.")
+        held = b.cmd_new(self.root, "Refused held")
+        self.edit_job(held, stage="build", reason=None, limitResetAt=1_800_000_000)
+        asked = self.asked("resume 1", "abort 1")
+        with mock.patch.object(self.serve, "resume_refusal", return_value="can't resume yet: sib. Fix: x"), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            for j in (stalled, held):
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{j}/resume", {"manual": True}),
+                                 (409, {"error": "can't resume yet: sib. Fix: x"}))
+            code, out, _ = self.answer(asked, {"key": "a"})
+            self.assertEqual((code, out), (409, {"error": "can't resume yet: sib. Fix: x"}))
+        spawn.assert_not_called()
+        for j in (stalled, held, asked):
+            [line] = lines(j)
+            self.assertEqual(set(line), {"date", "project", "job", "kind", "reason"})
+            self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+            self.assertEqual((line["project"], line["kind"], line["reason"]),
+                             ("repo", "refused", "can't resume yet: sib. Fix: x"))
+        queued = b.cmd_new(self.root, "Refused queued")
+        self.edit_job(queued, stage="needs-human", reason="stalled in build: x. Fix: click Resume.")
+        with mock.patch.object(self.serve, "resume_refusal", return_value="waiting: free RAM 5% (< 20%)"), \
+                mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {"manual": True})[0], 202)
+        with self.cooling():
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 409)
+        self.assertEqual(lines(queued), [], "a queued click and a cooling-down 409 are not refused stops")
+        for j in (stalled, held, asked, queued):
+            b.cmd_abort(self.root, j, False)
+
     def test_resume_endpoint_accepts_limit_held_job(self):
         """continue.py's {} brings back a job held in its stage on a usage limit (limitResetAt, no paused)."""
         b = self.serve.board
