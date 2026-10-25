@@ -11,6 +11,7 @@ os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so;
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
+os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 import board  # noqa: E402
@@ -1531,12 +1532,45 @@ class BoardTest(unittest.TestCase):
         """2026-10-24: 19 sessions ran at "32% free" with 9 GB of a 16 GB Mac swapped. memory_pressure's free %
         counts inactive pages as free; swap in use, as a share of physical RAM, is the honest signal."""
         self.assertEqual(board.MAX_SWAP_PCT, 25)
-        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):
             self.assertEqual(board.machine_ok(self.tmp.name), "swap used 56.4% of RAM (> 25%)")
         with self.machine("14", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):  # RAM first
             self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
         with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="11"):
             self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def swap_log(self, samples=None, raw=None):
+        log = Path(self.tmp.name) / "swap.json"
+        if raw is not None:
+            log.write_text(raw)
+        elif samples is not None:
+            log.write_text(json.dumps([[time.time() - age, v] for age, v in samples]))
+        return mock.patch.dict(os.environ, SCRUM_SWAP_LOG=str(log))
+
+    def test_machine_ok_stale_swap_passes(self):
+        with self.swap_log(), self.machine("71", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+            self.assertIsNone(board.machine_ok(self.tmp.name), "second call, equal sample: still no growth")
+        with self.swap_log(raw="not json{"), self.machine("71", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):
+            self.assertIsNone(board.machine_ok(self.tmp.name), "corrupt log: no growth")
+        with self.swap_log(), self.machine("35", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4"):
+            self.assertIsNone(board.machine_ok(self.tmp.name), "exactly 35% is not under 35%")
+
+    def test_machine_ok_swap_growth(self):
+        msg = "swap used 56.4% of RAM (> 25%)"
+        env = mock.patch.dict(os.environ, SCRUM_SWAP_PCT="56.4")
+        with self.swap_log([(120, 50.0)]), self.machine("71", "1000"), env:
+            self.assertEqual(board.machine_ok(self.tmp.name), msg)
+        with self.swap_log([(700, 50.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "old sample")
+        with self.swap_log([(120, 56.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "under 1 point of growth")
+        with self.swap_log([(120, 60.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "shrinking")
+        with self.swap_log([(120, 50.0), (700, 10.0)]), self.machine("71", "1000"), env:
+            board.machine_ok(self.tmp.name)
+            kept = json.loads((Path(self.tmp.name) / "swap.json").read_text())
+            self.assertEqual([v for _, v in kept], [50.0, 56.4], "pruned to 10 min, current appended")
 
     def test_swap_used_pct_reads_sysctl(self):
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT=""):

@@ -105,7 +105,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, tempfile, time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -2016,6 +2016,8 @@ MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
 MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
+SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
+SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
 MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
 #                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24).
@@ -2076,6 +2078,24 @@ def cooling_down():
     return cooldown_path().exists()
 
 
+def swap_grew(swap):
+    """True when swap rose more than 1 point of RAM above the lowest reading of the last SWAP_GROWTH_SECS. Records swap
+    in SCRUM_SWAP_LOG (default: system temp dir), pruned to that window; a missing or corrupt file means no growth."""
+    log = os.environ.get("SCRUM_SWAP_LOG") or os.path.join(tempfile.gettempdir(), "scrum-swap-log.json")
+    now = time.time()
+    try:
+        keep = [[t, v] for t, v in json.loads(Path(log).read_text()) if now - t < SWAP_GROWTH_SECS]
+    except (OSError, ValueError, TypeError):
+        keep = []
+    grew = bool(keep) and swap - min(v for _, v in keep) > 1
+    try:
+        with open(log, "w") as fh:
+            json.dump(keep + [[now, swap]], fh)
+    except OSError:
+        pass
+    return grew
+
+
 def machine_ok(path, manual=False):
     """None when the machine has room for new work, else why not: cool-down (skipped for Trevor's manual clicks), then
     free RAM, then swap, then free disk, then the session ceiling. Gates new claims, resumes and auto-continue starts
@@ -2086,7 +2106,7 @@ def machine_ok(path, manual=False):
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
     swap = swap_used_pct()
-    if swap is not None and swap > MAX_SWAP_PCT:
+    if swap is not None and swap > MAX_SWAP_PCT and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap)):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
