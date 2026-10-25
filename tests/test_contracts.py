@@ -1365,22 +1365,18 @@ class ContractTest(unittest.TestCase):
 
     def test_skill_records_terminal(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        for phrase in ("ps -o tty= -p $PPID", "B set $ID tty=", "$TERM_PROGRAM", "B set $ID term=",
-                       "Apple_Terminal|iTerm.app|ghostty", "ttys[0-9]*"):
+        for phrase in ("ps -o tty= -p $PPID", "B set $ID tty=", "ttys[0-9]*"):
             self.assertIn(phrase, text, phrase)
+        self.assertNotIn("B set $ID term=", text)
         commands = self.section(text, "## Commands", "## Check gate")
         self.assertIn("**record your terminal**", self.section(commands, "`/trevskills-scrum approve <id>`", "\n"))
         self.assertIn("**record your terminal**", self.section(commands, "`/trevskills-scrum rework <id> <feedback>`", "\n"))
         self.assertIn("**record your terminal**", self.section(commands, "2. **Base:**", "\n"))  # New job, next, start
 
-    def test_dashboard_has_activity_line_and_open_terminal(self):
+    def test_dashboard_has_activity_line(self):
         text = DASHBOARD.read_text()
         self.assertIn(".activity .what{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}", text)
         self.assertIn("${esc(act.text)}", text)
-        self.assertIn(">Open terminal</button>", text)
-        self.assertIn("/terminal`", text)
-        self.assertIn("job.tty", text)
-        self.assertIn("job.runlog", text)
 
     def assert_reviewer_renders(self, name):
         text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
@@ -2111,7 +2107,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('aria-labelledby="viewerTitle"', dialog)
         self.assertNotIn('aria-label="Job files"', dialog)
         self.assertLess(dialog.index('id="viewerTitle"'), dialog.index('id="tabs"'))
-        opener = text[text.index("function open(job)"):text.index("function termForm")]
+        opener = text[text.index("function open(job)"):text.index("// The roadmap card")]
         self.assertIn('$("viewerTitle").innerHTML = jobTitle(job);', opener)  # id + escaped title: test_dashboard_job_modal
 
     def test_dashboard_names_stale_server(self):

@@ -1582,40 +1582,6 @@ def board_with_activity(root):
     return data
 
 
-TERM_SCRIPTS = {  # each gets "/dev/<tty>" as argv; returns "ok", or "missing" when no tab has that tty
-    "Apple_Terminal": """on run argv
-  tell application "Terminal"
-    repeat with w in windows
-      repeat with t in tabs of w
-        if tty of t is item 1 of argv then
-          set selected of t to true
-          set index of w to 1
-          activate
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end tell
-  return "missing"
-end run""",
-    "iTerm.app": """on run argv
-  tell application "iTerm"
-    repeat with w in windows
-      repeat with t in tabs of w
-        repeat with s in sessions of t
-          if tty of s is item 1 of argv then
-            select w
-            select t
-            select s
-            activate
-            return "ok"
-          end if
-        end repeat
-      end repeat
-    end repeat
-  end tell
-  return "missing"
-end run"""}
 NEW_WINDOW_SCRIPT = """on run argv
   set cmd to "cd " & quoted form of item 1 of argv
   set sep to " && "
@@ -1652,71 +1618,6 @@ def run_terminal(tries):
         if out.stdout.strip() != "missing":
             return 200, {"message": message}
     return None
-
-
-def open_terminal(project, root, job_id):
-    """Bring the job's interactive tab to the front, or tail its headless run log in a new window. Every stored value
-    is re-checked here (board.py checked it on the way in) and reaches osascript/open only as an argv item."""
-    jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
-    job = next((j for j in jobs if j.get("id") == job_id), None)
-    if not job:
-        return 404, {"error": "no such job"}
-    tty, term = job.get("tty"), job.get("term")
-    with RUNS_LOCK:
-        runlog = job.get("runlog") or RUNS.get(f"{project}/{job_id}", {}).get("log")
-    if (tty is not None and not (isinstance(tty, str) and board.SHAPES["tty"].fullmatch(tty))
-            or term is not None and term not in board.TERMS):
-        return 400, {"error": "job has a bad tty or term"}
-    log = None
-    if runlog:
-        runs = os.path.realpath(root / "runs") + os.sep
-        log = os.path.realpath(root / runlog) if isinstance(runlog, str) else ""
-        if not log.startswith(runs) or not log.endswith(".log") or not os.path.isfile(log):
-            return 400, {"error": "run log is missing or outside scrum/runs/"}
-    tries = []  # the recorded tab first; when it's been closed, the latest run log
-    if tty and term == "ghostty":
-        tries.append((["open", "-a", "Ghostty"], f"Ghostty is open. Look for the tab on {tty}."))
-    elif tty:
-        tries.append((["osascript", "-e", TERM_SCRIPTS[term or "Apple_Terminal"], f"/dev/{tty}"], None))
-    if log and term == "ghostty" and os.path.isdir("/Applications/Ghostty.app"):
-        tries.append((["open", "-na", "Ghostty", "--args", "-e", "tail", "-f", log], None))
-    elif log:
-        tries.append((osa_new_window(root / "runs", "tail", "-f", log), f"The tab on {tty} is closed; showing the latest run log." if tty else None))
-    if not tries:
-        return 409, {"error": "no terminal recorded for this job"}
-    code, obj = run_terminal(tries) or (404, {"error": f"no open tab on {tty}, and no run log to show"})
-    return code, {"id": job_id, **obj} if code == 200 else obj
-
-
-def ask_prompt(root: Path, job_id: str) -> str:
-    """The Ask Claude prompt: the job's artifacts that exist now, as absolute paths (never their contents)."""
-    d = root / "jobs" / job_id
-    rounds = sorted((p for p in d.glob("round-*") if p.is_dir() and re.fullmatch(r"round-\d+", p.name)),
-                    key=lambda p: int(p.name[6:]))
-    paths = [d / "feature.md", d / "spec.md", d / "build.md",
-             *(f for r in rounds for f in sorted(r.glob("*.md"), key=lambda f: f.name)), d / "decision.md"]
-    files = "".join(f"{p}\n" for p in paths if p.is_file())
-    return (f"Answer my questions about scrum job {job_id}. Its session has ended. Read these first:\n{files}"
-            f'Its board entry is the object with "id": "{job_id}" in {root / "board.json"}. '
-            "Don't change any file unless I ask.")
-
-
-def ask_claude(project: str, root: Path, job_id: str) -> tuple[int, dict]:
-    """Open a new interactive claude in the job's worktree (the repo root once it's gone), primed with its artifacts.
-    It isn't recorded as the job's tty or added to RUNS, so the board and the watchdog ignore it."""
-    jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
-    job = next((j for j in jobs if j.get("id") == job_id), None)
-    if not job:
-        return 404, {"error": "no such job"}
-    wt = job.get("worktree")
-    cwd = wt if isinstance(wt, str) and os.path.isdir(wt) else str(root.parent)
-    claude = ["env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, ask_prompt(root, job_id)]
-    if os.path.isdir("/Applications/Ghostty.app"):
-        tries = [(["open", "-na", "Ghostty", "--args", f"--working-directory={cwd}", "-e", *claude], "Claude opened in Ghostty.")]
-    else:
-        tries = [(osa_new_window(cwd, *claude), "Claude opened in a new Terminal window.")]
-    code, obj = run_terminal(tries)
-    return code, {"id": job_id, **obj} if code == 200 else obj
 
 
 # --- AI-Settings security scan: static, read-only. Reads files only; never runs a hook or touches an MCP server. ----
@@ -2830,10 +2731,6 @@ class Handler(BaseHTTPRequestHandler):
             _, _, digest_id, pid = rest.split("/", 3)
             return digest_decide(root, digest_id, unquote(pid), body.get("decision"))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
-        if action == "terminal":
-            return open_terminal(project, root, job_id)
-        if action == "ask":
-            return ask_claude(project, root, job_id)
         if action == "abort":
             return abort_job(project, root, job_id, bool(body.get("requeue")))
         if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
