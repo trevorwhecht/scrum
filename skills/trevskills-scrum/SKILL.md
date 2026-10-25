@@ -118,7 +118,7 @@ A tty of `??` or empty sets nothing. The recorded tty is also what the frontmatt
 
    `- Cloud environment: <id>` (optional, hand-added): the claude.ai/code environment the **Cloud lane** starts sessions in.
 
-   `- Auto continue: <n>` (optional, hand-added): serve.py starts one headless run-all per idle opted-in project, Focus projects first, then the project that just finished, newest board activity, lower `n`; none when usage is over pace, and no new work while free RAM or disk is low. `- Focus: yes` (optional): ordering only, never holds another project. First-run setup writes neither.
+   `- Auto continue: <n>` (optional, hand-added): serve.py starts one headless run-all per idle opted-in project, Focus projects first, then the project that just finished, newest board activity, lower `n`; only `board.machine_ok` (free RAM or disk low) and `MAX_SESSIONS` gate new work. `- Focus: yes` (optional): ordering only, never holds another project. First-run setup writes neither.
 
    `- Test sign-in: <account> — credentials in <where>` is optional: the test account `scrum-review-ui` and `scrum-review-ux` sign in with to render signed-in pages. `<where>` is where the credentials live, such as an env var name or a file path; the line only points at them and never holds a password or token value. First-run setup writes it only when the repo's CLAUDE.md/AGENTS.md, rules files, README, seed script or e2e config already names a test account. Otherwise it writes no such line.
 
