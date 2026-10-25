@@ -305,6 +305,7 @@ def answer_job(project, root, job, jobs, key):
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a hold on a bare clock time is capped here
 STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's one non-limit resume per stage
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
@@ -332,18 +333,20 @@ def net_error(root, job):
 
 
 def limit_reset(root, job):
-    """(limit hit?, reset epoch or None) from the tail of the job's run log: the line Claude Code prints when the
-    account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm"). A clock time
-    is the next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever."""
+    """(limit hit?, reset epoch or None, fixed?) from the tail of the job's run log: the line Claude Code prints when
+    the account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm"). fixed is
+    True for an epoch or a dated reset, False for a bare clock time (a session limit) or none. A clock time is the
+    next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever; one more
+    than SESSION_WINDOW after it is the same time that day (the limit line predates the log's last write)."""
     tail, written = run_log_tail(root, job)
     if not LIMIT_RE.search(tail):
-        return False, None
+        return False, None, False
     m = RESET_EPOCH_RE.search(tail)
     if m:
-        return True, int(m.group(1))
+        return True, int(m.group(1)), True
     m = RESET_RE.search(tail)
     if not m:
-        return True, None
+        return True, None, False
     mon, day, hour, minute, ampm = m.groups()
     hour = int(hour) % 12 + (12 if ampm.lower() == "pm" else 0)
     try:
@@ -352,11 +355,14 @@ def limit_reset(root, job):
             at = at.replace(month=datetime.strptime(mon, "%b").month, day=int(day))
             if at < written:
                 at = at.replace(year=at.year + 1)
-        elif at < written:
-            at += timedelta(days=1)
+        else:
+            if at < written:
+                at += timedelta(days=1)
+            if at - written > timedelta(seconds=SESSION_WINDOW):
+                at -= timedelta(days=1)
     except ValueError:
-        return True, None
-    return True, at.timestamp()
+        return True, None, False
+    return True, at.timestamp(), bool(mon)
 
 
 def auto_resume(project, root, jobs):
@@ -388,7 +394,7 @@ def auto_resume(project, root, jobs):
         if now < due:
             busy = True
             continue
-        hit, reset = limit_reset(root, job)
+        hit, reset, fixed = limit_reset(root, job)
         if not hit:
             if net_error(root, job):
                 if resume_refusal(project, root, job) is None:
@@ -410,7 +416,7 @@ def auto_resume(project, root, jobs):
         stage = re.match(rf"{board.STALLED}(\w+):", reason)
         if stage and stage.group(1) in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
-                         stage.group(1))
+                         stage.group(1), fixed=fixed)
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
@@ -498,10 +504,12 @@ def flag_stalled(root, job, msg):
     return True
 
 
-def hold_limited(root, job, reset, stage=None):
+def hold_limited(root, job, reset, stage=None, fixed=False):
     """Under the board lock, keep a usage-limit-killed job in its stage (or move it back to `stage`) with
-    limitResetAt = reset (epoch seconds); auto_resume restarts it after the reset. False when the job is gone or its
-    stage moved on meanwhile."""
+    limitResetAt = reset (epoch seconds), at most now + SESSION_WINDOW unless the reset is fixed (an epoch or a date);
+    auto_resume restarts it after the reset. False when the job is gone or its stage moved on meanwhile."""
+    if not fixed:
+        reset = min(reset, int(time.time()) + SESSION_WINDOW)
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
@@ -536,10 +544,11 @@ def respawn_exited(project, root):
         if alive(job):
             continue  # another session (e.g. a Terminal) has the job; look again next tick
         run["handled"] = True
-        hit, reset = limit_reset(root, job)
+        hit, reset, fixed = limit_reset(root, job)
         if hit:  # a reset already past (or none named) waits AUTO_RESUME_EVERY, so a resume never loops every tick
             now = time.time()
-            hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY)
+            hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
+                         fixed=fixed)
             continue
         stage = job["stage"]
         if not flag_stalled(root, job, EXITED):
