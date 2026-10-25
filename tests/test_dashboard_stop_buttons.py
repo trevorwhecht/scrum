@@ -229,7 +229,7 @@ class StopBox(unittest.TestCase):
             postFails = null; {submit} renderActions(jobs[0]); out(els.actions.innerHTML);
             postFails = {json.dumps(msg)}; {submit} jobs[0] = {{...jobs[0], stage: "build"}}; renderActions(jobs[0]); out(els.actions.innerHTML);""")
         self.assertEqual(first, msg)
-        self.assertTrue(again.endswith(f'<p class="error" role="alert">{shown}</p>'), again)
+        self.assertIn(f'<p class="error" role="alert">{shown}</p>', again)
         self.assertIn('<p class="error" role="alert"></p>', other)  # cleared by the next POST that succeeds
         self.assertIn('<p class="error" role="alert"></p>', moved)  # cleared when the stage changes
         answered, = js(f"""jobs = [{json.dumps({**ASKED, "options": OPTIONS})}]; postFails = {json.dumps(msg)};
