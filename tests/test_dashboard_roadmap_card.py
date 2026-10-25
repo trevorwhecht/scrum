@@ -151,7 +151,7 @@ class RoadmapCard(unittest.TestCase):
         # A poll re-renders actions only for a board job key (project/id); this key is never one.
         self.assertEqual(got["key"], "p#roadmap")
         text = DASHBOARD.read_text()
-        click = text[text.index('$("board").addEventListener("click", e => {\n  if (e.target.closest("button[data-answer]"))'):]
+        click = text[text.index('$("board").addEventListener("click", e => {\n  const el = e.target.closest(".card");'):]
         self.assertIn("openRoadmap(", click[:click.index("});")])
 
     def test_render_keeps_focus_on_roadmap_card(self):

@@ -18,7 +18,7 @@ h1{font-size:16px;margin:0}
 #status,#routing,#machine,#cooldownState{color:var(--muted);font-size:12px}
 #cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 #machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
-#machine .ring{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 4px,black 4.5px)}
+#machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:10px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
 #machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
@@ -50,6 +50,7 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .bar{display:block;height:3px;margin-top:6px;border-radius:99px;background:var(--line);overflow:hidden}
 .bar>span{display:block;height:100%;background:var(--accent)}.bar.done>span{background:var(--pass)}.bar.human>span{background:var(--human)}
 .reason{display:block;font-size:12px;color:var(--human);margin-top:6px}
+.card .status{display:block;font-size:12px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}.card.human .status{color:var(--human)}
 .stale{color:var(--changes)}
 .meta.kid{margin-top:0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
 .empty{color:var(--muted);font-size:12px}
@@ -61,6 +62,7 @@ dialog::backdrop{background:#0007}
 .tabs .close{margin-left:auto}
 .vhead{position:sticky;top:0;z-index:1;background:var(--card)}.vhead .tabs{position:static}
 #viewerTitle{margin:0;padding:10px 10px 0;font-size:16px;overflow-wrap:anywhere;color:var(--ink)}
+#viewerStatus{padding:2px 10px 0;overflow-wrap:anywhere}#viewerStatus:empty{display:none}
 article{padding:4px 20px 20px;overflow-wrap:anywhere}
 article pre{overflow-x:auto;background:var(--bg);padding:8px;border-radius:6px;white-space:pre-wrap}
 article a{color:var(--accent)}
@@ -71,7 +73,6 @@ body:has(dialog[open]){overflow:hidden}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
 .btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
 .card.aborted{opacity:.55}
-.answer .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.tall{min-height:44px}
 .btn.more{width:100%}
@@ -91,8 +92,13 @@ header{flex-wrap:wrap}
 .error{font-size:12px;color:var(--human);margin:0}
 .error:empty{display:none}
 #actions{display:grid;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line)}
-.waiting{border:1px solid var(--human);border-radius:8px;padding:8px 12px;background:color-mix(in srgb,var(--human) 8%,var(--card))}
-.waiting b{color:var(--human)}.waiting p{margin:4px 0 0;overflow-wrap:anywhere}
+.stop{border:1px solid var(--human);border-radius:8px;padding:8px 12px;background:color-mix(in srgb,var(--human) 8%,var(--card));min-width:0}
+.stop b{color:var(--human)}.stop p{margin:4px 0 0;overflow-wrap:anywhere}
+.stop .acts{display:grid;gap:8px;margin-top:8px}.stop .acts .btn{width:100%;font-size:15px;text-align:left;overflow-wrap:anywhere}
+.stop .acts .badge{margin:0 0 0 2px;vertical-align:middle}.stop .acts .note{margin:-4px 0 0}
+.stop .sendback{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
+details.more summary{display:flex;align-items:center;min-height:44px;min-width:44px;width:max-content;cursor:pointer;color:var(--muted);font-size:13px}
+details.more form{margin-top:4px}
 #actions:empty{display:none}
 #actions form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .kids{display:grid;gap:6px}.kids .btn{flex:1;text-align:left}.btn.kid.human{border-color:var(--human)}
@@ -205,13 +211,13 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
   #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use, its label and tooltip the free %. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it (grey with no reading); swap and disk turn orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red only when the swap verdict blocks starts (stale swap with free RAM does not) and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it or on the swap verdict (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists board.machine_ok refuses every automatic start: the watchdog's claims, auto-resumes, queued Plays, orphan respawns, auto continue and continue.py's Resume POSTs. Sessions already running finish; nothing is stopped. Trevor's own Play, Resume, closed-question answers and Run now still start work. The state text counts the headless sessions still running (board.live_sessions) and reads idle at 0, when serve.py plays one done sound. Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
@@ -221,7 +227,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <main id="board"></main>
-<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
+<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
@@ -372,7 +378,16 @@ const ago = at => {
   const s = Math.max(0, Math.round(Date.now() / 1000 - at));
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 };
-const tickAgo = () => document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
+// Also re-runs statusLine on cards and the modal, so "Building, N min" advances with no board change.
+const tickAgo = () => {
+  document.querySelectorAll("[data-at]").forEach(el => { el.textContent = ago(+el.dataset.at); });
+  document.querySelectorAll(".card[data-key] > .status").forEach(el => {
+    const j = jobs.find(x => x.key === el.parentElement.dataset.key);
+    if (j) el.textContent = statusLine(j);
+  });
+  const j = $("viewer").open && jobs.find(x => x.key === $("viewer").dataset.key);
+  if (j && $("viewerStatus")) $("viewerStatus").textContent = statusLine(j);
+};
 
 // A running job whose interactive session is stopped on a permission prompt, a question or a reply (board.py hook).
 const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
@@ -476,18 +491,15 @@ function card(job) {
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !hold && !held && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
-  // A card with option buttons is a focusable div that opens like a button (see the board keydown handler): buttons can't nest.
-  const opts = optionsRow(job), el = opts ? "div" : "button";
-  return `<${el} class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}"${opts ? ' tabindex="0" role="button"' : ""}>
+  return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${held ? `<span class="badge">waiting for reset ${esc(when(job.limitResetAt))}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
     ${job.routed ? routeTags(routes[job.key]) : ""}
     ${pct == null ? "" : `<span class="bar${job.stage === "done" ? " done" : human ? " human" : ""}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" aria-label="Estimated progress" title="~${pct}% (estimate)"><span style="width:${pct}%"></span></span>`}
-    ${paused(job) ? `<span class="reason">${esc(job.waiting)}</span>` : ""}${outcomeLine(job, "span", "meta")}
-    ${human && !paused(job) && job.reason && !opts ? `<span class="reason">${esc(splitReason(job.reason).problem)}</span>` : ""}${opts}
-    ${setup ? `<span class="reason">Human setup: ${esc(job.setup_text || "—")}</span>` : ""}
+    ${outcomeLine(job, "span", "meta")}
+    <span class="status">${esc(statusLine(job))}</span>
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
@@ -495,7 +507,7 @@ function card(job) {
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
       : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
-  </${el}>`;
+  </button>`;
 }
 
 // The Done column shows this many cards; Load more adds DONE_STEP. Kept outside the DOM so a poll re-render keeps it.
@@ -513,7 +525,6 @@ function render() {
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
   const rmFocused = document.activeElement?.matches?.("#board [data-roadmap]") && document.activeElement.dataset.roadmap;
-  const optFocused = document.activeElement?.matches?.("#board [data-answer]") && [document.activeElement.closest(".card").dataset.key, document.activeElement.dataset.answer];
   $("board").innerHTML = cols.map(stage => {
     const all = list.filter(j => colOf(j) === stage).sort(newestFirst);
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
@@ -522,7 +533,6 @@ function render() {
       ${rIn(stage).join("") + inCol.map(card).join("") + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
-  if (optFocused) focusOption($("board"), ...optFocused);
   if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus();
   const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
@@ -578,12 +588,16 @@ function renderMachine(m) {
   if (!m) return;
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
-  // RAM is a ring: the filled arc is RAM in use, the free % is in its label.
-  const ram = m.free_ram_pct, ramLabel = ram == null ? "RAM —" : `RAM ${Math.round(ram)}% free`;
-  const ring = `<span class="ring ${ram == null ? "none" : machineLevel(ram, "ram", m)}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${ramLabel}" title="${ramLabel}"></span>`;
+  // RAM is a ring: the filled arc is RAM in use, the free % sits inside it. Swap has no text of its own: it only
+  // turns the ring red when board.machine_ok's verdict is the swap one (stale swap with free RAM blocks nothing),
+  // and shows in its tooltip, since free RAM and swap are independent.
+  const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), /^swap used/.test(m.verdict || "") ? "danger" : "ok"];
+  const level = ram == null ? "none" : levels.includes("danger") ? "danger" : levels.includes("low") ? "low" : "ok";
+  const tip = `RAM ${ram == null ? "—" : Math.round(ram) + "% free"} · swap ${m.swap_pct == null ? "—" : Math.round(m.swap_pct) + "%"}`;
+  const ring = `<span class="ring ${level}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${tip}" title="${tip}">${ram == null ? "—" : Math.round(ram) + "%"}</span> RAM`;
   // A red reading already says what the verdict says, so the verdict shows only when it names something else (the session ceiling).
-  const shownRed = [["ram", ram], ["swap", m.swap_pct], ["disk", m.free_disk_gb]].some(([k, v]) => machineLevel(v, k, m) === "danger");
-  el.innerHTML = [ring, part("swap", "swap", m.swap_pct, "%"),
+  const shownRed = level === "danger" || machineLevel(m.free_disk_gb, "disk", m) === "danger";
+  el.innerHTML = [ring,
     part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }
@@ -680,6 +694,7 @@ function openRoadmap(p) {
   const doc = roadmapDoc(p);
   $("viewer").dataset.key = doc.key;
   $("viewerTitle").textContent = rm.name;
+  $("viewerStatus").textContent = "";
   $("tabs").innerHTML = tag(p) + '<button data-file="roadmap.md" aria-pressed="false">roadmap.md</button><button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = $("actions").innerHTML = $("diverged").innerHTML = "";
   if (!$("viewer").open) $("viewer").showModal();
@@ -720,16 +735,24 @@ async function loadRework(job) {
 const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form data-act="abort">
     <label hidden><input type="checkbox" name="requeue"> Put back in backlog</label>
     <button class="btn danger-outline" type="submit">Abort job</button></form>`;
+// The one More menu: Abort sits behind it so it is never a top-level button.
+const moreMenu = job => { const a = abortForm(job); return a ? `<details class="more" data-key="${esc(job.key)}"><summary>More</summary>${a}</details>` : ""; };
 // Pause stops the job's session and holds it in its stage (board.py PAUSABLE); Play is the resume form below.
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
+// When serve.py says a click would be refused (job.resumeRefusal), the waiting status shows in its place: what it waits
+// on, not "Paused by you", which the status line above already says.
 const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
-const resumeForm = reason => !RESUMABLE.some(p => (reason || "").startsWith(p)) ? ""
-  : `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
+const resumeForm = job => {
+  const reason = job.reason || "";
+  if (!RESUMABLE.some(p => reason.startsWith(p))) return "";
+  if (job.resumeRefusal) return `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
+  return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
+};
 // A paused job keeps its stage, so its panel takes the not-needs-human branch: Play goes there in place of Pause.
-const playForm = job => heldByTrevor(job) ? resumeForm(job.reason) : "";
+const playForm = job => heldByTrevor(job) ? resumeForm(job) : "";
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
     <button class="btn primary tall" type="submit">Setup done</button></form>`;
@@ -739,54 +762,90 @@ const reopenForm = job => !["done", "aborted"].includes(job.stage) ? ""
   : `<form data-act="reopen"><textarea name="note" required maxlength="2000" placeholder="What should the follow-up job do?" aria-label="Note for the reopened job"></textarea>
     <button class="btn" type="submit">Reopen</button></form>`;
 
-// Splits a needs-human reason into problem and fix on the first " Fix: " the orchestrator writes.
-const splitReason = reason => {
-  const r = reason || "", i = r.indexOf(" Fix: ");
-  if (i < 0) return {problem: r || "No reason recorded.", fix: "Click Discuss first."};
-  const fix = r.slice(i + 6);
-  return {problem: r.slice(0, i), fix: fix.charAt(0).toUpperCase() + fix.slice(1)};
+// A stop's issue in plain words: the machine prefix (board.py ask, "Hard stop: x — ") goes, the text is cut at the
+// first " Fix: ", and every path is cut to its basename (the same rule as serve.py waiting_on).
+const noPaths = text => text.replace(/\S*\//g, "");
+const STOP_PREFIX = /^(stalled in \w+: )?(Hard stop: [^—]+ — |[a-z][\w ]{0,30}: )/;
+const stopIssue = text => noPaths(String(text || "").replace(STOP_PREFIX, "").split(" Fix: ")[0]).trim() || "No reason recorded.";
+const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check: "Checking", review: "Reviewing", approve: "Approving",
+  merging: "Merging", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
+// One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
+// waitingOn(job) helper above.
+const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
+  : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).join(", ")} (${job.waitingOn.why})`
+  : job.paused ? "Paused by you"
+  : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
+  : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
+  : paused(job) ? `Waiting on you: ${job.waiting}`
+  : setupWait(job) ? "Waiting on you: setup"
+  : `${VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
+
+// A needs-human job's closed question (board.py ask): armed/pending/note-open state per job key, outside the DOM so a
+// poll re-render keeps it. actionError: a refused POST's message per job key, kept across re-renders until the next
+// POST for that job succeeds or its stage changes.
+const answerState = {}, actionError = {};
+const setActionError = (key, stage, msg) => {
+  actionError[key] = {msg, stage};
+  const p = $("viewer").dataset.key === key && $("actions").querySelector(":scope > .error");
+  if (p) p.textContent = msg;
 };
-// A needs-human job's closed question (board.py ask): the question, then one button per option in key order. Its
-// armed/pending/error state lives outside the DOM, so a poll re-render keeps it.
-const answerState = {};
-function optionsRow(job) {
-  if (job.stage !== "needs-human" || !job.options?.length) return "";
+// Recommended option first, then key order.
+const stopOptions = job => [...(job.options || [])].sort((a, b) =>
+  (b.key === job.recommend?.key) - (a.key === job.recommend?.key) || String(a.key).localeCompare(String(b.key)));
+// The one renderer of a stop: the issue once, then one large button per option (A/B/C), the rework option with an
+// optional note. A session paused on a prompt gets the same box with its prompt.
+function stopBox(job) {
+  if (paused(job)) return `<div class="stop" role="status"
+    data-agent-hint="This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for.">
+    <b>Waiting on you</b><p>${esc(job.waiting)}</p><p>Answer it in the job's terminal.</p></div>`;
+  if (job.stage !== "needs-human") return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
-  const opts = [...job.options].sort((a, b) => String(a.key).localeCompare(String(b.key)));
-  return `<div class="answer"><span class="reason">${esc(job.question || splitReason(job.reason).problem)}</span><div class="acts">${opts.map(o =>
-    `<button class="btn tall${st.armed === o.key ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${off ? " disabled" : ""}>${st.armed === o.key ? "Confirm: " : ""}${esc(o.label)}</button>`).join("")}</div><p class="error" role="alert">${esc(st.err || "")}</p></div>`;
+  const rec = job.recommend, dis = off ? " disabled" : "";
+  const buttons = stopOptions(job).map((o, i) => {
+    const armed = st.armed === o.key, top = i === 0 && !!rec && o.key === rec.key;
+    return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}</button>`
+      + (top && rec.why ? `<p class="note">${esc(rec.why)}</p>` : "");
+  }).join("");
+  // Without options the reason's own fix (after " Fix: ") stays as the box's second line, as before.
+  const fix = buttons ? "" : (job.reason || "").split(" Fix: ").slice(1).join(" Fix: ");
+  const note = !st.noteOpen ? "" : `<div class="sendback"><textarea name="note" maxlength="2000" placeholder="Anything the builder should know? (optional)" aria-label="Note for the builder"${dis}>${esc(st.note || "")}</textarea>
+    <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>Send back</button></div>`;
+  return `<div class="stop" role="status"
+    data-agent-hint="This job stopped and needs Trevor. The first line is what is wrong; then either the exact fix or the ways forward, the recommended one first.">
+    <b>Waiting on you</b><p>${esc(stopIssue(job.question || job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
 }
-const waitingBanner = job => {
-  const p = paused(job);
-  if (!p && job.stage !== "needs-human") return "";
-  const {problem, fix} = p ? {problem: job.waiting, fix: "Answer it in the job's terminal."} : splitReason(job.reason);
-  return `<div class="waiting" role="status"
-    data-agent-hint="${p ? "This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for."
-      : "This job stopped and needs Trevor. The first line is what is wrong; the second is the exact fix."}">
-    <b>Waiting on you</b><p>${esc(problem)}</p><p>${esc(fix)}</p></div>`;
-};
 
 function renderActions(job) {
-  const el = $("actions"), run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + waitingBanner(job);
+  const el = $("actions"), status = $("viewerStatus"), d0 = el.querySelector?.("details.more"), more = d0?.open && d0.dataset?.key === job.key;  // never carry the open menu to another job
+  if (status) status.textContent = statusLine(job);
+  if (actionError[job.key] && actionError[job.key].stage !== job.stage) delete actionError[job.key];
+  const fail = actionError[job.key], err = fail ? `<p class="error" role="alert">${esc(fail.msg)}</p>`
+    : `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`;
+  el.innerHTML = actionsHtml(job, err);
+  if (more) { const d = el.querySelector("details.more"); if (d) d.open = true; }
+}
+// The modal's actions for job; err is the error line, last, under the buttons.
+function actionsHtml(job, err) {
+  const run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + stopBox(job);
   const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
-  const err = `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`, kids = waitingNote(job, "note") + childLinks(job);
+  const kids = waitingNote(job, "note") + childLinks(job);
   // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
   const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
-  if (run?.alive && run.action !== "discuss") return el.innerHTML = banner + kids + now + pauseForm(job) + abortForm(job) + err;
+  if (run?.alive && run.action !== "discuss") return banner + kids + now + pauseForm(job) + moreMenu(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") return el.innerHTML = banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + pauseForm(job) + abortForm(job) + err;
+  if (job.stage !== "needs-human") return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + pauseForm(job) + moreMenu(job) + err;
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
-  el.innerHTML = banner + kids + last + (optionsRow(job) || resumeForm(reason)
+  return banner + kids + last + (job.options?.length ? "" : resumeForm(job)
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
-      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + abortForm(job) + err;
+      <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + moreMenu(job) + err;
 }
 
 $("actions").addEventListener("submit", async e => {
@@ -807,6 +866,7 @@ $("actions").addEventListener("submit", async e => {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
       : act === "reopen" ? {note: form.note.value} : act === "resume" ? {manual: true} : act === "pause" || act === "setup-done" ? {} : {feedback: form.feedback.value};
     const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
+    delete actionError[key];
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();
     const linked = act === "reopen" && jobs.find(j => j.key === `${job.project}/${out.id}`);
@@ -814,42 +874,48 @@ $("actions").addEventListener("submit", async e => {
     renderActions(jobs.find(j => j.key === key));
   } catch (err) {
     btn.disabled = false;
-    $("actions").querySelector(":scope > .error").textContent = err.message;
+    setActionError(key, job.stage, err.message);
   }
 });
 
-// Option buttons, on a card and in the modal. An abort option arms first; the second click posts.
-// box is the board (rows sit in cards) or the modal's #actions (its one row belongs to the open job).
-const ofJob = (el, key) => (el.closest(".card")?.dataset.key ?? key) === key;
-const focusOption = (box, key, k) => [...box.querySelectorAll("button[data-answer]")].find(b => ofJob(b, key) && b.dataset.answer === k)?.focus();
+// Redraws only the open modal's stop box (a poll redraws the rest), keeping focus on the note or the clicked option.
 function redrawAnswer(key, k) {
-  const job = jobs.find(j => j.key === key);
-  const boxes = [$("board"), $("viewer").open && $("viewer").dataset.key === key ? $("actions") : null];
-  for (const box of boxes) {
-    const row = [...box?.querySelectorAll(".answer") || []].find(r => ofJob(r, key));
-    if (!row || !job) continue;
-    const refocus = row.contains(document.activeElement) || document.activeElement === document.body;
-    row.outerHTML = optionsRow(job);
-    if (refocus) focusOption(box, key, k);
-  }
+  const job = jobs.find(j => j.key === key), box = $("actions");
+  const stop = job && $("viewer").open && $("viewer").dataset.key === key && box.querySelector(".stop");
+  if (!stop) return;
+  const refocus = stop.contains(document.activeElement) || document.activeElement === document.body;
+  stop.outerHTML = stopBox(job);
+  const note = answerState[key]?.noteOpen && box.querySelector('.stop textarea[name="note"]');
+  if (note && !note.disabled) note.focus();
+  else if (refocus) [...box.querySelectorAll(".stop button[data-answer]")].find(b => b.dataset.answer === k)?.focus();
 }
-async function answer(key, k) {
+// An option click. A rework option opens its note first and posts {key, note} from Send back; an abort option arms
+// first and posts on the second click; any other option posts {key} at once.
+async function answer(key, k, note) {
   const job = jobs.find(j => j.key === key), opt = job?.options?.find(o => o.key === k), st = answerState[key] || {};
   if (!opt || st.pending) return;
+  if (note === undefined && /^rework /.test(opt.command || "")) { answerState[key] = {noteOpen: k, note: st.note}; return redrawAnswer(key, k); }
   if (/^abort\b/.test(opt.command || "") && st.armed !== k) { answerState[key] = {armed: k}; return redrawAnswer(key, k); }
-  answerState[key] = {pending: true}; redrawAnswer(key, k);
+  const keep = note === undefined ? {} : {noteOpen: k, note};
+  answerState[key] = {...keep, pending: true}; redrawAnswer(key, k);
   try {
-    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/answer`, {key: k});
+    await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/answer`, note === undefined ? {key: k} : {key: k, note});
     delete answerState[key];
+    delete actionError[key];
     await poll();
     const now = $("viewer").open && $("viewer").dataset.key === key && jobs.find(j => j.key === key);
     if (now) renderActions(now);
-  } catch (err) { answerState[key] = {err: err.message}; redrawAnswer(key, k); }
+  } catch (err) { answerState[key] = keep; redrawAnswer(key, k); setActionError(key, job.stage, err.message); }
 }
 // answer() end
 $("actions").addEventListener("click", e => {
-  const b = e.target.closest("button[data-answer]");
-  if (b) answer($("viewer").dataset.key, b.dataset.answer);
+  const b = e.target.closest("button[data-answer], button[data-send]"), key = $("viewer").dataset.key;
+  if (b?.dataset.answer) answer(key, b.dataset.answer);
+  else if (b) answer(key, b.dataset.send, $("actions").querySelector('.stop textarea[name="note"]')?.value ?? "");
+});
+$("actions").addEventListener("input", e => {  // the note draft lives in answerState, so a re-render keeps it
+  const st = e.target.matches('.stop textarea[name="note"]') && answerState[$("viewer").dataset.key];
+  if (st) st.note = e.target.value;
 });
 
 const blProject = () => $("blProject").value;
@@ -1593,17 +1659,6 @@ $("board").addEventListener("click", e => {
   if (!$("board").querySelector("[data-more]")) doneCards()[before]?.focus();
 });
 $("board").addEventListener("click", e => {
-  const b = e.target.closest("button[data-answer]");
-  if (b) answer(b.closest(".card").dataset.key, b.dataset.answer);
-});
-$("board").addEventListener("keydown", e => {  // a div card (one with option buttons) opens on Enter or Space, like a button
-  if (!(e.key === "Enter" || e.key === " ") || !e.target.matches("div.card[data-key]")) return;
-  e.preventDefault();
-  const job = jobs.find(j => j.key === e.target.dataset.key);
-  if (job) open(job);
-});
-$("board").addEventListener("click", e => {
-  if (e.target.closest("button[data-answer]")) return;
   const el = e.target.closest(".card");
   if (el?.dataset.roadmap) return openRoadmap(el.dataset.roadmap);
   const job = el && jobs.find(j => j.key === el.dataset.key);
