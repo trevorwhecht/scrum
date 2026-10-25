@@ -1045,14 +1045,14 @@ async function attachImages(files) {
   $("blError").textContent = "";
   for (const file of files) {
     if (!file.type.startsWith("image/")) { $("blError").textContent = "Only images can be attached"; continue; }
-    uploads++; add.disabled = true;
+    uploads++; add.disabled = $("blProject").disabled = true;  // a token must land in the project it uploaded to
     try {
       const {path} = await post(url, {data: await toBase64(file), type: file.type});
       const text = form.text.value, token = `[screenshot: ${path}]`, next = text + (text ? " " : "") + token;
       if (next.length > form.text.maxLength) $("blError").textContent = "Item is too long to add another screenshot";
       else form.text.value = next;
     } catch (err) { $("blError").textContent = err.message; }
-    finally { if (!--uploads) add.disabled = false; }
+    finally { if (!--uploads) add.disabled = $("blProject").disabled = false; }
   }
 }
 $("blAdd").text.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); $("blAdd").requestSubmit(); } });
