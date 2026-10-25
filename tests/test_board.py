@@ -1266,11 +1266,11 @@ class BoardTest(unittest.TestCase):
     def test_machine_ok_session_ceiling(self):
         """Job 279 (Trevor 2026-10-24): free RAM caps new work, not a fixed 8 sessions. Job 283 (Trevor, later that day,
         after 19 sessions across three projects piled up): one machine-wide ceiling, derived from the RAM share."""
-        self.assertEqual(board.MAX_SESSIONS, 60 // board.SESSION_RAM_PCT)
-        with self.sessions(11):
+        self.assertEqual(board.MAX_SESSIONS, 70 // board.SESSION_RAM_PCT)
+        with self.sessions(13):
             self.assertIsNone(board.machine_ok(self.tmp.name))
-        with self.sessions(12):
-            self.assertEqual(board.machine_ok(self.tmp.name), "12 sessions running (ceiling 12)")
+        with self.sessions(14):
+            self.assertEqual(board.machine_ok(self.tmp.name), "14 sessions running (ceiling 14)")
         with self.sessions(20), self.machine("14", "1000"):
             self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "RAM first")
 
@@ -1290,7 +1290,7 @@ class BoardTest(unittest.TestCase):
         ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 3 + "   09:00 claude -p /trevskills-scrum start 2-b\n" * 2)
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
             self.assertEqual(board.ram_room(), 6, "9 shares, 3 young sessions reserved")
-        with self.machine("66", "1000"), self.sessions(11):
+        with self.machine("66", "1000"), self.sessions(13):
             self.assertEqual(board.ram_room(), 1, "one short of the ceiling")
         ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 9)
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
@@ -1298,7 +1298,7 @@ class BoardTest(unittest.TestCase):
 
     def test_ram_room(self):
         self.assertEqual(board.SESSION_RAM_PCT, 5)
-        for ram, room in (("66", 9), ("100", 12), ("26", 1), ("20", 1)):  # 100: the MAX_SESSIONS ceiling
+        for ram, room in (("66", 9), ("100", 14), ("26", 1), ("20", 1)):  # 100: the MAX_SESSIONS ceiling
             with self.subTest(ram=ram), self.machine(ram, "1000"):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):

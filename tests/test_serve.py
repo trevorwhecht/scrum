@@ -931,11 +931,11 @@ class ServeTest(unittest.TestCase):
         job = {"id": "9-x", "lane": "standard"}
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
                 mock.patch.object(self.serve.board, "pace_cap", return_value=None):
-            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 11)
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 13)
             self.assertIsNone(self.serve.resume_refusal("repo", self.root, job))
-            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 12)
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 14)
             self.assertEqual(self.serve.resume_refusal("repo", self.root, job), self.serve.board.MACHINE_WAIT
-                             + "12 sessions running (ceiling 12). Fix: click Resume once memory or disk frees up.")
+                             + "14 sessions running (ceiling 14). Fix: click Resume once memory or disk frees up.")
 
     def test_resume_refusal_machine_guard(self):
         """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
@@ -4745,10 +4745,10 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1); self.project("b", n=2)
         ps = self.base / "ps.txt"
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), mock.patch.object(self.board, "pace_cap", return_value=None):
-            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 11)
-            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "11 live sessions, RAM fine: both start")
-            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 12)
-            self.assertEqual(self.tick(), [], "12 live sessions: at the ceiling, nothing starts")
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 13)
+            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "13 live sessions, RAM fine: both start")
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 14)
+            self.assertEqual(self.tick(), [], "14 live sessions: at the ceiling, nothing starts")
 
     def test_auto_continue_starts_each_idle_project(self):
         self.project("a", n=1); self.project("b", n=5)

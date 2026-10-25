@@ -1965,8 +1965,9 @@ MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
-MAX_SESSIONS = 12  # machine_ok: headless sessions may hold 60% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
-#                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24)
+MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
+#                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24).
+#                   14, not 12: Trevor keeps it as a backstop until further notice in case the RAM reading misleads (job 284)
 SESSION_RAMP_SECS = 120  # ram_room: a session younger than this has not grown into its RAM yet, so free RAM % overstates
 #                          the room; two projects claiming within that minute both burst (the 2026-10-24 pile-up)
 
