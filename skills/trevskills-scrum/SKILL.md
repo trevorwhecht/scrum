@@ -119,7 +119,7 @@ A tty of `??` or empty, or a `$TERM_PROGRAM` outside that list, sets nothing. Th
 
    `- Cloud environment: <id>` is a third optional, hand-added line: the claude.ai/code environment the **Cloud lane** starts sessions in.
 
-   `- Auto continue: <n>` is optional and hand-added: serve.py starts one headless run-all at a time across opted-in projects, lower `n` first, skipped when usage is over pace. First-run setup never writes it.
+   `- Auto continue: <n>` is optional and hand-added: serve.py starts one headless run-all at a time across opted-in projects, the project that just finished first, then the most recent board activity, then lower `n`, skipped when usage is over pace. First-run setup never writes it.
 
 5. Tell the user this repo is now on the dashboard: open the **Trevskills Scrum** app, or run `python3 ~/.claude/skills/trevskills-scrum/serve.py` from anywhere, then go to http://localhost:8765. One dashboard shows every project.
 
