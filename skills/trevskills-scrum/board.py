@@ -1740,7 +1740,7 @@ BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
-MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM, disk or the session ceiling (machine_ok)
+MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok)
 RUNALL_MAX_IN_PROGRESS = 5  # a Run-all parent's in-progress cap when usage pacing has no say (see pace_cap)
 WINDOWS = {"five_hour": 18000, "seven_day": 604800}  # Claude Code's rate_limits windows and their length in seconds
 USAGE_FRESH = 300  # seconds; an older usage.json means no status line is running, so no pacing
@@ -1961,7 +1961,7 @@ def slot_cap(runall):
 
 MIN_FREE_RAM_PCT = 20  # machine_ok: no new claim or resume below this much free RAM
 MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
-MAX_LIVE_SESSIONS = 8  # ... or with this many headless scrum sessions live machine-wide (live_sessions)
+SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
 
 
 def free_ram_pct():
@@ -1990,8 +1990,7 @@ def free_disk_gb(path):
 
 
 def machine_ok(path):
-    """None when the machine has room for new work, else why not: free RAM, free disk, then the machine-wide session
-    ceiling. Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown
+    """None when the machine has room for new work, else why not: free RAM, then free disk. Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown
     reading passes."""
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
@@ -1999,10 +1998,14 @@ def machine_ok(path):
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
-    live = live_sessions()
-    if live >= MAX_LIVE_SESSIONS:
-        return f"{live} sessions running (machine cap {MAX_LIVE_SESSIONS})"
     return None
+
+
+def ram_room():
+    """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
+    split into SESSION_RAM_PCT shares, at least 1. An unknown reading allows 1, so a batch never bursts blind."""
+    ram = free_ram_pct()
+    return 1 if ram is None else max(1, int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT))
 
 
 SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")
@@ -2105,10 +2108,10 @@ def cmd_ready(root, parent_id, live=()):
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
         cap = slot_cap(runall)
-        room = MAX_LIVE_SESSIONS - live_sessions() if go and not machine else 0  # one claim = one new session
+        room = ram_room() if go and not machine else 0  # one claim = one new session
         ready = []
         for k in kids if go and not machine else []:
-            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the ceiling
+            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
             if k["stage"] != "waiting" or k.get("setup") == "pending" \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
