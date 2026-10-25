@@ -3441,6 +3441,18 @@ class AiAuditTest(unittest.TestCase):
             self.assertEqual(self.toggle("disable", idle)[0], 409)
         self.assertFalse(user_settings.exists())
 
+    def test_toggle_500_hides_the_os_error(self):
+        self.plant()
+        idle = self.row(self.audit()[0], "skills", "idle")["id"]
+        settings = self.user / "settings.json"
+        before = settings.read_bytes()
+        boom = OSError("disk full at /Users/secret/path")
+        with mock.patch.object(Path, "write_text", side_effect=boom), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as log:
+            self.assertEqual(self.serve.ai_toggle(idle, False), (500, {"error": "couldn't write the settings file"}))
+        self.assertIn("/Users/secret/path", log.getvalue())
+        self.assertEqual(settings.read_bytes(), before)
+
 
 class AiResearchTest(unittest.TestCase):
     """Page 5: Research this on Audit rows, on the AiAuditTest fake home. The registered "reg" project is the research home."""
