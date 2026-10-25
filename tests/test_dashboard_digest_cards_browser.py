@@ -7,7 +7,7 @@ sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 
 # Drives the real dashboard in headless Chromium at a phone-sized 390x844 viewport, against a real serve.py. Prints one
-# JSON line: {"skip": why} when Playwright or Chromium is missing, else what the digest card measured or showed.
+# JSON line: {"skip": why} when Playwright or Chromium is missing, else what the Digest dialog's row measured or showed.
 SCRIPT = r"""
 let chromium;
 try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.stringify({skip: "playwright module not found"})); process.exit(0); }
@@ -17,25 +17,34 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
   try {
     const page = await browser.newPage({viewport: {width: 390, height: 844}});
     await page.goto(process.env.DASH_URL);
-    await page.waitForSelector(".dcard button[data-decide]");
+    await page.waitForFunction(() => document.querySelector("#dgProject") && typeof loadDigests === "function");
+    await page.click("#digestBtn");
+    await page.waitForSelector("#dgList .prop button[data-revert]");
     if (process.env.MODE === "layout") {
       const got = await page.evaluate(() => {
         const box = el => { const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, height: r.height}; };
-        const card = document.querySelector(".dcard");
-        return {scrollWidth: document.documentElement.scrollWidth, cards: document.querySelectorAll(".dcard").length,
-                card: box(card), target: card.querySelector(".kid").textContent,
-                targetOverflow: card.querySelector(".kid").scrollWidth - card.querySelector(".kid").clientWidth,
-                approve: box(card.querySelector('[data-decide="approve"]')), reject: box(card.querySelector('[data-decide="reject"]'))};
+        const row = document.querySelector("#dgList .prop"), path = row.querySelector(".path");
+        return {scrollWidth: document.documentElement.scrollWidth, rows: document.querySelectorAll("#dgList .prop").length,
+                row: box(row), target: path.textContent, targetOverflow: path.scrollWidth - path.clientWidth,
+                revert: box(row.querySelector("button[data-revert]")), cards: document.querySelectorAll("#board .card").length};
       });
       console.log(JSON.stringify(got));
       return;
     }
-    await page.click('.dcard [data-decide="approve"]');
-    await page.waitForFunction(() => document.querySelector(".dcard .error")?.textContent);
+    await page.click("#dgList .prop button[data-revert]");
+    if (process.env.MODE === "ok") {
+      await page.waitForSelector("#dgList .prop .chip.reverted");
+      console.log(JSON.stringify(await page.evaluate(() => {
+        const row = document.querySelector("#dgList .prop");
+        return {chip: row.querySelector(".chip").textContent, buttons: row.querySelectorAll("button[data-revert]").length};
+      })));
+      return;
+    }
+    await page.waitForFunction(() => document.querySelector("#dgList .prop .error")?.textContent);
     const look = () => page.evaluate(() => {
-      const card = document.querySelector(".dcard");
-      return card && {cards: document.querySelectorAll(".dcard").length, role: card.querySelector(".error").getAttribute("role"),
-        error: card.querySelector(".error").textContent, disabled: [...card.querySelectorAll("button")].map(b => b.disabled)};
+      const row = document.querySelector("#dgList .prop"), b = row.querySelector("button[data-revert]");
+      return {role: row.querySelector(".error").getAttribute("role"), error: row.querySelector(".error").textContent,
+              disabled: b.disabled, chip: row.querySelector(".chip").textContent};
     });
     const first = await look();
     await page.waitForTimeout(2600);  // past one 2 s poll cycle
@@ -46,7 +55,9 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
 """
 
 
-class DigestCardsBrowserTest(unittest.TestCase):
+
+
+class DigestLogBrowserTest(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node")
         if not self.node:
@@ -70,12 +81,12 @@ class DigestCardsBrowserTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.proposals = self.reg / "scrum" / "digests" / "001" / "proposals.json"
 
-    def propose(self, target):
+    def propose(self, target, text):
+        """One applied proposal for target, whose file now holds text."""
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("old line\n")
+        target.write_text(text)
         self.proposals.write_text(json.dumps({"proposals": [{"id": "p1", "target": str(target), "why": "Seen in 001-a and 002-b.",
-                                                             "old": "old line", "new": "new line", "obvious": False,
-                                                             "obvious_reason": "one job only"}]}))
+                                                             "old": "old line", "new": "new line", "status": "applied"}]}))
 
     def browse(self, mode):
         env = dict(os.environ, MODE=mode, DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
@@ -89,29 +100,37 @@ class DigestCardsBrowserTest(unittest.TestCase):
             raise unittest.SkipTest(got["skip"])
         return got
 
-    def test_card_fits_390px(self):
-        target = self.reg / "agents" / ("scrum-" + "very-long-agent-name-without-any-spaces-" * 3 + "x.md")
+    def test_row_fits_390px(self):
+        target = self.user / "rules" / ("very-long-rule-name-without-any-spaces-" * 3 + "x.md")
         self.assertGreaterEqual(len(str(target)), 80)
         self.assertNotIn(" ", str(target))
-        self.propose(target)
+        self.propose(target, "new line\n")
         got = self.browse("layout")
-        self.assertEqual((got.get("cards"), got.get("target")), (1, str(target)), got)
+        self.assertEqual((got.get("rows"), got.get("target")), (1, str(target)), got)
+        self.assertEqual(got["cards"], 0, got)  # no Digest card on the board
         self.assertLessEqual(got["scrollWidth"], 390, got)
-        self.assertLessEqual(got["card"]["right"], 390, got)
-        self.assertLessEqual(got["targetOverflow"], 0, got)  # the long path wraps inside the card, not clipped past it
-        for name in ("approve", "reject"):
-            self.assertGreaterEqual(got[name]["left"], 0, got)
-            self.assertLessEqual(got[name]["right"], 390, got)
-            self.assertGreaterEqual(got[name]["height"], 44, got)
+        self.assertLessEqual(got["row"]["right"], 390, got)
+        self.assertLessEqual(got["targetOverflow"], 0, got)  # the long path wraps inside the row, not clipped past it
+        self.assertGreaterEqual(got["revert"]["left"], 0, got)
+        self.assertLessEqual(got["revert"]["right"], 390, got)
+        self.assertGreaterEqual(got["revert"]["height"], 44, got)
 
-    def test_failed_post_shows_error_and_reenables(self):
-        self.propose(self.reg / ".claude" / "settings.json")
+    def test_failed_revert_shows_error_and_reenables(self):
+        target = self.user / "rules" / "x.md"
+        self.propose(target, "edited since\n")
         got = self.browse("fail")
-        expected = {"cards": 1, "role": "alert", "error": "target is not editable", "disabled": [False, False]}
+        expected = {"role": "alert", "error": "old text found 0 times", "disabled": False, "chip": "applied"}
         self.assertEqual(got.get("first"), expected, got)
         self.assertEqual(got.get("later"), expected, got)
-        self.assertEqual([p.get("status", "pending") for p in json.loads(self.proposals.read_text())["proposals"]], ["pending"])
-        self.assertEqual((self.reg / ".claude" / "settings.json").read_text(), "old line\n")
+        self.assertEqual([p["status"] for p in json.loads(self.proposals.read_text())["proposals"]], ["applied"])
+        self.assertEqual(target.read_text(), "edited since\n")
+
+    def test_revert_success_refreshes(self):
+        target = self.user / "rules" / "x.md"
+        self.propose(target, "keep\nnew line\n")
+        self.assertEqual(self.browse("ok"), {"chip": "reverted", "buttons": 0})
+        self.assertEqual(target.read_text(), "keep\nold line\n")
+        self.assertEqual([p["status"] for p in json.loads(self.proposals.read_text())["proposals"]], ["reverted"])
 
 
 if __name__ == "__main__":

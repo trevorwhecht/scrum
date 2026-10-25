@@ -121,7 +121,7 @@ class JobModal(unittest.TestCase):
         self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: {at: 1767222000}})'), 1767225600000)
         self.assertEqual(run('staleAt({updatedAt: "2026-01-01T00:00:00Z", activity: null})'), 1767225600000)
         text = DASHBOARD.read_text()
-        card = text[text.index("function card(job)"):text.index("function digestCard(")]
+        card = text[text.index("function card(job)"):text.index("function render(")]
         self.assertIn("Date.now() - staleAt(job) > STALE_MS", card)
         self.assertNotIn("Date.parse(job.updatedAt)", card)
 
@@ -159,7 +159,7 @@ class JobModal(unittest.TestCase):
         text = DASHBOARD.read_text()
         src = (text[text.index("const STAGES = "):text.index("function roadmapLookup(")]
                + text[text.index("const splitReason = "):text.index("const waitingBanner = ")]
-               + text[text.index("function card(job)"):text.index("function digestCard(")]
+               + text[text.index("function card(job)"):text.index("function render(")]
                + text[text.index("const ofJob = "):text.index("// answer() end")])
         src = src.replace("const $ = id => document.getElementById(id);", "const $ = id => stub;") \
             .replace("const post = (url, body) =>", "const realPost = (url, body) =>")
@@ -186,7 +186,7 @@ class JobModal(unittest.TestCase):
         for html in (plain, human):
             self.assertNotIn("waiting for reset", html)
         text = DASHBOARD.read_text()
-        self.assertIn("Date.now() - staleAt(job) > STALE_MS", text[text.index("function card(job)"):text.index("function digestCard(")])
+        self.assertIn("Date.now() - staleAt(job) > STALE_MS", text[text.index("function card(job)"):text.index("function render(")])
 
     def test_no_options_unchanged(self):
         for extra in ({}, {"options": []}):

@@ -1079,7 +1079,7 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_digest_dialog(self):
         text = DASHBOARD.read_text()
-        for phrase in ('id="digest"', "Digest now", "Digesting…", "No digests", 'id="dgError" role="alert"', "data-decide"):
+        for phrase in ('id="digest"', "Digest now", "Digesting…", "No digests", 'id="dgError" role="alert"', "data-revert"):
             self.assertIn(phrase, text, phrase)
 
     def test_dashboard_has_waiting_banner(self):
