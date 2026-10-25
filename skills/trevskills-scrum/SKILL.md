@@ -203,6 +203,8 @@ For a BigBoy child (the job has a `parent`), every time this run runs `B ask` fo
    find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
    A tracked `.env*` file is never symlinked: the worktree already has it.
+   Run `Install` from `project.md` in `$WT`; never symlink `node_modules` from `$REPO`.
+   When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` in `$WT` after the install.
    Then `B set $ID worktree=$WT stage=build`.
 5. **Build:** spawn `scrum-builder` (see **Routing**) with step 3's **Model:** override and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`, run `B ask $ID 'blocked: <first reason line>' --a "Send back=rework $ID \"make the most reasonable call on the blocker and record it as a Ruling in build.md\"" --b "Requeue=abort $ID --requeue" --c "Abort=abort $ID"` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
 6. Continue at **Check gate**.

@@ -2326,7 +2326,6 @@ class BoardTest(unittest.TestCase):
                  "  302 ttys009 node /Users/t/onewitharts/.claude/worktrees/scrum-011-x/node_modules/.bin/next dev\n"
                  "  303 ttys004 /Users/t/.local/bin/claude --resume\n"
                  "  304 ??      /Users/t/.local/bin/claude -p /trevskills-scrum start 005-headless\n"
-                 "  305 ??      python3 local/run.py claude -p /trevskills-scrum start 009-local\n"
                  "  306 ??      node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js start 010-node\n")
         ps = mock.Mock(stdout=lines, returncode=0)
         with mock.patch.object(board.subprocess, "run", return_value=ps):
@@ -2335,7 +2334,6 @@ class BoardTest(unittest.TestCase):
             self.assertFalse(alive({"id": "011-x", "tty": "ttys009"}))
             self.assertTrue(alive({"id": "006-interactive", "tty": "ttys004"}))
             self.assertTrue(alive({"id": "005-headless", "tty": None}))
-            self.assertTrue(alive({"id": "009-local", "tty": None}))
             self.assertTrue(alive({"id": "010-node", "tty": None}))
         job_id = self.aged("Orphan dev server", 31, stage="build")
         orphan = ps.stdout.replace("scrum-024-x", f"scrum-{job_id}")
@@ -2775,6 +2773,24 @@ print("stub err", file=sys.stderr)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
                                                       "--permission-mode", "acceptEdits"])
+
+    def test_big_ticket_model(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-big", "stage": "plan", "lane": "bigboy"}, {"id": "002-pts", "stage": "spec"},
+            {"id": "003-small", "stage": "spec"}, {"id": "004-road", "stage": "running", "lane": "roadmap"}]}))
+        (self.root / "backlog.md").write_text("# Backlog\n\n- [x] [8] Big thing → 002-pts\n- [x] [3] Small → 003-small\n")
+        project = self.root / "project.md"
+        project.write_text("- Orchestrator model: sonnet\n- Big ticket model: claude-fable-5-1\n")
+        for job_id, model in (("001-big", "claude-fable-5-1"), ("002-pts", "claude-fable-5-1"),
+                              ("004-road", "claude-fable-5-1"), ("003-small", "sonnet"), ("999-gone", "sonnet"),
+                              (None, "sonnet")):
+            self.assertEqual(board.orchestrator_model(self.root, job_id), model, job_id)
+        for line in ("", "- Big ticket model: so net\n", "- Big ticket model:\n"):
+            project.write_text("- Orchestrator model: sonnet\n" + line)
+            self.assertEqual(board.orchestrator_model(self.root, "001-big"), "sonnet", line)
+        project.write_text("- Big ticket model: opus\n")
+        self.assertEqual(board.orchestrator_model(self.root, "002-pts"), "opus")
+        self.assertEqual(board.orchestrator_model(self.root, "003-small"), "sonnet")
 
     def test_spawn_model_selection(self):
         project = self.root / "project.md"

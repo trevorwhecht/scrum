@@ -3225,13 +3225,32 @@ SPAWN_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")  # job ids plus run-all, digest,
 SPAWN_ACTION_RE = re.compile(r"[a-z-]+")
 
 
-def orchestrator_model(root: Path) -> str | None:
+BIG_LANES = ("bigboy", "roadmap")
+BIG_POINTS = 5
+
+
+def big_ticket(root: Path, job_id: str) -> bool:
+    """A job on a BIG_LANES lane, or claimed from a backlog line of BIG_POINTS or more."""
+    try:
+        job = find(read_board(root), job_id)
+    except SystemExit:  # not on the board (run-all, digest) or a broken board.json
+        job = {}
+    if job.get("lane") in BIG_LANES:
+        return True
+    return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in read_backlog(root)[1])
+
+
+def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
     """The `- Orchestrator model:` line of scrum/project.md: None for `inherit` (no --model), else the model.
-    Missing, blank or malformed values give `sonnet`."""
+    Missing, blank or malformed values give `sonnet`. The optional `- Big ticket model:` line wins for a big_ticket
+    job; the board and backlog are only read when that line is present and valid."""
     try:
         text = (root / "project.md").read_text()
     except (OSError, ValueError):  # missing, or not UTF-8
         return "sonnet"
+    big = re.search(r"^- Big ticket model: *(.*?) *$", text, re.M)
+    if job_id and big and MODEL_RE.fullmatch(big.group(1)) and big_ticket(root, job_id):
+        return big.group(1)
     m = re.search(r"^- Orchestrator model: *(.*)$", text, re.M)
     value = m.group(1).strip() if m else ""
     if value.lower() == "inherit":
@@ -3242,7 +3261,7 @@ def orchestrator_model(root: Path) -> str | None:
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
           model: str | None = None) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog.
-    start/resume get `--model <Orchestrator model>` unless `model` is given. Returns (proc, log path relative to root)."""
+    start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given. Returns (proc, log path relative to root)."""
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
     if not SPAWN_ACTION_RE.fullmatch(action):
@@ -3250,7 +3269,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     if model is not None and not MODEL_RE.fullmatch(model):
         raise SystemExit(f"bad model {model!r}; must match {MODEL_RE.pattern}")
     if model is None and action in ("start", "resume"):
-        model = orchestrator_model(root)
+        model = orchestrator_model(root, job_id)
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
