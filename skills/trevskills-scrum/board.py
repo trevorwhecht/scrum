@@ -1965,6 +1965,10 @@ MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
+MAX_SESSIONS = 12  # machine_ok: headless sessions may hold 60% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
+#                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24)
+SESSION_RAMP_SECS = 120  # ram_room: a session younger than this has not grown into its RAM yet, so free RAM % overstates
+#                          the room; two projects claiming within that minute both burst (the 2026-10-24 pile-up)
 
 
 def free_ram_pct():
@@ -2019,31 +2023,49 @@ def machine_ok(path):
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
+    live = live_sessions()
+    if live >= MAX_SESSIONS:
+        return f"{live} sessions running (ceiling {MAX_SESSIONS})"
     return None
 
 
 def ram_room():
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
-    split into SESSION_RAM_PCT shares, at least 1. An unknown reading allows 1, so a batch never bursts blind, and so
-    does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping."""
+    split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
+    for but not used yet), never past MAX_SESSIONS in all, at least 1. An unknown reading allows 1, so a batch never
+    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping."""
     ram = free_ram_pct()
     swap = swap_used_pct()
     if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
         return 1
-    return max(1, int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT))
+    ages = session_ages()
+    room = int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - sum(a < SESSION_RAMP_SECS for a in ages)
+    return max(1, min(room, MAX_SESSIONS - len(ages)))
 
 
 SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")
+ETIME_RE = re.compile(r"\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+) (.*)")  # ps etime: [[dd-]hh:]mm:ss, then the command
+
+
+def session_ages():
+    """Age in seconds of every headless `/trevskills-scrum <action>` session (start, resume, approve, run-all, ...) on
+    this machine, any project and any launcher (ps sees them all; serve.py's RUNS only knows its own). SCRUM_PS names
+    a file read in place of ps's output; its lines may start with an etime token, and a line without one is old."""
+    fake = os.environ.get("SCRUM_PS")
+    out = Path(fake).read_text() if fake else \
+        subprocess.run(["ps", "-Ao", "etime=,command="], capture_output=True, text=True).stdout
+    ages = []
+    for line in out.splitlines():
+        m = ETIME_RE.match(line)
+        d, h, mi, sec, cmd = m.groups() if m else (None, None, None, None, line)
+        if SESSION_RE.match(cmd):
+            ages.append(int(d or 0) * 86400 + int(h or 0) * 3600 + int(mi) * 60 + int(sec) if m else 10 ** 9)
+    return ages
 
 
 def live_sessions():
-    """How many headless `/trevskills-scrum <action>` sessions (start, resume, approve, run-all, ...) run on this
-    machine, any project and any launcher (ps sees them all; serve.py's RUNS only knows its own). SCRUM_PS names a
-    file read in place of ps's output."""
-    fake = os.environ.get("SCRUM_PS")
-    out = Path(fake).read_text() if fake else \
-        subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True).stdout
-    return sum(1 for line in out.splitlines() if SESSION_RE.match(line))
+    """How many headless scrum sessions run on this machine (see session_ages)."""
+    return len(session_ages())
 
 
 def slot_conflict(k, busy, files, cap):

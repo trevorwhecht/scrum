@@ -1263,15 +1263,42 @@ class BoardTest(unittest.TestCase):
                       + "vim board.py\n")  # run-all counts too; vim does not
         return mock.patch.dict(os.environ, SCRUM_PS=str(ps))
 
-    def test_machine_ok_has_no_session_count_cap(self):
-        """Trevor 2026-10-24: free RAM caps new work, not a fixed session count."""
-        self.assertFalse(hasattr(board, "MAX_LIVE_SESSIONS"))
-        with self.sessions(20):
+    def test_machine_ok_session_ceiling(self):
+        """Job 279 (Trevor 2026-10-24): free RAM caps new work, not a fixed 8 sessions. Job 283 (Trevor, later that day,
+        after 19 sessions across three projects piled up): one machine-wide ceiling, derived from the RAM share."""
+        self.assertEqual(board.MAX_SESSIONS, 60 // board.SESSION_RAM_PCT)
+        with self.sessions(11):
             self.assertIsNone(board.machine_ok(self.tmp.name))
+        with self.sessions(12):
+            self.assertEqual(board.machine_ok(self.tmp.name), "12 sessions running (ceiling 12)")
+        with self.sessions(20), self.machine("14", "1000"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "RAM first")
+
+    def test_session_ages_reads_ps_etime(self):
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   07:54 /opt/homebrew/bin/claude -p /trevskills-scrum start 1-a --model sonnet\n"
+                      "1-02:03:04 claude -p /trevskills-scrum run-all\n"
+                      "   00:45 vim board.py\n"  # not a session
+                      "claude -p /trevskills-scrum approve 2-b\n")  # no etime: old
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.session_ages(), [474, 93784, 10 ** 9])
+            self.assertEqual(board.live_sessions(), 3)
+
+    def test_ram_room_reserves_young_sessions(self):
+        """Two projects claiming within a minute both saw healthy free RAM: a session takes a while to grow into it."""
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 3 + "   09:00 claude -p /trevskills-scrum start 2-b\n" * 2)
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.ram_room(), 6, "9 shares, 3 young sessions reserved")
+        with self.machine("66", "1000"), self.sessions(11):
+            self.assertEqual(board.ram_room(), 1, "one short of the ceiling")
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 9)
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.ram_room(), 1, "never 0 once machine_ok passed")
 
     def test_ram_room(self):
         self.assertEqual(board.SESSION_RAM_PCT, 5)
-        for ram, room in (("66", 9), ("100", 16), ("26", 1), ("20", 1)):
+        for ram, room in (("66", 9), ("100", 12), ("26", 1), ("20", 1)):  # 100: the MAX_SESSIONS ceiling
             with self.subTest(ram=ram), self.machine(ram, "1000"):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):

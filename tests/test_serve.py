@@ -925,12 +925,17 @@ class ServeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, SCRUM_PS=str(ps), SCRUM_USAGE=str(usage)):
                 self.assertEqual(self.serve.resume_refusal("repo", self.root, job), out)
 
-    def test_resume_has_no_session_count_cap(self):
+    def test_resume_refused_at_session_ceiling(self):
+        """Job 283: MAX_SESSIONS live sessions refuse a resume through the machine guard (job 279's fixed 8 is gone)."""
         ps = Path(self.tmp.name) / "ps.txt"
-        ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 12)
+        job = {"id": "9-x", "lane": "standard"}
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
                 mock.patch.object(self.serve.board, "pace_cap", return_value=None):
-            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}))
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 11)
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, job))
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 12)
+            self.assertEqual(self.serve.resume_refusal("repo", self.root, job), self.serve.board.MACHINE_WAIT
+                             + "12 sessions running (ceiling 12). Fix: click Resume once memory or disk frees up.")
 
     def test_resume_refusal_machine_guard(self):
         """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
@@ -4735,12 +4740,15 @@ class AutoContinueTest(unittest.TestCase):
             with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
                 self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
-    def test_auto_continue_has_no_session_count_cap(self):
+    def test_auto_continue_stops_at_session_ceiling(self):
+        """Job 283 (Trevor 2026-10-24): MAX_SESSIONS machine-wide, after 19 sessions across three projects piled up."""
         self.project("a", n=1); self.project("b", n=2)
         ps = self.base / "ps.txt"
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), mock.patch.object(self.board, "pace_cap", return_value=None):
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 11)
+            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "11 live sessions, RAM fine: both start")
             ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 12)
-            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "12 live sessions, RAM fine: both start")
+            self.assertEqual(self.tick(), [], "12 live sessions: at the ceiling, nothing starts")
 
     def test_auto_continue_starts_each_idle_project(self):
         self.project("a", n=1); self.project("b", n=5)
