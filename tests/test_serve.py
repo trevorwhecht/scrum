@@ -3586,8 +3586,7 @@ class DigestTest(unittest.TestCase):
         return d
 
     def prop(self, pid, target, old="old line", new="new line", **extra):
-        return {"id": pid, "target": str(target), "why": f"Seen in 001-a and 002-b ({pid}).", "old": old, "new": new,
-                "obvious": False, "obvious_reason": "", **extra}
+        return {"id": pid, "target": str(target), "why": f"Seen in 001-a and 002-b ({pid}).", "old": old, "new": new, **extra}
 
     def decide(self, pid, decision, digest_id="001", headers=None):
         return self.post(f"/api/p/reg/digests/{digest_id}/{pid}", {"decision": decision}, headers)
@@ -3622,9 +3621,9 @@ class DigestTest(unittest.TestCase):
                                               "trimmed": True, "proposals": []})
         self.assertEqual(data["digests"][1], {"id": "001", "jobs": [a], "error": None, "trimmed": False, "proposals": [
             {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line", "status": "pending",
-             "obvious": False, "obvious_reason": "", "kind": "edit"},
+             "kind": "edit"},
             {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "old": "keep A", "new": "kept A", "status": "applied",
-             "obvious": False, "obvious_reason": "", "kind": "edit"}]})
+             "kind": "edit"}]})
         (self.scrum / "digests" / "003").mkdir()  # the reader hasn't written proposals.json yet
         self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
         self.assertEqual(self.get("/api/p/nope/digests")[0], 404)
@@ -3765,11 +3764,10 @@ class DigestTest(unittest.TestCase):
 
     def test_digests_brief_omits_old_and_new(self):
         rule = self.rule()
-        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep A", new="kept A", status="applied", obvious=True,
-                                                       obvious_reason="2 jobs")])
+        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep A", new="kept A", status="applied")])
         self.digest([], "002")
         full = {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line",
-                "status": "pending", "obvious": False, "obvious_reason": "", "kind": "edit"}
+                "status": "pending", "kind": "edit"}
         code, data, _ = self.get("/api/p/reg/digests?brief=1")
         self.assertEqual(code, 200)
         self.assertEqual((data["running"], data["undigested"]), (False, 0))
@@ -3777,10 +3775,8 @@ class DigestTest(unittest.TestCase):
                          [("002", [], None, False), ("001", [], None, False)])
         self.assertEqual(data["digests"][0]["proposals"], [])
         self.assertEqual(data["digests"][1]["proposals"], [
-            {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "status": "pending",
-             "obvious": False, "obvious_reason": "", "kind": "edit"},
-            {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "status": "applied",
-             "obvious": True, "obvious_reason": "2 jobs", "kind": "edit"}])
+            {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "status": "pending", "kind": "edit"},
+            {"id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "status": "applied", "kind": "edit"}])
         for query in ("", "?brief=0", "?brief=true", "?brief="):
             props = self.get(f"/api/p/reg/digests{query}")[1]["digests"][1]["proposals"]
             self.assertEqual(props[0], full, query)
@@ -3917,71 +3913,98 @@ class DigestTest(unittest.TestCase):
         agent, skill = self.repo_file("agents/scrum-x.md"), self.repo_file("skills/s/SKILL.md")
         (self.user / "agents").mkdir()
         (self.user / "agents" / "scrum-y.md").symlink_to(self.repo_file("agents/scrum-y.md"))  # install.sh's link
-        self.digest([self.prop("p1", agent, obvious=True, obvious_reason="3 jobs, sharper rule"),
-                         self.prop("p2", skill, obvious=True, obvious_reason="2 jobs"),
-                         self.prop("p3", self.user / "agents" / "scrum-y.md", obvious=True, obvious_reason="linked"),
-                         self.prop("p4", agent, obvious_reason="loosens a hard stop")])
+        self.digest([self.prop("p1", agent, obvious=True, obvious_reason="3 jobs, sharper rule"), self.prop("p2", skill),
+                     self.prop("p3", self.user / "agents" / "scrum-y.md"), self.prop("p4", agent, obvious_reason="loosens a hard stop")])
         out = self.serve.digest_auto(self.scrum, "001")
-        git = {"reason": "not a git checkout"}  # the fixture repo is no git work tree, so nothing is applied
-        self.assertEqual(out, {"applied": [], "queued": [{"id": "p1", "target": str(agent), "obvious_reason": "3 jobs, sharper rule"} | git,
-                                                         {"id": "p2", "target": str(skill), "obvious_reason": "2 jobs"} | git,
-                                                         {"id": "p3", "target": str(self.user / "agents" / "scrum-y.md"),
-                                                          "obvious_reason": "linked"} | git],
-                               "human": [{"id": "p4", "reason": "loosens a hard stop"}], "job": None})
-        self.assertEqual(self.statuses(), ["queued", "queued", "queued", "pending"])
+        q = lambda pid, t: {"id": pid, "target": str(t), "why": f"Seen in 001-a and 002-b ({pid}).", "reason": "not a git checkout"}
+        # the fixture repo is no git work tree, so nothing is applied and every edit is queued, obvious flag or not
+        self.assertEqual(out, {"applied": [], "skipped": [], "job": None,
+                               "queued": [q("p1", agent), q("p2", skill), q("p3", self.user / "agents" / "scrum-y.md"), q("p4", agent)]})
+        self.assertEqual(self.statuses(), ["queued"] * 4)
         self.assertEqual(agent.read_text(), "old line\n")
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
                          ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
                           "Apply digest 001 p2 to skills/s/SKILL.md: Seen in 001-a and 002-b (p2).",
-                          "Apply digest 001 p3 to agents/scrum-y.md: Seen in 001-a and 002-b (p3)."])
-        self.assertEqual(len(list((self.scrum / "backlog-specs").iterdir())), 3)  # digest_auto pre-writes each spec too
-        self.assertEqual(self.serve.digest_auto(self.scrum, "001"),
-                         {"applied": [], "queued": [], "human": [{"id": "p4", "reason": "loosens a hard stop"}], "job": None})
+                          "Apply digest 001 p3 to agents/scrum-y.md: Seen in 001-a and 002-b (p3).",
+                          "Apply digest 001 p4 to agents/scrum-x.md: Seen in 001-a and 002-b (p4)."])
+        self.assertEqual(len(list((self.scrum / "backlog-specs").iterdir())), 4)  # digest_auto pre-writes each spec too
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001"), {"applied": [], "queued": [], "skipped": [], "job": None})
 
-    def test_digest_auto_rechecks_target_whatever_digester_says(self):
+    def test_valid_proposal_ignores_obvious_and_accepts_skipped(self):
+        rule = self.rule()
+        plain = self.prop("p1", rule)
+        expected = {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line",
+                    "status": "pending", "kind": "edit"}
+        self.assertEqual(self.serve.valid_proposal(plain), expected)
+        self.assertEqual(self.serve.valid_proposal(plain | {"obvious": True, "obvious_reason": "x"}), expected)
+        self.assertEqual(self.serve.valid_proposal(plain | {"surprise": [1, 2], "obvious": "yes"}), expected)
+        self.assertEqual(self.serve.valid_proposal(plain | {"status": "skipped", "reason": "old text found 0 times"}),
+                         expected | {"status": "skipped", "reason": "old text found 0 times"})
+        self.assertEqual(self.serve.valid_proposal(plain | {"status": "reverted"})["status"], "reverted")
+        self.assertEqual(self.serve.valid_proposal(plain | {"reason": 7}), expected)  # a non-string reason is dropped
+        self.assertIsNone(self.serve.valid_proposal(plain | {"status": "maybe"}))
+
+    def test_digest_auto_applies_global_file_with_backup(self):
         memory = self.user / "projects" / "p" / "memory" / "m.md"
         memory.parent.mkdir(parents=True)
-        memory.write_text("old line\n")
-        (self.user / "CLAUDE.md").write_text("old line\n")
-        (self.user / "agents").mkdir()
-        (self.user / "agents" / "scrum-g.md").write_text("old line\n")  # a global agent, in no repo
-        targets = [self.user / "CLAUDE.md", self.rule(), memory, self.repo_file("CLAUDE.md"),
-                   self.repo_file(".claude/rules/x.md"), self.repo_file(".claude/settings.json"),
-                   self.user / "agents" / "scrum-g.md", self.repo_file("docs/scrum-x.md"), self.repo_file("agents/other.md")]
-        self.digest([self.prop(f"p{i}", t, obvious=True, obvious_reason="claimed obvious") for i, t in enumerate(targets)])
+        memory.write_text("remember: old line\n")
+        (self.user / "CLAUDE.md").write_text("top\nold line\n")
+        rule, stale = self.rule(), self.user / "rules" / "stale.md"
+        stale.write_text("old line\nold line\n")
+        self.digest([self.prop("p1", rule), self.prop("p2", self.user / "CLAUDE.md"), self.prop("p3", memory),
+                     self.prop("p4", stale)])
         out = self.serve.digest_auto(self.scrum, "001")
-        self.assertEqual((out["applied"], out["queued"], out["job"]), ([], [], None))
-        self.assertEqual(out["human"], [{"id": "p0", "reason": "global file"}, {"id": "p1", "reason": "global file"},
-                                        {"id": "p2", "reason": "global file"},
-                                        {"id": "p3", "reason": "not a scrum agent or SKILL.md"},
-                                        {"id": "p4", "reason": "not a scrum agent or SKILL.md"},
-                                        {"id": "p5", "reason": "settings or hooks file"},
-                                        {"id": "p6", "reason": "outside every registered repo"},
-                                        {"id": "p7", "reason": "not a scrum agent or SKILL.md"},
-                                        {"id": "p8", "reason": "not a scrum agent or SKILL.md"}])
-        self.assertEqual(self.statuses(), ["pending"] * len(targets))
+        a = lambda pid, t: {"id": pid, "target": str(t), "why": f"Seen in 001-a and 002-b ({pid})."}
+        self.assertEqual(out, {"applied": [a("p1", rule), a("p2", self.user / "CLAUDE.md"), a("p3", memory)], "queued": [],
+                               "skipped": [{"id": "p4", "target": str(stale), "reason": "old text found 2 times"}], "job": None})
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual((self.user / "CLAUDE.md").read_text(), "top\nnew line\n")
+        self.assertEqual(memory.read_text(), "remember: new line\n")
+        self.assertEqual(stale.read_text(), "old line\nold line\n")
+        self.assertEqual(sorted(b.read_bytes() for b in self.backups()), [b"keep A\nold line\nkeep B\n", b"remember: old line\n", b"top\nold line\n"])
+        self.assertEqual(self.statuses(), ["applied", "applied", "applied", "skipped"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual(data[3]["reason"], "old text found 2 times")
         self.assertEqual(self.board.backlog_items(self.scrum), [])
-        self.assertEqual(self.backups(), [])
-        # A link in ~/.claude/rules to a repo agent is still a global path, so it stays with Trevor.
-        link = self.user / "rules" / "agent-link.md"
-        link.symlink_to(self.repo_file("agents/scrum-z.md"))
-        self.assertEqual(self.serve.digest_target_auto_ok(str(link)), "global file")
-        self.assertIsNone(self.serve.digest_target_auto_ok(str(self.reg / "agents" / "scrum-z.md")))
 
-    def test_digest_obvious_fields_default_and_never_auto(self):
-        agent = self.repo_file("agents/scrum-x.md")
-        missing = self.prop("p2", agent)
-        del missing["obvious"], missing["obvious_reason"]
-        self.digest([self.prop("p1", agent, obvious="true", obvious_reason="string, not a boolean"), missing,
-                     self.prop("p3", agent, obvious=1, obvious_reason=7), self.prop("p4", agent, obvious_reason="one job only")])
-        props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
-        self.assertEqual([(p["id"], p["obvious"], p["obvious_reason"]) for p in props],
-                         [("p1", False, "string, not a boolean"), ("p2", False, ""), ("p3", False, ""), ("p4", False, "one job only")])
-        self.assertEqual(self.serve.digest_auto(self.scrum, "001"),
-                         {"applied": [], "queued": [], "job": None,
-                          "human": [{"id": "p1", "reason": "string, not a boolean"}, {"id": "p2", "reason": ""},
-                                    {"id": "p3", "reason": ""}, {"id": "p4", "reason": "one job only"}]})
-        self.assertEqual(self.statuses(), ["pending"] * 4)
+    def test_digest_auto_skips_uneditable_target(self):
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("old line\n")
+        (self.user / "agents").mkdir()
+        (self.user / "agents" / "scrum-g.md").write_text("old line\n")  # a global agent: not an editable AI-Settings item here
+        rule = self.rule()
+        targets = [outside, "rules/x.md", self.user / "rules" / "gone.md"]
+        self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)] + [self.prop("p9", rule)])
+        snap = lambda: {p: p.read_bytes() for p in [*self.home.rglob("*"), outside] if p.is_file() and "scrum" not in p.parts}
+        before = snap()
+        with mock.patch.object(self.serve.Path, "write_bytes", side_effect=OSError("disk full")):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out, {"applied": [], "queued": [], "job": None, "skipped": [
+            {"id": f"p{i}", "target": str(t), "reason": "target is not editable"} for i, t in enumerate(targets)]
+            + [{"id": "p9", "target": str(rule), "reason": "write failed: disk full"}]})
+        self.assertEqual({p: v for p, v in snap().items() if "backups" not in str(p)},
+                         {p: v for p, v in before.items() if "backups" not in str(p)})
+        self.assertEqual(self.statuses(), ["skipped"] * 4)
+
+    def test_digest_auto_skips_denied_target(self):
+        targets = []
+        for f in (self.user / "settings.json", self.user / "settings.local.json", self.user / "hooks" / "x.md",
+                  self.reg / ".claude" / "settings.json", self.reg / ".claude" / "hooks" / "guard.sh"):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("old line\n")
+            targets.append(f)
+        self.git_repo()
+        runs = self.contract_tests()
+        self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)])
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "scrum" not in p.parts}
+        before = snap()
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out, {"applied": [], "queued": [], "job": None, "skipped": [
+            {"id": f"p{i}", "target": str(t), "reason": "settings or hooks file"} for i, t in enumerate(targets)]})
+        self.assertEqual(snap(), before)
+        self.assertEqual(runs(), [])
+        self.assertEqual(self.head_count(), 1)
+        self.assertEqual(self.statuses(), ["skipped"] * len(targets))
         self.assertEqual(self.board.backlog_items(self.scrum), [])
 
     def test_digest_auto_cli_output(self):
@@ -3993,21 +4016,41 @@ class DigestTest(unittest.TestCase):
             return json.loads(r.stdout)
         job_id = self.done_job()
         (self.scrum / "jobs" / job_id / "build.md").write_text("x")
-        agent = self.repo_file("agents/scrum-x.md")
-        self.digest([self.prop("p1", agent, obvious=True, obvious_reason="2 jobs, concrete failure"),
-                     self.prop("p2", self.repo_file("CLAUDE.md"), obvious=True, obvious_reason="claimed")], jobs=[job_id])
-        self.assertEqual(cli("001"), {"applied": [], "queued": [{"id": "p1", "target": str(agent), "obvious_reason": "2 jobs, concrete failure",
-                                                                 "reason": "not a git checkout"}],
-                                      "human": [{"id": "p2", "reason": "not a scrum agent or SKILL.md"}], "job": None})
-        self.assertFalse((self.scrum / "digests" / "001" / "trimmed").exists())
-        self.digest([self.prop("p1", agent, obvious=True, obvious_reason="last one")], "002", jobs=[job_id])
-        self.assertEqual(cli("002"), {"applied": [], "queued": [{"id": "p1", "target": str(agent), "obvious_reason": "last one",
-                                                                 "reason": "not a git checkout"}], "human": [], "job": None})
-        self.assertTrue((self.scrum / "digests" / "002" / "trimmed").exists())  # the last pending decision trims
+        agent, claude_md = self.repo_file("agents/scrum-x.md"), self.repo_file("CLAUDE.md")
+        self.digest([self.prop("p1", agent), self.prop("p2", claude_md), self.prop("p3", self.repo_file(".claude/settings.json"))],
+                    jobs=[job_id])
+        why = lambda pid: f"Seen in 001-a and 002-b ({pid})."
+        self.assertEqual(cli("001"), {"applied": [], "job": None,
+                                      "queued": [{"id": "p1", "target": str(agent), "why": why("p1"), "reason": "not a git checkout"},
+                                                 {"id": "p2", "target": str(claude_md), "why": why("p2"), "reason": "not a git checkout"}],
+                                      "skipped": [{"id": "p3", "target": str(self.reg / ".claude" / "settings.json"),
+                                                   "reason": "settings or hooks file"}]})
+        self.assertEqual(self.statuses(), ["queued", "queued", "skipped"])
+        self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
         self.assertFalse((self.scrum / "jobs" / job_id / "build.md").exists())
+        before = (self.scrum / "digests" / "001" / "proposals.json").read_bytes()
+        self.assertEqual(cli("001"), {"applied": [], "queued": [], "skipped": [], "job": None})  # a re-run changes nothing
+        self.assertEqual((self.scrum / "digests" / "001" / "proposals.json").read_bytes(), before)
         self.digest([], "003")
-        self.assertEqual(cli("003"), {"applied": [], "queued": [], "human": [], "job": None})
-        self.assertEqual(cli("009"), {"applied": [], "queued": [], "human": [], "job": None})
+        self.assertEqual(cli("003"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertEqual(cli("009"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertEqual(cli("x9"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertFalse((self.scrum / "digests" / "009").exists())
+
+    def test_digest_auto_trims_after_run(self):
+        job_id = self.done_job()
+        (self.scrum / "jobs" / job_id / "build.md").write_text("x")
+        rule = self.rule()
+        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="not there"), self.prop("p3", self.user / "settings.json"),
+                     self.prop("p4", rule, status="rejected")], jobs=[job_id])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([[e["id"] for e in out[k]] for k in ("applied", "queued", "skipped")], [["p1"], [], ["p2", "p3"]])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([(p.get("status"), p.get("reason")) for p in data],
+                         [("applied", None), ("skipped", "old text found 0 times"), ("skipped", "settings or hooks file"),
+                          ("rejected", None)])
+        self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
+        self.assertFalse((self.scrum / "jobs" / job_id / "build.md").exists())
 
     def git(self, *args, check=True):
         r = subprocess.run(["git", "-C", str(self.reg), *args], capture_output=True, text=True, timeout=30)
@@ -4045,22 +4088,40 @@ class DigestTest(unittest.TestCase):
     def head_count(self):
         return int(self.git("rev-list", "--count", "HEAD"))
 
+    def test_digest_auto_applies_non_obvious_repo_claude_md(self):
+        self.git_repo(files=("CLAUDE.md",))
+        runs = self.contract_tests()
+        claude_md = self.reg / "CLAUDE.md"
+        self.digest([self.prop("p1", claude_md)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(claude_md), "why": "Seen in 001-a and 002-b (p1)."}],
+                               "queued": [], "skipped": [], "job": job["id"]})
+        self.assertEqual(claude_md.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(runs(), [str(self.reg)])
+        self.assertEqual(self.head_count(), 2)
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["CLAUDE.md"])
+        self.assertTrue((self.scrum / "jobs" / job["id"] / "feature.md").read_text().startswith("Apply digest 001 proposals:"))
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
     def test_digest_auto_applies_obvious_edit_and_commits(self):
         self.git_repo()
         runs = self.contract_tests()
         (self.user / "agents").mkdir()
         link = self.user / "agents" / "scrum-x.md"
         link.symlink_to(self.reg / "agents" / "scrum-x.md")  # install.sh's link: the write must keep it
-        self.digest([self.prop("p1", link, obvious=True, obvious_reason="3 jobs, sharper rule")])
+        self.digest([self.prop("p1", link)])
         out = self.serve.digest_auto(self.scrum, "001")
         [job] = self.jobs()
-        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(link), "obvious_reason": "3 jobs, sharper rule"}],
-                               "queued": [], "human": [], "job": job["id"]})
+        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(link), "why": "Seen in 001-a and 002-b (p1)."}],
+                               "queued": [], "skipped": [], "job": job["id"]})
         self.assertTrue(link.is_symlink())
         self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
         self.assertEqual(runs(), [str(self.reg)])
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
-        self.assertIn("digest 001 p1", (self.scrum / "jobs" / job["id"] / "feature.md").read_text())
+        self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
+                         "Apply digest 001 proposals:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
         self.assertEqual(self.head_count(), 2)
         self.assertTrue(self.git("log", "-1", "--format=%s").startswith(f"[scrum {job['id']}] Apply digest 001"))
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
@@ -4070,38 +4131,38 @@ class DigestTest(unittest.TestCase):
         self.assertFalse((self.scrum / "backlog-specs").exists() and any((self.scrum / "backlog-specs").iterdir()))
         self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())  # nothing left pending
 
-    def test_digest_auto_queues_ambiguous_match(self):
+    def test_digest_auto_skips_stale_old_text(self):
         self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
         twice = self.reg / "agents" / "scrum-y.md"
         twice.write_text("old line\nold line\n")
         self.git("commit", "-q", "-am", "twice")
         runs = self.contract_tests()
         agent = self.reg / "agents" / "scrum-x.md"
-        self.digest([self.prop("p1", agent, old="not there", obvious=True, obvious_reason="a"),
-                     self.prop("p2", twice, obvious=True, obvious_reason="b")])
+        self.digest([self.prop("p1", agent, old="not there"), self.prop("p2", twice)])
         out = self.serve.digest_auto(self.scrum, "001")
-        self.assertEqual(out, {"applied": [], "human": [], "job": None, "queued": [
-            {"id": "p1", "target": str(agent), "obvious_reason": "a", "reason": "old text found 0 times"},
-            {"id": "p2", "target": str(twice), "obvious_reason": "b", "reason": "old text found 2 times"}]})
+        self.assertEqual(out, {"applied": [], "queued": [], "job": None, "skipped": [
+            {"id": "p1", "target": str(agent), "reason": "old text found 0 times"},
+            {"id": "p2", "target": str(twice), "reason": "old text found 2 times"}]})
         self.assertEqual((agent.read_text(), twice.read_text()), ("keep A\nold line\nkeep B\n", "old line\nold line\n"))
         self.assertEqual(runs(), [])
         self.assertEqual(self.jobs(), [])
         self.assertEqual(self.head_count(), 2)
-        self.assertEqual(self.statuses(), ["queued", "queued"])
-        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
-                         ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
-                          "Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
-        self.assertEqual(len(list((self.scrum / "backlog-specs").iterdir())), 2)
+        self.assertEqual(self.statuses(), ["skipped", "skipped"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([p["reason"] for p in data], ["old text found 0 times", "old text found 2 times"])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertFalse((self.scrum / "backlog-specs").exists())
 
     def test_digest_auto_queues_when_contract_tests_fail(self):
         self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
         runs = self.contract_tests(fail_on=[2])
         x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
-        self.digest([self.prop("p1", x, obvious=True, obvious_reason="a"), self.prop("p2", y, obvious=True, obvious_reason="b")])
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
         out = self.serve.digest_auto(self.scrum, "001")
         [job] = self.jobs()
-        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(x), "obvious_reason": "a"}], "human": [], "job": job["id"],
-                               "queued": [{"id": "p2", "target": str(y), "obvious_reason": "b", "reason": "contract tests failed"}]})
+        self.assertEqual(out, {"applied": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}], "skipped": [],
+                               "job": job["id"], "queued": [{"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).",
+                                                             "reason": "contract tests failed"}]})
         self.assertEqual(len(runs()), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n", "keep A\nold line\nkeep B\n"))
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
@@ -4130,10 +4191,10 @@ class DigestTest(unittest.TestCase):
                     self.git_repo()
                     setup()
                     heads = self.head_count()
-                self.digest([self.prop("p1", agent, obvious=True, obvious_reason="a")], digest_id)
+                self.digest([self.prop("p1", agent)], digest_id)
                 out = self.serve.digest_auto(self.scrum, digest_id)
-                self.assertEqual(out, {"applied": [], "human": [], "job": None,
-                                       "queued": [{"id": "p1", "target": str(agent), "obvious_reason": "a", "reason": why}]})
+                self.assertEqual(out, {"applied": [], "skipped": [], "job": None, "queued": [
+                    {"id": "p1", "target": str(agent), "why": "Seen in 001-a and 002-b (p1).", "reason": why}]})
                 self.assertEqual(agent.read_text(), "keep A\nold line\nkeep B\n")
                 self.assertEqual(self.jobs(), [])
                 self.assertEqual(self.statuses(digest_id), ["queued"])
@@ -4150,13 +4211,13 @@ class DigestTest(unittest.TestCase):
         hook.chmod(0o755)
         runs = self.contract_tests()
         x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
-        self.digest([self.prop("p1", x, obvious=True, obvious_reason="a"), self.prop("p2", y, obvious=True, obvious_reason="b")])
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
         out = self.serve.digest_auto(self.scrum, "001")
         [job] = self.jobs()
         why = "commit failed: hook says no"
-        self.assertEqual(out, {"applied": [], "human": [], "job": job["id"],
-                               "queued": [{"id": "p1", "target": str(x), "obvious_reason": "a", "reason": why},
-                                          {"id": "p2", "target": str(y), "obvious_reason": "b", "reason": why}]})
+        self.assertEqual(out, {"applied": [], "skipped": [], "job": job["id"],
+                               "queued": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1).", "reason": why},
+                                          {"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).", "reason": why}]})
         self.assertEqual(len(runs()), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
         self.assertEqual(job["stage"], "needs-human")
@@ -4184,13 +4245,45 @@ class DigestTest(unittest.TestCase):
         props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
         self.assertEqual([(p["id"], p["kind"]) for p in props], [("p1", "skill"), ("p6", "edit"), ("p7", "skill")])
 
-    def test_digest_auto_never_approves_skill(self):
-        target = self.reg / "skills" / "k" / "SKILL.md"
-        self.digest([self.skill("p1", target, obvious=True, obvious_reason="claimed obvious")])
-        self.assertEqual(self.serve.digest_auto(self.scrum, "001"),
-                         {"applied": [], "queued": [], "human": [{"id": "p1", "reason": "new skill"}], "job": None})
+    def test_digest_decide_route_rejects_bad_body_and_hides_write_errors(self):
+        rule = self.rule()
+        self.digest([self.prop("p1", rule)])
+
+        def raw(data):
+            r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}/api/p/reg/digests/001/p1", method="POST",
+                                       headers={"Content-Type": "application/json"}, data=data)
+            try:
+                with urllib.request.urlopen(r) as res:
+                    return res.status, json.loads(res.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
+        self.assertEqual(raw(b"{not json"), (400, {"error": "body must be JSON"}))
+        self.assertEqual(raw(json.dumps({"decision": 5}).encode()), (400, {"error": "decision must be approve or reject"}))
+        with mock.patch.object(self.serve.Path, "write_bytes", side_effect=OSError("disk full at /secret")), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(raw(json.dumps({"decision": "approve"}).encode()), (500, {"error": "couldn't write the file"}))
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
         self.assertEqual(self.statuses(), ["pending"])
-        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_digest_auto_queues_skill(self):
+        target = self.reg / "skills" / "k" / "SKILL.md"
+        exists = self.repo_file("skills/e/SKILL.md")
+        hooks = self.reg / ".claude" / "hooks" / "skills" / "h" / "SKILL.md"
+        self.digest([self.skill("p1", target), self.skill("p2", exists), self.skill("p3", self.reg / "docs" / "SKILL.md"),
+                     self.skill("p4", hooks)])
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001"), {
+            "applied": [], "job": None,
+            "queued": [{"id": "p1", "target": str(target), "why": "Seen in 001-a and 002-b (p1).", "reason": "new skill"}],
+            "skipped": [{"id": "p2", "target": str(exists), "reason": "skill already exists"},
+                        {"id": "p3", "target": str(self.reg / "docs" / "SKILL.md"), "reason": "target is not editable"},
+                        {"id": "p4", "target": str(hooks), "reason": "target is not editable"}]})
+        self.assertEqual(self.statuses(), ["queued", "skipped", "skipped", "skipped"])
+        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertEqual(items, ["Create digest 001 p1 skill at skills/k/SKILL.md: Seen in 001-a and 002-b (p1)."])
+        self.assertTrue(self.board.spec_path(self.scrum, items[0]).read_text().startswith("# Create digest 001 p1 skill at skills/k/SKILL.md\n"))
+        self.assertFalse(target.exists())
+        self.assertEqual(self.serve.digest_skill_check(self.scrum, "001", "p1"), {"ok": True, "target": "skills/k/SKILL.md"})
 
     def test_approve_skill_queues_backlog_and_writes_nothing(self):
         target, dot = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "my-skill-2" / "SKILL.md"
