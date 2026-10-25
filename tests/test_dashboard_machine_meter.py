@@ -55,23 +55,37 @@ class MachineMeter(unittest.TestCase):
                   "              return el.innerHTML; });\n"
                   "renderMachine({...s, free_ram_pct: 14, swap_pct: 1, free_disk_gb: 100, verdict: 'free RAM 14% (< 20%)', usage: 'unknown'});\n"
                   "const order = el.innerHTML;\n"
+                  "const rings = [25, null].map(v => { renderMachine({...s, free_ram_pct: v, swap_pct: 1, free_disk_gb: 100, verdict: null});\n"
+                  "                                  return el.innerHTML; });\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: '15 sessions running (ceiling 14)'});\n"
+                  "const sessions = el.innerHTML;\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 29.3, free_disk_gb: 100, verdict: 'swap used 29.3% of RAM (> 25%)'});\n"
+                  "const swap = el.innerHTML;\n"
                   "renderMachine(null);\n"
-                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order}));")
+                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok"])
-        self.assertEqual(out["ok"], [False, '<span class="ok">RAM 34% free</span> · <span class="ok">swap —</span> · '
+        self.assertEqual(out["ok"], [False, '<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free" title="RAM 34% free"></span> · <span class="ok">swap —</span> · '
                                             '<span class="ok">disk 120 GB</span>'])
-        self.assertEqual(out["bad"], '<span class="danger">RAM 14% free</span> · <span class="ok">swap 3%</span> · '
-                                     '<span class="ok">disk 50 GB</span> · <span class="danger">free RAM 14% (&lt; 20%)</span>')
+        self.assertEqual(out["bad"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free" title="RAM 14% free"></span> · <span class="ok">swap 3%</span> · '
+                                     '<span class="ok">disk 50 GB</span>', "the red ring already shows the RAM verdict")
         self.assertTrue(out["gone"])
-        base = '<span class="ok">RAM 40% free</span> · <span class="ok">swap 1%</span> · <span class="ok">disk 100 GB</span> · '
+        base = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free" title="RAM 40% free"></span> · <span class="ok">swap 1%</span> · <span class="ok">disk 100 GB</span> · '
         self.assertEqual(out["use"], [base + '<span class="low">5h 93% · 7d 40% · allowance 1</span>',
                                       base + '<span class="danger">5h 100% · 7d — · allowance 0</span>',
                                       base + '<span class="ok">5h — · 7d 12%</span>',
                                       base + '<span class="ok">usage: unknown</span>'])
-        self.assertEqual(out["order"], '<span class="danger">RAM 14% free</span> · <span class="ok">swap 1%</span> · '
-                                       '<span class="ok">disk 100 GB</span> · <span class="ok">usage: unknown</span> · '
-                                       '<span class="danger">free RAM 14% (&lt; 20%)</span>', "usage sits before the verdict")
+        self.assertEqual(out["order"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free" title="RAM 14% free"></span> · <span class="ok">swap 1%</span> · '
+                                       '<span class="ok">disk 100 GB</span> · <span class="ok">usage: unknown</span>')
+        tail = ' · <span class="ok">swap 1%</span> · <span class="ok">disk 100 GB</span>'
+        self.assertEqual(out["rings"], ['<span class="ring low" role="img" style="--pct:75" aria-label="RAM 25% free" title="RAM 25% free"></span>' + tail,
+                                        '<span class="ring none" role="img" style="--pct:0" aria-label="RAM —" title="RAM —"></span>' + tail])
+        self.assertEqual(out["sessions"], base + '<span class="danger">15 sessions running (ceiling 14)</span>',
+                         "a verdict that repeats no shown reading stays, after the usage segment")
+        self.assertEqual(out["swap"].count("swap 29%"), 1)
+        self.assertIn('<span class="danger">swap 29%</span>', out["swap"])
+        self.assertNotIn("swap used", out["swap"])
+        self.assertNotIn("RAM 40% free</span>", out["swap"], "no RAM text segment")
 
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()
@@ -79,6 +93,15 @@ class MachineMeter(unittest.TestCase):
         self.assertTrue(css)
         self.assertIn("var(--human)", " ".join(css))
         self.assertNotRegex(" ".join(css), r"#[0-9a-fA-F]{3,6}\b|\bwhite\b")
+        ring = " ".join(c for c in css if ".ring" in c)
+        self.assertIn("conic-gradient(", ring)
+        self.assertIn("var(--pct)", ring)
+        for want in (".ring.ok{--ring:var(--pass)}", ".ring.low{--ring:var(--p5)}", ".ring.danger{--ring:var(--human)}",
+                     ".ring.none{--ring:var(--pending)}"):
+            self.assertIn(want, text)
+        size = re.search(r"#machine \.ring\{[^}]*width:(\d+)px;height:(\d+)px", text)
+        self.assertIsNotNone(size)
+        self.assertLessEqual(max(int(size.group(1)), int(size.group(2))), 20)
 
 
 if __name__ == "__main__":
