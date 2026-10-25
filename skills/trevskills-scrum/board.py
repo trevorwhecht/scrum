@@ -6,12 +6,14 @@
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
                                    clears the pause
-  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
-                                   closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
-                                   shell: <cmd>), log it to questions.log. With [--kind K] (K in UNBLOCK_KINDS, under 2
-                                   unblocks, not yet unblocked for K) the job is not parked: it keeps its stage, the
-                                   unblock is logged and {"unblock": true, "n": N} is printed; else it parks and prints
-                                   {"unblock": false} (lanes/unblock.md)
+  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...] [--recommend KEY WHY]  park the job at
+                                   needs-human with a closed question (command: approve|resume|abort <id>
+                                   [--requeue|--cascade], rework <id> "<text>", shell: <cmd>), log it to questions.log;
+                                   --recommend stores {"key","why"}, the option the agent advises, cleared with the
+                                   question. With [--kind K] (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked
+                                   for K) the job is not parked: it keeps its stage, the unblock is logged and
+                                   {"unblock": true, "n": N} is printed; else it parks and prints {"unblock": false}
+                                   (lanes/unblock.md)
   board.py unblock-log <id>        read jobs/<id>/unblock-<unblocks>.md, log its verdict line to questions.log, print
                                    {"verdict","blocker","kind","n"} (verdict INVALID when missing or unreadable)
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
@@ -39,7 +41,9 @@
   board.py roadmap-insert <P> <afterS> <bigboy|standard> <request>  add a [ ] step after S, renumber the rest of P
   board.py roadmap-stop <id> <reason>  mark the step holding <id> [!] and log the reason
   board.py register <repo>         add a repo to the all-projects dashboard (idempotent)
-  board.py abort <id> [--requeue] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on the backlog
+  board.py abort <id> [--requeue] [--cascade] [--reason TEXT]  mark a job aborted (terminal); --requeue puts it back on
+                                   the backlog; --cascade also aborts its waiting, needs-human, paused or queued dependents
+                                   (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
   board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
@@ -123,7 +127,8 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
-ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue)?|rework {id} "[^"]+"|shell: \S.*)'
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
+                            r'|shell: \S.*)'
                             .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
 # Scrum's only sounds: done, needs-human, and a question in a silenced session. Each is a clip in SOUNDS_DIR (not in
@@ -199,6 +204,7 @@ def locked_board(root):
             if job.get("stage") != "needs-human":
                 job.pop("question", None)
                 job.pop("options", None)
+                job.pop("recommend", None)
         tmp = path.with_name("board.json.tmp")
         tmp.write_text(json.dumps(board, indent=2) + "\n")
         os.replace(tmp, path)
@@ -541,13 +547,26 @@ def cmd_cloud_claim(root, n) -> dict:
         return {"claimed": claimed}
 
 
-def cmd_abort(root, job_id, requeue, reason=None):
-    """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item."""
+def cmd_abort(root, job_id, requeue, reason=None, cascade=False):
+    """Mark a job aborted (terminal). Optionally put its full feature text back on the backlog as an open item.
+    With cascade, also abort every waiting, needs-human, paused or play-queued job that depends_on an aborted one,
+    transitively (a Run-all child is requeued). Returns the aborted ids, the root first."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] in ("done", "aborted"):
             raise SystemExit(f"job {job_id} is already {job['stage']}")
         abort_job(root, job, requeue, reason or f"Aborted by Trevor {now()}")
+        aborted = [job_id]
+        if cascade:
+            jobs = {j["id"]: j for j in board["jobs"]}
+            for gone in aborted:  # grows while it runs: each aborted dependent is followed in turn
+                for kid in board["jobs"]:
+                    if gone in (kid.get("depends_on") or []) and kid["stage"] not in ("done", "aborted") \
+                            and (kid["stage"] in ("waiting", "needs-human") or kid.get("paused") or kid.get("play_queued")):
+                        parent = jobs.get(kid.get("parent")) or {}
+                        abort_job(root, kid, parent.get("lane") == "runall", f"Removed with {job_id}")
+                        aborted.append(kid["id"])
+    return aborted
 
 
 def abort_job(root, job, requeue, reason):
@@ -2406,10 +2425,10 @@ UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", 
 UNBLOCK_MAX = 2  # unblocks per job, ever; a kind is unblocked at most once (the loop guard compares kinds, not text)
 
 
-def cmd_ask(root, job_id, question, options, kind=None):
+def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
-    order. Returns the stored option dicts. An eligible kind (lanes/unblock.md) leaves the job in its stage and
-    returns {"unblock": True, "n": N} instead."""
+    order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
+    An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead."""
     question = question.strip()
     if not question:
         raise SystemExit("ask needs a question")
@@ -2425,8 +2444,15 @@ def cmd_ask(root, job_id, question, options, kind=None):
             raise SystemExit(f"bad option {raw!r}; expected label=command")
         if not ASK_COMMAND_RE.fullmatch(command):
             raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
-                             "abort <id> [--requeue], resume <id>, shell: <command>")
+                             "abort <id> [--requeue|--cascade], resume <id>, shell: <command>")
         parsed.append({"key": key, "label": label, "command": command})
+    if recommend is not None:
+        rkey, why = recommend[0].strip(), clean(recommend[1])
+        if rkey not in [o["key"] for o in parsed]:
+            raise SystemExit(f"bad recommend key {rkey!r}; the question offers {', '.join(o['key'] for o in parsed)}")
+        if not why:
+            raise SystemExit("recommend needs a reason")
+        recommend = {"key": rkey, "why": why}
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         kinds = job.get("unblockKinds", [])
@@ -2442,8 +2468,13 @@ def cmd_ask(root, job_id, question, options, kind=None):
         if job.get("reason") != reason:
             job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
         job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
-        questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                             "question": question, "options": parsed})
+        entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                 "question": question, "options": parsed}
+        if recommend:
+            job["recommend"] = entry["recommend"] = recommend
+        else:
+            job.pop("recommend", None)  # a re-ask without one drops the old question's advice
+        questions_log(root, entry)
     if was != "needs-human":
         play(sound("needs-human"))
     return parsed
@@ -3161,6 +3192,7 @@ def main(argv=None):
     ak.add_argument("--b", required=True, metavar="LABEL=COMMAND")
     ak.add_argument("--c", metavar="LABEL=COMMAND")
     ak.add_argument("--kind")
+    ak.add_argument("--recommend", nargs=2, metavar=("KEY", "WHY"))
     sub.add_parser("unblock-log").add_argument("id")
     an = sub.add_parser("answer")
     an.add_argument("id")
@@ -3192,6 +3224,7 @@ def main(argv=None):
     ab = sub.add_parser("abort")
     ab.add_argument("id")
     ab.add_argument("--requeue", action="store_true")
+    ab.add_argument("--cascade", action="store_true")
     ab.add_argument("--reason")
     sub.add_parser("artifacts").add_argument("id")
     sub.add_parser("digest-due")
@@ -3261,7 +3294,8 @@ def main(argv=None):
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "ask":
-        out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind)
+        out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind,
+                      a.recommend)
         if a.kind is not None:
             print(json.dumps(out if isinstance(out, dict) else {"unblock": False}))
     elif a.cmd == "unblock-log":
@@ -3285,7 +3319,9 @@ def main(argv=None):
     elif a.cmd == "register":
         cmd_register(a.repo)
     elif a.cmd == "abort":
-        cmd_abort(a.dir, a.id, a.requeue, a.reason)
+        aborted = cmd_abort(a.dir, a.id, a.requeue, a.reason, a.cascade)
+        if a.cascade:
+            print(json.dumps({"aborted": aborted}))
     elif a.cmd == "artifacts":
         print("".join(f"{line}\n" for line in cmd_artifacts(a.dir, a.id)), end="")
     elif a.cmd == "digest-due":
