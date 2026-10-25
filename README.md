@@ -53,12 +53,11 @@ Each card carries a project tag, and the **All projects** menu filters to one pr
 
 - Cards move across the stages, and each review round is one row of reviewer chips.
 - A stuck (needs-human) card opens with **Approve & merge** and **Send back to builder**. Each click starts a background `claude -p` run, logged to `scrum/runs/`, and the card shows "● running" until it finishes.
-- **Ask Claude** in any job's modal opens a new interactive `claude` in the job's worktree (the repo root once it's gone), in Ghostty if installed, else a new Terminal window, with a prompt listing the job's files and board entry.
 - **Backlog** opens the queue:
   - **+** adds an item, and Sonnet estimates it in Fibonacci points (1 2 3 5 8 13, colour-coded). Change the points or text inline.
   - ↑/↓ reorders the queue; `/trevskills-scrum next` takes the top item.
   - ▶ starts a job now, and ✕ deletes an item. Both ask once on the button.
-- A card whose job has a `routing.log` shows one tag per routed step, such as `builder local` or `builder cloud`; hover for the model, seconds and outcome. The header shows `Codex 5h 42% · wk 61% · Ollama up`, refreshed every minute.
+- A card whose job has a `routing.log` shows one tag per routed step, such as `builder cloud` or `codex-review skip`; hover for the model, seconds and outcome. The header shows Claude and Codex 5h and weekly use, refreshed every minute.
 - **Pipelines** shows each pipeline's chart with each agent's model, in tabs: All (the orchestrator fanning out to all four), Fast, Standard, Debug, BigBoy and Maintenance. Click an agent for its prompt, tools and skills; **+** adds an installed skill to its frontmatter (live on the next spawn, and an uncommitted change in this checkout).
 
 The server listens on localhost only and refuses requests from other websites.
@@ -84,17 +83,6 @@ Set up the cloud environment once:
 3. Environment variables: whatever the project's tests need from `.env` (cloud sessions have no `.env`).
 4. Copy the environment's id (`env_...`). If the settings page doesn't show it, ask any cloud session to run its `list_environments` tool. Add `- Cloud environment: env_...` to the project's `scrum/project.md`. Without that line, `claude --cloud` uses your default environment.
 
-## Local routing
+## Routing
 
-`local/route.py` picks cloud or local Ollama for each routed step; the full rules are in [local/README.md](local/README.md#how-routing-decides).
-
-- **Eligible roles:** the estimator, digest reader and Codex review always; the builder only on a `fast`-lane job; the spec writer only for a backlog item of 2 points or less (`spec_writer_max_points`). Reviewers, the approver, planner, tracker, debugger, triager and digester always run on cloud.
-- **Trust** per role in `local/routing.json`: `off` (cloud), `trial` (local when eligible or a BigBoy child), `approved` (local when eligible).
-- **Ollama health check:** local only when Ollama's `/api/tags` answers within 2 s and lists the role's model (`scrum-qwen2.5-coder:7b` or `scrum-qwen3.5:4b`, the 32K variants from local/README.md).
-- **Claude session limit:** while a recent `scrum/runs/` log shows Claude's session limit, trial and approved roles go local until it resets.
-- **Codex quota:** the Codex review moves to local once the 5h window reaches 85 % used or the weekly one 90 % (`codex_5h`, `codex_weekly`), and is skipped when Ollama is down.
-- **Background worker:** `local/worker-install.sh` runs `local/worker.py` every 10 minutes: local backlog estimates and insight notes for the digest, only when memory allows, more while the Mac is idle. See [local/README.md](local/README.md#background-worker).
-- **`SCRUM_ROUTE=cloud`** forces every routed step to cloud; **`SCRUM_ROUTE=local`** forces local for eligible steps when Ollama is up.
-- **One cloud retry:** a local run with no valid artifact is retried once on cloud, never again and never back to local. Every attempt is logged to `routing.log`.
-
-For the opt-in local launcher and setup, see [local/README.md](local/README.md).
+Every agent runs on cloud Claude. `local/route.py codex-review` answers `skip` when Codex is not installed or its 5h or weekly quota is at its threshold, and `cloud` otherwise; every step is logged to `routing.log`. See [local/README.md](local/README.md).
