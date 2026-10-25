@@ -178,6 +178,41 @@ def resume_job(project, root, job, jobs):
     spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
 
+def resumable(job):
+    """Paused by Trevor (Play), or needs-human for a reason whose card offers Resume (RESUMABLE)."""
+    return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE))
+
+
+PLAY_QUEUED = "queued, starts next"
+
+
+def unqueue(root, job):
+    """Drop the job's play_queued flag, when it has one."""
+    if job.get("play_queued"):
+        with board.locked_board(root) as b:
+            board.find(b, job["id"]).pop("play_queued", None)
+
+
+def play_queue_tick(project, root, jobs) -> bool:
+    """Start the Play clicks the machine guard queued, oldest first, before any other start this tick. A job no
+    longer resumable (or already running) is dropped from the queue; another kind of refusal keeps it queued and
+    moves on; a machine-guard refusal stops here and keeps it and every later one queued. True when it started one."""
+    started = False
+    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
+        if running(project, job["id"]) or not resumable(job):
+            unqueue(root, job)
+            continue
+        refusal = resume_refusal(project, root, job)
+        if refusal and refusal.startswith(board.MACHINE_WAIT):
+            break
+        if refusal:
+            continue
+        resume_job(project, root, job, jobs)
+        unqueue(root, job)
+        started = True
+    return started
+
+
 LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
                  "/trevskills-commitpush, or discard it, then click Abort.")
 
@@ -795,7 +830,7 @@ def watchdog_tick():
             jobs = json.loads((root / "board.json").read_text())["jobs"]
             by_id = {j["id"]: j for j in jobs}
             busy[project] = board_busy(project, root, jobs, by_id, alive)
-            # Play queue (T3): start Play-queued jobs here, before auto_resume
+            busy[project] = play_queue_tick(project, root, jobs) or busy[project]  # Trevor's queued Play goes first
             busy[project] = auto_resume(project, root, jobs) or busy[project]  # resumes take the free slots first
             for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                 start_ready(project, root, parent)
@@ -897,7 +932,19 @@ def machine_status():
     return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE)}
+            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time())}
+
+
+def machine_usage(now):
+    """The meter's usage segment: 5h and 7d used %, the 5h reset and usage_allowance's live-session cap (null for no
+    taper), or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
+    usage = board.read_usage() or {}
+    at = usage.get("written_at")
+    if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
+        return "unknown"
+    u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
+    return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
+            "allowance": None if allow is None else int(allow)}
 
 
 def claude_usage(now):
@@ -1400,7 +1447,7 @@ def ai_settings_save(item_id, content, version, confirm=False):
         ai_backup(it["path"])
         Path(it["path"]).write_text(json.dumps(data, indent=2) + "\n")  # in place, so a symlinked file keeps its link
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the file", e)
     except (ValueError, KeyError, IndexError, TypeError):
         return 409, {"error": "file changed on disk"}
     return ai_refind(it)
@@ -1423,7 +1470,7 @@ def ai_settings_undo(item_id, version):
         ai_backup(it["path"])
         Path(it["path"]).write_bytes(data)
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the file", e)
     return ai_refind(it)
 
 
@@ -1569,6 +1616,12 @@ NEW_WINDOW_SCRIPT = """on run argv
 end run"""  # argv: a directory, then the command's words; each is shell-quoted, so nothing in them runs as shell
 
 
+def server_error(message, detail):
+    """A 500 with a fixed message; the detail (an exception, stderr) goes to serve.py's log, never to the client."""
+    print(f"serve: {message}: {detail}", file=sys.stderr, flush=True)
+    return 500, {"error": message}
+
+
 def osa_new_window(cwd, *words):
     return ["osascript", "-e", NEW_WINDOW_SCRIPT, str(cwd), *words]
 
@@ -1579,9 +1632,9 @@ def run_terminal(tries):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
         except (subprocess.SubprocessError, OSError) as e:
-            return 500, {"error": f"couldn't open the terminal ({e})"}
+            return server_error("couldn't open the terminal", e)
         if out.returncode:
-            return 500, {"error": (out.stderr.strip().splitlines() or ["couldn't open the terminal"])[-1]}
+            return server_error("couldn't open the terminal", out.stderr.strip())
         if out.stdout.strip() != "missing":
             return 200, {"message": message}
     return None
@@ -2108,7 +2161,7 @@ def ai_toggle(item_id, enable):
         else:
             target.write_bytes(before)
     except OSError as e:
-        return 500, {"error": str(e)}
+        return server_error("couldn't write the settings file", e)
     return 409, {"error": "a higher-precedence settings file still decides this"}
 
 
@@ -2359,7 +2412,7 @@ def digest_decide(root, digest_id, pid, decision):
                 ai_backup(target)
                 Path(target).write_bytes(text.replace(prop["old"], prop["new"], 1).encode())  # in place: keeps a symlink
             except OSError as e:
-                return 500, {"error": str(e)}
+                return server_error("couldn't write the file", e)
             status = "applied"
         entry["status"] = status
         tmp = path.with_name("proposals.json.tmp")
@@ -2785,12 +2838,16 @@ class Handler(BaseHTTPRequestHandler):
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"))
         if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
-            if not job or running(project, job_id) or not (job.get("paused") or job["stage"] == "needs-human"
-                                                           and (job.get("reason") or "").startswith(board.RESUMABLE)):
+            if not job or running(project, job_id) or not resumable(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             if refusal := resume_refusal(project, root, job):
-                return 409, {"error": refusal}
+                if not refusal.startswith(board.MACHINE_WAIT):
+                    return 409, {"error": refusal}
+                with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
+                    board.find(b, job_id).setdefault("play_queued", board.now())
+                return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
             resume_job(project, root, job, jobs)
+            unqueue(root, job)
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}
