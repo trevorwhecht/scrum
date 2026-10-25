@@ -924,12 +924,12 @@ class ServeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, SCRUM_PS=str(ps), SCRUM_USAGE=str(usage)):
                 self.assertEqual(self.serve.resume_refusal("repo", self.root, job), out)
 
-    def test_resume_refused_at_machine_ceiling(self):
+    def test_resume_has_no_session_count_cap(self):
         ps = Path(self.tmp.name) / "ps.txt"
-        ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 8)
-        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
-            self.assertEqual(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}),
-                             "waiting: 8 sessions running (machine cap 8). Fix: click Resume once memory or disk frees up.")
+        ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 12)
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
+                mock.patch.object(self.serve.board, "pace_cap", return_value=None):
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}))
 
     def test_resume_refusal_machine_guard(self):
         """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
@@ -4644,7 +4644,7 @@ class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: each tick the watchdog starts one headless run-all in every opted-in
     project with no work in flight and a claimable backlog line: Focus projects first, then the project that just
     finished, then the most recently active, then the lowest n. Nothing starts when usage is over pace, and starts
-    stop at the first failed machine_ok (RAM, disk, or 8 live sessions)."""
+    stop at the first failed machine_ok (RAM or disk)."""
 
     def setUp(self):
         import serve
@@ -4734,14 +4734,12 @@ class AutoContinueTest(unittest.TestCase):
             with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
                 self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
-    def test_auto_continue_session_ceiling(self):
+    def test_auto_continue_has_no_session_count_cap(self):
         self.project("a", n=1); self.project("b", n=2)
         ps = self.base / "ps.txt"
-        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
-            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 8)
-            self.assertEqual(self.tick(), [], "8 live sessions: no run-all starts")
-            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 7)
-            self.assertEqual(self.tick(), self.started("a") + self.started("b"))
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), mock.patch.object(self.board, "pace_cap", return_value=None):
+            ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 12)
+            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "12 live sessions, RAM fine: both start")
 
     def test_auto_continue_starts_each_idle_project(self):
         self.project("a", n=1); self.project("b", n=5)

@@ -2242,7 +2242,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_focus_is_priority_not_lock(self):
         setup = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Setup", "## Commands")
         self.assertIn("serve.py starts one headless run-all per idle opted-in project, Focus projects first", setup)
-        self.assertIn("no new work beyond 8 live sessions machine-wide", setup)
+        self.assertIn("no new work while free RAM or disk is low", setup)
         self.assertIn("`- Focus: yes` (optional): ordering only, never holds another project.", setup)
         self.assertNotIn("sole auto-continue target", setup)
         self.assertNotIn("hold every other project", setup)
