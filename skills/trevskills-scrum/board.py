@@ -14,6 +14,8 @@
                                    for K) the job is not parked: it keeps its stage, the unblock is logged and
                                    {"unblock": true, "n": N} is printed; else it parks and prints {"unblock": false}
                                    (lanes/unblock.md)
+  board.py wait-on <id> <blocker> park a builder-blocked job at stage waiting with depends_on=[blocker] (a full id or a
+                                   number like 001); serve.py starts it once that job is done, print {"id","waiting_on"}
   board.py unblock-log <id>        read jobs/<id>/unblock-<unblocks>.md, log its verdict line to questions.log, print
                                    {"verdict","blocker","kind","n"} (verdict INVALID when missing or unreadable)
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
@@ -2556,6 +2558,53 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
     return parsed
 
 
+def cmd_wait_on(root, job_id, blocker) -> dict:
+    """Park a builder-blocked job at stage waiting on another job on this board (SKILL.md New job step 5), so
+    wake_waiting restarts it once that job merges. blocker is a full id or a number matching one id's NNN- start."""
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        ids = [j["id"] for j in board["jobs"]]
+        hits = [blocker] if blocker in ids else [i for i in ids if blocker.isdigit() and i.startswith(blocker + "-")]
+        if len(hits) != 1:
+            raise SystemExit(f"blocker {blocker!r} matches {len(hits)} jobs on the board; expected one")
+        dep = find(board, hits[0])
+        if dep["id"] == job_id:
+            raise SystemExit(f"job {job_id} cannot wait on itself")
+        if dep["stage"] in ("done", "aborted"):
+            raise SystemExit(f"blocker {dep['id']} is {dep['stage']}; there is nothing to wait for")
+        if job_id in (dep.get("depends_on") or []):
+            raise SystemExit(f"blocker {dep['id']} already waits on {job_id}")
+        if job.get("parent") and dep["id"] not in (find(board, job["parent"]).get("children") or []):
+            raise SystemExit(f"job {job_id} is a child of {job['parent']}; it may only wait on a sibling")
+        job.update(stage="waiting", depends_on=[dep["id"]], reason=f"waiting on {dep['id']}", worktree=None,
+                   updatedAt=now())
+    return {"id": job_id, "waiting_on": dep["id"]}
+
+
+def wake_waiting(root) -> dict:
+    """Claim (stage -> spec) every parentless waiting job whose depends_on are all done; park one whose dependency was
+    aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. Returns {"ready", "lost"}."""
+    ready, lost = [], {}
+    with locked_board(root) as board:
+        stage = {j["id"]: j["stage"] for j in board["jobs"]}
+        for j in board["jobs"]:
+            deps = j.get("depends_on") or []
+            if j["stage"] != "waiting" or j.get("parent") or j.get("setup") == "pending" or j.get("paused") or not deps:
+                continue
+            gone = [d for d in deps if stage.get(d) in (None, "aborted")]
+            if gone:
+                lost[j["id"]] = gone[0]
+            elif all(stage[d] == "done" for d in deps):
+                j.update(stage="spec", reason=None, updatedAt=now())
+                ready.append(j["id"])
+    for job_id, dep in lost.items():
+        try:  # one refused ask (the job was aborted meanwhile) must not hide the claimed ready jobs from the caller
+            cmd_ask(root, job_id, f"blocked: {dep} was aborted or removed, so this job has nothing to wait for.",
+                    [f"Put back on the backlog=abort {job_id} --requeue", f"Remove this job=abort {job_id} --cascade"])
+        except SystemExit as e:
+            print(f"wake_waiting: {job_id}: {e}", file=sys.stderr)
+    return {"ready": ready, "lost": list(lost)}
+
 def cmd_unblock_log(root, job_id):
     """Log the verdict of the job's latest scrum-unblocker file (jobs/<id>/unblock-<unblocks>.md) to questions.log."""
     with locked_board(root) as board:
@@ -3300,6 +3349,9 @@ def main(argv=None):
     ak.add_argument("--c", metavar="LABEL=COMMAND")
     ak.add_argument("--kind")
     ak.add_argument("--recommend", nargs=2, metavar=("KEY", "WHY"))
+    wo = sub.add_parser("wait-on")
+    wo.add_argument("id")
+    wo.add_argument("blocker")
     sub.add_parser("unblock-log").add_argument("id")
     an = sub.add_parser("answer")
     an.add_argument("id")
@@ -3405,6 +3457,8 @@ def main(argv=None):
                       a.recommend)
         if a.kind is not None:
             print(json.dumps(out if isinstance(out, dict) else {"unblock": False}))
+    elif a.cmd == "wait-on":
+        print(json.dumps(cmd_wait_on(a.dir, a.id, a.blocker)))
     elif a.cmd == "unblock-log":
         print(json.dumps(cmd_unblock_log(a.dir, a.id)))
     elif a.cmd == "answer":

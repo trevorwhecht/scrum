@@ -3270,6 +3270,116 @@ class BoardTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(board.secret_filter(text))
 
+    # --- wait-on / wake_waiting ---
+    def wait_board(self, *jobs):
+        """Write a board of {"id", "stage", ...} jobs straight to board.json (no lock needed: no writer runs)."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"updatedAt": "2026-01-01T00:00:00+00:00", **j} for j in jobs]}))
+
+    def test_wait_on_parks_job_waiting_with_depends_on(self):
+        self.wait_board({"id": "001-first", "stage": "review"},
+                        {"id": "002-second", "stage": "build", "worktree": "/tmp/wt-002", "reason": "old"})
+        out = board.cmd_wait_on(self.root, "002-second", "001-first")
+        self.assertEqual(out, {"id": "002-second", "waiting_on": "001-first"})
+        job = self.jobs()[1]
+        self.assertEqual((job["stage"], job["depends_on"], job["reason"], job["worktree"]),
+                         ("waiting", ["001-first"], "waiting on 001-first", None))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+        self.assertFalse((self.root / "questions.log").exists())
+        self.assertEqual(self.jobs()[0]["stage"], "review")
+
+    def test_wait_on_plays_no_sound(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        with mock.patch.object(board, "play") as play:
+            board.cmd_wait_on(self.root, "002-second", "001-first")
+        play.assert_not_called()
+
+    def test_wait_on_resolves_number_prefix(self):
+        self.wait_board({"id": "001-first", "stage": "merging"}, {"id": "0011-other", "stage": "spec"},
+                        {"id": "002-second", "stage": "build"})
+        self.assertEqual(board.cmd_wait_on(self.root, "002-second", "001"),
+                         {"id": "002-second", "waiting_on": "001-first"})
+        self.assertEqual(self.jobs()[2]["depends_on"], ["001-first"])
+
+    def test_wait_on_refuses_unknown_ambiguous_self_done_aborted_cycle(self):
+        jobs = [{"id": "001-first", "stage": "review"}, {"id": "001-twin", "stage": "review"},
+                {"id": "003-done", "stage": "done"}, {"id": "004-gone", "stage": "aborted"},
+                {"id": "005-loop", "stage": "waiting", "depends_on": ["006-me"]},
+                {"id": "006-me", "stage": "build", "worktree": "/tmp/wt"},
+                {"id": "007-paused", "stage": "build", "paused": True},
+                {"id": "008-aborted", "stage": "aborted"}]
+        cases = [("006-me", "999"), ("006-me", "999-nope"), ("006-me", "001"), ("006-me", "006-me"),
+                 ("006-me", "006"), ("006-me", "003-done"), ("006-me", "004"), ("006-me", "005-loop"),
+                 ("007-paused", "001-first"), ("008-aborted", "001-first"), ("006-me", "-1")]
+        for job_id, blocker in cases:
+            with self.subTest(job=job_id, blocker=blocker):
+                self.wait_board(*jobs)
+                before = (self.root / "board.json").read_text()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_wait_on(self.root, job_id, blocker)
+                self.assertIsInstance(e.exception.code, str)
+                self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_wait_on_refuses_child_with_outside_blocker(self):
+        self.wait_board({"id": "001-outside", "stage": "review"},
+                        {"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a", "004-b"]},
+                        {"id": "003-a", "stage": "review", "parent": "002-parent"},
+                        {"id": "004-b", "stage": "build", "parent": "002-parent"})
+        before = (self.root / "board.json").read_text()
+        with self.assertRaises(SystemExit):
+            board.cmd_wait_on(self.root, "004-b", "001-outside")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertEqual(board.cmd_wait_on(self.root, "004-b", "003"), {"id": "004-b", "waiting_on": "003-a"})
+
+    def test_wait_on_cli_prints_json(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "wait-on", "002-second", "001"])
+        self.assertEqual(json.loads(buf.getvalue()), {"id": "002-second", "waiting_on": "001-first"})
+        self.assertIn("wait-on <id> <blocker>", board.__doc__)
+
+    def test_wake_waiting_claims_when_dependency_done(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                         "reason": "waiting on 001-first"})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": ["002-second"], "lost": []})
+        job = self.jobs()[1]
+        self.assertEqual((job["stage"], job["reason"]), ("spec", None))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_wake_waiting_leaves_unfinished_dependency(self):
+        jobs = [{"id": "001-first", "stage": "merging"},
+                {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "reason": "waiting on 001-first"},
+                {"id": "003-parent", "stage": "running", "lane": "bigboy", "children": ["004-kid"]},
+                {"id": "004-kid", "stage": "waiting", "parent": "003-parent", "depends_on": ["005-done"]},
+                {"id": "005-done", "stage": "done"},
+                {"id": "006-setup", "stage": "waiting", "setup": "pending", "depends_on": ["005-done"]},
+                {"id": "007-plain", "stage": "waiting"},
+                {"id": "008-paused", "stage": "waiting", "paused": True, "depends_on": ["005-done"]}]
+        self.wait_board(*jobs)
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+        self.assertEqual([j["stage"] for j in self.jobs()], [j["stage"] for j in jobs])
+
+    def test_wake_waiting_asks_when_dependency_aborted(self):
+        self.wait_board({"id": "001-first", "stage": "aborted"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["009-missing"]})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": ["002-second", "003-third"]})
+        second, third = self.jobs()[1], self.jobs()[2]
+        self.assertEqual(second["stage"], "needs-human")
+        self.assertEqual(second["question"],
+                         "blocked: 001-first was aborted or removed, so this job has nothing to wait for.")
+        self.assertEqual(second["options"], [
+            {"key": "a", "label": "Put back on the backlog", "command": "abort 002-second --requeue"},
+            {"key": "b", "label": "Remove this job", "command": "abort 002-second --cascade"}])
+        self.assertEqual(third["question"],
+                         "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
 
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""

@@ -1423,6 +1423,19 @@ class ServeTest(unittest.TestCase):
                                                        "why": "shares SKILL.md, runs alone, shares serve.py"})
         self.assertIsNone(self.serve.waiting_on(None))
 
+    def test_board_with_activity_waiting_on_unmerged_dependency(self):
+        b = self.serve.board
+        first, second, third = (b.cmd_new(self.root, t) for t in ("Blocker one", "Parked two", "Merged three"))
+        self.addCleanup(lambda: self.edit_job(second, stage="aborted"))  # the shared board: no later tick may claim it
+        self.edit_job(first, stage="merging")
+        self.edit_job(second, stage="waiting", depends_on=[first, third], reason=f"waiting on {first}")
+        self.edit_job(third, stage="done")
+        jobs = self.board_jobs()
+        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first], "why": "not merged yet"})
+        self.assertNotIn("waitingOn", jobs[first])
+        self.edit_job(first, stage="done")
+        self.assertNotIn("waitingOn", self.board_jobs()[second])
+
     def test_board_json_free_job_nulls(self):
         b = self.serve.board
         free, lil, kid = (b.cmd_new(self.root, t) for t in ("Free paused", "Lil paused", "Kid low RAM"))
@@ -5233,6 +5246,38 @@ class WatchdogIdleParentTest(unittest.TestCase):
                           "updatedAt": "2026-10-25T10:00:00+00:00"},
                          {"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
                           "updatedAt": "2026-10-25T09:00:00+00:00"})
+
+    def test_watchdog_starts_waiting_job_after_blocker_merges(self):
+        self.queue_board({"id": "001-first", "stage": "merging"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                          "reason": "waiting on 001-first"})
+        spawn, _, _ = self.tick()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                          "reason": "waiting on 001-first"})
+        with mock.patch.object(self.serve, "sweep_parents") as sweep:
+            spawn, _, _ = self.tick()
+        sweep.assert_called_once()
+        self.assertEqual([c.args for c in spawn.call_args_list],
+                         [("idle", self.root, "002-second", "start", "/trevskills-scrum start 002-second")])
+        self.assertEqual((self.job("002-second")["stage"], self.job("002-second")["reason"]), ("spec", None))
+
+    def test_wake_waiting_failure_still_sweeps_parents(self):
+        self.queue_board({"id": "001-first", "stage": "done"})
+        with mock.patch.object(self.board, "wake_waiting", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve, "sweep_parents") as sweep:
+            self.tick()
+        sweep.assert_called_once()
+
+    def test_wake_waiting_holds_while_machine_busy(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
 
     def test_watchdog_tick_resume_blocks_claims(self):
         held = {"id": "010-held", "stage": "build", "limitResetAt": int(time.time()) - 300}  # reset + 120 s is past

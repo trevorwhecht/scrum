@@ -169,6 +169,15 @@ def start_ready(project, root, parent_id):
     return out
 
 
+def wake_waiting(project, root):
+    """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
+    `start` spawn start_ready makes. A full machine leaves them waiting, never needs-human."""
+    if board.machine_ok(root):
+        return
+    for job_id in board.wake_waiting(root)["ready"]:
+        spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
+
+
 def resume_job(project, root, job, jobs, manual=False):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
@@ -951,8 +960,9 @@ def watchdog_tick():
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project.
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
-       let sweep_parents claim, and run auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick
-       and prune_worktrees run every tick."""
+       start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
+       auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
+       tick."""
     global RESUME_ROOM
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = False
@@ -997,6 +1007,10 @@ def watchdog_tick():
             if claim:  # a flagged child frees its Run-all/BigBoy slot
                 for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                     start_ready(project, root, parent)
+                try:  # its own guard: a wake failure must not skip sweep_parents
+                    wake_waiting(project, root)
+                except (Exception, SystemExit) as e:
+                    print(f"watchdog: {project}: wake waiting: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a sweep failure must not skip the cloud poll
                 sweep_parents(project, root, jobs, alive, claim=claim)
             except (Exception, SystemExit) as e:
@@ -1807,8 +1821,10 @@ def activity(root, job):
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
-    Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`."""
+    Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
+    waiting job with a dependency not yet done or aborted ("not merged yet")."""
     data = json.loads((root / "board.json").read_text())
+    stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
     for job in data.get("jobs", []):
         job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
@@ -1818,6 +1834,9 @@ def board_with_activity(root, project):
             refusal = resume_refusal(project, root, job, manual=True)  # manual: as the dashboard's click sends it
             job["resumeRefusal"] = str(refusal) if refusal else None
             job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
+        if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
+                                                       if stage.get(d) not in ("done", "aborted")]):
+            job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
     return data
 
 
