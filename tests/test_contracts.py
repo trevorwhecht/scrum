@@ -53,6 +53,15 @@ class ContractTest(unittest.TestCase):
             self.assertIn("prisma migrate", text, name)
             self.assertIn("git merge", text, name)
 
+    def test_schema_jobs_migrate_at_merge(self):
+        for name in ("scrum-review-code", "scrum-review-ux"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            self.assertIn("with no migration file is not a defect", text, name)
+            self.assertIn("the migration is generated at merge", text, name)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertIn("runs `/trevskills-migrate` at merge", builder)
+        self.assertNotIn("after Trevor approves", builder)
+
     def test_skill_references_every_agent_and_board_command(self):
         text = self.rules()
         for name in AGENTS:
