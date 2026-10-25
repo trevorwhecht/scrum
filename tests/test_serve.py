@@ -3588,8 +3588,8 @@ class DigestTest(unittest.TestCase):
     def prop(self, pid, target, old="old line", new="new line", **extra):
         return {"id": pid, "target": str(target), "why": f"Seen in 001-a and 002-b ({pid}).", "old": old, "new": new, **extra}
 
-    def decide(self, pid, decision, digest_id="001", headers=None):
-        return self.post(f"/api/p/reg/digests/{digest_id}/{pid}", {"decision": decision}, headers)
+    def revert(self, pid, digest_id="001", headers=None):
+        return self.post(f"/api/p/reg/digests/{digest_id}/{pid}", {"decision": "revert"}, headers)
 
     def statuses(self, digest_id="001"):
         data = json.loads((self.scrum / "digests" / digest_id / "proposals.json").read_text())
@@ -3671,12 +3671,12 @@ class DigestTest(unittest.TestCase):
             self.assertEqual(self.serve.valid_proposal(self.prop(pid, rule))["id"], pid)
         self.digest([self.prop("p 1", rule), self.prop("p1\n", rule), self.prop("ok-1", rule)])
         self.assertEqual([p["id"] for p in self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]], ["ok-1"])
-        self.assertEqual(self.decide("p%201", "approve")[0], 404)
-        self.assertEqual(self.decide("p1%0A", "reject")[0], 404)
+        self.assertEqual(self.revert("p%201")[0], 404)
+        self.assertEqual(self.revert("p1%0A")[0], 404)
         self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
         self.assertEqual(self.statuses(), ["pending"] * 3)
 
-    def test_approve_refuses_settings_and_hook_targets(self):
+    def test_auto_and_revert_refuse_settings_and_hook_targets(self):
         targets = []
         for f in (self.user / "settings.json", self.user / "settings.local.json", self.reg / ".claude" / "settings.json",
                   self.reg / ".claude" / "settings.local.json", self.user / "hooks" / "x.md",
@@ -3690,51 +3690,47 @@ class DigestTest(unittest.TestCase):
         targets.append(link)
         self.assertFalse(self.serve.digest_denied(str(self.rule())))
         self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)])
-        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "digests" not in p.parts}
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "scrum" not in p.parts}
         before = snap()
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["skipped"], [{"id": f"p{i}", "target": str(t), "reason": "settings or hooks file"} for i, t in enumerate(targets)])
+        self.assertEqual(self.statuses(), ["skipped"] * len(targets))
+        self.digest([self.prop(f"p{i}", t, old="new line", new="old line", status="applied") for i, t in enumerate(targets)])
         for i in range(len(targets)):
-            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i}", "approve"),
-                             (403, {"error": "target is not editable"}), targets[i])
-        self.assertEqual(self.decide("p0", "approve")[0], 403)
+            self.assertEqual(self.serve.digest_revert(self.scrum, "001", f"p{i}"), (409, {"error": "target is not editable"}), targets[i])
+        self.assertEqual(self.revert("p0")[0], 409)
         self.assertEqual(snap(), before)
         self.assertEqual(self.backups(), [])
         self.assertEqual(self.board.backlog_items(self.scrum), [])
-        self.assertEqual(self.statuses(), ["pending"] * len(targets))
-        self.assertEqual(self.decide("p3", "reject")[1]["status"], "rejected")
-        self.assertEqual(self.statuses()[3], "rejected")
+        self.assertEqual(self.statuses(), ["applied"] * len(targets))
 
     def test_digest_endpoints_need_json_and_localhost(self):
-        rule = self.rule()
-        self.digest([self.prop("p1", rule)])
+        rule = self.rule("keep A\nnew line\nkeep B\n")
+        self.digest([self.prop("p1", rule, status="applied")])
         self.done_job()
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             for headers in ({"Content-Type": "text/plain"}, {"Origin": "https://evil.example"}, {"Host": "evil.example"}):
                 self.assertEqual(self.post("/api/p/reg/digest", {}, headers)[0], 403, headers)
-                self.assertEqual(self.decide("p1", "approve", headers=headers)[0], 403, headers)
+                self.assertEqual(self.revert("p1", headers=headers)[0], 403, headers)
             popen.assert_not_called()
         r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}/api/p/reg/digests", headers={"Host": "evil.example"})
         with self.assertRaises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(r)
         e.exception.close()
         self.assertEqual(e.exception.code, 403)
-        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
-        self.assertEqual(self.statuses(), ["pending"])
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["applied"])
 
-    def test_approve_applies_edit_with_backup(self):
-        rule = self.rule()
+    def test_digest_auto_keeps_crlf_with_backup(self):
         memory = self.user / "projects" / "p" / "memory" / "m.md"
         memory.parent.mkdir(parents=True)
         memory.write_text("remember: old line\r\n")
-        self.digest([self.prop("p1", rule), self.prop("p2", memory)])
-        code, out = self.decide("p1", "approve")
-        self.assertEqual((code, out), (200, {**self.prop("p1", rule), "status": "applied", "kind": "edit"}))
-        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
-        self.assertEqual([b.read_bytes() for b in self.backups()], [b"keep A\nold line\nkeep B\n"])
-        self.assertTrue(self.backups()[0].name.endswith(urllib.parse.quote(str(rule), safe="")))
-        self.assertEqual(self.statuses(), ["applied", "pending"])
-        self.assertEqual(self.decide("p2", "approve")[0], 200)
+        self.digest([self.prop("p1", memory)])
+        self.assertEqual([e["id"] for e in self.serve.digest_auto(self.scrum, "001")["applied"]], ["p1"])
         self.assertEqual(memory.read_bytes(), b"remember: new line\r\n")
-        self.assertEqual(self.statuses(), ["applied", "applied"])
+        self.assertEqual([b.read_bytes() for b in self.backups()], [b"remember: old line\r\n"])
+        self.assertTrue(self.backups()[0].name.endswith(urllib.parse.quote(str(memory), safe="")))
+        self.assertEqual(self.statuses(), ["applied"])
 
     def test_digest_denied_is_case_insensitive(self):
         targets = []
@@ -3752,12 +3748,11 @@ class DigestTest(unittest.TestCase):
         for t in (self.rule(), self.user / "prehooks" / "x.md", self.user / "hooks.md", self.reg / ".claude" / "Hooks.md"):
             self.assertFalse(self.serve.digest_denied(str(t)), t)
         self.digest([self.prop(f"p{i}", t) for i, t in enumerate(targets)])
-        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "digests" not in p.parts}
+        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and "scrum" not in p.parts}
         before = snap()
-        for i in range(len(targets)):
-            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i}", "approve"),
-                             (403, {"error": "target is not editable"}), targets[i])
-        self.assertEqual(self.statuses(), ["pending"] * len(targets))
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001")["skipped"],
+                         [{"id": f"p{i}", "target": str(t), "reason": "settings or hooks file"} for i, t in enumerate(targets)])
+        self.assertEqual(self.statuses(), ["skipped"] * len(targets))
         self.assertEqual(snap(), before)
         self.assertEqual(self.backups(), [])
         self.assertEqual(self.board.backlog_items(self.scrum), [])
@@ -3783,8 +3778,8 @@ class DigestTest(unittest.TestCase):
             self.assertEqual((props[1]["old"], props[1]["new"]), ("keep A", "kept A"), query)
         self.assertEqual(self.get("/api/p/nope/digests?brief=1")[0], 404)
 
-    def test_approve_refuses_non_editable_and_stale(self):
-        agent = self.home / ".claude.json"  # an editable JSON item (MCP servers): digest approve still refuses it
+    def test_digest_auto_skips_non_editable_and_stale(self):
+        agent = self.home / ".claude.json"  # an editable JSON item (MCP servers): the digest still refuses it
         agent.write_text(json.dumps({"mcpServers": {"x": {"command": "old line"}}}))
         outside = Path(self.tmp.name) / "outside.md"
         outside.write_text("old line\n")
@@ -3795,54 +3790,27 @@ class DigestTest(unittest.TestCase):
         self.digest([self.prop("p1", agent), self.prop("p2", outside), self.prop("p3", settings),
                      self.prop("p4", self.user / "rules" / ".." / "rules" / "x.md", old="nope"),
                      self.prop("p5", twice), self.prop("p6", absent), self.prop("p7", self.user / "rules" / "gone.md")])
-        snap = lambda: {p: p.read_bytes() for p in [*self.home.rglob("*"), outside] if p.is_file() and "digests" not in p.parts}
+        snap = lambda: {p: p.read_bytes() for p in [*self.home.rglob("*"), outside] if p.is_file() and "scrum" not in p.parts}
         before = snap()
-        for pid in ("p1", "p2", "p3", "p7"):
-            self.assertEqual(self.decide(pid, "approve"), (403, None), pid)
-        for pid in ("p4", "p5", "p6"):
-            self.assertEqual(self.decide(pid, "approve"), (409, None), pid)
-        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p1", "approve"), (403, {"error": "target is not editable"}))
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([(e["id"], e["reason"]) for e in out["skipped"]], [
+            ("p1", "target is not editable"), ("p2", "target is not editable"), ("p3", "settings or hooks file"),
+            ("p4", "old text found 0 times"), ("p5", "old text found 2 times"), ("p6", "old text found 0 times"),
+            ("p7", "target is not editable")])
         settings_it = next(i for i in AiSettingsTest.scope(self, "global")[0]["settings"]["items"] if i["path"] == str(settings))
         self.assertTrue(settings_it["editable"])  # editable in AI-Settings, yet never a digest target
-        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p3", "approve"), (403, {"error": "target is not editable"}))
-        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p5", "approve"), (409, {"error": "proposal no longer applies"}))
         self.assertEqual(snap(), before)
         self.assertEqual(self.backups(), [])
-        self.assertEqual(self.statuses(), ["pending"] * 7)
+        self.assertEqual(self.statuses(), ["skipped"] * 7)
 
-    def test_reject_and_double_decide(self):
-        rule = self.rule()
-        self.digest([self.prop("p1", rule), self.prop("p2", rule)])
-        snap = lambda: {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and p.name != "proposals.json"}
-        before = snap()
-        self.assertEqual(self.decide("p1", "reject"), (200, {**self.prop("p1", rule), "status": "rejected", "kind": "edit"}))
-        self.assertEqual(snap(), before)
-        self.assertEqual(self.statuses(), ["rejected", "pending"])
-        self.assertEqual(self.decide("p1", "reject")[0], 409)
-        self.assertEqual(self.decide("p1", "approve")[0], 409)
-        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
-        self.assertEqual(self.decide("p9", "reject")[0], 404)
-        self.assertEqual(self.decide("p2", "reject", digest_id="009")[0], 404)
-        self.assertEqual(self.decide("p2", "maybe")[0], 400)
-        self.assertEqual(self.post("/api/p/reg/digests/../p2", {"decision": "reject"})[0], 404)
-        self.assertEqual(self.statuses(), ["rejected", "pending"])
-
-    def test_approve_repo_target_adds_backlog_item_and_leaves_file(self):
-        claude_md = self.reg / "CLAUDE.md"
-        claude_md.write_text("old line\n")
-        (self.reg / "agents").mkdir()
-        agent = self.reg / "agents" / "scrum-x.md"
-        agent.write_text("old line\n")
-        (self.user / "agents").mkdir()
-        (self.user / "agents" / "scrum-x.md").symlink_to(agent)  # how install.sh links agents into ~/.claude
-        self.digest([self.prop("p1", claude_md), self.prop("p2", self.user / "agents" / "scrum-x.md")])
-        self.assertEqual(self.decide("p1", "approve"), (200, {**self.prop("p1", claude_md), "status": "queued", "kind": "edit"}))
-        self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
-        self.assertEqual((claude_md.read_text(), agent.read_text()), ("old line\n", "old line\n"))
-        self.assertEqual(self.backups(), [])
-        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
-        self.assertEqual(items, ["Apply digest 001 p1 to CLAUDE.md: Seen in 001-a and 002-b (p1).",
-                                 "Apply digest 001 p2 to agents/scrum-x.md: Seen in 001-a and 002-b (p2)."])
+    def test_revert_route_unknown_proposal_is_404(self):
+        rule = self.rule("keep A\nnew line\nkeep B\n")
+        self.digest([self.prop("p1", rule, status="applied")])
+        self.assertEqual(self.revert("p9")[0], 404)
+        self.assertEqual(self.revert("p1", digest_id="009")[0], 404)
+        self.assertEqual(self.post("/api/p/reg/digests/../p1", {"decision": "revert"})[0], 404)
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["applied"])
 
     def test_queued_proposal_backlog_item_is_self_contained(self):
         target = self.reg / "docs" / "guide.md"
@@ -3850,11 +3818,10 @@ class DigestTest(unittest.TestCase):
         target.write_text("intro\n```\nold block\n```\n")
         old, new = "```\nold block\n```\n", "````md\n```\nnew block\n```\n````\n"
         why = "Two jobs\n  hit   this."
-        d = self.digest([self.prop("p1", target, old=old, new=new, why=why), self.prop("p2", target), self.prop("p3", target)])
+        d = self.digest([self.prop("p1", target, old=old, new=new, why=why), self.prop("p2", target, status="rejected")])
         specs = self.scrum / "backlog-specs"
-        self.assertEqual(self.decide("p2", "reject")[1]["status"], "rejected")
-        self.assertFalse(specs.exists())
-        self.assertEqual(self.decide("p1", "approve")[1]["status"], "queued")
+        self.assertEqual([e["id"] for e in self.serve.digest_auto(self.scrum, "001")["queued"]], ["p1"])
+        self.assertEqual(self.statuses(), ["queued", "rejected"])
         items = [i["text"] for i in self.board.backlog_items(self.scrum)]
         self.assertEqual(items, ["Apply digest 001 p1 to docs/guide.md: Two jobs hit this."])
         for bad in ("proposals.json", str(self.scrum), str(d), str(self.home), "/Users/", "/tmp"):
@@ -3882,21 +3849,21 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(moved, spec)
         self.assertIn(old, moved)
         self.assertIn(new, moved)
-        self.assertEqual(self.decide("p1", "approve")[0], 409)  # already queued: no second item, no new spec
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001")["queued"], [])  # already queued: no second item, no new spec
         self.assertFalse(specs.exists() and any(specs.iterdir()))
 
-    def test_last_decision_trims(self):
+    def test_last_pending_settled_trims(self):
         job_id = self.done_job()
         for rel in ("feature.md", "spec.md", "decision.md", "build.md", "round-1/check.md"):
             (self.scrum / "jobs" / job_id / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.scrum / "jobs" / job_id / rel).write_text(rel)
         self.board.cmd_sync(self.scrum, job_id)
         rule = self.rule()
-        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="keep B", new="kept B"), {"id": "bad"}], jobs=[job_id])
-        self.assertEqual(self.decide("p1", "reject")[0], 200)
+        self.digest([self.prop("p1", rule, status="rejected"), self.prop("p2", rule, old="keep B", new="kept B"), {"id": "bad"}],
+                    jobs=[job_id])
         self.assertEqual(len(list((self.scrum / "jobs" / job_id).rglob("*"))), 6)
         self.assertFalse(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
-        self.assertEqual(self.decide("p2", "approve")[0], 200)
+        self.assertEqual([e["id"] for e in self.serve.digest_auto(self.scrum, "001")["applied"]], ["p2"])
         self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["decision.md", "feature.md", "spec.md"])
         job = next(j for j in json.loads((self.scrum / "board.json").read_text())["jobs"] if j["id"] == job_id)
         self.assertEqual(job["files"], ["decision.md", "feature.md", "spec.md"])
@@ -4170,6 +4137,9 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(self.statuses(), ["applied", "queued"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([p.get("reason") for p in data], [None, "contract tests failed"])
+        self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"][1]["reason"], "contract tests failed")
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
                          ["Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
 
@@ -4321,9 +4291,11 @@ class DigestTest(unittest.TestCase):
         props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
         self.assertEqual([(p["id"], p["kind"]) for p in props], [("p1", "skill"), ("p6", "edit"), ("p7", "skill")])
 
-    def test_digest_decide_route_rejects_bad_body_and_hides_write_errors(self):
-        rule = self.rule()
-        self.digest([self.prop("p1", rule), self.prop("p2", rule, old="kept B", new="keep B", status="applied")])
+    def test_digest_route_accepts_only_revert(self):
+        rule = self.rule("keep A\nold line\nkept B\n")
+        self.digest([self.prop("p1", rule, old="keep A", new="kept A"), self.prop("p2", rule, old="keep B", new="kept B", status="applied")])
+        proposals = self.scrum / "digests" / "001" / "proposals.json"
+        before = proposals.read_bytes()
 
         def raw(data, pid="p1"):
             r = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}/api/p/reg/digests/001/{pid}", method="POST",
@@ -4335,21 +4307,24 @@ class DigestTest(unittest.TestCase):
                 with e:
                     return e.code, json.loads(e.read())
         self.assertEqual(raw(b"{not json"), (400, {"error": "body must be JSON"}))
-        self.assertEqual(raw(json.dumps({"decision": 5}).encode()), (400, {"error": "decision must be approve, reject or revert"}))
-        self.assertEqual(raw(json.dumps({"decision": "undo"}).encode()), (400, {"error": "decision must be approve, reject or revert"}))
+        for body in ({"decision": "approve"}, {"decision": "reject"}, {"decision": 5}, {"decision": "undo"}, {}):
+            for pid in ("p1", "p2"):
+                self.assertEqual(raw(json.dumps(body).encode(), pid), (400, {"error": "decision must be revert"}), (body, pid))
+        self.assertEqual(proposals.read_bytes(), before)
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkept B\n")
+        self.assertEqual(self.backups(), [])
+        self.assertFalse(hasattr(self.serve, "digest_decide"))
         with mock.patch.object(self.serve.Path, "write_bytes", side_effect=OSError("disk full at /secret")), \
                 mock.patch("sys.stderr"):
-            self.assertEqual(raw(json.dumps({"decision": "approve"}).encode()), (500, {"error": "couldn't write the file"}))
             self.assertEqual(raw(b'{"decision": "revert"}', "p2"), (500, {"error": "couldn't write the file"}))
-        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkept B\n")
         self.assertEqual(self.statuses(), ["pending", "applied"])
         self.assertEqual(raw(b'{"decision": "revert"}', "p2"), (200, {
-            "id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "old": "kept B", "new": "keep B",
+            "id": "p2", "target": str(rule), "why": "Seen in 001-a and 002-b (p2).", "old": "keep B", "new": "kept B",
             "status": "reverted", "kind": "edit"}))
-        self.assertEqual(rule.read_text(), "keep A\nold line\nkept B\n")
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
         self.assertEqual(raw(b'{"decision": "revert"}', "p2"), (409, {"error": "proposal is reverted, not applied"}))
-        self.assertEqual(self.decide("p1", "reject")[0], 200)
-        self.assertEqual(self.statuses(), ["rejected", "reverted"])
+        self.assertEqual(self.statuses(), ["pending", "reverted"])
 
     def test_digest_auto_queues_skill(self):
         target = self.reg / "skills" / "k" / "SKILL.md"
@@ -4364,17 +4339,20 @@ class DigestTest(unittest.TestCase):
                         {"id": "p3", "target": str(self.reg / "docs" / "SKILL.md"), "reason": "target is not editable"},
                         {"id": "p4", "target": str(hooks), "reason": "target is not editable"}]})
         self.assertEqual(self.statuses(), ["queued", "skipped", "skipped", "skipped"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual(data[0]["reason"], "new skill")
+        self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"][0]["reason"], "new skill")
         items = [i["text"] for i in self.board.backlog_items(self.scrum)]
         self.assertEqual(items, ["Create digest 001 p1 skill at skills/k/SKILL.md: Seen in 001-a and 002-b (p1)."])
         self.assertTrue(self.board.spec_path(self.scrum, items[0]).read_text().startswith("# Create digest 001 p1 skill at skills/k/SKILL.md\n"))
         self.assertFalse(target.exists())
         self.assertEqual(self.serve.digest_skill_check(self.scrum, "001", "p1"), {"ok": True, "target": "skills/k/SKILL.md"})
 
-    def test_approve_skill_queues_backlog_and_writes_nothing(self):
+    def test_digest_auto_skill_queues_backlog_and_writes_nothing(self):
         target, dot = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "my-skill-2" / "SKILL.md"
         d = self.digest([self.skill("p1", target), self.skill("p2", dot)])
-        self.assertEqual(self.decide("p1", "approve")[:2], (200, {**self.skill("p1", target), "status": "queued"}))
-        self.assertEqual(self.decide("p2", "approve")[1]["status"], "queued")
+        self.assertEqual([(e["id"], e["reason"]) for e in self.serve.digest_auto(self.scrum, "001")["queued"]],
+                         [("p1", "new skill"), ("p2", "new skill")])
         self.assertEqual(self.statuses(), ["queued", "queued"])
         items = [i["text"] for i in self.board.backlog_items(self.scrum)]
         self.assertEqual(items, ["Create digest 001 p1 skill at skills/k/SKILL.md: Seen in 001-a and 002-b (p1).",
@@ -4408,10 +4386,9 @@ class DigestTest(unittest.TestCase):
             return r.returncode, json.loads(r.stdout)
         target, hooks = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "h" / "SKILL.md"
         other = self.reg / "skills" / "o" / "SKILL.md"
-        self.digest([self.skill("p1", target), self.skill("p2", other), self.skill("p3", hooks), self.skill("p4", target),
+        self.digest([self.skill("p1", target, status="queued"), self.skill("p2", other, status="queued"),
+                     self.skill("p3", hooks, status="queued"), self.skill("p4", target),
                      self.prop("p5", self.repo_file("agents/scrum-x.md"), status="queued"), self.skill("p6", target, status="rejected")])
-        for pid in ("p1", "p2", "p3"):
-            self.assertEqual(self.decide(pid, "approve")[1]["status"], "queued")
         self.assertEqual(check("001", "p1"), (0, {"ok": True, "target": "skills/k/SKILL.md"}))
         self.assertEqual(check("001", "p3"), (0, {"ok": True, "target": ".claude/skills/h/SKILL.md"}))
         target.parent.mkdir(parents=True)
@@ -4440,20 +4417,18 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((self.scrum / "digests" / "001" / "proposals.json").read_text(), before)
         self.assertFalse(target.exists())
 
-    def test_approve_skill_refuses_bad_targets(self):
+    def test_digest_auto_skill_skips_bad_targets(self):
         existing = self.repo_file("skills/e/SKILL.md")
         bad = [self.user / "skills" / "x" / "SKILL.md", self.reg / "docs" / "x" / "SKILL.md",
                self.reg / "skills" / "x" / "y" / "SKILL.md", self.reg / "skills" / "Bad_Name" / "SKILL.md",
                self.reg / "skills" / "hooks" / "SKILL.md", self.reg / "skills" / "x" / "README.md", "skills/x/SKILL.md"]
         self.digest([self.skill("p0", existing)] + [self.skill(f"p{i + 1}", t) for i, t in enumerate(bad)])
-        snap = lambda: sorted(p for p in [*self.home.rglob("*"), *self.reg.rglob("*")] if "digests" not in p.parts)
+        snap = lambda: sorted(p for p in [*self.home.rglob("*"), *self.reg.rglob("*")] if "scrum" not in p.parts)
         before = snap()
-        self.assertEqual(self.serve.digest_decide(self.scrum, "001", "p0", "approve"), (409, {"error": "skill already exists"}))
-        self.assertFalse((self.scrum / "backlog-specs").exists())
-        for i in range(len(bad)):
-            self.assertEqual(self.serve.digest_decide(self.scrum, "001", f"p{i + 1}", "approve"),
-                             (403, {"error": "target is not editable"}), bad[i])
-        self.assertEqual(self.statuses(), ["pending"] * (len(bad) + 1))
+        self.assertEqual(self.serve.digest_auto(self.scrum, "001")["skipped"],
+                         [{"id": "p0", "target": str(existing), "reason": "skill already exists"}]
+                         + [{"id": f"p{i + 1}", "target": str(t), "reason": "target is not editable"} for i, t in enumerate(bad)])
+        self.assertEqual(self.statuses(), ["skipped"] * (len(bad) + 1))
         self.assertEqual(self.board.backlog_items(self.scrum), [])
         self.assertFalse((self.scrum / "backlog-specs").exists())
         self.assertEqual(existing.read_text(), "old line\n")

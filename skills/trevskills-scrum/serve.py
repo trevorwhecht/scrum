@@ -2404,41 +2404,6 @@ def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str
         board.cmd_digest_trim(root, digest_id)
 
 
-def digest_decide(root, digest_id, pid, decision):
-    """Approve or reject one pending proposal. The last decision in a digest trims its job folders."""
-    if decision not in ("approve", "reject"):
-        return 400, {"error": "decision must be approve, reject or revert"}
-    path = root / "digests" / digest_id / "proposals.json"
-    with DIGEST_LOCK:
-        entry = next((p for p in read_proposals(path)[1] if (v := valid_proposal(p)) and v["id"] == pid), None)
-        if entry is None:
-            return 404, {"error": "no such proposal"}
-        prop = valid_proposal(entry)
-        if prop["status"] != "pending":
-            return 409, {"error": f"proposal is already {prop['status']}"}
-        if decision == "reject":
-            status = "rejected"
-        elif prop["kind"] == "skill":
-            if why := digest_queue_skill(root, digest_id, prop):
-                return (403 if why == "target is not editable" else 409), {"error": why}
-            status = "queued"
-        elif digest_denied(prop["target"]):
-            return 403, {"error": "target is not editable"}
-        elif repo_of(prop["target"]):
-            digest_queue_repo_edit(digest_id, prop)
-            status = "queued"
-        else:
-            if (why := digest_write_global(prop)) == "target is not editable":
-                return 403, {"error": why}
-            if why and why.startswith("write failed"):
-                return server_error("couldn't write the file", why)
-            if why:
-                return 409, {"error": "proposal no longer applies"}
-            status = "applied"
-        digest_set_statuses(root, digest_id, {pid: (status, None)})
-    return 200, prop | {"status": status}
-
-
 def digest_skill_check(root, digest_id, pid):
     """Re-check a queued skill proposal before its backlog item creates the file: {"ok": True, "target": rel} only while
     it is still a queued, valid skill proposal whose target is creatable and absent; else {"ok": False, "error": why}.
@@ -2615,7 +2580,7 @@ def digest_auto(root, digest_id):
 
     def queue(p, why):
         out["queued"].append({"id": p["id"], "target": p["target"], "why": p["why"], "reason": why})
-        updates[p["id"]] = ("queued", None)
+        updates[p["id"]] = ("queued", why)
 
     pending = [v for x in read_proposals(root / "digests" / digest_id / "proposals.json")[1]
                if (v := valid_proposal(x)) and v["status"] == "pending"]
@@ -2865,9 +2830,9 @@ class Handler(BaseHTTPRequestHandler):
             return digest_now(project, root)
         if rest.startswith("/digests/"):
             _, _, digest_id, pid = rest.split("/", 3)
-            if body.get("decision") == "revert":
-                return digest_revert(root, digest_id, unquote(pid))
-            return digest_decide(root, digest_id, unquote(pid), body.get("decision"))
+            if body.get("decision") != "revert":
+                return 400, {"error": "decision must be revert"}
+            return digest_revert(root, digest_id, unquote(pid))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
         if action == "abort" and not isinstance(body.get("cascade", False), bool):
             raise SystemExit("cascade must be true or false")
