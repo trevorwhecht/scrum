@@ -5205,6 +5205,69 @@ class LilguyFitTest(unittest.TestCase):
             board.cmd_lilguy_fit(self.root, "999-nope")
 
 
+class RunAllLilguyTest(unittest.TestCase):
+    """A Run all child crosses lilguy-fit routing, then the lilguy-with-worktree done guard (needs a merged PR)."""
+
+    PR = "https://github.com/o/r/pull/7"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(Path(self.tmp.name) / "no-usage.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] [1] Tweak the dashboard label text\n- [ ] [3] Reword the board legend\n")
+        out = board.cmd_runall_start(self.root)
+        self.parent, (self.one, self.three) = out["id"], out["children"]
+
+    def job(self, job_id):
+        return board.find(board.read_board(self.root), job_id)
+
+    def gh(self, state):
+        return mock.patch.object(board.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess(["gh"], 0, state + "\n", ""))
+
+    def worktree_child(self):
+        board.cmd_set(self.root, self.one, ["lane=lilguy", "worktree=/tmp/wt-one"])
+        return self.job(self.one)
+
+    def test_runall_child_points_1_fits_lilguy(self):
+        self.assertEqual(board.cmd_lilguy_fit(self.root, self.one), {"fit": True, "why": "backlog item is 1 point"})
+        self.assertIs(board.cmd_lilguy_fit(self.root, self.three)["fit"], False)
+        for kid in (self.one, self.three):
+            self.assertEqual(self.job(kid)["parent"], self.parent)
+            self.assertNotIn("lane", self.job(kid))
+
+    def test_runall_child_hard_stop_word_not_lilguy(self):
+        (self.root / "jobs" / self.one / "feature.md").write_text("Fix the login button\n")
+        got = board.cmd_lilguy_fit(self.root, self.one)
+        self.assertIs(got["fit"], False)
+        self.assertIn("login", got["why"])
+
+    def test_runall_lilguy_worktree_child_needs_pr_for_done(self):
+        job = self.worktree_child()
+        self.assertIs(board.lilguy_in_checkout(job), False)
+        self.assertEqual(board.merge_refusal(job), "not done: no PR recorded")
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, self.one, ["stage=done"])
+        self.assertEqual(self.job(self.one)["stage"], "waiting")
+
+    def test_runall_lilguy_worktree_child_done_after_merged_pr(self):
+        self.worktree_child()
+        board.cmd_set(self.root, self.one, [f"pr={self.PR}"])
+        with self.gh("OPEN"), self.assertRaises(SystemExit):
+            board.cmd_set(self.root, self.one, ["stage=done"])
+        self.assertEqual(self.job(self.one)["stage"], "waiting")
+        with self.gh("MERGED"):
+            board.cmd_set(self.root, self.one, ["stage=done"])
+        job = self.job(self.one)
+        self.assertEqual((job["stage"], job["lane"], job["worktree"], job["pr"]),
+                         ("done", "lilguy", "/tmp/wt-one", self.PR))
+
+
 class PipelineFitTest(unittest.TestCase):
     """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
 
