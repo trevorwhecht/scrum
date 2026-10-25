@@ -224,5 +224,15 @@ class ReadyPacingTest(unittest.TestCase):
     def test_ready_held_kids_yield_still_respects_zero_cap(self):
         self.assertFalse(self.claimed("AC", 99))  # allowance 0: nothing is claimed
 
+    def test_ready_only_held_kids_left_keeps_parent_running(self):
+        parent, b = self.held_board("AC", 96)  # allowance 1 < 2 held, and no waiting sibling to claim
+        path = self.root / "board.json"
+        data = json.loads(path.read_text())
+        next(j for j in data["jobs"] if j["id"] == b)["stage"] = "done"
+        path.write_text(json.dumps(data))
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([], 2))
+        self.assertEqual(self.jobs()[parent]["stage"], "running")
+
 if __name__ == "__main__":
     unittest.main()
