@@ -236,7 +236,26 @@ def resume_refusal(project, root, job, manual=False):
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
-    return f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish." if blocker else None
+    if not blocker:
+        return None
+    refusal = Refusal(f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish.")
+    refusal.blocker = blocker
+    return refusal
+
+
+class Refusal(str):
+    """resume_refusal's text; .blocker is the board.Blocker it came from (None for a lilguy or machine refusal)."""
+    blocker = None
+
+
+def waiting_on(blocker):
+    """{"ids", "why"} for the dashboard's "Waiting on <ids> (<why>)" line, or None. why is the Blocker's distinct
+    reasons with every path cut to its basename: "shares SKILL.md", "runs alone"."""
+    if not blocker:
+        return None
+    parts = ["runs alone"] if blocker == "this job runs alone" else \
+        [re.sub(r"\S*/", "", re.sub(r"^sibling \S+ ", "", p)) for p in blocker.split("; ")]
+    return {"ids": list(blocker.ids), "why": ", ".join(dict.fromkeys(parts))}
 
 
 def approve_job(project, root, job_id, migrated=False):
@@ -253,16 +272,20 @@ def rework_job(project, root, job_id, feedback):
     spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
 
 
-def abort_job(project, root, job_id, requeue):
-    """The Abort job button, and an `abort` answer: stop its run, then mark it aborted."""
+def abort_job(project, root, job_id, requeue, cascade=False):
+    """The Abort job button, and an `abort` answer: stop its run, then mark it aborted. With cascade, its waiting
+    dependents are aborted too (board.cmd_abort) and each one's run is stopped."""
     stop(project, job_id)
-    board.cmd_abort(root, job_id, requeue)
-    return 200, {"id": job_id, "stage": "aborted"}
+    ids = board.cmd_abort(root, job_id, requeue, cascade=True) if cascade else board.cmd_abort(root, job_id, requeue)
+    for i in ids[1:]:
+        stop(project, i)
+    return 200, {"id": job_id, "stage": "aborted", "aborted": ids}
 
 
 def option_command(command):
     """(verb, arg) for a closed-question option's command (board.py ask), or None when it is none of
-    approve/rework/abort/resume/shell:. arg is the rework text, the abort requeue flag or the shell command."""
+    approve/rework/abort/resume/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
+    command."""
     if not isinstance(command, str):
         return None
     if command.startswith("shell:"):  # passed on to the resumed session as text; never run here
@@ -276,14 +299,15 @@ def option_command(command):
         return words[0], None
     if len(words) == 3 and words[0] == "rework" and board.clean(words[2]):
         return "rework", words[2]
-    if len(words) in (2, 3) and words[0] == "abort" and words[2:] in ([], ["--requeue"]):
-        return "abort", words[2:] == ["--requeue"]
+    if len(words) in (2, 3) and words[0] == "abort" and words[2:] in ([], ["--requeue"], ["--cascade"]):
+        return "abort", words[2][2:] if words[2:] else None
     return None
 
 
-def answer_job(project, root, job, jobs, key):
+def answer_job(project, root, job, jobs, key, note=None):
     """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
-    records the pick; the command it returns runs through the same helpers as the matching button, on this job."""
+    records the pick; the command it returns runs through the same helpers as the matching button, on this job.
+    A non-blank note replaces a rework option's preset text; other options ignore it."""
     opts = job.get("options") if job else None
     opt = next((o for o in opts or [] if isinstance(o, dict) and isinstance(key, str) and o.get("key") == key), None)
     if not job or job["stage"] != "needs-human" or running(project, job["id"]) or not opt:
@@ -299,11 +323,11 @@ def answer_job(project, root, job, jobs, key):
         return 409, {"error": f"unknown option command: {picked.get('command')}"}
     verb, arg = parsed
     if verb == "abort":
-        return abort_job(project, root, job_id, arg)
+        return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
     if verb == "approve":
         approve_job(project, root, job_id)
     elif verb == "rework":
-        rework_job(project, root, job_id, arg)
+        rework_job(project, root, job_id, note if board.clean(note or "") else arg)
     elif verb == "resume":
         resume_job(project, root, job, jobs, manual=True)
     else:
@@ -1606,14 +1630,20 @@ def activity(root, job):
     return {"text": text, "at": at}
 
 
-def board_with_activity(root):
+def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
-    (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it)."""
+    (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
+    Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`."""
     data = json.loads((root / "board.json").read_text())
     for job in data.get("jobs", []):
         job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
             job["activity"] = activity(root, job)
+        if resumable(job) and not running(project, job.get("id")):
+            # ponytail: machine_ok runs per resumable job each poll; compute it once per board if many sit paused
+            refusal = resume_refusal(project, root, job, manual=True)  # manual: as the dashboard's click sends it
+            job["resumeRefusal"] = str(refusal) if refusal else None
+            job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
     return data
 
 
@@ -2675,7 +2705,7 @@ class Handler(BaseHTTPRequestHandler):
                 if target == os.path.realpath(root / "board.json"):
                     record_outcomes(project, root)
                     try:
-                        return self.send_json(200, board_with_activity(root))
+                        return self.send_json(200, board_with_activity(root, project))
                     except ValueError:
                         pass  # mid-write or hand-broken: serve the raw bytes as before
                 return self.send(200, Path(target).read_bytes(), TYPES[Path(target).suffix])
@@ -2768,8 +2798,12 @@ class Handler(BaseHTTPRequestHandler):
             _, _, digest_id, pid = rest.split("/", 3)
             return digest_decide(root, digest_id, unquote(pid), body.get("decision"))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
+        if action == "abort" and not isinstance(body.get("cascade", False), bool):
+            raise SystemExit("cascade must be true or false")
+        if action == "answer" and body.get("note") is not None and not isinstance(body["note"], str):
+            raise SystemExit("note must be a string")
         if action == "abort":
-            return abort_job(project, root, job_id, bool(body.get("requeue")))
+            return abort_job(project, root, job_id, bool(body.get("requeue")), cascade=body.get("cascade") is True)
         if action == "pause":  # record first, so a session that outlives the kill is refused on its next write
             ids = board.cmd_pause(root, job_id)
             for i in ids:
@@ -2784,7 +2818,7 @@ class Handler(BaseHTTPRequestHandler):
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
         if action == "answer":
-            return answer_job(project, root, job, jobs, body.get("key"))
+            return answer_job(project, root, job, jobs, body.get("key"), body.get("note"))
         if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
             if not job or running(project, job_id) or not resumable(job):
                 return 409, {"error": "job isn't stalled, or is already running"}

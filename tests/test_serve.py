@@ -862,9 +862,9 @@ class ServeTest(unittest.TestCase):
                                        return_value={"key": "a", "label": "Drop", "command": command}) as ans, \
                         mock.patch.object(self.serve, "spawn") as spawn, \
                         mock.patch.object(self.serve, "stop", side_effect=lambda *a: order("stop", *a)), \
-                        mock.patch.object(b, "cmd_abort", side_effect=lambda *a: order("abort", *a)):
+                        mock.patch.object(b, "cmd_abort", side_effect=lambda *a: (order("abort", *a), [job_id])[1]):
                     code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a"})
-                self.assertEqual((code, out), (200, {"id": job_id, "stage": "aborted"}))
+                self.assertEqual((code, out), (200, {"id": job_id, "stage": "aborted", "aborted": [job_id]}))
                 ans.assert_called_once_with(self.root.resolve(), job_id, "a")
                 self.assertEqual(order.call_args_list, [mock.call("stop", "repo", job_id),
                                                         mock.call("abort", self.root.resolve(), job_id, requeue)])
@@ -1240,6 +1240,169 @@ class ServeTest(unittest.TestCase):
                 code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "X", "command": command})
                 self.assertEqual((code, out), (409, {"error": f"unknown option command: {command}"}))
                 self.assert_nothing_ran(m)
+
+    # --- board.json resumeRefusal / waitingOn, the job file route, cascade abort, rework note ---
+    def board_jobs(self):
+        code, data = self.req("GET", "/p/repo/board.json")
+        self.assertEqual(code, 200)
+        return {j["id"]: j for j in data["jobs"]}
+
+    def test_board_json_refusal_only_for_resumable_jobs(self):
+        b = self.serve.board
+        paused, stalled, plain, busy = (b.cmd_new(self.root, t) for t in ("Paused one", "Stalled one", "Plain one", "Busy one"))
+        self.edit_job(paused, stage="build", paused=True)
+        self.edit_job(stalled, stage="needs-human", reason="stalled in build: no board update for 30 min. Fix: click Resume.")
+        self.edit_job(plain, stage="needs-human", reason="blocked: pick one. Fix: click an option.")
+        self.edit_job(busy, stage="build", paused=True)
+        seen = []
+        real_running = self.serve.running
+        with mock.patch.object(self.serve, "resume_refusal", side_effect=lambda p, r, j, manual=False: seen.append(j["id"]) or "nope"), \
+                mock.patch.object(self.serve, "running", side_effect=lambda p, i: i == busy or real_running(p, i)):
+            jobs = self.board_jobs()
+        self.assertEqual(sorted(i for i in seen if i in (paused, stalled, plain, busy)), sorted([paused, stalled]))
+        for i in (paused, stalled):
+            self.assertEqual(jobs[i]["resumeRefusal"], "nope")
+            self.assertIsNone(jobs[i]["waitingOn"])
+        for i in (plain, busy):
+            self.assertNotIn("resumeRefusal", jobs[i])
+            self.assertNotIn("waitingOn", jobs[i])
+
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
+    def test_board_json_waiting_on_sibling(self):
+        b = self.serve.board
+        parent, kid, sib = (b.cmd_new(self.root, t) for t in ("Wait parent", "Paused kid", "Busy sibling"))
+        self.edit_job(parent, lane="runall", stage="running", children=[kid, sib])
+        self.edit_job(kid, parent=parent, parallel=True, stage="build", paused=True)
+        self.edit_job(sib, parent=parent, parallel=True, stage="build")
+        for k, extra in ((kid, "src/kid.py"), (sib, "src/sib.py")):
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `skills/x/SKILL.md`: why\n- `{extra}`: why\n")
+        job = self.board_jobs()[kid]
+        self.assertEqual(job["resumeRefusal"], f"can't resume yet: sibling {sib} shares skills/x/SKILL.md. "
+                                               f"Fix: click Resume when {sib} finish.")
+        self.assertEqual(job["waitingOn"], {"ids": [sib], "why": "shares SKILL.md"})
+        B = b.Blocker
+        self.assertEqual(self.serve.waiting_on(B("this job runs alone", ["1-a", "2-b"])), {"ids": ["1-a", "2-b"], "why": "runs alone"})
+        many = B("sibling 1-a shares a/b/SKILL.md; sibling 2-b runs alone; sibling 3-c shares c/SKILL.md; sibling 4-d shares serve.py",
+                 ["1-a", "2-b", "3-c", "4-d"])
+        self.assertEqual(self.serve.waiting_on(many), {"ids": ["1-a", "2-b", "3-c", "4-d"],
+                                                       "why": "shares SKILL.md, runs alone, shares serve.py"})
+        self.assertIsNone(self.serve.waiting_on(None))
+
+    def test_board_json_free_job_nulls(self):
+        b = self.serve.board
+        free, lil, kid = (b.cmd_new(self.root, t) for t in ("Free paused", "Lil paused", "Kid low RAM"))
+        self.edit_job(free, stage="build", paused=True)
+        self.edit_job(lil, lane="lilguy", stage="spec", paused=True)
+        self.edit_job(kid, parent="100-parent", stage="build", paused=True)
+        jobs = self.board_jobs()
+        self.assertEqual((jobs[free]["resumeRefusal"], jobs[free]["waitingOn"]), (None, None))
+        self.assertEqual((jobs[lil]["resumeRefusal"], jobs[lil]["waitingOn"]),
+                         ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "
+                          "checkout and run /trevskills-commitpush, or discard it, then click Abort.", None))
+        blocker = b.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(b, "resume_blocker", return_value=blocker):
+            jobs = self.board_jobs()
+        self.assertEqual((jobs[kid]["resumeRefusal"], jobs[kid]["waitingOn"]),
+                         ("waiting: free RAM 14% (< 20%). Fix: click Resume once memory or disk frees up.", None))
+
+    def get_bytes(self, path):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}") as res:
+                return res.status, res.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, None
+
+    def test_job_file_route_serves_spec_and_decision(self):
+        registry = Path(os.environ["SCRUM_REGISTRY"])
+        saved = registry.read_text()
+        self.addCleanup(registry.write_text, saved)
+        base = Path(self.tmp.name)
+        repos = {"repo": base / "repo", "other": base / "other", "a/shared": base / "a" / "shared", "b/shared": base / "b" / "shared"}
+        for name, repo in repos.items():
+            (repo / "scrum" / "jobs").mkdir(parents=True, exist_ok=True)
+            self.serve.board.cmd_register(repo)
+        job = "086-blank-cost-sync"
+        for name, repo in repos.items():
+            d = repo / "scrum" / "jobs" / job
+            d.mkdir()
+            self.addCleanup(shutil.rmtree, d)
+            (d / "spec.md").write_text(f"# spec of {name}\n")
+            (d / "decision.md").write_text(f"APPROVE {name}\n")
+        self.assertEqual(sorted(self.serve.board.projects()), ["a/shared", "b/shared", "other", "repo"])
+        for name in repos:
+            for f, want in (("spec.md", f"# spec of {name}\n"), ("decision.md", f"APPROVE {name}\n")):
+                url = f"/p/{urllib.parse.quote(name, safe='')}/jobs/{job}/{f}"
+                self.assertEqual(self.get_bytes(url), (200, want.encode()), url)
+        self.assertEqual(self.get_bytes(f"/p/a%2Fshared/jobs/{job}/nope.md")[0], 404)
+        for bad in ("/p/repo/../../calls.jsonl", "/p/repo/%2e%2e/%2e%2e/calls.jsonl", "/p/nope/board.json", "/../../etc/passwd"):
+            self.assertEqual(self.get_bytes(bad)[0], 404, bad)
+
+    def test_answer_cascade_aborts_and_stops_dependents(self):
+        self.assertEqual(self.serve.option_command("abort 012 --cascade"), ("abort", "cascade"))
+        self.assertEqual(self.serve.option_command("abort 012 --requeue"), ("abort", "requeue"))
+        self.assertEqual(self.serve.option_command("abort 012"), ("abort", None))
+        self.assertIsNone(self.serve.option_command("abort 012 --cascade --requeue"))
+        job_id = self.asked("approve 1", "rework 1 \"redo\"", "abort 1 --cascade")
+        dep = self.serve.board.cmd_new(self.root, "Depends on asked")
+        self.edit_job(dep, stage="waiting", depends_on=[job_id])
+        stopped = []
+        with mock.patch.object(self.serve, "stop", side_effect=lambda p, i: stopped.append((p, i))), \
+                mock.patch.object(self.serve.board, "cmd_abort", wraps=self.serve.board.cmd_abort) as abort, \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "c"})
+        self.assertEqual((code, out), (200, {"id": job_id, "stage": "aborted", "aborted": [job_id, dep]}))
+        self.assertEqual(abort.call_args_list, [mock.call(self.root.resolve(), job_id, False, cascade=True)])
+        self.assertEqual(stopped, [("repo", job_id), ("repo", dep)])
+        self.assertEqual((self.stage_of(job_id)["stage"], self.stage_of(dep)["stage"]), ("aborted", "aborted"))
+        spawn.assert_not_called()
+
+    def test_abort_post_cascade(self):
+        b = self.serve.board
+        root_job, dep, plain, plain_dep = (b.cmd_new(self.root, t) for t in ("Cascade root", "Cascade dep", "Plain abort", "Plain dep"))
+        self.edit_job(root_job, stage="needs-human", reason="blocked: x")
+        self.edit_job(dep, stage="waiting", depends_on=[root_job])
+        self.edit_job(plain, stage="needs-human", reason="blocked: x")
+        self.edit_job(plain_dep, stage="waiting", depends_on=[plain])
+        for bad in ({"cascade": "yes"}, {"cascade": 1}):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{root_job}/abort", bad),
+                             (400, {"error": "cascade must be true or false"}), bad)
+        self.assertEqual(self.stage_of(root_job)["stage"], "needs-human")
+        stopped = []
+        with mock.patch.object(self.serve, "stop", side_effect=lambda p, i: stopped.append(i)):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{root_job}/abort", {"cascade": True}),
+                             (200, {"id": root_job, "stage": "aborted", "aborted": [root_job, dep]}))
+            self.assertEqual(stopped, [root_job, dep])
+            stopped.clear()
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{plain}/abort", {}),
+                             (200, {"id": plain, "stage": "aborted", "aborted": [plain]}))
+            self.assertEqual(stopped, [plain])
+        self.assertEqual([self.stage_of(i)["stage"] for i in (root_job, dep, plain, plain_dep)],
+                         ["aborted", "aborted", "aborted", "waiting"])
+
+    def test_answer_rework_note_overrides_preset(self):
+        cases = (("  use the old name  ", "use the old name"), (None, "preset"), ("", "preset"), ("  \n ", "preset"))
+        for note, want in cases:
+            with self.subTest(note=note):
+                job_id = self.asked('rework 1 "preset"')
+                body = {"key": "a"} if note is None else {"key": "a", "note": note}
+                with mock.patch.object(self.serve, "spawn") as spawn:
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", body),
+                                     (202, {"id": job_id, "action": "answer", "command": "rework"}))
+                self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                                 [(job_id, "rework", f'/trevskills-scrum rework {job_id} "{want}"')])
+        job_id = self.asked("approve 1")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a", "note": "ignored"})[0], 202)
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(job_id, "approve", f"/trevskills-scrum approve {job_id}")])
+        job_id = self.asked('rework 1 "preset"')
+        log = self.root / "questions.log"
+        before = log.read_text() if log.exists() else ""
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a", "note": 5}),
+                             (400, {"error": "note must be a string"}))
+        spawn.assert_not_called()
+        self.assertEqual(log.read_text() if log.exists() else "", before)  # no pick recorded
 
     # --- pause / play ---
     def test_pause_endpoint_kills_fake_run_and_marks_paused(self):
