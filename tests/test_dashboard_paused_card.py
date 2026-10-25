@@ -19,7 +19,7 @@ class PausedCard(unittest.TestCase):
         self.assertNotRegex(rule.group(1), r"#[0-9a-fA-F]{3,6}|rgb", "no raw colour")
 
     def test_card_markup(self):
-        card = section("function card(job)", "function digestCard(")
+        card = section("function card(job)", "function render(")
         self.assertIn('${hold ? " paused" : ""}', card)
         self.assertIn('${hold ? \'<span class="badge">paused</span>\' : ""}', card)
         self.assertIn("!hold && !held", card)  # a paused card is never stale
