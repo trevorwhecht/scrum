@@ -56,6 +56,10 @@ Rules:
 - **Likely files** names every file the diff will change as a backticked repo-relative path, test files included: `B rules-check` rule 7 stops a rules job on any changed file missing there.
 - For a reworded line that `tests/test_contracts.py` pins, name the pinning test method (grep the phrase), never a line number.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
+- **Check for work already built.** When the request may already be built, check earlier jobs (`scrum/jobs/*/spec.md`, `build.md`) and the commits (`git log $BASE`) first, and take the `OBSOLETE:` path if so, instead of re-deriving it.
+- **Do not restate `RULES_RE`.** Never re-explain the Merge agent-rules guard (`RULES_RE`) in a spec; CLAUDE.md says specs need not.
+- **List every test file the build edits** (for example `tests/test_serve.py`) under `## Likely files`: rules-check rule 7 stops a job on a changed file missing there.
+- **Scrum map edits.** A needed `~/.claude/scrum-map.md` edit is one line under `## Assumptions`, shaped `Scrum map: <section heading> — <one-line edit>`. It is never an acceptance criterion, a Likely file or a manual step.
 - **`scrum/` is never in the diff.** `scrum/` is git-excluded and outside the worktree, so a backlog line the request asks for is never an acceptance criterion or a Likely file. Write each new line under `## Scope` Out as `Follow-up: <one-line backlog text>`. A line the request only ticks stays open for the Run all triager, which retires done items.
 - Write no code and touch no file except `spec.md` (in follow-up mode, only `followups/*.md`). Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 

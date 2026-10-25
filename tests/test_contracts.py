@@ -724,6 +724,13 @@ class ContractTest(unittest.TestCase):
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
 
+    def test_spec_writer_checks_earlier_work(self):
+        t = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("check earlier jobs", "`git log $BASE`", "Do not restate `RULES_RE`",
+                       "List every test file the build edits", "Scrum map: <section heading>",
+                       "never an acceptance criterion, a Likely file or a manual step"):
+            self.assertIn(phrase, t)
+
     def test_spec_writer_documents_lane_line(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("Lane: fast|standard|debug|bigboy", "100", "3 files", "8 files", "500"):
