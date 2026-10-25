@@ -11,6 +11,7 @@ os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so;
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
+os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -4913,6 +4914,137 @@ class PipelineFitTest(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=bad) as cm:
                 board.cmd_pipeline_fit(self.root, bad)
             self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
+
+
+USAGE_NOW = 1_000_000
+
+
+def usage(five=None, seven=None, written_at=USAGE_NOW):
+    """A usage.json dict. five/seven = (used_percentage, seconds from written_at until resets_at)."""
+    limits = {}
+    for key, w in (("five_hour", five), ("seven_day", seven)):
+        if w is not None:
+            limits[key] = {"used_percentage": w[0], "resets_at": written_at + w[1]}
+    return {"rate_limits": limits, "written_at": written_at}
+
+
+class UsageAllowanceTest(unittest.TestCase):
+    def allow(self, u, live=0):
+        a = board.usage_allowance(u, USAGE_NOW, live)
+        return None if a is None else int(a)
+
+    def test_ladder_steps(self):
+        """A reset 1 h away neither relaxes nor tightens: remaining >= 10 None, < 10 gives 3, < 5 gives 1, < 2 gives 0."""
+        for used, want in ((0, None), (89, None), (90, None), (91, 3), (95, 3), (95.5, 1), (98, 1), (98.5, 0), (100, 0)):
+            for u in (usage(five=(used, 3600)), usage(seven=(used, 3600))):
+                self.assertEqual(self.allow(u), want, (used, u))
+        self.assertIsInstance(board.usage_allowance(usage(five=(91, 3600)), USAGE_NOW, 0), int)
+
+    def test_relax_near_reset(self):
+        for used, want in ((91, None), (96, 3), (99, 1), (100, 1)):
+            self.assertEqual(self.allow(usage(five=(used, 1200))), want, used)
+            self.assertEqual(self.allow(usage(five=(used, 1))), want, used)
+        self.assertEqual(self.allow(usage(five=(96, 1201))), 1, "just past 20 min: no relax")
+
+    def test_tighten_far_reset(self):
+        for used, want in ((91, 1), (96, 0), (99, 0)):
+            self.assertEqual(self.allow(usage(seven=(used, 10801))), want, used)
+            self.assertEqual(self.allow(usage(seven=(used, 3 * 86400))), want, used)
+        self.assertEqual(self.allow(usage(seven=(91, 10800))), 3, "exactly 3 h: no tighten")
+        self.assertIsNone(self.allow(usage(seven=(85, 3 * 86400))), "remaining >= 10 never tightens")
+
+    def test_stricter_window_wins(self):
+        self.assertEqual(self.allow(usage(five=(91, 3600), seven=(96, 3600))), 1)
+        self.assertEqual(self.allow(usage(five=(99, 3600), seven=(91, 3600))), 0)
+        self.assertEqual(self.allow(usage(five=(50, 3600), seven=(91, 3600))), 3, "None counts as unlimited")
+        self.assertEqual(self.allow(usage(five=(91, 600), seven=(91, 3600))), 3, "relaxed 5h is None; 7d binds")
+
+    def test_stale_missing_and_malformed(self):
+        low = usage(five=(99, 3600))
+        bad = [None, "x", [], {}, {"rate_limits": None, "written_at": USAGE_NOW},
+               {"rate_limits": "x", "written_at": USAGE_NOW},
+               {"rate_limits": low["rate_limits"]},
+               {**low, "written_at": "1000000"}, {**low, "written_at": None}, {**low, "written_at": True},
+               {**low, "written_at": USAGE_NOW - 301},
+               {"rate_limits": {"five_hour": {"used_percentage": "99", "resets_at": USAGE_NOW + 3600}},
+                "written_at": USAGE_NOW},
+               {"rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": "soon"}}, "written_at": USAGE_NOW},
+               {"rate_limits": {"five_hour": {"used_percentage": 99}}, "written_at": USAGE_NOW},
+               {"rate_limits": {"five_hour": "x"}, "written_at": USAGE_NOW}]
+        for u in bad:
+            self.assertIsNone(board.usage_allowance(u, USAGE_NOW, 0), u)
+        self.assertEqual(self.allow({**low, "written_at": USAGE_NOW - 300} | {"rate_limits": {"five_hour": {
+            "used_percentage": 99, "resets_at": USAGE_NOW + 3600}}}), 0, "exactly 300 s old still counts")
+
+    def test_passed_reset_ignored(self):
+        for after in (0, -1, -7200):
+            self.assertIsNone(self.allow(usage(five=(99, after))), after)
+            self.assertEqual(self.allow(usage(five=(99, after), seven=(91, 3600))), 3, after)
+
+    def test_reason_text(self):
+        u = usage(five=(93.4, 14400), seven=(50, 86400))
+        at = datetime.fromtimestamp(USAGE_NOW + 14400).strftime("%H:%M")
+        a = board.usage_allowance(u, USAGE_NOW, 2)
+        self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 2 live)"))
+        a = board.usage_allowance(u, USAGE_NOW, ["1-a", "2-b", "3-c"])
+        self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 3 live)"))
+        self.assertEqual(int(board.usage_allowance(u, USAGE_NOW, 40)), 1, "the number never depends on live")
+        seven_at = datetime.fromtimestamp(USAGE_NOW + 3600).strftime("%H:%M")
+        a = board.usage_allowance(usage(five=(91, 3600), seven=(96.6, 3600)), USAGE_NOW, 0)
+        self.assertEqual(a.reason, f"usage 7d 97% used, resets {seven_at} (allowance 1, 0 live)")
+        a = board.usage_allowance(usage(five=(92, 3600), seven=(93, 3600)), USAGE_NOW, 0)
+        self.assertEqual(a.reason, f"usage 5h 92% used, resets {seven_at} (allowance 3, 0 live)", "tie: five_hour")
+
+
+class ReadyUsageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.root, self.usage, self.ps = base / "scrum", base / "usage.json", base / "ps.txt"
+        self.ps.write_text("")
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage), SCRUM_PS=str(self.ps))
+        env.start()
+        self.addCleanup(env.stop)
+        self.root.mkdir()
+        (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(5)))
+        out = board.cmd_runall_start(self.root)
+        self.parent, self.kids = out["id"], out["children"]
+        for i, k in enumerate(self.kids):
+            spec = self.root / "jobs" / k / "spec.md"
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text(f"# x\n## Likely files\n- `src/{i}.py`: why\n")
+
+    def write_usage(self, used):
+        self.usage.write_text(json.dumps(usage(five=(used, 3600), written_at=int(time.time()))))
+
+    def live(self, n):
+        self.ps.write_text("claude -p /trevskills-scrum start 1-a\n" * n)
+
+    def parent_job(self):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == self.parent)
+
+    def test_ready_caps_batch_to_allowance(self):
+        self.write_usage(96)  # 4 % left, reset 1 h away: allowance 1
+        self.live(1)
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [], "1 live of allowance 1: no slot")
+        self.live(0)
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:1])
+        self.usage.unlink()
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[1:], "no usage.json: no taper")
+
+    def test_ready_holds_parent_with_usage_reason(self):
+        self.write_usage(96)
+        self.live(1)
+        at = datetime.fromtimestamp(json.loads(self.usage.read_text())["rate_limits"]["five_hour"]["resets_at"])
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [])
+        p = self.parent_job()
+        self.assertEqual((p["stage"], p["reason"]),
+                         ("running", f"waiting: usage 5h 96% used, resets {at:%H:%M} (allowance 1, 1 live)"))
+        self.write_usage(50)
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids)
+        p = self.parent_job()
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
 
 if __name__ == "__main__":

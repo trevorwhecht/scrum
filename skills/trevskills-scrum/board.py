@@ -1740,7 +1740,7 @@ BLOCKED = "bigboy blocked"
 RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
-MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok)
+MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok) or usage
 
 
 def usage_path():
@@ -1757,6 +1757,60 @@ def read_usage():
 
 def is_num(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+USAGE_LOW_PCT = 10  # remaining % below which automated claims taper (USAGE_STEPS[0])
+USAGE_LOWER_PCT = 5  # remaining % below which the taper drops to USAGE_STEPS[1]
+USAGE_STOP_PCT = 2  # remaining % below which automated claims stop (USAGE_STEPS[2])
+USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the ladder) means unlimited
+USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
+USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
+USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
+
+
+class Allowance(int):
+    """usage_allowance's number of live sessions; .reason says which window bound it and why."""
+    def __new__(cls, n, reason):
+        self = super().__new__(cls, n)
+        self.reason = reason
+        return self
+
+
+def usage_allowance(usage, now, live):
+    """How many live headless sessions automated claims may run under the 5h and 7d budgets (an Allowance), or None
+    for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
+    one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
+    missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
+    only feeds the reason text. Trevor's own Play/Resume never call this."""
+    if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
+        return None
+    at = usage.get("written_at")
+    if not is_num(at) or now - at > USAGE_STALE_SECS:
+        return None
+    rungs = (None,) + USAGE_STEPS
+    best = None
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = usage["rate_limits"].get(key)
+        if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
+            continue
+        used, resets = w["used_percentage"], w["resets_at"]
+        left = 100 - used
+        if left >= USAGE_LOW_PCT or resets <= now:
+            continue
+        i = 3 if left < USAGE_STOP_PCT else 2 if left < USAGE_LOWER_PCT else 1
+        if resets - now <= USAGE_RELAX_SECS:
+            i -= 1
+        elif resets - now > USAGE_TIGHTEN_SECS:
+            i = min(i + 1, len(USAGE_STEPS))
+        n = rungs[i]
+        if n is not None and (best is None or n < best[0]):
+            best = n, label, used, resets
+    if best is None:
+        return None
+    n, label, used, resets = best
+    count = live if isinstance(live, int) else len(live)
+    return Allowance(n, f"usage {label} {round(used)}% used, resets {datetime.fromtimestamp(resets):%H:%M} "
+                        f"(allowance {n}, {count} live)")
 
 
 def pace_cap(usage, now, base):
@@ -2115,11 +2169,21 @@ def cmd_ready(root, parent_id, live=()):
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
         machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
+        cap = None  # the usage ladder's slots left this call; None = no taper
+        if go and not machine:
+            n_live = live_sessions()
+            allow = usage_allowance(read_usage(), time.time(), n_live)
+            if allow is not None:
+                cap = max(0, allow - n_live)
+                if not cap:  # no slot under the budget: held like a machine wait, never needs-human
+                    machine = allow.reason
         spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
             if (jobs_dir / k["id"] / "spec.md").is_file() else ""
         files = {k["id"]: likely_files(spec(k)) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
         room = ram_room() if go and not machine else 0  # one claim = one new session
+        if cap is not None:
+            room = min(room, cap)
         ready = []
         for k in kids if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
@@ -2135,7 +2199,7 @@ def cmd_ready(root, parent_id, live=()):
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if machine:  # wait for RAM or disk; never needs-human, and a legacy parent keeps its reason to re-evaluate
+        if machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):
                 new = "running", MACHINE_WAIT + machine
         elif blocked and (ready or busy or finished == len(kids)):

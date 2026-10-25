@@ -10,6 +10,7 @@ os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, w
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
+os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 
 # A fake `claude`: records its argv, and answers estimate prompts with a fixed estimate.
 STUB = r'''#!/usr/bin/env python3
@@ -45,7 +46,7 @@ class ServeTest(unittest.TestCase):
         cls.stub = stub
         # SCRUM_ROUTE=cloud pins route.py to cloud for every role, so no test depends on local machine state.
         os.environ.update(SCRUM_CLAUDE=str(stub), STUB_LOG=str(cls.stub_log), SCRUM_REGISTRY=str(base / "projects.json"),
-                          SCRUM_ROUTE="cloud", SCRUM_USAGE=str(base / "no-usage.json"))  # no usage pacing in `ready`
+                          SCRUM_ROUTE="cloud")
         import serve  # noqa: E402  (reads SCRUM_CLAUDE at import)
         serve.CLAUDE = serve.board.CLAUDE = str(stub)  # another test class may have imported serve or board first
         cls.serve = serve
@@ -67,7 +68,6 @@ class ServeTest(unittest.TestCase):
         cls.server.shutdown()
         os.environ.pop("SCRUM_REGISTRY", None)
         os.environ.pop("SCRUM_ROUTE", None)
-        os.environ.pop("SCRUM_USAGE", None)
         cls.tmp.cleanup()
 
     def req(self, method, path, body=None, headers=None):
@@ -891,6 +891,35 @@ class ServeTest(unittest.TestCase):
                                                       "Fix: click Resume when 123-sib finish."}))
         self.assert_nothing_ran(m)
 
+    def low_usage(self, base):
+        """usage.json at 99 % used on both windows, resets 2 h and 3 days away: allowance 0."""
+        usage, now = base / "usage.json", time.time()
+        usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 99, "resets_at": now + 7200},
+            "seven_day": {"used_percentage": 99, "resets_at": now + 3 * 86400}}}))
+        return usage
+
+    def test_resume_refusal_ignores_usage(self):
+        """Trevor's Resume/Play is never tapered by the usage ladder: resume_refusal does not even ask it."""
+        usage = self.low_usage(Path(tempfile.mkdtemp(dir=self.tmp.name)))
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
+                mock.patch.object(self.serve.board, "usage_allowance", wraps=self.serve.board.usage_allowance) as allow:
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}))
+        self.assertEqual(allow.call_count, 0)
+
+    def test_start_ready_usage_hold_not_needs_human(self):
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        usage, root = self.low_usage(base), base / "scrum"
+        root.mkdir()
+        (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
+        parent = self.serve.board.cmd_runall_start(root)["id"]
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.serve.start_ready("repo", root, parent)["ready"], [])
+        spawn.assert_not_called()
+        job = self.serve.board.find(self.serve.board.read_board(root), parent)
+        self.assertEqual(job["stage"], "running")
+        self.assertTrue(job["reason"].startswith("waiting: usage "), job["reason"])
+
     def test_resume_ignores_pace_and_session_count(self):
         """No usage pace and no session count stops a resume (job 282): only machine_ok and a Run-all/BigBoy child's
         overlap rules do."""
@@ -923,8 +952,7 @@ class ServeTest(unittest.TestCase):
         """Job 283: MAX_SESSIONS live sessions refuse a resume through the machine guard (job 279's fixed 8 is gone)."""
         ps = Path(self.tmp.name) / "ps.txt"
         job = {"id": "9-x", "lane": "standard"}
-        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
-                mock.patch.object(self.serve.board, "pace_cap", return_value=None):
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
             ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 13)
             self.assertIsNone(self.serve.resume_refusal("repo", self.root, job))
             ps.write_text("claude -p /trevskills-scrum start 1-a\n" * 14)
@@ -4724,8 +4752,7 @@ class AutoContinueTest(unittest.TestCase):
         self.projects.clear()
         shutil.rmtree(self.base / "a", ignore_errors=True)
         self.project("a", 1, jobs=jobs)
-        with mock.patch.object(self.board, "pace_cap", return_value=None):
-            return [c for c in self.tick() if c[2] == "run-all"]
+        return [c for c in self.tick() if c[2] == "run-all"]
 
     def test_only_running_bigboy_parent_is_excluded(self):
         self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], lane="runall")), [])
@@ -4741,21 +4768,40 @@ class AutoContinueTest(unittest.TestCase):
         """Low RAM or disk: no run-all starts; the next tick with room starts it as before. A guard that fails partway
         through a tick stops the later starts and keeps the earlier ones."""
         self.project("a", n=1)
-        with mock.patch.object(self.board, "pace_cap", return_value=None):
-            for ram, disk in (("14", "1000"), ("100", "6.2")):
-                with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
-                    self.assertEqual(self.tick(), [], (ram, disk))
-            self.assertEqual(self.tick(), self.started("a"))
+        for ram, disk in (("14", "1000"), ("100", "6.2")):
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
+                self.assertEqual(self.tick(), [], (ram, disk))
+        self.assertEqual(self.tick(), self.started("a"))
+        self.project("b", n=2); self.project("c", n=3)
+        answers = iter([None, "free RAM 14% (< 20%)", None])
+        with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
+            self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
+
+    def test_auto_continue_usage_hold(self):
+        """The usage ladder holds a run-all start like a machine_ok failure: none while live >= allowance, a start once
+        a slot frees or usage.json is gone, and a hold partway through a tick stops the later starts."""
+        self.project("a", n=1)
+        ps = self.base / "ps.txt"
+        self.usage.write_text(json.dumps({"written_at": time.time(), "rate_limits": {
+            "five_hour": {"used_percentage": 96, "resets_at": time.time() + 3600}}}))  # 4 % left: allowance 1
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n")
+            self.assertEqual(self.tick(), [], "1 live of allowance 1: held")
+            ps.write_text("")
+            self.assertEqual(self.tick(), self.started("a"), "0 live: starts")
+            ps.write_text("claude -p /trevskills-scrum start 1-a\n")
+            self.usage.unlink()
+            self.assertEqual(self.tick(), self.started("a"), "no usage.json: no taper")
             self.project("b", n=2); self.project("c", n=3)
-            answers = iter([None, "free RAM 14% (< 20%)", None])
-            with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
-                self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
+            answers = iter([None, self.board.Allowance(0, "usage 5h 99% used"), None])
+            with mock.patch.object(self.board, "usage_allowance", side_effect=lambda u, now, live: next(answers)):
+                self.assertEqual(self.tick(), self.started("a"), "b held: neither b nor c starts")
 
     def test_auto_continue_stops_at_session_ceiling(self):
         """Job 283 (Trevor 2026-10-24): MAX_SESSIONS machine-wide, after 19 sessions across three projects piled up."""
         self.project("a", n=1); self.project("b", n=2)
         ps = self.base / "ps.txt"
-        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), mock.patch.object(self.board, "pace_cap", return_value=None):
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
             ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 13)
             self.assertEqual(self.tick(), self.started("a") + self.started("b"), "13 live sessions, RAM fine: both start")
             ps.write_text("claude -p /trevskills-scrum start 1-a --model sonnet\n" * 14)
@@ -5071,7 +5117,6 @@ class ParkedParentTest(unittest.TestCase):
     def tick(self, running=lambda p, j: False, alive=lambda job: False):
         with mock.patch.object(self.board, "projects", return_value={"p": self.root.parent}), \
                 mock.patch.object(self.board, "session_alive_fn", return_value=alive), \
-                mock.patch.object(self.board, "pace_cap", return_value=None), \
                 mock.patch.object(self.serve, "running", side_effect=running), \
                 mock.patch.object(self.serve, "resume_job"), \
                 mock.patch.object(self.serve, "spawn") as spawn:
@@ -5135,7 +5180,6 @@ class ParkedParentTest(unittest.TestCase):
                            "session", ["Resume=resume 074-b", "Abort=abort 074-b"])
         with mock.patch.object(self.board, "projects", return_value={"p": self.root.parent}), \
                 mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
-                mock.patch.object(self.board, "pace_cap", return_value=None), \
                 mock.patch.object(self.serve, "running", return_value=False), \
                 mock.patch.object(self.serve, "resume_job") as resume, \
                 mock.patch.object(self.serve, "spawn") as spawn:
