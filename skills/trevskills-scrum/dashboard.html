@@ -18,7 +18,7 @@ h1{font-size:16px;margin:0}
 #status,#routing,#machine,#cooldownState{color:var(--muted);font-size:12px}
 #cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 #machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
-#machine .ring{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 4px,black 4.5px)}
+#machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:10px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
 #machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
@@ -71,7 +71,7 @@ body:has(dialog[open]){overflow:hidden}
 .btn.danger{background:var(--human);border-color:var(--human);color:#fff}
 .btn.danger-outline{background:transparent;border-color:var(--human);color:var(--human)}
 .card.aborted{opacity:.55}
-.card.dcard{cursor:default}.dcard .acts,.answer .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.answer .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.tall{min-height:44px}
 .btn.more{width:100%}
@@ -194,6 +194,9 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .diff{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .diff div{min-width:0}.diff pre{margin:4px 0 0}
 .prop .acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.prop .id{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-weight:600}
+.prop .chip{background:transparent;color:var(--muted);border:1px solid var(--line)}.prop .chip.applied{color:var(--pass);border-color:var(--pass)}.prop .chip.skipped{color:var(--changes);border-color:var(--changes)}
+.prop .diff div:first-child pre{text-decoration:line-through;color:var(--human)}.prop .diff div:last-child pre{color:var(--pass)}
 @media (max-width:640px){#agents,#aiSettings,#digest,#backlog,#viewer,#usage{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article,#usage article{padding-inline:12px}
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
@@ -208,7 +211,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use, its label and tooltip the free %. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it (grey with no reading); swap and disk turn orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use and the free % sits inside it; swap has no text, it only colours the ring (the worse of RAM and swap) and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM and swap are fine, yellow within 10 points of a limit and red past one (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists board.machine_ok refuses every automatic start: the watchdog's claims, auto-resumes, queued Plays, orphan respawns, auto continue and continue.py's Resume POSTs. Sessions already running finish; nothing is stopped. Trevor's own Play, Resume, closed-question answers and Run now still start work. The state text counts the headless sessions still running (board.live_sessions) and reads idle at 0, when serve.py plays one done sound. Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
@@ -295,7 +298,7 @@ const STALE = "Dashboard server is out of date. Restart serve.py.";
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
   .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, digests = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || (laneFilter === "roadmap" ? !!roadmapSteps[j.key] : laneOf(j) === laneFilter)));
@@ -495,18 +498,6 @@ function card(job) {
   </${el}>`;
 }
 
-// A pending digest proposal: Trevor decides it here or in the Digest dialog. A div, so its buttons don't nest in a <button>.
-function digestCard(project, digestId, p) {
-  return `<div class="card human dcard" data-project="${esc(project)}" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
-    ${tag(project)}<span class="reason">Digest ${esc(digestId)} ${esc(p.id)}${p.obvious_reason ? `: ${esc(p.obvious_reason)}` : ""}</span>
-    <span class="meta kid">${esc(p.target)}</span>
-    <div class="acts"><button class="btn tall primary" type="button" data-decide="approve">Approve</button><button class="btn tall" type="button" data-decide="reject">Reject</button></div>
-    <p class="error" role="alert"></p></div>`;
-}
-// Digest cards follow the project filter like job cards; they have no lane, so the lane filter leaves them alone.
-const digestCards = () => projects.filter(p => !filter || p === filter).flatMap(p => (digests[p]?.digests || [])
-  .flatMap(g => g.proposals.filter(x => x.status === "pending").map(x => digestCard(p, g.id, x))));
-
 // The Done column shows this many cards; Load more adds DONE_STEP. Kept outside the DOM so a poll re-render keeps it.
 const DONE_STEP = 10;
 let doneShown = DONE_STEP;
@@ -514,21 +505,21 @@ let doneShown = DONE_STEP;
 const newestFirst = (a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
 
 function render() {
-  const list = shown(), dcards = digestCards(), rcards = roadmapShown().map(p => [roadmapCol(p), roadmapCard(p)]);
+  const list = shown(), rcards = roadmapShown().map(p => [roadmapCol(p), roadmapCard(p)]);
   const rIn = s => rcards.filter(([c]) => c === s).map(([, html]) => html);
   const cols = [...STAGES, ...new Set([...list.map(colOf), ...rcards.map(([c]) => c)].filter(s => !STAGES.includes(s)))];
-  const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length + (s === "needs-human" ? dcards.length : 0);
+  const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length;
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
   const rmFocused = document.activeElement?.matches?.("#board [data-roadmap]") && document.activeElement.dataset.roadmap;
   const optFocused = document.activeElement?.matches?.("#board [data-answer]") && [document.activeElement.closest(".card").dataset.key, document.activeElement.dataset.answer];
   $("board").innerHTML = cols.map(stage => {
-    const all = list.filter(j => colOf(j) === stage).sort(newestFirst), extra = stage === "needs-human" ? dcards.join("") : "";
+    const all = list.filter(j => colOf(j) === stage).sort(newestFirst);
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
     const more = inCol.length < all.length ? `<button class="btn tall more" type="button" data-more>Load more</button>` : "";
     return `<section class="col${stage === "needs-human" ? " human" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
-      ${rIn(stage).join("") + inCol.map(card).join("") + extra + more || '<p class="empty">—</p>'}</section>`;
+      ${rIn(stage).join("") + inCol.map(card).join("") + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
   if (optFocused) focusOption($("board"), ...optFocused);
@@ -587,12 +578,15 @@ function renderMachine(m) {
   if (!m) return;
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
-  // RAM is a ring: the filled arc is RAM in use, the free % is in its label.
-  const ram = m.free_ram_pct, ramLabel = ram == null ? "RAM —" : `RAM ${Math.round(ram)}% free`;
-  const ring = `<span class="ring ${ram == null ? "none" : machineLevel(ram, "ram", m)}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${ramLabel}" title="${ramLabel}"></span>`;
+  // RAM is a ring: the filled arc is RAM in use, the free % sits inside it. Swap has no text of its own: it only
+  // colours the ring (the worse of the two levels) and shows in its tooltip, since free RAM and swap are independent.
+  const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), machineLevel(m.swap_pct, "swap", m)];
+  const level = ram == null ? "none" : levels.includes("danger") ? "danger" : levels.includes("low") ? "low" : "ok";
+  const tip = `RAM ${ram == null ? "—" : Math.round(ram) + "% free"} · swap ${m.swap_pct == null ? "—" : Math.round(m.swap_pct) + "%"}`;
+  const ring = `<span class="ring ${level}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${tip}" title="${tip}">${ram == null ? "—" : Math.round(ram) + "%"}</span> RAM`;
   // A red reading already says what the verdict says, so the verdict shows only when it names something else (the session ceiling).
   const shownRed = [["ram", ram], ["swap", m.swap_pct], ["disk", m.free_disk_gb]].some(([k, v]) => machineLevel(v, k, m) === "danger");
-  el.innerHTML = [ring, part("swap", "swap", m.swap_pct, "%"),
+  el.innerHTML = [ring,
     part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }
@@ -606,14 +600,12 @@ async function poll() {
     projects = (await res.json()).map(p => p.name);
     projectHue = projectHues(projects);
     if (filter && !projects.includes(filter)) filter = "";
-    const [boards, items, checks, runList, digestList, roadmapList] = await Promise.all([
+    const [boards, items, checks, runList, roadmapList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
       getJson("api/runs", []),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/digests?brief=1`, null))),  // the cards need no old/new
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
-    digests = Object.fromEntries(projects.map((p, i) => [p, digestList[i]]));
     roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);
@@ -630,7 +622,7 @@ async function poll() {
     backlogs = nextBacklogs;
     manuals = nextManuals;
     renderSelect($("filter"), filter, true);
-    const text = JSON.stringify([all, runs, backlogs, digests, roadmaps, filter, routes]);
+    const text = JSON.stringify([all, runs, backlogs, roadmaps, filter, routes]);
     if (text !== lastText) {
       jobs = all; lastText = text; render();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
@@ -1070,18 +1062,19 @@ $("blManualList").addEventListener("change", async e => {
   renderBacklog();
 });
 
-// Digest: proposals from scrum/digests/<NNN>/proposals.json. Approve applies a global edit (backed up) or queues a repo
-// edit on that repo's backlog; serve.py decides which. The last decision in a digest trims its job folders.
+// Digest: proposals from scrum/digests/<NNN>/proposals.json, shown as a log. serve.py's digest_auto has already applied,
+// queued or skipped each one; Revert undoes an applied one through serve.py's digest_revert.
 let digestData = null, digestText = "";
 const dgProject = () => $("dgProject").value;
 const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</span><pre>${esc(old)}</pre></div><div><span class="note">New</span><pre>${esc(now)}</pre></div></div>`;
+// One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
 const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
+    <span class="id">${esc(p.id)} <span class="chip ${esc(p.status)}">${esc(p.status)}</span></span>
     <span class="path">${esc(p.target)}</span><span>${esc(p.why)}</span>
+    ${["skipped", "queued"].includes(p.status) && p.reason ? `<span class="note">${esc(p.reason)}</span>` : ""}
     ${diffHtml(p.old, p.new)}
-    <div class="acts">${p.status === "pending"
-      ? `<button class="btn primary" type="button" data-decide="approve" data-agent-hint="A file outside every registered repo is edited in place after a backup to ~/.claude/backups/ai-settings/. A file inside a repo is not touched: the edit is added to that repo's backlog instead.">Approve</button>
-         <button class="btn" type="button" data-decide="reject">Reject</button>`
-      : `<span class="note" role="status">${esc(p.status)}</span>`}</div></div>`;
+    ${p.status === "applied" ? `<div class="acts"><button class="btn" type="button" data-revert data-agent-hint="Puts the old text back through the path that applied it: a repo file gets its own commit after the contract tests, any other file is restored after a backup. It stays applied when the file has changed since.">Revert</button></div>` : ""}
+    <p class="error" role="alert"></p></div>`;
 
 function renderDigests() {
   $("dgNow").hidden = !projects.length;
@@ -1130,12 +1123,23 @@ $("dgNow").addEventListener("click", () => {
   $("dgNow").disabled = true;
   digestCall(`api/p/${enc(dgProject())}/digest`, {});
 });
-$("dgList").addEventListener("click", e => {
-  const b = e.target.closest("button[data-decide]");
+$("dgList").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-revert]");
   if (!b) return;
-  const row = b.closest(".prop");
-  row.querySelectorAll("button").forEach(x => { x.disabled = true; });
-  digestCall(`api/p/${enc(dgProject())}/digests/${enc(row.dataset.digest)}/${enc(row.dataset.pid)}`, {decision: b.dataset.decide});
+  const {digest, pid} = b.closest(".prop").dataset;
+  // A poll may re-render the list while the post is in flight, so the row is looked up again afterwards.
+  const row = () => [...$("dgList").querySelectorAll(".prop")].find(r => r.dataset.digest === digest && r.dataset.pid === pid);
+  b.disabled = true;
+  row().querySelector(".error").textContent = "";
+  try {
+    await post(`api/p/${enc(dgProject())}/digests/${enc(digest)}/${enc(pid)}`, {decision: "revert"});
+  } catch (err) {
+    const r = row();
+    if (r) { r.querySelector(".error").textContent = err.message; r.querySelector("button[data-revert]")?.removeAttribute("disabled"); }
+    return;
+  }
+  digestText = "";  // re-render from fresh data: the row now shows reverted and no button
+  await loadDigests();
 });
 
 // Pipelines: the order is fixed by SKILL.md, so it lives here; everything about each agent comes from api/agents.
@@ -1162,7 +1166,7 @@ const PIPELINES = {
     {step: "Next step", note: "after each merge", hint: "After a step's job merges, the next todo step starts with no prompt. A step stopped on needs-human shows as the roadmap's blocker."}]};
 const MAINTENANCE = {
   "Run all": ["scrum-triager", {step: "Jobs", note: "backlog, one by one", hint: "After triage every open backlog item runs as a job, one after another."}],
-  "Digest": ["scrum-digest-reader", "scrum-digester", {step: "Digest dialog", note: "you decide", hint: "Each proposed edit waits in the Digest dialog for Approve or Reject."}]};
+  "Digest": ["scrum-digest-reader", "scrum-digester", {step: "Digest dialog", note: "log", hint: "Each proposal is applied automatically; an applied one can be reverted in the Digest dialog."}]};
 // Single-pipeline tabs draw a loop from `from` back up to scrum-builder.
 const LOOPS = {fast: ["scrum-review-code", "changes", "When the code review asks for CHANGES, the job goes back to the builder for another round."],
   standard: ["scrum-approver", "changes · rework", "When the approver decides CHANGES or REWORK, the job goes back to the builder for another round."]};
@@ -1583,20 +1587,6 @@ $("aiList").addEventListener("click", async e => {
   }
 });
 
-$("board").addEventListener("click", async e => {
-  const b = e.target.closest("button[data-decide]");
-  if (!b) return;
-  const c = b.closest(".dcard"), btns = c.querySelectorAll("button");
-  btns.forEach(x => { x.disabled = true; });
-  c.querySelector(".error").textContent = "";
-  try {
-    await post(`api/p/${enc(c.dataset.project)}/digests/${enc(c.dataset.digest)}/${enc(c.dataset.pid)}`, {decision: b.dataset.decide});
-    poll();  // the card leaves once the proposal is no longer pending
-  } catch (err) {
-    c.querySelector(".error").textContent = err.message;
-    btns.forEach(x => { x.disabled = false; });
-  }
-});
 $("board").addEventListener("click", e => {
   if (!e.target.closest("[data-more]")) return;
   const doneCards = () => $("board").querySelectorAll('[data-col="done"] .card'), before = doneCards().length;

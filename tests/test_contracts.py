@@ -1079,7 +1079,7 @@ class ContractTest(unittest.TestCase):
 
     def test_dashboard_has_digest_dialog(self):
         text = DASHBOARD.read_text()
-        for phrase in ('id="digest"', "Digest now", "Digesting…", "No digests", 'id="dgError" role="alert"', "data-decide"):
+        for phrase in ('id="digest"', "Digest now", "Digesting…", "No digests", 'id="dgError" role="alert"', "data-revert"):
             self.assertIn(phrase, text, phrase)
 
     def test_dashboard_has_waiting_banner(self):
@@ -1301,7 +1301,7 @@ class ContractTest(unittest.TestCase):
         step2 = self.section(text, "2. **Base:**", "3. **Spec:**")
         for phrase in ("Base branch:", "sed -n 's/^- Base branch: *//p' \"$F/project.md\" | head -1",
                        "refs/remotes/origin/HEAD", "git remote set-head origin -a", "B set $ID base=$BASE",
-                       "[A-Za-z0-9._/-]", "Base branch line in scrum/project.md is malformed",
+                       "[A-Za-z0-9._/-]", "Base branch line in the project profile is malformed",
                        "rev-parse --verify", "not found on origin"):
             self.assertIn(phrase, step2, phrase)
         lilguy = self.lane("lilguy")
@@ -1524,12 +1524,14 @@ class ContractTest(unittest.TestCase):
         for phrase in ("absent", "expected change", "Rendered: blocked", "never REWORK or ESCALATE for the render"):
             self.assertIn(phrase, rule, phrase)
         for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
-                       "Hard stop: render — UI not rendered"):
+                       "Hard stop: render — UI not rendered: <which screens changed, in plain words>"):
             self.assertIn(phrase, rule, phrase)
+        self.assertNotIn("<which UI-glob files changed>", text)
         self.assertEqual(text.count("Hard stop: blocked — UI not rendered"), 1)
         self.assertIn("`Hard stop: blocked — UI not rendered` is only for a UI diff", text)
         stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
-        for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>"):
+        for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>",
+                       "with no file paths, double quotes or backticks", "go in decision.md's body"):
             self.assertIn(phrase, stop, phrase)
 
     def test_approver_retro_p1_blocked_render_never_hard_stop(self):
@@ -1574,12 +1576,13 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         approve = self.section(text, "## Approve", "## Merge")
         self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' "
-                      "--kind render --a \"Approve & merge=approve $ID\" --b \"Send back=rework $ID \\\"render the changed page and "
-                      "see the change, or write Rendered: n/a when nothing on screen changed\\\"\" --c \"Abort=abort $ID\"`",
+                      "--kind render --a \"Merge anyway=approve $ID\" --b \"Send back with a note=rework $ID \\\"render the changed page and "
+                      "see the change, or write Rendered: n/a when nothing on screen changed\\\"\" --c \"Remove this job=abort $ID --cascade\" "
+                      "--recommend <key> '<why>'`",
                       approve)
-        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --kind blocked --a \"Send back="
+        self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --kind blocked --a \"Send back with a note="
                       "rework $ID \\\"make the most reasonable call on the blocker in decision.md and record it as a "
-                      "Ruling in build.md\\\"\" --b \"Abort=abort $ID\"`", approve)
+                      "Ruling in build.md\\\"\" --b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'`", approve)
         rule = self.section(text, "**Every stop is a closed question.**", "\n1. ")
         self.assertIn("`Hard stop: render`", rule)
 
@@ -1601,9 +1604,10 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         line = ("If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the PR on GitHub "
                 "before you retry.' --a ")
-        self.assertIn(line + '"Retry=approve $ID" --b "Abort=abort $ID"` and stop.',
+        self.assertIn(line + '"Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> \'<why>\'` and stop.',
                       self.section(text, "7. **Clean up:**", "## Resuming the builder"))
-        self.assertIn(line + "'Retry=shell: gh pr view <pr url> --json state' --b \"Abort=abort $ID\"` and stop.",
+        self.assertIn(line + "'Try again=shell: gh pr view <pr url> --json state' --b \"Remove this job=abort $ID --cascade\" "
+                      "--recommend <key> '<why>'` and stop.",
                       self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
 
     def test_done_only_when_live(self):
@@ -1676,6 +1680,8 @@ class ContractTest(unittest.TestCase):
             self.assertIn(len(commands), (2, 3), span)
             for command in commands:
                 self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
+            self.assertTrue(span.endswith("--recommend <key> '<why>'"), span)
+            self.assertEqual(span.count("--recommend"), 1, span)
         text = self.rules()
         self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
         self.assertIn("`B set` refuses the needs-human stage.", text)
@@ -1685,16 +1691,80 @@ class ContractTest(unittest.TestCase):
                        '"bigboy review: main not updated', '"Base branch line', "'Base branch <BB>", "'blocked: "):
             self.assertTrue(any(prefix in sp for sp in spans), prefix)
 
+    def ask_spans(self):
+        """(lane file name, span) for every `B ask ...` code span in SKILL.md and lanes/*.md."""
+        skill = ROOT / "skills" / "trevskills-scrum"
+        return [(f.stem, sp) for f in [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]
+                for sp in re.findall(r"`(B ask [^`]+)`", f.read_text())]
+
+    def ask_question(self, span):
+        import shlex
+        return shlex.split(span)[3]  # B ask <id> <question> ...
+
+    def test_ask_prefixes_unchanged(self):
+        questions = [self.ask_question(sp) for _, sp in self.ask_spans()]
+        for prefix in ("Hard stop: schema — ", "Hard stop: agent rules — ", "blocked: ", "bigboy off track: ",
+                       "bigboy review: main not updated", "Base branch line", "Base branch <BB>", "debug: ", "lilguy: ",
+                       "migrate needs your OK: ", "migrate stopped: ", "merge refused: ", "merge conflicts with ",
+                       "approver ", "CI still fails", "Uncommitted change in ", "Uncommitted files in the job worktree",
+                       "bigboy chain lock held by "):
+            self.assertTrue(any(q.startswith(prefix) for q in questions), prefix)
+
+    def test_ask_questions_have_no_paths(self):
+        for _, span in self.ask_spans():
+            q = self.ask_question(span)
+            for bad in ("scrum/", "lanes/", "<first matching file>", "<first files>"):
+                self.assertNotIn(bad, q, span)
+            self.assertIsNone(re.search(r"/[\w<>.-]*\.[A-Za-z]", q), span)
+        text = self.rules()
+        self.assertEqual(text.count("`$F/jobs/$ID/stop.md`"), 6)  # stops.md, schema, worktree files, main checkout, 2 agent rules
+
+    def test_ask_labels_plain(self):
+        import shlex
+        for name, span in self.ask_spans():
+            filled = span
+            for ph in ("$ID", "$P", "<id>", "<P>"):
+                filled = filled.replace(ph, "123-sample")
+            words = shlex.split(filled)
+            options = [words[i + 1].partition("=") for i, w in enumerate(words) if w in ("--a", "--b", "--c")]
+            for label, _, command in options:
+                self.assertNotIn(label, ("Abort", "Keep", "Discard", "Requeue", "Approve & merge", "Retry", "Resume",
+                                         "Send back"), span)
+                if command.startswith("abort ") and name != "lilguy":
+                    self.assertTrue(command.endswith((" --cascade", " --requeue")), span)
+                if command.endswith(" --cascade"):
+                    self.assertEqual(label, "Remove this job", span)
+                if command.endswith(" --requeue"):
+                    self.assertEqual(label, "Put back on the backlog", span)
+                if command.startswith("rework "):
+                    self.assertEqual(label, "Send back with a note", span)
+
+    def test_stops_lane_shape(self):
+        stops = self.lane("stops")
+        self.assertLessEqual(len(stops.splitlines()), 15)
+        for phrase in ("then one plain sentence with no file paths", "`jobs/<id>/stop.md`",
+                       "`Remove this job=abort <id> --cascade`", "`Send back with a note`",
+                       "`--recommend <key> '<why>'`", "by your own judgement", "every `'` removed",
+                       "A re-ask passes the same question, options and --recommend"):
+            self.assertIn(phrase, stops, phrase)
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        rule = self.section(text, "**Every stop is a closed question.**", "\n\n")
+        self.assertIn("Read `$HOME/.claude/skills/trevskills-scrum/lanes/stops.md` for the Issue / Options / Recommended "
+                      "shape every question takes.", rule)
+        self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
+
     def test_merge_main_checkout_self_heal(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Routing")
         guard = self.section(merge, "**Main checkout guard", "2. Run `B set $ID stage=merging`")
         for phrase in ("run project.md's Test command (its `- Test:` line; `none` or missing counts as a fail) in `$REPO`",
                        "invoke `/trevskills-commitpush` via the Skill tool in `$REPO`", "continue the merge",
-                       """--a "Keep=resume $ID" --b 'Discard=shell: git checkout -- <the files>'""",
-                       '--a "Resume=resume $ID" --b "Abort=abort $ID"',
+                       """--a "Keep my changes and carry on=resume $ID" --b 'Throw away the changes=shell: git checkout -- <the files>' """
+                       """--c "Remove this job=abort $ID --cascade" --recommend <key> '<why>'""",
+                       '--a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade"',
+                       "write those files to `$F/jobs/$ID/stop.md`",
                        "Never stash, clean or switch branches in the main checkout on your own",
-                       "Only the Discard option Trevor picks throws anything away."):
+                       "Only the Throw away the changes option Trevor picks throws anything away."):
             self.assertIn(phrase, guard, phrase)
         self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
 
@@ -1716,8 +1786,9 @@ class ContractTest(unittest.TestCase):
         for phrase in ('`B rules-check $ID --worktree "$WT" --base "$BASE"`', "spawn `scrum-review-rules` and wait for it",
                        "HEAD=$HEAD", "its second line is `Reviewed: $HEAD`, reuse it",
                        "is `VERDICT: PASS` and its second line is `Reviewed: $HEAD`, continue Merge without a human",
-                       "`B ask $ID 'Hard stop: agent rules — <first matching file>; <why>'",
-                       '--a "Merge anyway=approve $ID"', "--b 'Send back=rework <id>",
+                       "`B ask $ID 'Hard stop: agent rules — this change edits scrum rules files, listed in stop.md; <why>'",
+                       "Write the matching files to `$F/jobs/$ID/stop.md`",
+                       '--a "Merge anyway=approve $ID"', "--b 'Send back with a note=rework <id>",
                        "a missing or unreadable file, another HEAD) counts as CHANGES"):
             self.assertIn(phrase, gate, phrase)
         self.assertLess(gate.index("1. **Script rules.**"), gate.index("2. **Judged rules.**"))
@@ -1749,7 +1820,8 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         step5 = self.section(text, "5. **Conflicts.**", "6. **Merge:**")
         self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
-                      "$DEFAULT after 2 tries.\" --kind conflict --a \"Requeue=abort $ID --requeue\" --b \"Abort=abort $ID\"` and stop.", step5)
+                      "$DEFAULT after 2 tries.\" --kind conflict --a \"Put back on the backlog=abort $ID --requeue\" "
+                      "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'` and stop.", step5)
         for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
             self.assertIn(phrase, step5, phrase)
 
@@ -1789,7 +1861,7 @@ class ContractTest(unittest.TestCase):
         reasons = re.findall(r"`B ask \$ID '([^']*)'", text + debug)
         for gone in ("debug: no repro", "debug: repro does not fail"):
             self.assertEqual([r for r in reasons if r.startswith(gone)], [], gone)
-        self.assertIn("B ask $ID 'debug: blocked — <line 2>' --a \"Re-diagnose=rework $ID", debug)
+        self.assertIn("B ask $ID 'debug: blocked — <line 2>' --a \"Send back with a note=rework $ID", debug)
 
     def test_bigboy_gaps_filed_not_stopped(self):
         text = self.rules()
@@ -1840,7 +1912,10 @@ class ContractTest(unittest.TestCase):
         # an older `bigboy blocked` fallback names no aborted child: Resume must not discard its waiting children
         self.assertIn("only the `waiting` children that depend (directly or through another `waiting` child) on an "
                       "aborted sibling", resume)
-        self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Resume=resume <id>\" --b \"Abort=abort <id>\"`", resume)
+        self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Carry on=resume <id>\" "
+                      "--b \"Remove this job=abort <id> --cascade\" --recommend <key> '<why>'`", resume)
+        self.assertEqual(resume.count("same question, options and --recommend"), 2)
+        self.assertIn("after Trevor picks Throw away the changes", resume)
         for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",
                        "find the step whose `B ask` wrote the question"):
             self.assertIn(phrase, resume, phrase)
@@ -2194,15 +2269,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
         for phrase in ("`lane` is `debug`", "after CI fix", "Repro test untouched",
-                       "B ask $ID 'debug: checks fail after CI fix — <first failing check>' --a \"Send back=rework $ID"):
+                       "B ask $ID 'debug: checks fail after CI fix — <first failing check>' --a \"Send back with a note=rework $ID"):
             self.assertIn(phrase, step6, phrase)
         self.assertLess(step6.index("after CI fix"), step6.index("gh pr merge"))
 
     def test_merge_gh_missing_fix_installs_first(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
-        self.assertIn("GitHub CLI is not installed or not signed in; branch scrum/$ID is local only. Run brew "
-                      "install gh, then gh auth login, before you retry.\" --a \"Retry=approve $ID\"", merge)
+        self.assertIn("GitHub CLI is not installed or not signed in, so the branch is local only; run brew "
+                      "install gh, then gh auth login, before you retry.\" --a \"Try again=approve $ID\"", merge)
         self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
 
 
@@ -2333,7 +2408,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "Read JOB_DIR/unblock-N.md and follow Instructions.",
                        "Revise spec.md from the Instructions in JOB_DIR/unblock-N.md.", "never raises `limit`",
                        "same `--kind`", "skip the needs-human side steps", "BigBoy lane** step 6", "Roadmap lane** stop rule",
-                       "Cloud lane"):
+                       "Cloud lane",
+                       "pass `--recommend <key> '<why>'` with the key you pick among the For Trevor options",
+                       "same question, options and --recommend as the original ask"):
             self.assertIn(phrase, text, phrase)
         for kind in ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render"):  # board.UNBLOCK_KINDS
             self.assertIn(f"`{kind}`", text, kind)
