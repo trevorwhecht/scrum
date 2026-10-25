@@ -794,9 +794,18 @@ class ContractTest(unittest.TestCase):
               "unsaved edits).")
         b6 = ("   - When you move code to another file, grep the tests for the old file path; retarget any "
               "test that reads that source file to the new path and change no `expect`.")
-        for line in (b1, b2, b3, b4, b5, b6, step2, must_fail, handoff):
+        b7 = ("   - An API route checks each request field's type and format (a parseable date, a string "
+              "where a string is expected) before any database call, and answers a malformed one with 400 "
+              "naming the field, never a 500 from the database layer.")
+        b8 = ("   - Writes from one request that change the same record and its children (an order and its "
+              "lines) run in one transaction, so a failure leaves none of them applied.")
+        b9 = ("   - An update matches an existing row by its id, never by a display field such as a "
+              "description or a name.")
+        markup = "UB-38, UB-30)."
+        for line in (b1, b2, b3, b4, b5, b6, b7, b8, b9, step2, must_fail, handoff):
             self.assertEqual(text.count(line + "\n"), 1, line)
         self.assertIn(step2 + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
+        self.assertIn(markup + "\n" + b7 + "\n" + b8 + "\n" + b9 + "\n" + step3, text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
         self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
         self.assertIn("\n" + running_app, text)
