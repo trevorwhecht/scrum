@@ -8,7 +8,12 @@
                                    clears the pause
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...]  park the job at needs-human with a
                                    closed question (command: approve|resume|abort [--requeue] <id>, rework <id> "<text>",
-                                   shell: <cmd>), log it to questions.log
+                                   shell: <cmd>), log it to questions.log. With [--kind K] (K in UNBLOCK_KINDS, under 2
+                                   unblocks, not yet unblocked for K) the job is not parked: it keeps its stage, the
+                                   unblock is logged and {"unblock": true, "n": N} is printed; else it parks and prints
+                                   {"unblock": false} (lanes/unblock.md)
+  board.py unblock-log <id>        read jobs/<id>/unblock-<unblocks>.md, log its verdict line to questions.log, print
+                                   {"verdict","blocker","kind","n"} (verdict INVALID when missing or unreadable)
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
@@ -2392,12 +2397,19 @@ def questions_log(root, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def cmd_ask(root, job_id, question, options):
+UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render")
+UNBLOCK_MAX = 2  # unblocks per job, ever; a kind is unblocked at most once (the loop guard compares kinds, not text)
+
+
+def cmd_ask(root, job_id, question, options, kind=None):
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
-    order. Returns the stored option dicts."""
+    order. Returns the stored option dicts. An eligible kind (lanes/unblock.md) leaves the job in its stage and
+    returns {"unblock": True, "n": N} instead."""
     question = question.strip()
     if not question:
         raise SystemExit("ask needs a question")
+    if kind is not None and not re.fullmatch(r"[a-z][a-z-]*", kind):
+        raise SystemExit(f"bad kind {kind!r}; expected lowercase words joined by hyphens")
     if not 2 <= len(options) <= 3:
         raise SystemExit(f"ask needs 2 or 3 options, got {len(options)}")
     parsed = []
@@ -2412,6 +2424,13 @@ def cmd_ask(root, job_id, question, options):
         parsed.append({"key": key, "label": label, "command": command})
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
+        kinds = job.get("unblockKinds", [])
+        if kind in UNBLOCK_KINDS and job.get("unblocks", 0) < UNBLOCK_MAX and kind not in kinds:
+            n = job.get("unblocks", 0) + 1
+            job.update(unblocks=n, unblockKinds=[*kinds, kind], updatedAt=now())
+            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                                 "kind": kind, "unblock": n, "question": question})
+            return {"unblock": True, "n": n}
         was = job["stage"]
         # a session that did not load the scrum agent types is a session fault: stalled, so auto_resume retries it
         reason = f"{STALLED}{was}: {question}" if was in WATCHED and AGENT_TYPES_RE.search(question) else question
@@ -2423,6 +2442,22 @@ def cmd_ask(root, job_id, question, options):
     if was != "needs-human":
         play(sound("needs-human"))
     return parsed
+
+
+def cmd_unblock_log(root, job_id):
+    """Log the verdict of the job's latest scrum-unblocker file (jobs/<id>/unblock-<unblocks>.md) to questions.log."""
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        n, kind = job.get("unblocks", 0), (job.get("unblockKinds") or [None])[-1]
+        try:
+            lines = (Path(root) / "jobs" / job_id / f"unblock-{n}.md").read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        first = lines[0].strip() if lines else ""
+        verdict = first[9:] if first in ("VERDICT: REWORK", "VERDICT: RESPEC", "VERDICT: ESCALATE") else "INVALID"
+        blocker = lines[1].strip() if len(lines) > 1 else ""
+        questions_log(root, {"date": now(), "job": job_id, "kind": kind, "verdict": verdict, "blocker": blocker})
+    return {"verdict": verdict, "blocker": blocker, "kind": kind, "n": n}
 
 
 def cmd_answer(root, job_id, key):
@@ -3120,6 +3155,8 @@ def main(argv=None):
     ak.add_argument("--a", required=True, metavar="LABEL=COMMAND")
     ak.add_argument("--b", required=True, metavar="LABEL=COMMAND")
     ak.add_argument("--c", metavar="LABEL=COMMAND")
+    ak.add_argument("--kind")
+    sub.add_parser("unblock-log").add_argument("id")
     an = sub.add_parser("answer")
     an.add_argument("id")
     an.add_argument("key", choices=("a", "b", "c"))
@@ -3219,7 +3256,11 @@ def main(argv=None):
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "ask":
-        cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None])
+        out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind)
+        if a.kind is not None:
+            print(json.dumps(out if isinstance(out, dict) else {"unblock": False}))
+    elif a.cmd == "unblock-log":
+        print(json.dumps(cmd_unblock_log(a.dir, a.id)))
     elif a.cmd == "answer":
         print(json.dumps(cmd_answer(a.dir, a.id, a.key)))
     elif a.cmd == "next":
