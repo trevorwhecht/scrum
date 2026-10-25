@@ -1976,15 +1976,13 @@ def free_disk_gb(path):
 def machine_ok(path):
     """None when the machine has room for new work, else why not: free RAM, then swap, then free disk. Gates new claims,
     resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
-    return machine_verdict(free_ram_pct(), swap_used_pct(), free_disk_gb(path))
-
-
-def machine_verdict(ram, swap, disk):
-    """machine_ok's answer for readings already taken (serve.py's /api/machine reads each once)."""
+    ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
+    swap = swap_used_pct()
     if swap is not None and swap > MAX_SWAP_PCT:
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
+    disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
     return None

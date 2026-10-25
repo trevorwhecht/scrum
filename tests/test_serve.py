@@ -965,7 +965,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None}))
-        self.assertEqual(disk, [ROOT / "skills" / "trevskills-scrum"], "disk is read on serve.py's own volume")
+        self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
     def test_answer_unknown_command(self):

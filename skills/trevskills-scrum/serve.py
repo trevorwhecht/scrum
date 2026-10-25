@@ -874,12 +874,13 @@ def save_attachment(root, data, mime):
 
 def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
-    file's volume (the dashboard spans every project, and they share one disk)."""
-    ram, swap, disk = board.free_ram_pct(), board.swap_used_pct(), board.free_disk_gb(HERE)
+    file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
+    ms each) so its verdict is exactly the gate's, whatever checks it grows."""
     r = lambda v: None if v is None else round(v, 1)
-    return {"free_ram_pct": r(ram), "swap_pct": r(swap), "free_disk_gb": r(disk),
-            "min_free_ram_pct": board.MIN_FREE_RAM_PCT, "max_swap_pct": board.MAX_SWAP_PCT,
-            "min_free_disk_gb": board.MIN_FREE_DISK_GB, "verdict": board.machine_verdict(ram, swap, disk)}
+    return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
+            "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
+            "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
+            "verdict": board.machine_ok(HERE)}
 
 
 def claude_usage(now):
