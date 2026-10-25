@@ -15,7 +15,8 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
-#status,#routing{color:var(--muted);font-size:12px}
+#status,#routing,#machine{color:var(--muted);font-size:12px}
+#machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -204,6 +205,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
+  <span id="machine" hidden data-agent-hint="This Mac's free RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; orange marks a reading within 10 points (10 GB) of its limit, red one past it, and the trailing red text names the failing reading."></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
@@ -521,7 +523,29 @@ function renderSelect(sel, value, withAll) {
   sel.value = value;
 }
 
+// "danger" past board.machine_ok's limit, "low" within 10 points (10 GB) of it, else "ok"; an unknown reading is ok.
+function machineLevel(value, kind, s) {
+  if (value == null) return "ok";
+  const [bad, near] = kind === "swap" ? [value > s.max_swap_pct, value > s.max_swap_pct - 10]
+    : kind === "ram" ? [value < s.min_free_ram_pct, value < s.min_free_ram_pct + 10]
+    : [value < s.min_free_disk_gb, value < s.min_free_disk_gb + 10];
+  return bad ? "danger" : near ? "low" : "ok";
+}
+
+function renderMachine(m) {
+  const el = $("machine");
+  if (!el) return;
+  el.hidden = !m;
+  if (!m) return;
+  const part = (kind, label, v, unit) =>
+    `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
+  el.innerHTML = [part("ram", "RAM", m.free_ram_pct, "% free"), part("swap", "swap", m.swap_pct, "%"),
+    part("disk", "disk", m.free_disk_gb, " GB")].join(" · ")
+    + (m.verdict ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
+}
+
 async function poll() {
+  getJson("api/machine", null).then(renderMachine);  // not awaited: memory_pressure never delays the board
   try {
     const res = await fetch("api/projects", {cache: "no-store"});
     if (res.status === 404) return $("status").textContent = STALE;

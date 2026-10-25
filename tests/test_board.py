@@ -1193,17 +1193,13 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, a, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
 
-    def test_runall_ready_caps_in_progress_at_five(self):
-        self.assertEqual(board.RUNALL_MAX_IN_PROGRESS, 5)
+    def test_runall_ready_has_no_count_cap(self):
         parent, kids = self.runall(7)
         for i, k in enumerate(kids):
             self.spec(k, f"src/{i}.py")
         out = board.cmd_ready(self.root, parent)
-        self.assertEqual((out["ready"], out["in_progress"]), (kids[:5], 5))
+        self.assertEqual((out["ready"], out["in_progress"]), (kids, 7))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
-        board.cmd_set(self.root, kids[0], ["stage=done"])
-        out = board.cmd_ready(self.root, parent)
-        self.assertEqual((out["ready"], out["in_progress"]), ([kids[5]], 5))
         # A spec-less Run-all child starts only alone.
         parent, (a, b) = self.runall(2)
         self.spec(b, "src/b.py")
@@ -1342,9 +1338,9 @@ class BoardTest(unittest.TestCase):
         parent, kids = self.runall(7)
         for i, k in enumerate(kids):
             self.spec(k, f"src/m{i}.py")
-        with self.machine("40", "1000"), mock.patch.object(board, "slot_cap", return_value=7):
+        with self.machine("40", "1000"):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:4])
-        with self.machine("27", "1000"), mock.patch.object(board, "slot_cap", return_value=7):
+        with self.machine("27", "1000"):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[4:5])
         self.assertEqual(self.child(parent)["stage"], "running")
 
@@ -2305,47 +2301,41 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, b, ["stage=done"])
         board.cmd_set(self.root, a, ["stage=build"])
         self.assertIsNone(board.resume_blocker(self.root, a))
-        # (c) Run-all cap: RUNALL_MAX_IN_PROGRESS (5) with no pacing.
+        # (c) no count cap: five disjoint Run-all siblings in progress, even with usage.json over pace.
         _, kids = self.runall(7)
         for i, k in enumerate(kids):
             self.spec(k, f"src/r{i}.py")
         board.cmd_set(self.root, kids[0], stalled, internal=True)
         for k in kids[1:6]:
             board.cmd_set(self.root, k, ["stage=build"])
-        text = board.resume_blocker(self.root, kids[0])
-        self.assertEqual((text, text.ids), ("5 siblings in progress (cap 5)", kids[1:6]))
-        board.cmd_set(self.root, kids[5], ["stage=done"])
-        self.assertIsNone(board.resume_blocker(self.root, kids[0]))
-        # (c) a fresh usage.json with projected use >= 125% paces the cap down to 1 for Run-all and BigBoy alike.
         now = int(__import__("time").time())
         usage = Path(self.tmp.name) / "usage.json"
         usage.write_text(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": now + 9000}},
                                      "written_at": now}))
         with mock.patch.dict(os.environ, {"SCRUM_USAGE": str(usage)}):
-            text = board.resume_blocker(self.root, kids[0])
-            self.assertEqual((text, text.ids), ("4 siblings in progress (cap 1)", kids[1:5]))
+            self.assertIsNone(board.resume_blocker(self.root, kids[0]))
             board.cmd_set(self.root, b, ["stage=build"])
             board.cmd_set(self.root, a, stalled, internal=True)
-            text = board.resume_blocker(self.root, a)
-            self.assertEqual((text, text.ids), ("1 siblings in progress (cap 1)", [b]))
+            self.assertIsNone(board.resume_blocker(self.root, a))
+        board.cmd_set(self.root, b, ["stage=done"])
         self.assertIsNone(board.resume_blocker(self.root, a))  # BigBoy without pacing has no cap
 
     def test_live_sessions_count_as_busy_siblings(self):
         """A child serve.py just spawned still reads needs-human (or waiting) on the board; `live` counts it as busy so
-        one sweep cannot resume or claim past the cap."""
+        one sweep cannot resume or claim beside an overlapping sibling."""
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
-        parent, kids = self.runall(8)
+        parent, kids = self.runall(4)
         for i, k in enumerate(kids):
-            self.spec(k, f"src/l{i}.py")
-        for k in kids[:6]:
+            self.spec(k, f"src/l{i % 2}.py")  # kids 0 and 2 share src/l0.py, kids 1 and 3 share src/l1.py
+        for k in kids[:2]:
             board.cmd_set(self.root, k, stalled, internal=True)
         self.assertIsNone(board.resume_blocker(self.root, kids[0]))
-        text = board.resume_blocker(self.root, kids[0], live=set(kids[1:6]))
-        self.assertEqual((text, text.ids), ("5 siblings in progress (cap 5)", kids[1:6]))
+        text = board.resume_blocker(self.root, kids[0], live={kids[2]})
+        self.assertEqual((text, text.ids), (f"sibling {kids[2]} shares src/l0.py", [kids[2]]))
         self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
-        out = board.cmd_ready(self.root, parent, live=set(kids[:5]))
-        self.assertEqual(out["ready"], [], "5 live resumes fill the cap")
-        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], kids[6:8])
+        out = board.cmd_ready(self.root, parent, live=set(kids[:2]))
+        self.assertEqual(out["ready"], [], "live resumes block the waiting children that share their files")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], [kids[3]])
 
     # --- cloud lane ---
     def test_new_with_id_keeps_the_given_id(self):

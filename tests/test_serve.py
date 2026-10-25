@@ -1,5 +1,4 @@
 import inspect, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -892,38 +891,33 @@ class ServeTest(unittest.TestCase):
                                                       "Fix: click Resume when 123-sib finish."}))
         self.assert_nothing_ran(m)
 
-    def test_resume_refused_at_machine_wide_session_cap(self):
-        """A standalone job has no siblings: only the usage-pace cap (when pacing is active) or the machine ceiling of 8
-        live sessions stops it resuming. With no pacing, 6 live sessions still resume."""
-        ps = Path(self.tmp.name) / "ps.txt"
-        two = ["/opt/homebrew/bin/claude -p /trevskills-scrum resume 1-a --model sonnet",
-               "claude -p /trevskills-scrum approve 2-b", "vim serve.py"]  # every scrum action counts; vim does not
-        three = two + ["claude -p /trevskills-scrum resume 3-c"]
-        six = three + [f"claude -p /trevskills-scrum resume {i}-d" for i in range(4, 7)]
-        job = {"id": "9-x", "lane": "standard"}
-        for lines, count, cap, refused in ((two, 2, 3, False), (three, 3, 3, True), (two, 2, 1, True),
-                                           (six, 6, None, False)):
-            with self.subTest(count=count, cap=cap):
-                ps.write_text("\n".join(lines) + "\n")
-                with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
-                        mock.patch.object(self.serve.board, "pace_cap", return_value=cap):
-                    self.assertEqual(self.serve.board.live_sessions(), count)
-                    out = self.serve.resume_refusal("repo", self.root, job)
-                self.assertEqual(out, f"can't resume yet: {count} sessions running (usage cap {cap}). "
-                                      "Fix: click Resume when one finishes." if refused else None)
-
-    def test_resume_pace_cap_uses_runall_base(self):
-        """Light usage (projected 12.5 %): pace_cap gives the Run-all base 5 + 2 = 7, so 6 live resume and 7 wait."""
-        ps, usage = Path(self.tmp.name) / "ps.txt", Path(self.tmp.name) / "usage.json"
-        now = time.time()  # 10 % used, 1 h of 5 left
+    def test_resume_ignores_pace_and_session_count(self):
+        """No usage pace and no session count stops a resume (job 282): only machine_ok and a Run-all/BigBoy child's
+        overlap rules do."""
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        ps, usage, root = base / "ps.txt", base / "usage.json", base / "scrum"
+        ps.write_text("claude -p /trevskills-scrum resume 1-a\n" * 7)
+        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
-            "five_hour": {"used_percentage": 10, "resets_at": now + 3600}}}))
-        job = {"id": "9-x", "lane": "standard"}
-        for count, out in ((6, None), (7, "can't resume yet: 7 sessions running (usage cap 7). "
-                                          "Fix: click Resume when one finishes.")):
-            ps.write_text("claude -p /trevskills-scrum resume 1-a\n" * count)
-            with mock.patch.dict(os.environ, SCRUM_PS=str(ps), SCRUM_USAGE=str(usage)):
-                self.assertEqual(self.serve.resume_refusal("repo", self.root, job), out)
+            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+        root.mkdir()
+        (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
+        a, b = self.serve.board.cmd_runall_start(root)["children"]
+        for k in (a, b):
+            (root / "jobs" / k / "spec.md").write_text("# x\n## Likely files\n- `src/shared.py`: both\n")
+        self.serve.board.cmd_set(root, a, ["stage=needs-human", "reason=stalled in build: x. Fix: click Resume."],
+                                 internal=True)
+        self.serve.board.cmd_set(root, b, ["stage=build"])
+        kid = self.serve.board.find(self.serve.board.read_board(root), a)
+        alone = {"id": "9-x", "lane": "standard"}
+        with mock.patch.dict(os.environ, SCRUM_PS=str(ps), SCRUM_USAGE=str(usage)):
+            self.assertEqual(self.serve.board.live_sessions(), 7)
+            self.assertIsNone(self.serve.resume_refusal("repo", root, alone))
+            self.assertEqual(self.serve.resume_refusal("repo", root, kid),
+                             f"can't resume yet: sibling {b} shares src/shared.py. Fix: click Resume when {b} finish.")
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+                self.assertEqual(self.serve.resume_refusal("repo", root, alone),
+                                 "waiting: free RAM 14% (< 20%). Fix: click Resume once memory or disk frees up.")
 
     def test_resume_refused_at_session_ceiling(self):
         """Job 283: MAX_SESSIONS live sessions refuse a resume through the machine guard (job 279's fixed 8 is gone)."""
@@ -938,25 +932,46 @@ class ServeTest(unittest.TestCase):
                              + "14 sessions running (ceiling 14). Fix: click Resume once memory or disk frees up.")
 
     def test_resume_refusal_machine_guard(self):
-        """Low RAM or disk refuses every resume before the session-count and sibling checks; a pass gives the old results."""
+        """Low RAM or disk refuses every resume before the sibling checks; a pass gives the old results."""
         ps = Path(self.tmp.name) / "ps.txt"
         ps.write_text("claude -p /trevskills-scrum resume 1-a\nclaude -p /trevskills-scrum resume 2-b\n")
         blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         alone, kid = {"id": "9-x", "lane": "standard"}, {"id": "8-k", "lane": "standard", "parent": "100-parent"}
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
-                mock.patch.object(self.serve.board, "pace_cap", return_value=1), \
                 mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
             for ram, disk, why in (("14", "1000", "free RAM 14% (< 20%)"), ("100", "6.2", "free disk 6.2 GB (< 10 GB)")):
                 with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_FREE_DISK_GB=disk):
                     for job in (alone, kid):
                         self.assertEqual(self.serve.resume_refusal("repo", self.root, job),
                                          f"waiting: {why}. Fix: click Resume once memory or disk frees up.")
-            self.assertEqual(self.serve.resume_refusal("repo", self.root, alone),
-                             "can't resume yet: 2 sessions running (usage cap 1). Fix: click Resume when one finishes.")
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
         with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
             self.assertEqual(self.serve.resume_refusal("repo", self.root, kid),
                              "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish.")
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
+
+    def test_api_machine(self):
+        keys = ["free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "swap_pct", "verdict"]
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
+            code, out = self.req("GET", "/api/machine")
+        self.assertEqual((code, sorted(out)), (200, keys))
+        self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
+                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)"})
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25"):
+            self.assertEqual(self.req("GET", "/api/machine")[1],
+                             {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
+                              "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)"})
+        disk = []
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB=""), \
+                mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
+                mock.patch.object(self.serve.board.shutil, "disk_usage",
+                                  side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
+            code, out = self.req("GET", "/api/machine")
+        self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
+                                             "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
+                                             "verdict": None}))
+        self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
+        self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
@@ -1072,7 +1087,8 @@ class ServeTest(unittest.TestCase):
         self.assertFalse(s.hold_limited(self.root, dict(seen), 1_700_000_000))
         self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_play_on_paused_parent_resumes_at_most_the_cap(self):
+    def test_play_on_paused_parent_resumes_all_but_overlapping_children(self):
+        """No count cap (job 282): Play resumes every paused child but those sharing a file with one just resumed."""
         b, s = self.serve.board, self.serve
         parent = b.cmd_new(self.root, "Capped parent")
         kids = [b.cmd_new(self.root, f"Capped kid {i}") for i in range(7)]
@@ -1080,7 +1096,7 @@ class ServeTest(unittest.TestCase):
         for i, k in enumerate(kids):
             self.edit_job(k, parent=parent, stage="build", parallel=True)
             (self.root / "jobs" / k).mkdir(parents=True, exist_ok=True)
-            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/cap{i}.py`: why\n")
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/cap{i % 5}.py`: why\n")
         b.cmd_pause(self.root, parent)
 
         def fake_spawn(project, root, jid, action, prompt, flags=()):
@@ -1091,7 +1107,7 @@ class ServeTest(unittest.TestCase):
         self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in kids])
         with mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})[0], 202)
-        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:5], "a just-spawned resume holds its slot")
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], kids[:5], "a just-spawned resume holds its files")
         for k in kids[5:]:
             job = self.stage_of(k)
             self.assertEqual(job["stage"], "needs-human")
@@ -4620,37 +4636,32 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual(self.spawned(), [("002-claimed", "start", "/trevskills-scrum start 002-claimed")])
 
     def test_orphan_blocked_by_resume_blocker_stays_eligible(self):
-        for case in ("overlap", "slot cap 1"):
-            with self.subTest(case=case):
-                self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear()
-                shared = "src/shared.py" if case == "overlap" else "src/{}.py"
-                for jid in ("002-claimed", "003-sib"):
-                    (self.root / "jobs" / jid).mkdir(exist_ok=True)
-                    (self.root / "jobs" / jid / "spec.md").write_text(
-                        f"# x\n## Likely files\n- `{shared.format(jid)}`: why\n")
-                self.write("running", {"002-claimed": "spec", "003-sib": "build"})
-                data = json.loads((self.root / "board.json").read_text())
-                old = (datetime.now().astimezone() - timedelta(minutes=4)).isoformat()
-                data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
-                data["jobs"][2].update(parallel=True)
-                (self.root / "board.json").write_text(json.dumps(data))
-                with mock.patch.object(self.board, "slot_cap", return_value=1) if case == "slot cap 1" else nullcontext():
-                    self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
-                    kid = self.job("002-claimed")
-                    self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
-                    self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
-                    self.assertNotIn("idle/002-claimed/spec", self.serve.STALL_RESUMED)
-                    data["jobs"][2]["stage"] = "done"  # the sibling leaves its in-progress stage
-                    (self.root / "board.json").write_text(json.dumps(data))
-                    self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
-                    self.assertEqual(self.spawned(), [], "once per stage")
+        self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear()
+        for jid in ("002-claimed", "003-sib"):
+            (self.root / "jobs" / jid).mkdir(exist_ok=True)
+            (self.root / "jobs" / jid / "spec.md").write_text("# x\n## Likely files\n- `src/shared.py`: why\n")
+        self.write("running", {"002-claimed": "spec", "003-sib": "build"})
+        data = json.loads((self.root / "board.json").read_text())
+        old = (datetime.now().astimezone() - timedelta(minutes=4)).isoformat()
+        data["jobs"][1].update(updatedAt=old, parallel=True, worktree="/tmp/wt-002")
+        data["jobs"][2].update(parallel=True)
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(self.spawned(), [], "003-sib is in progress: 002-claimed must wait")
+        kid = self.job("002-claimed")
+        self.assertEqual((kid["stage"], kid["reason"]), ("spec", None))
+        self.assertNotIn("idle/002-claimed", self.serve.ORPHAN_RESPAWN)
+        self.assertNotIn("idle/002-claimed/spec", self.serve.STALL_RESUMED)
+        data["jobs"][2]["stage"] = "done"  # the sibling leaves its in-progress stage
+        (self.root / "board.json").write_text(json.dumps(data))
+        self.assertEqual(self.spawned(), [("002-claimed", "resume", "/trevskills-scrum resume 002-claimed")])
+        self.assertEqual(self.spawned(), [], "once per stage")
 
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: each tick the watchdog starts one headless run-all in every opted-in
     project with no work in flight and a claimable backlog line: Focus projects first, then the project that just
-    finished, then the most recently active, then the lowest n. Nothing starts when usage is over pace, and starts
-    stop at the first failed machine_ok (RAM or disk)."""
+    finished, then the most recently active, then the lowest n. Usage pace gates nothing; starts stop at the first
+    failed machine_ok (RAM or disk)."""
 
     def setUp(self):
         import serve
@@ -4971,14 +4982,13 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1); self.project("b", n=2)
         self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), self.started("a"))
 
-    def test_no_start_over_pace(self):
+    def test_auto_continue_ignores_pace(self):
         self.project("a", n=1)
-        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %: pace_cap gives 2, not None
+        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %: the old pace gate skipped this tick
         self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
-        self.assertEqual(self.tick(), [])
-        self.usage.write_text(json.dumps({"written_at": now - 3600, "rate_limits": {  # stale: no pacing
-            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+        with mock.patch.object(self.board, "machine_ok", return_value="free RAM 14% (< 20%)"):
+            self.assertEqual(self.tick(), [])
         self.assertEqual(self.tick(), self.started("a"))
 
     def test_no_start_without_claimable(self):

@@ -25,51 +25,16 @@ def usage(five=None, seven=None, written_at=NOW):
 
 
 class PaceCapTest(unittest.TestCase):
-    # five_hour with 9000 s left = half elapsed, so projected = 2 * used.
-    def test_pace_cap_math(self):
-        cap = lambda u, base=3: board.pace_cap(u, NOW, base)
-        # tiers
-        self.assertEqual(cap(usage(five=(20, 9000))), 5)            # P=40
-        self.assertIsNone(cap(usage(five=(20, 9000)), None))         # under pace, no base: no cap
-        self.assertEqual(cap(usage(five=(29.9, 9000))), 5)          # P just under 60
-        self.assertEqual(cap(usage(five=(30, 9000))), 3)            # P=60
-        self.assertEqual(cap(usage(five=(40, 9000))), 3)            # P=80
-        self.assertIsNone(cap(usage(five=(40, 9000)), None))         # on pace, no base: no cap
-        self.assertEqual(cap(usage(five=(50, 9000))), 2)            # P=100
-        self.assertEqual(cap(usage(five=(55, 9000))), 2)            # P=110
-        self.assertEqual(cap(usage(five=(55, 9000)), None), 2)      # min(None, 2) = 2
-        self.assertEqual(cap(usage(five=(55, 9000)), 1), 1)         # min(1, 2)
-        self.assertEqual(cap(usage(five=(62.5, 9000))), 1)          # P=125
-        # the Run-all base of 5: under 60% gives 7, 100% and 125% still give 2 and 1
-        self.assertEqual(cap(usage(five=(20, 9000)), 5), 7)         # P=40
-        self.assertEqual(cap(usage(five=(50, 9000)), 5), 2)         # P=100
-        self.assertEqual(cap(usage(five=(62.5, 9000)), 5), 1)       # P=125
-        self.assertEqual(cap(usage(five=(100, 9000)), None), 1)     # P=200
-        # the highest window wins: 5h P=40, 7d (half of 604800 left) P=130
-        self.assertEqual(cap(usage(five=(20, 9000), seven=(65, 302400))), 1)
-        # missing / unparseable
-        self.assertIsNone(cap(None))
-        self.assertIsNone(cap({}))
-        self.assertIsNone(cap({"rate_limits": "x", "written_at": NOW}))
-        self.assertIsNone(cap({"rate_limits": {"five_hour": {"used_percentage": 55, "resets_at": NOW + 9000}}}))
-        self.assertIsNone(cap(usage()))  # no windows
-        # stale: more than 300 s old; exactly 300 s and future still count as fresh
-        self.assertIsNone(cap(usage(five=(55, 9000 + 301), written_at=NOW - 301)))
-        self.assertEqual(cap(usage(five=(55, 9000 + 300), written_at=NOW - 300)), 2)
-        self.assertEqual(cap(usage(five=(55, 9000 - 60), written_at=NOW + 60)), 2)
-        # early window: under 10% elapsed (17000 s left of 18000) is skipped
-        self.assertIsNone(cap(usage(five=(50, 17000))))
-        self.assertEqual(cap(usage(five=(50, 16200))), 1)  # exactly 10% elapsed counts
-        # past resets_at: the window already rolled over
-        self.assertIsNone(cap(usage(five=(55, 0))))
-        self.assertIsNone(cap(usage(five=(55, -10))))
-        # used_percentage must be a number from 0 to 100
-        self.assertIsNone(cap(usage(five=(150, 9000))))
-        self.assertIsNone(cap(usage(five=(-1, 9000))))
-        self.assertIsNone(cap(usage(five=("55", 9000))))
-        self.assertIsNone(cap(usage(five=(True, 9000))))
-        # an unusable window is ignored, the other still counts
-        self.assertEqual(cap(usage(five=(55, 0), seven=(40, 302400))), 3)
+    def test_pace_cap_always_none(self):
+        """Usage pacing gates nothing (job 282); continue.py reads pace_cap, so it must stay importable and say None."""
+        for u in (usage(five=(62.5, 9000)), usage(five=(100, 9000), seven=(100, 302400)), usage(five=(20, 9000)),
+                  None, {}, "x"):
+            for base in (None, 1, 3, 5):
+                self.assertIsNone(board.pace_cap(u, NOW, base), (u, base))
+
+    def test_no_fixed_session_caps(self):
+        self.assertFalse(hasattr(board, "slot_cap"))
+        self.assertFalse(hasattr(board, "RUNALL_MAX_IN_PROGRESS"))
 
 
 class StatuslineTest(unittest.TestCase):
@@ -163,53 +128,20 @@ class ReadyPacingTest(unittest.TestCase):
             self.spec(k, f"src/{i}.py")
         return parent, kids[:-1]  # the last (exposure) child depends on all the others
 
-    def test_ready_runall_cap_follows_pacing(self):
-        for p5, claims in ((40, 7), (80, 5), (110, 2), (130, 1), (None, 5)):
+    def test_ready_ignores_usage_pacing_and_runall_cap(self):
+        """8 waiting non-overlapping children beside 6 in progress: only free RAM (ram_room) and machine_ok limit the
+        batch, never usage.json or a Run-all count cap."""
+        for ram, claims, reason in (("90", 8, None), ("14", 0, "waiting: free RAM 14% (< 20%)")):
             self.tmp.cleanup()
             self.root.parent.mkdir(parents=True, exist_ok=True)
-            if p5 is not None:
-                self.write_usage(p5)
-            parent, kids = self.runall(8)
-            out = board.cmd_ready(self.root, parent)
-            self.assertEqual((out["ready"], out["in_progress"]), (kids[:claims], claims), p5)
-        # a stale usage file means no throttling
-        self.tmp.cleanup()
-        self.root.parent.mkdir(parents=True, exist_ok=True)
-        self.usage.write_text(json.dumps(usage(five=(55, 9000), written_at=int(time.time()) - 301)))
-        parent, kids = self.runall(8)
-        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[:5])
-
-    def test_ready_bigboy_throttled_when_over_pace(self):
-        for p5, claims in ((None, 4), (40, 4), (80, 4), (110, 2), (130, 1)):
-            self.tmp.cleanup()
-            self.root.parent.mkdir(parents=True, exist_ok=True)
-            if p5 is not None:
-                self.write_usage(p5)
-            parent, kids = self.bigboy(5)
-            out = board.cmd_ready(self.root, parent)
-            self.assertEqual((out["ready"], out["in_progress"]), (kids[:claims], claims), p5)
-
-    def test_ready_pacing_never_below_one_and_leaves_busy_alone(self):
-        now = int(time.time())
-        maxed = {"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": now + 9000},
-                                 "seven_day": {"used_percentage": 100, "resets_at": now + 302400}}, "written_at": now}
-        for make in (self.runall, self.bigboy):
-            self.tmp.cleanup()
-            self.root.parent.mkdir(parents=True, exist_ok=True)
-            self.usage.write_text(json.dumps(maxed))
-            parent, kids = make(4)
-            out = board.cmd_ready(self.root, parent)  # nothing in progress: still claims 1
-            self.assertEqual((out["ready"], out["in_progress"]), (kids[:1], 1))
-            # over the cap: a second child already in progress is left exactly as it is
-            board.cmd_set(self.root, kids[1], ["stage=build", "round=2", "builder=claude"])
-            before = self.jobs()
-            out = board.cmd_ready(self.root, parent)
-            self.assertEqual((out["ready"], out["in_progress"]), ([], 2))
-            after = self.jobs()
-            self.assertEqual(after, before)  # no child or parent field changed, no reason set
-            self.assertIsNone(after[parent].get("reason"))
-            self.assertEqual(after[parent]["stage"], "running")
-
+            self.write_usage(130)  # projected 130 %: the old pace cap was 1
+            parent, kids = self.runall(14)
+            for k in kids[:6]:
+                board.cmd_set(self.root, k, ["stage=build", "round=1", "builder=claude"])
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM=ram, SCRUM_SWAP_PCT="0"):
+                out = board.cmd_ready(self.root, parent)
+            self.assertEqual((out["ready"], out["in_progress"]), (kids[6:6 + claims], 6 + claims), ram)
+            self.assertEqual(self.jobs()[parent].get("reason"), reason, ram)
 
 if __name__ == "__main__":
     unittest.main()
