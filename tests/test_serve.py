@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
@@ -994,19 +995,19 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "swap_pct", "usage",
-                "verdict"]
+        keys = ["cooldown", "free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "sessions",
+                "swap_pct", "usage", "verdict"]
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
-                               "usage": "unknown"})
+                               "usage": "unknown", "cooldown": False, "sessions": 0})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25"):
             self.assertEqual(self.req("GET", "/api/machine")[1],
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
-                              "usage": "unknown"})
+                              "usage": "unknown", "cooldown": False, "sessions": 0})
         disk = []
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB=""), \
                 mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
@@ -1015,7 +1016,7 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
-                                             "verdict": None, "usage": "unknown"}))
+                                             "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
@@ -1081,6 +1082,137 @@ class ServeTest(unittest.TestCase):
                 "error": "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish."}))
         spawn.assert_not_called()
         self.assertNotIn("play_queued", self.stage_of(kid))
+
+    # --- cool down (job 305): a flag file that refuses every automatic start; Trevor's clicks still start work ---
+    def cooling(self):
+        flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
+        flag.write_text("")
+        return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
+
+    def test_cooldown_refuses_automatic_resume_post(self):
+        """continue.py POSTs {} to Resume: while cooling down that is an automatic start, refused before the queue."""
+        stalled = self.serve.board.cmd_new(self.root, "Cool stalled")
+        self.edit_job(stalled, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
+        self.addCleanup(self.serve.board.cmd_abort, self.root, stalled, False)
+        paused = self.paused_job("Cool paused")
+        with self.cooling(), mock.patch.object(self.serve, "spawn") as spawn:
+            for job_id in (stalled, paused):
+                for body in ({}, {"manual": "yes"}, {"manual": 1}):
+                    with self.subTest(job=job_id, body=body):
+                        before = self.stage_of(job_id)
+                        code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", body)
+                        self.assertEqual(code, 409)
+                        self.assertIn("cooling down", out["error"])
+                        self.assertEqual(self.stage_of(job_id), before, "not queued, nothing changed")
+                        self.assertNotIn("play_queued", self.stage_of(job_id))
+        spawn.assert_not_called()
+
+    def test_cooldown_manual_play_allowed(self):
+        b = self.serve.board
+        self.settle_board()
+        stalled = b.cmd_new(self.root, "Cool manual stalled")
+        self.edit_job(stalled, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
+        paused = self.paused_job("Cool manual paused")
+        parent, kid, wait = (b.cmd_new(self.root, t) for t in ("Cool parent", "Cool paused kid", "Cool waiting kid"))
+        self.edit_job(parent, lane="runall", stage="running", children=[kid, wait])
+        self.edit_job(kid, parent=parent, stage="build")
+        self.edit_job(wait, parent=parent, stage="waiting")
+        self.assertEqual(sorted(b.cmd_pause(self.root, parent)), sorted([parent, kid]))
+        with self.cooling():
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                for job_id in (stalled, paused):
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {"manual": True}),
+                                     (202, {"id": job_id, "action": "resume"}))
+            self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(stalled, "resume"), (paused, "resume")])
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{parent}/resume", {"manual": True}),
+                                 (202, {"id": parent, "action": "resume"}))
+            self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+            self.assertEqual(self.stage_of(wait)["stage"], "waiting", "no new claim while cooling down")
+            self.assertEqual(self.stage_of(parent)["reason"], "waiting: cooling down")
+            asked = self.asked("resume 1")
+            code, out, m = self.answer(asked, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
+            self.assertEqual((code, out), (202, {"id": asked, "action": "answer", "command": "resume"}))
+            m["resume"].assert_called_once()
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                item = b.backlog_op(self.root, "add", text="Cool run now", points=1)[-1]
+                code, out = self.req("POST", "/api/p/repo/backlog/run", {"index": item["index"]})
+            self.assertEqual(code, 202, out)
+            self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(out["id"], "start")])
+            low = self.paused_job("Cool low RAM")
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(self.serve, "spawn") as spawn:
+                self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{low}/resume", {"manual": True}),
+                                 (202, {"id": low, "action": "resume", "queued": True, "message": "queued, starts next"}))
+            spawn.assert_not_called()
+        for j in (stalled, kid, wait, parent, out["id"], asked):
+            if self.stage_of(j)["stage"] != "aborted":
+                b.cmd_abort(self.root, j, False)
+
+    def post_raw_bytes(self, path, data, headers=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", data=data,
+                                   headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(r) as res:
+                return res.status, json.loads(res.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, json.loads(e.read())
+
+    def test_cooldown_endpoint(self):
+        flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "nested" / "cooldown"
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            code, m = self.req("GET", "/api/machine")
+            self.assertEqual((code, m["cooldown"], m["sessions"], m["verdict"]), (200, False, 0, None))
+            for _ in range(2):  # idempotent
+                self.assertEqual(self.raw_post("/api/cooldown", {"on": True}), (200, {"cooldown": True}))
+                self.assertTrue(flag.is_file(), "creates the flag and its parent dir")
+            m = self.req("GET", "/api/machine")[1]
+            self.assertEqual((m["cooldown"], m["verdict"]), (True, "cooling down"))
+            for state in (True, False):
+                for body in ({"on": "yes"}, {"on": 1}, {"on": None}, {}, {"off": True}):
+                    with self.subTest(state=state, body=body):
+                        code, out = self.raw_post("/api/cooldown", body)
+                        self.assertEqual((code, out), (400, {"error": "on must be true or false"}))
+                        self.assertEqual(flag.exists(), state, "left as it was")
+                self.assertEqual(self.post_raw_bytes("/api/cooldown", b"{not json"), (400, {"error": "body must be JSON"}))
+                self.assertEqual(self.post_raw_bytes("/api/cooldown", json.dumps({"on": not state}).encode(),
+                                                     {"Host": "evil.example"}), (403, {"error": "forbidden"}))
+                self.assertEqual(flag.exists(), state, "a foreign Host changes nothing")
+                if state:
+                    for _ in range(2):  # off twice: the second has no file to remove
+                        self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
+                        self.assertFalse(flag.exists())
+            m = self.req("GET", "/api/machine")[1]
+            self.assertEqual((m["cooldown"], m["verdict"]), (False, None))
+            flag.write_text("")  # left over from an earlier serve.py run: still counts
+            self.assertEqual(self.req("GET", "/api/machine")[1]["cooldown"], True)
+            self.assertEqual(self.serve.board.machine_ok(self.root), "cooling down")
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
+            self.assertIsNone(self.serve.board.machine_ok(self.root), "the next tick may start work, no restart")
+
+    def test_cooldown_chimes_once_at_zero(self):
+        s, b = self.serve, self.serve.board
+        ps = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "ps.txt"
+        ps.write_text("claude -p /trevskills-scrum start 1-a\nclaude -p /trevskills-scrum build 2-b\n")
+        s.COOLDOWN_CHIMED = False
+        with self.cooling(), mock.patch.dict(os.environ, SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "SOUNDS_DIR", str(ps.parent)), mock.patch.object(b, "play") as play, \
+                mock.patch.object(b, "projects", return_value={}):
+            s.watchdog_tick()
+            self.assertEqual(play.call_count, 0, "2 sessions still finishing")
+            ps.write_text("vim board.py\n")
+            s.watchdog_tick(); s.watchdog_tick(); s.watchdog_tick()
+            self.assertEqual(play.call_args_list, [mock.call("/System/Library/Sounds/Blow.aiff")], "once at 0")
+            flag = Path(os.environ["SCRUM_COOLDOWN"])
+            flag.unlink()
+            s.watchdog_tick()
+            flag.write_text("")
+            s.watchdog_tick()
+            self.assertEqual(play.call_count, 2, "off then on re-arms it")
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": True}), (200, {"cooldown": True}))
+            s.watchdog_tick()
+            self.assertEqual(play.call_count, 3, "a POST off and on between ticks re-arms it too")
 
     def test_play_queued_cleared_on_abort_pause_and_play(self):
         b = self.serve.board
@@ -4082,6 +4214,7 @@ class AutoResumeTest(unittest.TestCase):
         self.assertNotIn("p/net", s.AUTO_RESUME)
         self.assertEqual(self.sweep(), ["net"])
 
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: job["id"] == "sib"))  # the in-progress sibling has a live session
     def test_auto_resume_skips_lilguy_and_slot_blocked_children(self):
         s = self.serve
         stalled = "stalled in plan: no board update for 30 min and no live session. Fix: click Resume."
@@ -4667,6 +4800,45 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("030-a", "resume")], "the guard stops the queue")
         self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],
                          [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
+
+    def test_cooldown_refuses_automatic_starts(self):
+        """Job 305: with the cool-down flag on, no watchdog path starts anything; with it gone the same boards start."""
+        flag = self.repo / "cooldown"
+        old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
+        stalled = "stalled in build: no live session. Fix: click Resume."
+        (self.root / "runs").mkdir()
+        (self.root / "runs" / "solo.log").write_text("Traceback: something else broke")
+        boards = {
+            "claim and orphan": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-claimed", "003-wait"]},
+                                 {"id": "002-claimed", "stage": "spec", "parent": "001-par", "updatedAt": old},
+                                 {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
+            "queued play and auto-resume": [
+                {"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": "2026-10-25T09:00:00+00:00"},
+                {"id": "011-solo", "stage": "needs-human", "reason": stalled, "runlog": "runs/solo.log"}],
+            "auto continue": []}
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
+        for case, jobs in boards.items():
+            for cooling in (True, False):
+                with self.subTest(case=case, cooling=cooling):
+                    self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear(); self.serve.AUTO_RESUME.clear()
+                    self.queue_board(*(dict(j) for j in jobs))
+                    if cooling:
+                        flag.write_text("")
+                    with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+                        spawn, _, _ = self.tick()
+                    flag.unlink(missing_ok=True)
+                    if cooling:
+                        spawn.assert_not_called()
+                        if case == "claim and orphan":
+                            self.assertTrue(self.job("001-par")["reason"].startswith("waiting: cooling down"))
+                            self.assertEqual((self.job("002-claimed")["stage"], self.job("003-wait")["stage"]),
+                                             ("spec", "waiting"))
+                        if case == "queued play and auto-resume":
+                            self.assertEqual(self.job("010-q")["play_queued"], "2026-10-25T09:00:00+00:00")
+                            self.assertEqual(self.job("011-solo")["reason"], stalled)
+                    else:  # the control: the same board starts work once the flag is gone
+                        self.assertTrue(spawn.called, case)
 
     def test_idle_runall_parent_starts_waiting_child(self):
         self.check_starts("runall")

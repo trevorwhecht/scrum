@@ -23,7 +23,7 @@ class MachineMeter(unittest.TestCase):
         self.assertIn('${job.play_queued ? "queued, starts next" : ""}', fn_body(text, "renderActions"),
                       "the queued text is drawn from the flag, so a re-render keeps it")
         poll = fn_body(text, "poll")
-        self.assertIn('getJson("api/machine", null).then(renderMachine)', poll)
+        self.assertIn('getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); })', poll)
         self.assertLess(poll.index('api/machine'), poll.index('fetch("api/projects"'),
                         "fetched before anything that can return early, on every poll")
         render = fn_body(text, "renderMachine")

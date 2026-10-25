@@ -15,7 +15,8 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
-#status,#routing,#machine{color:var(--muted);font-size:12px}
+#status,#routing,#machine,#cooldownState{color:var(--muted);font-size:12px}
+#cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 #machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
 #machine .ring{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:-2px;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 4px,black 4.5px)}
 #machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
@@ -208,6 +209,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
   <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use, its label and tooltip the free %. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it (grey with no reading); swap and disk turn orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists board.machine_ok refuses every automatic start: the watchdog's claims, auto-resumes, queued Plays, orphan respawns, auto continue and continue.py's Resume POSTs. Sessions already running finish; nothing is stopped. Trevor's own Play, Resume, closed-question answers and Run now still start work. The state text counts the headless sessions still running (board.live_sessions) and reads idle at 0, when serve.py plays one done sound. Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <select id="laneFilter" aria-label="Show pipeline"><option value="">All pipelines</option><option>roadmap</option><option>fast</option><option>standard</option><option>debug</option><option>bigboy</option><option>runall</option><option>lilguy</option></select>
@@ -564,6 +566,20 @@ function usagePart(u) {
   return `<span class="${level}">5h ${pct(u.five_hour_pct)} · 7d ${pct(u.seven_day_pct)}${u.allowance == null ? "" : ` · allowance ${esc(u.allowance)}`}</span>`;
 }
 
+// The Cool down button and its state text, from the same api/machine poll; a click's pending (disabled) state survives it.
+function renderCooldown(m) {
+  const btn = $("cooldown"), state = $("cooldownState");
+  if (!btn || !state) return;
+  btn.hidden = state.hidden = !m;
+  if (!m) return;
+  btn.dataset.on = m.cooldown ? "1" : "";
+  btn.textContent = m.cooldown ? "Resume work" : "Cool down";
+  const n = m.sessions || 0;
+  btn.dataset.sessions = n;
+  state.innerHTML = !m.cooldown ? "" : n ? `Cooling down · ${esc(n)} session${n === 1 ? "" : "s"} finishing`
+    : "Idle, safe to restart <code>sudo shutdown -r now</code>";
+}
+
 function renderMachine(m) {
   const el = $("machine");
   if (!el) return;
@@ -582,7 +598,7 @@ function renderMachine(m) {
 }
 
 async function poll() {
-  getJson("api/machine", null).then(renderMachine);  // not awaited: memory_pressure never delays the board
+  getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
   try {
     const res = await fetch("api/projects", {cache: "no-store"});
     if (res.status === 404) return $("status").textContent = STALE;
@@ -800,7 +816,7 @@ $("actions").addEventListener("submit", async e => {
   btn.disabled = true;
   try {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
-      : act === "reopen" ? {note: form.note.value} : act === "resume" || act === "pause" || act === "setup-done" ? {} : {feedback: form.feedback.value};
+      : act === "reopen" ? {note: form.note.value} : act === "resume" ? {manual: true} : act === "pause" || act === "setup-done" ? {} : {feedback: form.feedback.value};
     const out = await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/${act}`, body);
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();
@@ -1640,6 +1656,19 @@ async function loadRouting() {
   $("usageRows").innerHTML = usageRows(s);
 }
 $("routing").addEventListener("click", () => { if (usage) $("usage").showModal(); });
+$("cooldown").addEventListener("click", async e => {
+  const btn = e.currentTarget, focused = document.activeElement === btn;  // disabling drops focus; give it back
+  btn.disabled = true;
+  try {
+    const out = await post("api/cooldown", {on: !btn.dataset.on});
+    renderCooldown({cooldown: out.cooldown, sessions: Number(btn.dataset.sessions) || 0});
+  } catch (err) {
+    $("cooldownState").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    if (focused) btn.focus();
+  }
+});
 
 poll();
 setInterval(poll, 2000);
