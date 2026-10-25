@@ -19,6 +19,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - New markup uses a theme variable or the existing shared element, and never copies a hardcoded colour from a sibling element (`text-white`, `#fbeae6`; UB-38, UB-30).
    - Every new tappable control is at least 44 px in both directions at 390 px wide, even when its siblings are smaller (UB-15).
    - In every route file your diff touches, a 500 response returns a fixed generic message, never `error.message`, `details` or a stack, even on lines already there; log the error server-side and add a route test for it.
+   - In every route file your diff touches, a malformed JSON body or a field of the wrong type returns 400 with a plain message before any DB call, never a 500 from `req.json()` or Prisma; add a route test for it.
 3. For each acceptance criterion: if the repo has a test runner, work red-green: write the test, run it and see it fail for the expected reason, implement, and see it pass. Put the RED and GREEN result lines in build.md. If there is no test runner, verify it another way (a command, a script, a build) and record how.
    - Every test must fail if the behaviour breaks: hand-written literal expectations (never values computed by the code under test), and never an assertion on a mock.
    - A phrase assert on prose uses a phrase found only in the new rule, never a word that already appears elsewhere in the asserted section.
