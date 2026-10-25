@@ -154,12 +154,13 @@ def start_ready(project, root, parent_id):
     return out
 
 
-def resume_job(project, root, job, jobs):
+def resume_job(project, root, job, jobs, manual=False):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
     refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
     child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
-    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good)."""
+    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). manual (Trevor's click) lets
+    the children past cool-down; the new claims after them stay automatic, so they wait while cooling down."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -167,7 +168,7 @@ def resume_job(project, root, job, jobs):
             kid = next((j for j in jobs if j["id"] == k), None)
             if not kid or not kid.get("paused") or running(project, k):
                 continue
-            if resume_refusal(project, root, kid):
+            if resume_refusal(project, root, kid, manual=manual):
                 with board.locked_board(root) as b:  # not cmd_set: it never parks at needs-human, and plays a sound
                     live = board.find(b, k)
                     live.pop("paused", None)
@@ -222,13 +223,16 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
                  "/trevskills-commitpush, or discard it, then click Abort.")
 
 
-def resume_refusal(project, root, job):
+def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok); a Run-all/BigBoy child also waits for the overlap rules `ready` applies to new claims."""
+    (board.machine_ok, whose cool-down check a manual click skips); a Run-all/BigBoy child also waits for the overlap
+    rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
-    machine = board.machine_ok(root)
+    machine = board.machine_ok(root, manual=manual)
+    if machine == board.COOLING:
+        return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume work in the header."
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
@@ -286,7 +290,7 @@ def answer_job(project, root, job, jobs, key):
         return 409, {"error": "job isn't waiting on that answer, or is already running"}
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
-    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job)):
+    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
         return 409, {"error": refusal}
     job_id = job["id"]
     picked = board.cmd_answer(root, job_id, key)
@@ -301,7 +305,7 @@ def answer_job(project, root, job, jobs, key):
     elif verb == "rework":
         rework_job(project, root, job_id, arg)
     elif verb == "resume":
-        resume_job(project, root, job, jobs)
+        resume_job(project, root, job, jobs, manual=True)
     else:
         note = f'Trevor picked "{picked.get("label")}": run {arg}, then continue'
         spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}")
@@ -860,6 +864,36 @@ def watchdog_tick():
         auto_continue_tick(busy)
     except (Exception, SystemExit) as e:
         print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
+    cooldown_chime()
+
+
+COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
+
+
+def cooldown_chime():
+    """One done sound when cool-down is on and the last headless session has ended; cool-down off re-arms it."""
+    global COOLDOWN_CHIMED
+    if not board.cooling_down():
+        COOLDOWN_CHIMED = False
+    elif not COOLDOWN_CHIMED and board.live_sessions() == 0:
+        COOLDOWN_CHIMED = True
+        board.play(board.sound("done"))
+
+
+def set_cooldown(on):
+    """POST /api/cooldown {"on": bool}: create or remove the flag file. An explicit set, so a double click or a stale
+    tab can't flip it the wrong way."""
+    global COOLDOWN_CHIMED
+    if type(on) is not bool:
+        return 400, {"error": "on must be true or false"}
+    flag = board.cooldown_path()
+    if on:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch()
+    else:
+        flag.unlink(missing_ok=True)
+        COOLDOWN_CHIMED = False
+    return 200, {"cooldown": on}
 
 
 def watchdog_loop():
@@ -946,7 +980,8 @@ def machine_status():
     return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time())}
+            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
+            "sessions": board.live_sessions()}
 
 
 def machine_usage(now):
@@ -2763,6 +2798,8 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_toggle(body.get("id"), path.endswith("/enable"))
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
+            elif path == "/api/cooldown":
+                code, obj = set_cooldown(body.get("on"))
             else:
                 m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
@@ -2854,13 +2891,16 @@ class Handler(BaseHTTPRequestHandler):
         if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
             if not job or running(project, job_id) or not resumable(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
-            if refusal := resume_refusal(project, root, job):
+            manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
+            if not manual and board.cooling_down():
+                return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
+            if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT):
                     return 409, {"error": refusal}
                 with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
-            resume_job(project, root, job, jobs)
+            resume_job(project, root, job, jobs, manual=manual)
             unqueue(root, job)
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):

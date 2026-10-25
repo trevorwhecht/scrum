@@ -2047,9 +2047,24 @@ def free_disk_gb(path):
         return None
 
 
-def machine_ok(path):
-    """None when the machine has room for new work, else why not: free RAM, then swap, then free disk. Gates new claims,
-    resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
+COOLING = "cooling down"  # machine_ok's reason while Trevor's cool-down flag is on
+
+
+def cooldown_path():
+    """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no automatic start runs."""
+    return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
+
+
+def cooling_down():
+    return cooldown_path().exists()
+
+
+def machine_ok(path, manual=False):
+    """None when the machine has room for new work, else why not: cool-down (skipped for Trevor's manual clicks), then
+    free RAM, then swap, then free disk, then the session ceiling. Gates new claims, resumes and auto-continue starts
+    only; a running job is never touched. An unknown reading passes."""
+    if not manual and cooling_down():
+        return COOLING
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"

@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
@@ -1374,6 +1375,47 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), "14 sessions running (ceiling 14)")
         with self.sessions(20), self.machine("14", "1000"):
             self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "RAM first")
+
+    def cooling(self):
+        flag = Path(self.tmp.name) / "cooldown"
+        flag.write_text("")
+        return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
+
+    def test_machine_ok_cooling_down(self):
+        """Job 305: the cool-down flag refuses every automatic start first; Trevor's manual click skips it."""
+        with self.cooling():
+            self.assertEqual(board.machine_ok(self.tmp.name), "cooling down")
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True))
+            with self.machine("14", "6.2"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before RAM and disk")
+                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "free RAM 14% (< 20%)")
+            with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before swap")
+            with self.sessions(14):
+                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before the ceiling")
+                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "14 sessions running (ceiling 14)")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(Path(self.tmp.name) / "absent")):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+            with self.machine("14", "1000"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+
+    def test_cooldown_path_default(self):
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):
+            self.assertEqual(board.cooldown_path(), Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
+
+    def test_ready_cooling_down_claims_nothing(self):
+        parent, (a, b) = self.runall(2)
+        for i, k in enumerate((a, b)):
+            self.spec(k, f"src/c{i}.py")
+        with self.cooling(), mock.patch.object(board, "play") as play:
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [])
+        self.assertEqual((self.child(a)["stage"], self.child(b)["stage"]), ("waiting", "waiting"))
+        p = self.child(parent)
+        self.assertEqual(p["stage"], "running")
+        self.assertTrue(p["reason"].startswith("waiting: cooling down"), p["reason"])
+        play.assert_not_called()
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b], "claims again once the flag is gone")
 
     def test_session_ages_reads_ps_etime(self):
         ps = Path(self.tmp.name) / "ps.txt"
