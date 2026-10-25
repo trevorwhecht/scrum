@@ -2865,6 +2865,7 @@ def cmd_hook(event, tty, pid=None):
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
 WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
+IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
@@ -2952,6 +2953,18 @@ def stalled_since(job, cutoff):
         return False
 
 
+def job_dir_idle(root, job_id, cutoff):
+    """True when no file under root/jobs/<id>/ (any depth) has an mtime at or after the epoch-seconds cutoff."""
+    for d, _, names in os.walk(Path(root) / "jobs" / job_id):
+        for n in names:
+            try:
+                if os.stat(os.path.join(d, n)).st_mtime >= cutoff:
+                    return False
+            except OSError:
+                pass
+    return True
+
+
 def cmd_watchdog(root, alive=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
@@ -2966,10 +2979,19 @@ def cmd_watchdog(root, alive=None):
                      and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
                      and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
+            idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
             for job in stale:
+                live_idle = False
                 if alive(job):
-                    continue
-                if job["stage"] == "spec" and not job.get("parent") \
+                    if not (stalled_since(job, idle_cutoff) and job_dir_idle(root, job["id"], idle_cutoff.timestamp())):
+                        continue
+                    live_idle = True
+                if live_idle:
+                    job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board or job-dir "
+                               f"change for {IDLE_HOURS} h (session alive but idle). Fix: click Resume.")
+                    roadmap_stall_locked(root, job)
+                    flagged.append(job["id"])
+                elif job["stage"] == "spec" and not job.get("parent") \
                         and not (Path(root) / "jobs" / job["id"] / "feature.md").exists():
                     abort_job(root, job, True, ORPHANED)  # nothing to resume: put the item back, no human needed
                     requeued.append(job["id"])

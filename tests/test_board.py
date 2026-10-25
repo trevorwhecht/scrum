@@ -2451,6 +2451,39 @@ class BoardTest(unittest.TestCase):
         plain = self.aged("Plain review", 120, stage="review")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
 
+    def age_job_dir(self, job_id, hours):
+        t = time.time() - hours * 3600
+        for f in (self.root / "jobs" / job_id).rglob("*"):
+            os.utime(f, (t, t))
+
+    def test_watchdog_flags_live_idle_session(self):
+        job_id = self.aged("Idle review", 180, stage="review")
+        paused = self.aged("Idle paused", 180, stage="review", paused=True)
+        for j in (job_id, paused):
+            (self.root / "jobs" / j).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / j / "build.md").write_text("x")
+            self.age_job_dir(j, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [job_id])
+        self.assertEqual(self.get(job_id)["stage"], "needs-human")
+        self.assertEqual(self.get(job_id)["reason"], "stalled in review: no board or job-dir change for 2 h "
+                         "(session alive but idle). Fix: click Resume.")
+        self.assertEqual(self.get(paused)["stage"], "review")
+
+    def test_watchdog_skips_live_job_with_recent_job_dir_file(self):
+        job_id = self.aged("Busy review", 180, stage="review")
+        sub = self.root / "jobs" / job_id / "round-1"
+        sub.mkdir(parents=True, exist_ok=True)
+        self.age_job_dir(job_id, 3)
+        (sub / "check.md").write_text("x")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [])
+        self.assertEqual(self.get(job_id)["stage"], "review")
+
+    def test_watchdog_skips_live_job_updated_under_2h(self):
+        job_id = self.aged("Recent review", 90, stage="review")
+        self.age_job_dir(job_id, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [])
+        self.assertEqual(self.get(job_id)["stage"], "review")
+
     def test_watchdog_skips_paused_job(self):
         paused = self.aged("Paused build", 120, stage="build", paused=True,
                            reason="stalled in build: paused by Trevor. Fix: click Play.")
