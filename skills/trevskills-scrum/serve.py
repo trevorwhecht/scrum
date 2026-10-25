@@ -11,7 +11,8 @@ and every 10 minutes, while a project has a job in stage cloud or awaiting its a
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
-origin or a localhost origin; a cross-site page can't send that without a CORS preflight, which is never approved.
+origin or a localhost origin; the Host and Origin checks also accept the one configured tailnet hostname (for
+`tailscale serve`), from --tailnet-host, else SCRUM_TAILNET_HOST, else tailscale's own name, found once at start; a cross-site page can't send that without a CORS preflight, which is never approved.
 AI-Settings edits every item outside managed scope: a Markdown file in place, a JSON item (settings file, hook, MCP
 server, plugin) spliced back into its file with "[redacted]" values, whole or inside a string, restored from disk,
 and a change to what runs (a hook or plugin entry, an MCP server's command/args/type/url, a settings file's
@@ -42,6 +43,20 @@ import route  # noqa: E402
 
 CLAUDE = board.CLAUDE  # the cloud estimate and terminal launches; board.spawn reads board.CLAUDE
 LOCAL = {"localhost", "127.0.0.1"}
+TAILNET = set()  # the one extra hostname main() allows (the Mac's tailnet name); empty = localhost only
+
+
+def tailnet_host(explicit=""):
+    """The tailnet hostname to also accept: explicit, else $SCRUM_TAILNET_HOST, else tailscale's Self.DNSName ("" if none)."""
+    name = explicit or os.environ.get("SCRUM_TAILNET_HOST") or ""
+    if not name:
+        try:
+            exe = shutil.which("tailscale") or "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=3)
+            name = json.loads(out.stdout)["Self"]["DNSName"] if out.returncode == 0 else ""
+        except Exception:
+            name = ""
+    return name.strip().rstrip(".").lower() if isinstance(name, str) else ""
 TYPES = {".json": "application/json", ".md": "text/markdown; charset=utf-8", ".log": "text/plain; charset=utf-8",
          ".html": "text/html; charset=utf-8"}
 RUNS, RUNS_LOCK = {}, threading.Lock()  # "project/job id" -> {"action", "started", "proc", "log"[, "reason"]}
@@ -2804,7 +2819,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(code, json.dumps(obj).encode(), "application/json")
 
     def local_host(self):
-        return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL
+        return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL | TAILNET
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -2894,7 +2909,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         origin = self.headers.get("Origin")
         if (not self.local_host() or "application/json" not in (self.headers.get("Content-Type") or "")
-                or (origin and urlparse(origin).hostname not in LOCAL)):
+                or (origin and urlparse(origin).hostname not in LOCAL | TAILNET)):
             return self.send_json(403, {"error": "forbidden"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -3065,6 +3080,7 @@ def main():
     p.add_argument("--digest-auto", metavar="NNN", help="apply, queue or skip every pending proposal of this digest, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
+    p.add_argument("--tailnet-host", default="", help="also accept this tailnet hostname in Host/Origin (else SCRUM_TAILNET_HOST, else detected)")
     p.add_argument("--dir", type=Path, default=Path("scrum"),
                    help="the project's scrum/ folder, for --estimate, --digest-auto and --digest-skill-check")
     a = p.parse_args()
@@ -3076,10 +3092,13 @@ def main():
         return print(json.dumps(digest_auto(a.dir.resolve(), a.digest_auto)))
     if a.estimate is not None:
         return estimate(a.dir.resolve(), a.estimate)
+    global TAILNET
+    tn = tailnet_host(a.tailnet_host)
+    TAILNET = {tn} if tn else set()
     server = make_server(a.port)
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
-    print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}", flush=True)
+    print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
