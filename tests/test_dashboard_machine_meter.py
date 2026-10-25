@@ -61,8 +61,10 @@ class MachineMeter(unittest.TestCase):
                   "const sessions = el.innerHTML;\n"
                   "renderMachine({...s, free_ram_pct: 40, swap_pct: 29.3, free_disk_gb: 100, verdict: 'swap used 29.3% of RAM (> 25%)'});\n"
                   "const swap = el.innerHTML;\n"
+                  "renderMachine({...s, free_ram_pct: 72, swap_pct: 37.1, free_disk_gb: 100, verdict: null});\n"
+                  "const stale = el.innerHTML;\n"
                   "renderMachine(null);\n"
-                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap}));")
+                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap, stale}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok"])
         self.assertEqual(out["ok"], [False, '<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free · swap —" title="RAM 34% free · swap —">34%</span> RAM · '
@@ -84,6 +86,8 @@ class MachineMeter(unittest.TestCase):
                          "a verdict that repeats no shown reading stays, after the usage segment")
         self.assertEqual(out["swap"], '<span class="ring danger" role="img" style="--pct:60" aria-label="RAM 40% free · swap 29%" title="RAM 40% free · swap 29%">40%</span> RAM'
                          + ' · <span class="ok">disk 100 GB</span>', "swap has no text: it turns the ring red and sits in its tooltip")
+        self.assertEqual(out["stale"], '<span class="ring ok" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span> RAM'
+                         + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict keeps the ring green")
 
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()
