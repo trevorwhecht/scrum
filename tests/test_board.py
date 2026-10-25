@@ -2336,6 +2336,8 @@ class BoardTest(unittest.TestCase):
         self.assertIsNone(board.resume_blocker(self.root, kids[0], live={kids[0], kids[1]}), "itself never counts")
         out = board.cmd_ready(self.root, parent, live=set(kids[:2]))
         self.assertEqual(out["ready"], [], "live resumes block the waiting children that share their files")
+        self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], [], "stalled kids[1] holds claims")
+        board.cmd_abort(self.root, kids[1], False)
         self.assertEqual(board.cmd_ready(self.root, parent, live={kids[0]})["ready"], [kids[3]])
 
     # --- cloud lane ---
