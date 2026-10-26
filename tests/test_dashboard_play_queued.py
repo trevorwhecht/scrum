@@ -62,19 +62,21 @@ def column_of(html, key):
 
 class PlayQueued(unittest.TestCase):
     def test_play_queued_job_renders_in_waiting_column(self):
-        cols, html, status, status_none = run(f"""
+        cols, html, status, status_none, status_cpu = run(f"""
             const q = {json.dumps(QUEUED)}, s = {json.dumps(STUCK)};
             out([colOf(q), colOf(s), colOf({{stage: "aborted"}}), colOf({{stage: "build"}}), colOf({{stage: "needs-human"}})]);
             jobs = [q, s]; render(); out(els.board.innerHTML);
-            out(statusLine(q)); out(statusLine({{...q, resumeRefusal: null}}));""")
+            out(statusLine(q)); out(statusLine({{...q, resumeRefusal: null}}));
+            out(statusLine({{...q, resumeRefusal: "waiting: CPU busy 95% (> 90%). Fix: click Resume once memory or disk frees up."}}));""")
         self.assertEqual(cols, ["waiting", "needs-human", "done", "build", "needs-human"])
         self.assertEqual(column_of(html, "p/200-q"), "waiting")
         self.assertEqual(column_of(html, "p/201-s"), "needs-human")
         card = re.search(r'<button class="([^"]*)" data-key="p/200-q">(.*?)</button>', html, re.S)
         self.assertNotIn("human", card.group(1).split())
         self.assertNotRegex(card.group(2), r'class="bar[^"]* human')
-        self.assertEqual(status, "Waiting: swap used 28.1% of RAM (> 25%).")
+        self.assertEqual(status, "Waiting for CPU/RAM: swap used 28.1% of RAM (> 25%).")
         self.assertEqual(status_none, "Queued, starts next")
+        self.assertEqual(status_cpu, "Waiting for CPU/RAM: CPU busy 95% (> 90%).", "serve.py's waiting: prefix is not repeated")
         stuck = re.search(r'<button class="([^"]*)" data-key="p/201-s">', html)
         self.assertIn("human", stuck.group(1).split())
 
@@ -86,7 +88,7 @@ class PlayQueued(unittest.TestCase):
         self.assertEqual(box, "")
         self.assertNotIn("Waiting on you", html)
         self.assertIn('<p class="note" role="status">queued, starts next</p>', html)
-        self.assertEqual(viewer, "Waiting: swap used 28.1% of RAM (> 25%).")
+        self.assertEqual(viewer, "Waiting for CPU/RAM: swap used 28.1% of RAM (> 25%).")
         self.assertIn("<b>Waiting on you</b><p>no board update for 30 min.</p>", stuck_box)
 
     def test_play_queued_child_not_waiting_on_you(self):

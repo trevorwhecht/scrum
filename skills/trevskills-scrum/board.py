@@ -2647,7 +2647,11 @@ MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
 MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
-MAX_CPU_LOAD_PCT = 150  # ... or with the 5-min load average above this share of all cores (2026-10-25: load ~15 on 8 cores, healthy RAM)
+MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-100 over all cores): under about 10% idle an
+#                       8-core Mac has less than one core free, where E2E runs and next dev start time out; below it more
+#                       sessions still add throughput. Not the load average: macOS counts disk waits in it (681% after a reboot)
+CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
+CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
@@ -2687,17 +2691,56 @@ def swap_used_pct():
     return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
 
 
-def cpu_load_pct():
-    """The 5-min load average as a percent of all cores (100 = every core busy), or None when unknown (no getloadavg
-    or no core count). SCRUM_CPU_LOAD_PCT stands in for the reading."""
-    fake = os.environ.get("SCRUM_CPU_LOAD_PCT")
+def cpu_busy_sample():
+    """How busy the CPU is right now, 0-100 over all cores: 100 - idle from top's second sample (the first covers no
+    interval). Takes 1-2 s, so only the serve.py watchdog calls it (record_cpu_sample). None when unknown (no top -l, as
+    on Linux, a timeout or no CPU usage line)."""
+    try:
+        out = subprocess.run(["top", "-l", "2", "-n", "0", "-s", "1"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    idle = re.findall(r"CPU usage: .*?(\d+(?:\.\d+)?)% idle", out or "")
+    return 100 - float(idle[-1]) if idle else None
+
+
+def cpu_log_path():
+    return os.environ.get("SCRUM_CPU_LOG") or os.path.join(tempfile.gettempdir(), "scrum-cpu-log.json")
+
+
+def cpu_samples(now):
+    """The [time, busy] samples in the CPU log from the last CPU_SAMPLE_SECS; a missing or corrupt log has none."""
+    try:
+        return [[t, float(v)] for t, v in json.loads(Path(cpu_log_path()).read_text()) if now - t < CPU_SAMPLE_SECS]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def record_cpu_sample():
+    """Append one cpu_busy_sample to SCRUM_CPU_LOG (default: system temp dir), keeping the last CPU_SAMPLES from the
+    last CPU_SAMPLE_SECS. The serve.py watchdog is its one writer, so no lock. A None sample is not recorded; with
+    SCRUM_CPU_BUSY_PCT set it does nothing."""
+    if os.environ.get("SCRUM_CPU_BUSY_PCT"):
+        return
+    busy = cpu_busy_sample()
+    if busy is None:
+        return
+    now = time.time()
+    keep = (cpu_samples(now) + [[now, busy]])[-CPU_SAMPLES:]  # read before open(..., "w") truncates the log
+    try:
+        with open(cpu_log_path(), "w") as fh:
+            json.dump(keep, fh)
+    except OSError:
+        pass
+
+
+def cpu_busy_pct():
+    """The mean of the CPU log's recent samples (cpu_samples), or None when there are none. Never runs top: the
+    dashboard reads it every 2 s. SCRUM_CPU_BUSY_PCT stands in for the reading."""
+    fake = os.environ.get("SCRUM_CPU_BUSY_PCT")
     if fake:
         return float(fake)
-    cores = os.cpu_count()
-    try:
-        return os.getloadavg()[1] / cores * 100 if cores else None
-    except OSError:
-        return None
+    samples = cpu_samples(time.time())
+    return sum(v for _, v in samples) / len(samples) if samples else None
 
 
 def free_disk_gb(path):
@@ -2745,7 +2788,7 @@ def swap_grew(swap):
 
 def machine_ok(path, manual=False, claim=False):
     """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
-    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU load (also skipped for manual
+    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU busy (also skipped for manual
     clicks), then the session ceiling. Gates new claims, resumes and auto-continue starts only; a running job is never
     touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
@@ -2759,9 +2802,9 @@ def machine_ok(path, manual=False, claim=False):
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
-    cpu = None if manual else cpu_load_pct()
-    if cpu is not None and cpu > MAX_CPU_LOAD_PCT:
-        return f"CPU load {cpu:.0f}% of {os.cpu_count()} cores, limit {MAX_CPU_LOAD_PCT}%"
+    cpu = None if manual else cpu_busy_pct()
+    if cpu is not None and cpu > MAX_CPU_BUSY_PCT:
+        return f"CPU busy {cpu:.0f}% (> {MAX_CPU_BUSY_PCT}%)"
     live = live_sessions()
     if live >= MAX_SESSIONS:
         return f"{live} sessions running (ceiling {MAX_SESSIONS})"

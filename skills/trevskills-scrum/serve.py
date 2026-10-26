@@ -957,8 +957,13 @@ def watchdog_tick():
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
        tick.
-    4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one."""
+    4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
+    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
     global RESUME_ROOM
+    try:
+        board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = False
     RESUME_ROOM = board.ram_room()
@@ -1201,8 +1206,8 @@ def machine_status():
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
             "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
-            "sessions": board.live_sessions(), "cpu_load_pct": r(board.cpu_load_pct()),
-            "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT}
+            "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
+            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT}
 
 
 def machine_usage(now):
@@ -1839,6 +1844,8 @@ def activity(root, job):
     if wt and (t := worktree_mtime(wt)):
         events.append((t, "files changed"))
     text = STAGE_TEXT.get(job["stage"], job["stage"])
+    if job["stage"] == "needs-human" and job.get("play_queued"):  # the machine guard queued Trevor's Play
+        text = "waiting for CPU/RAM"
     if job.get("pr") and job["stage"] in ("merging", "needs-human"):
         text = "CI running" if job["stage"] == "merging" else "PR ready"
     try:
@@ -1865,7 +1872,8 @@ def board_with_activity(root, project):
             job["activity"] = activity(root, job)
         if resumable(job) and not running(project, job.get("id")):
             # ponytail: machine_ok runs per resumable job each poll; compute it once per board if many sit paused
-            refusal = resume_refusal(project, root, job, manual=True)  # manual: as the dashboard's click sends it
+            # manual: as the dashboard's click sends it; a queued Play is gated as play_queue_tick gates it, CPU included
+            refusal = resume_refusal(project, root, job, manual=not job.get("play_queued"))
             job["resumeRefusal"] = str(refusal) if refusal else None
             job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []

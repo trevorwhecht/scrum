@@ -10,7 +10,7 @@ os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, w
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
-os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly idle unless a test says so; no test reads the real load average
+os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 
@@ -1141,7 +1141,7 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["cooldown", "cpu_load_pct", "free_disk_gb", "free_ram_pct", "max_cpu_load_pct", "max_swap_pct",
+        keys = ["cooldown", "cpu_busy_pct", "free_disk_gb", "free_ram_pct", "max_cpu_busy_pct", "max_swap_pct",
                 "min_free_disk_gb", "min_free_ram_pct", "sessions", "swap_pct", "usage", "verdict"]
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
@@ -1149,28 +1149,28 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
-                               "cpu_load_pct": 1.0, "max_cpu_load_pct": 150})
+                               "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
-                             SCRUM_CPU_LOAD_PCT="42.56"):
+                             SCRUM_CPU_BUSY_PCT="42.56"):
             self.assertEqual(self.req("GET", "/api/machine")[1],
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
-                              "cpu_load_pct": 42.6, "max_cpu_load_pct": 150})
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="190"):
+                              "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90})
+        with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95.04"):
             out = self.req("GET", "/api/machine")[1]
-        self.assertEqual((out["cpu_load_pct"], out["verdict"][:13]), (190.0, "CPU load 190%"))
+        self.assertEqual((out["cpu_busy_pct"], out["verdict"]), (95.0, "CPU busy 95% (> 90%)"))
         disk = []
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB="", SCRUM_CPU_LOAD_PCT=""), \
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB="", SCRUM_CPU_BUSY_PCT="",
+                             SCRUM_CPU_LOG=str(Path(self.tmp.name) / "no-cpu-log.json")), \
                 mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
-                mock.patch.object(self.serve.board.os, "getloadavg", side_effect=OSError("no load")), \
                 mock.patch.object(self.serve.board.shutil, "disk_usage",
                                   side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
-                                             "cpu_load_pct": None, "max_cpu_load_pct": 150}))
+                                             "cpu_busy_pct": None, "max_cpu_busy_pct": 90}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
@@ -1498,6 +1498,23 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.serve.waiting_on(many), {"ids": ["1-a", "2-b", "3-c", "4-d"],
                                                        "why": "shares SKILL.md, runs alone, shares serve.py"})
         self.assertIsNone(self.serve.waiting_on(None))
+
+    def test_play_queued_activity_and_refusal(self):
+        """A Play the machine guard queued waits on the machine, not on Trevor: its refusal is computed the way
+        play_queue_tick does (manual=False, so a CPU-only hold shows), and its activity says so."""
+        b = self.serve.board
+        queued, unqueued = (b.cmd_new(self.root, t) for t in ("Queued stalled", "Plain stalled"))
+        for job_id in (queued, unqueued):
+            self.addCleanup(self.edit_job, job_id, stage="aborted", play_queued=None)  # the shared board: no later tick resumes it
+            self.edit_job(job_id, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
+        self.edit_job(queued, play_queued="2026-10-26T10:00:00+00:00")
+        with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95"):
+            jobs = self.board_jobs()
+        self.assertEqual(jobs[queued]["resumeRefusal"],
+                         "waiting: CPU busy 95% (> 90%). Fix: click Resume once memory or disk frees up.")
+        self.assertEqual(jobs[queued]["activity"]["text"], "waiting for CPU/RAM")
+        self.assertIsNone(jobs[unqueued]["resumeRefusal"], "Trevor's click skips the CPU check")
+        self.assertEqual(jobs[unqueued]["activity"]["text"], "waiting on you")
 
     def test_board_with_activity_waiting_on_unmerged_dependency(self):
         b = self.serve.board
@@ -5433,6 +5450,26 @@ class CloudPollTest(unittest.TestCase):
             self.serve.CLOUD_LAST.clear()
             self.tick(self.cloud, now=10_000, result={"moved": [], "error": "gh: auth required"})
         self.assertEqual(e.getvalue(), "cloud-sync: p: gh: auth required\n")
+
+    def test_watchdog_tick_records_cpu_sample(self):
+        s = self.serve
+        order = []
+        with mock.patch.object(s.board, "projects", return_value=self.window_projects()), \
+                mock.patch.object(s.board, "record_cpu_sample", side_effect=lambda: order.append("sample")) as rec, \
+                mock.patch.object(s.board, "machine_ok", side_effect=lambda *a, **k: order.append("gate")):
+            s.watchdog_tick()
+            self.assertEqual(rec.call_count, 1)
+            self.assertEqual(order[0], "sample", "sampled before any machine_ok")
+            self.assertIn("gate", order)
+            s.watchdog_tick()
+            self.assertEqual(rec.call_count, 2, "one sample per tick")
+        with mock.patch.object(s.board, "projects", return_value=self.window_projects()), \
+                mock.patch.object(s.board, "record_cpu_sample", side_effect=OSError("top broke")), \
+                mock.patch.object(s.board, "machine_ok", return_value=None) as gate, \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as e:
+            s.watchdog_tick()
+        self.assertIn("watchdog: cpu sample: top broke", e.getvalue())
+        self.assertTrue(gate.called, "the tick goes on")
 
     def test_watchdog_tick_polls_cloud_and_survives_a_failing_project(self):
         s = self.serve
