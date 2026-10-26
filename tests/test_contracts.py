@@ -3126,6 +3126,21 @@ class RulesCheckTest(unittest.TestCase):
         self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
         self.assert_fails("rule 6: python3 -m unittest tests.test_contracts fails")
 
+    def test_rule6_skipped_without_contracts_file(self):
+        self.git(self.repo, "rm", "-q", "tests/test_contracts.py")
+        self.git(self.repo, "commit", "-q", "-m", "no contracts")
+        self.git(self.wt, "merge", "-q", "main")
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["ok"], out["failures"]), (0, True, []), out)
+
+    def test_rule6_deleted_contracts_file_still_fails(self):
+        self.git(self.wt, "rm", "-q", "tests/test_contracts.py")
+        self.git(self.wt, "commit", "-q", "-m", "drop contracts")
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        self.assert_fails("rule 6: python3 -m unittest tests.test_contracts fails")
+        self.assert_fails("rule 6: FIRST_LINE pin for scrum-demo")
+
     def test_rule6_first_line_pin_kept(self):
         self.commit("tests/test_contracts.py", self.CONTRACTS.replace('    "scrum-demo": "DEMO: OK",\n', ""))
         self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")

@@ -1730,8 +1730,9 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
         if descs // 4 > AGENT_DESCS_MAX_TOKENS:
             fails.append(f"rule 3: agent descriptions total ~{descs // 4} tokens, over {AGENT_DESCS_MAX_TOKENS}")
         try:
+            has_suite = show(mb, "tests/test_contracts.py") is not None or show("HEAD", "tests/test_contracts.py") is not None
             suite = subprocess.run([sys.executable, "-m", "unittest", "tests.test_contracts"], cwd=wt,
-                                   capture_output=True, timeout=540).returncode  # under the 600 s Bash cap
+                                   capture_output=True, timeout=540).returncode if has_suite else 0  # under the 600 s Bash cap
         except subprocess.TimeoutExpired:
             suite = "timeout"
         if suite != 0:
