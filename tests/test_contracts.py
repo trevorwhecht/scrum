@@ -583,6 +583,15 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, new_job, phrase)
         self.assertNotIn("## Done when", new_job)
 
+    def test_fable_spawn_steps(self):
+        plan = self.section(self.lane("bigboy"), "1. **Plan.**", "\n2. ")
+        self.assertEqual(plan.count("B fable-ok $ID planner"), 2, "the first planner spawn and the respawn")
+        self.assertIn("respawns once with no override", plan)
+        new_job = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## New job", "## Run all")
+        self.assertIn("B fable-ok $ID spec-writer", new_job)
+        self.assertIn("never step 5's builder", new_job)
+        self.assertIn("respawn once without it", new_job)
+
     def test_skill_jev_promote_step(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         resume = self.section(text, "## Resuming the builder", "## Digest")

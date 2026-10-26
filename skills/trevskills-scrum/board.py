@@ -112,6 +112,9 @@
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
                                    board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
+  board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
+                                   the spec-writer of a big_ticket job on lane standard (or unset), gets Fable while
+                                   fable_state is ok or warn; each such call appends a line to jobs/<id>/fable.log
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -125,6 +128,11 @@ from itertools import permutations
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
+FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and big standard-ticket spec-writers, while usage allows
+FABLE_WARN_5H_PCT = 65  # used % at which the dashboard warns Fable is near its limit (Fable still runs)
+FABLE_WARN_7D_PCT = 75
+FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
+FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
@@ -2407,6 +2415,37 @@ def usage_allowance(usage, now, live):
                         f"(allowance {n}, {count} live)")
 
 
+def fable_used(usage, now):
+    """{"5h": %, "7d": %} for the Fable guard: a window whose reset is at or before now reads 0, an unreadable one None."""
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    out = {}
+    for key, label in WINDOWS:
+        w = limits.get(key) if isinstance(limits, dict) else None
+        ok = isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
+        out[label] = None if not ok else 0 if w["resets_at"] <= now else w["used_percentage"]
+    return out
+
+
+def fable_state(usage, now):
+    """"paused" at 5h >= FABLE_SWITCH_5H_PCT or 7d >= FABLE_SWITCH_7D_PCT used, else "warn" at the WARN levels, else
+    "ok"; "unknown" when usage.json is missing, malformed, missing a window or older than USAGE_STALE_SECS."""
+    used = fable_used(usage, now)
+    at = usage.get("written_at") if isinstance(usage, dict) else None
+    if None in used.values() or not is_num(at) or now - at > USAGE_STALE_SECS:
+        return "unknown"
+    five, seven = used["5h"], used["7d"]
+    if five >= FABLE_SWITCH_5H_PCT or seven >= FABLE_SWITCH_7D_PCT:
+        return "paused"
+    if five >= FABLE_WARN_5H_PCT or seven >= FABLE_WARN_7D_PCT:
+        return "warn"
+    return "ok"
+
+
+def fable_ok(usage, now):
+    """True when a new eligible spawn may run on Fable: unknown usage never does."""
+    return fable_state(usage, now) in ("ok", "warn")
+
+
 def pace_cap(usage, now, base):
     """Always None: usage pacing no longer caps sessions (job 282); machine_ok and the overlap rules gate instead.
     Kept for continue.py (outside this repo), which skips its tick when this is not None."""
@@ -4015,6 +4054,9 @@ def main(argv=None):
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
     sub.add_parser("statusline")
+    fo = sub.add_parser("fable-ok")
+    fo.add_argument("id")
+    fo.add_argument("role")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
@@ -4144,6 +4186,8 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "fable-ok":
+        print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "spawn":
         proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
         print(json.dumps({"log": log, "pid": proc.pid}))
@@ -4185,6 +4229,33 @@ def big_ticket(root: Path, job_id: str) -> bool:
     if job.get("lane") in BIG_LANES:
         return True
     return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in read_backlog(root)[1])
+
+
+def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
+    """fable-ok: FABLE_MODEL or "none" for a new planner or spec-writer spawn. The spec-writer is eligible only for a
+    big_ticket job whose board lane is missing, empty or standard. Each eligible call appends a tab-separated line to
+    jobs/<id>/fable.log (skipped when that dir is missing); an ineligible one writes nothing."""
+    if role not in ("planner", "spec-writer"):
+        raise SystemExit(f"fable-ok: role must be planner or spec-writer, not {role!r}")
+    check_id(job_id)
+    if role == "spec-writer":
+        try:
+            lane = find(read_board(root), job_id).get("lane")
+        except SystemExit:  # not on the board, or a broken board.json
+            return "none"
+        if lane not in (None, "", "standard") or not big_ticket(root, job_id):
+            return "none"
+    now = time.time()
+    usage = read_usage()
+    state = fable_state(usage, now)
+    model = FABLE_MODEL if state in ("ok", "warn") else "none"
+    job = Path(root) / "jobs" / job_id
+    if job.is_dir():
+        pct = {k: "—" if v is None else f"{round(v)}%" for k, v in fable_used(usage, now).items()}
+        with open(job / "fable.log", "a") as fh:
+            fh.write(f"{datetime.now().isoformat(timespec='seconds')}\t{role}\t{'opus' if model == 'none' else 'fable'}"
+                     f"\t5h {pct['5h']}\t7d {pct['7d']}\t{state}\n")
+    return model
 
 
 def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
