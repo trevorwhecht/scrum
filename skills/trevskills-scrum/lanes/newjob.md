@@ -1,0 +1,86 @@
+# New job
+
+1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
+   1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
+   1c. **Askme** (only for `askme` or `start <id> askme`; otherwise skip to step 2). An interactive question round with Trevor, run like **discuss**. **Record your terminal** first. Read `feature.md`, `$F/project.md` and just enough of the repo to know what is unclear. The level sets how many questions; you pick the number within it:
+      - level 1 asks only what blocks the build;
+      - level 2 asks a moderate number;
+      - level 3 is thorough.
+
+      Ask in rounds, in plain words. When an answer is unclear, or contradicts another answer, ask follow-up or different questions before going on. Until the questions are done, spawn no agent, create no worktree and edit no file except `feature.md`. Then append to `$F/jobs/$ID/feature.md`, with one pair per question asked, follow-ups included:
+      ```
+      ## Q&A
+      - Q: <question>
+        A: <Trevor's answer>
+      ```
+      If Trevor says to skip or stop, write the pairs answered so far (nothing at all if there are none) and carry on. The same session then runs the rest of the job (step 2 onward).
+2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. Read the optional base branch: `BB=$(sed -n 's/^- Base branch: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')`.
+   - **`BB` empty (line missing or blank):** `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again.
+   - **`BB` set:** if it does not match `^[A-Za-z0-9._/-]+$`, run `B ask $ID "Base branch line in the project profile is malformed; fix or remove it, then carry on." --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop before the spec writer. If `git rev-parse --verify -q "origin/$BB"` fails, run `B ask $ID 'Base branch <BB> not found on origin; push it or remove the Base branch line from the project profile, then carry on.' --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop before the spec writer. Otherwise `DEFAULT=$BB`.
+
+   Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
+3. **Spec:** **Model:** only when `$F/jobs/$ID/feature.md` exists, outside a `lilguy` or `cloud` lane session, pick the model once per job: reuse `jev.log`'s `model` decision, else run `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py model $F/jobs/$ID` (Bash timeout 90000). On `sonnet` or `opus`, pass Agent override `model: "<word>"` to every `scrum-spec-writer` spawn of this step (first, respawn, `Refresh spec.md:`) and step 5's `scrum-builder`; else no override (Opus). `B fable-ok $ID spec-writer` output other than `none` replaces that override on this step's spec-writer spawns (never step 5's builder); if the Agent tool rejects it, respawn once without it. **Lilguy route:** for a job with no `parent` or a `runall` parent, outside a Cloud lane session, run `B lilguy-fit $ID`; when `fit` is true, run **Lilguy lane** Worktree mode instead of the rest of New job. Then, if `$F/jobs/$ID/spec.md` already exists (pre-written from the backlog), the Model decision still runs; skip both spec-writer spawns below and go straight to 3b and 3c; never skip when step 3 runs with **BigBoy lane** step 4's `Refresh spec.md:` line, which spawns over the existing spec.md. Otherwise spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
+   ```
+   JOB_DIR=$F/jobs/$ID
+   WORKTREE=none
+   BASE=$BASE
+   ROUND=0
+   PROJECT=$F/project.md
+   Write spec.md for this job.
+   ```
+   If `spec.md` is missing afterwards, spawn it once more; if still missing, run `B abort $ID --requeue --reason 'requeue: spec writer produced nothing'` and stop (see **Auto-abort instead of needs-human**). After each spawn, record it: `B set $ID specwriter=<id>` (the returned agent id).
+   3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
+   3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard|debug|bigboy>`. Set `lane=debug` when it says exactly `Lane: debug`, and `lane=bigboy` when it says exactly `Lane: bigboy`, whatever the other header lines say; the job then goes to the **BigBoy lane** and gets no worktree (skip steps 4-6). A BigBoy child (the job has a `parent`) never gets `bigboy`: for it, `Lane: bigboy` counts as `standard`. Set `fast` only when it says exactly `Lane: fast` and the `Hard stops:` line is `none`. Set `standard` otherwise: the line is missing or malformed, or says `fast` with `Hard stops:` not `none`.
+      **Human setup:** then, when the job has no `parent` or its parent's `lane` is `runall` (a **Run all** child; so this skips a BigBoy child, whose planner ticket carries its own `Human setup:`), its lane is not `bigboy`, this is not a **Cloud lane** job session, `spec.md`'s `Human setup:` line is present and not `none`, and its `## Waiting on setup` section has a non-empty line, park the deferred part in the backlog: remove every `'` from the `Human setup:` value and from that line, run the **Dupe check** and **Rank** below on it, then `B backlog-add --setup='<Human setup value>' [--priority N] -- '<that line> (from $ID)'`. Then continue the job. A missing or `none` line, or a missing or empty `## Waiting on setup` section, adds nothing; so does a re-run (a resume at `spec`) when `backlog.md` already has a line containing both `(from $ID)` and `{setup:`. A failing `backlog-add` adds nothing and never stops the job; name it in the final report as `Human setup not parked: <its error>`.
+      **Dupe check** (before every `B backlog-add`): when `$F/backlog.md` has an open `- [ ]` line, pipe each new item, every `'` removed, to `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py dupe $F/jobs/$ID` (one call per item, Bash timeout 90000; a BigBoy parent uses `$F/jobs/$P`). On output `dupe <item>`, append ` (possible dupe of <item>)`, every `'` removed, to the text passed to `backlog-add`. The item is always added, whatever the output.
+      **Rank** (after the Dupe check, before every `B backlog-add`): pipe each bare item (no suffix), every `'` removed, to `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py rank $F/jobs/$ID` (Bash timeout 90000; a BigBoy parent uses `$F/jobs/$P`). On output `p<N> <kind>`, pass `--priority N` to `backlog-add` (one call per item when ranked items differ in N); on `none`, a failure or a timeout, add it with no flag. The rank never stops the job.
+4. **Worktree:**
+   ```bash
+   WT="$REPO/.claude/worktrees/scrum-$ID"
+   git fetch origin
+   git worktree add "$WT" -b "scrum/$ID" "$BASE"
+   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
+   ```
+   A tracked `.env*` file is never symlinked: the worktree already has it.
+   Run `Install` from `project.md` in `$WT`; never symlink `node_modules` from `$REPO`.
+   When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` in `$WT` after the install.
+   Then `B set $ID worktree=$WT stage=build`.
+5. **Build:** first sync the branch: run `git -C "$WT" fetch origin` then `git -C "$WT" merge "$BASE" --no-edit`. On a merge conflict run `git -C "$WT" merge --abort`, carry on to the builder unmerged (the Merge **Conflicts** step still resolves it), and never stop the job for it. Then spawn `scrum-builder` (see **Routing**) with step 3's **Model:** override and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`: when its first reason line names a job on this board (id or number), run `B wait-on $ID <that id>`; on exit 0 run `git -C "$REPO" worktree remove -f "$WT"` and `git -C "$REPO" branch -D "scrum/$ID"` (a child then runs **BigBoy lane** step 6) and stop: serve.py starts it once that job merges. When no job is named or `wait-on` exits non-zero, run `B ask $ID 'blocked: <first reason line>' --kind blocked --a "Send back with a note=rework $ID \"make the most reasonable call on the blocker and record it as a Ruling in build.md\"" --b "Put back on the backlog=abort $ID --requeue" --c "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
+6. Continue at **Check gate**.
+
+## Fast lane
+
+Applies only while the job's `lane` on the board is `fast`. A job with no `lane`, or `lane=standard`, never reads this section. Same builder, same Check gate; then one diff-only code review (plus one UI reviewer when the diff touches UI) and straight to Merge, with no approver.
+
+1. **Promotion (deterministic).** Promoting means running `B set $ID lane=standard` and appending `Promoted to standard: <trigger>` to `$F/jobs/$ID/promoted.md`; the job then continues on the standard path from where it is. A standard job is never set back to fast. You never judge the conditions yourself: run `B route-check $ID` (add `--clean-start` only when this session knows the round was not started by the Merge **Conflicts** step) and promote with trigger = its `promote` field whenever that is non-null; a `null` `promote` means the job stays fast.
+   - **2nd check failure:** when `check.md` says `CHECK: FAIL` for the 2nd time in a round, run `B route-check $ID --check-fails 2` (`check.md` is overwritten per attempt, so you pass the count). Its `promote` is then `check failed twice`. The fix attempts in **Check gate** step 4 then carry on as standard.
+   - **After `CHECK: PASS`, before Review**, run `B route-check $ID`. This runs again on every round, including after the Merge **Conflicts** step sends the job back to the Check gate. It checks, in order, against `git -C "$WT" diff --numstat`/`--name-only "$BASE"...HEAD`: a binary file; more than 100 added lines; more than 3 files with an added line (deleted lines and delete-only files don't count; exactly 100 lines or exactly 3 files stays fast); the Merge schema guard regex or `(^|/)\.env`; then the sensitive-path regex, case-insensitively: `grep -iE '(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission|payment|billing|checkout|stripe|webhook|secret|credential'` (trigger `sensitive path <first matching file>`; **Review** step 2's Security skip uses this same regex). A diff it can't read promotes (`diff unreadable`).
+2. **Review.** Run `B set $ID stage=review`. The UI reviewer is spawned only when any file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches `UI globs` (the Check gate's matching): `scrum-review-e2e` when `project.md` has an `E2E:` line that isn't `none`, else `scrum-review-ui`. Write `round-$N/review-security.md`, `round-$N/review-ux.md` and `round-$N/review-ui.md` yourself, except the spawned UI reviewer's file, each containing exactly:
+   ```
+   VERDICT: PASS
+   Skipped by orchestrator: fast lane.
+   ```
+   Unless `scrum-review-e2e` is spawned, first run `rm -f "$F/jobs/$ID/round-$N/review-e2e.md"` (a stale triage file).
+   Spawn `scrum-review-code` with the 5 lines (`ROUND=$N`), the line `LANE=fast`, and `Review this round. Write only your own review file.`; in the same message spawn the UI reviewer, if any, with the same lines but no `LANE=fast` and no `DEV_URL` (it starts its own server). Never spawn an approver, security or ux reviewer. Wait for all, then handle `B sync $ID` exactly as **Review** step 4.
+3. **Route:**
+   - `verdict` is `PASS` (both spawned reviewers passed): go straight to **Merge**. Spawn no approver; there is no decision.md. The PR uses the no-Merge-summary fallback in Merge step 3 (job title, spec acceptance criteria as bullets), and the body line `Approved by the scrum approver. Spec, reviews and decision: scrum/jobs/$ID/` is replaced by `Fast lane: check gate + code review. Spec and review: scrum/jobs/$ID/`. The schema guard still runs unchanged. With no decision.md, the `Restart:` line counts as `none`.
+   - `verdict` is `CHANGES` and `round < limit`: resume the builder as in **Review** step 5, run `B set $ID stage=build`, and go to **Check gate**. The job stays fast.
+   - `verdict` is `CHANGES` and `round >= limit`: go to **Approve**, as standard does.
+
+## Check gate
+
+If the job's `lane` is `fast`, see **Fast lane** (promotion on the 2nd failure, and before Review). If the job's `lane` is `debug`, step 2 adds the debug checks and step 4 ends differently.
+
+1. `N = round + 1` (round as stored on the board). Run `mkdir -p $F/jobs/$ID/round-$N`, then `B set $ID round=$N stage=check`.
+2. In `$WT`, run each of Test / Typecheck / Lint / Build from `project.md` that isn't `none`; Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`. When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` so a stale client never fails Typecheck. When `project.md` has an `E2E:` line that isn't `none` and any file in `git -C "$WT" diff --name-only "$BASE"...HEAD` matches `UI globs`, run that E2E command; a non-zero exit is `CHECK: FAIL`. Run `git -C "$WT" diff --name-only "$BASE"...HEAD | grep -E '(^|/)\.env'`; any output is a failure ("committed .env file").
+   For `lane=debug`, also run these; each failure makes `CHECK: FAIL` and gets its own entry in check.md:
+   - **Repro:** the `Repro:` command from `assessment.md`, in `$WT`. It must exit 0.
+   - **Allowed files:** every path in `git -C "$WT" diff --name-only "$BASE"...HEAD` must be listed under `## Allowed files` or be the `Repro test:` path. Otherwise it fails with `outside allowed files: <path>`.
+   - **Repro test untouched:** `git -C "$WT" diff --name-only <Commit from repro-before.md> HEAD -- <Repro test path>` must print nothing. Otherwise it fails with `repro test changed`.
+   When Lint exits non-zero and every error is in a file outside `git -C "$WT" diff --name-only "$BASE"...HEAD`, record it in check.md as `Lint: pre-existing, no error in diff files`; it alone does not make `CHECK: FAIL`, and the approver still adds its Follow-up.
+   When Test exits non-zero and every failing test file is outside that diff, re-run only those files once and record the retry and its result in check.md; a pass on the retry does not make `CHECK: FAIL`.
+   When Build exits non-zero and its output shows a failed network fetch (such as Google Fonts), or the Bash tool's time limit killed it, re-run it once (after a time-limit kill, with the longest Bash timeout) and record the retry and its result in check.md.
+   When the E2E command exits non-zero and every failing spec is outside `git -C "$WT" diff --name-only "$BASE"...HEAD`, re-run only those specs once (`npx playwright test <spec files>`, same `E2E_PORT`) and record the retry and its result in check.md; a pass on the retry does not make `CHECK: FAIL`.
+3. Write `round-$N/check.md`: first line `CHECK: PASS` or `CHECK: FAIL`, then for each command its exit code and the last 40 lines of output in a fenced block.
+4. If it says FAIL, resume the builder (see **Sonnet promotion**) with `Checks failed: read JOB_DIR/round-N/check.md, fix, commit, update build.md.` **E2E triage:** when the E2E command from step 2 ran and exited non-zero, first spawn `scrum-review-e2e` with the 5 lines (`ROUND=$N`) plus `Triage the failing E2E run. Write only your own review file.`, and wait for it; then the resume message is `Checks failed: read JOB_DIR/round-N/check.md and JOB_DIR/round-N/review-e2e.md, fix, commit, update build.md.` instead. Then re-run steps 2–3, overwriting `check.md`. Allow up to **3** fix attempts. If it still fails, skip the review and go to **Approve**; the approver rules on the failing check. Exception: a `lane=debug` job that still fails after the 3rd fix attempt never goes to **Approve**: run `B ask $ID "debug: 3 failed fixes — question the design." --kind check-fail --a "Send back with a note=rework $ID \"three fixes failed: re-read assessment.md, question the root cause and try a different fix\"" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop.
+5. If it says PASS, go to **Review**.
