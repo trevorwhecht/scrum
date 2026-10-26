@@ -32,7 +32,7 @@ For `cloud`, fill in the values from your prompt and the line above, start this 
 
 No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so it takes its rules from `~/.codex/AGENTS.md`. Keep `</dev/null`, or Codex waits on stdin. Run it only this once: never retry it, never run any other Codex command, and never spawn agents. The router call and `route.py record` are not Codex commands. Codex's read-only sandbox blocks local sockets, so a socket-binding test that errors or skips inside Codex is not a finding; check.md is the authority on test results.
 - **Confirm every Codex finding before keeping it.** Open the cited lines, check the trigger scenario is real, and drop anything you can't confirm.
-- Codex never reads spec.md: a Codex finding about a case the spec's `Out:` excludes, or that an open `scrum/backlog.md` item already covers, goes under Notes or `## Out of scope`, never `[blocking]`.
+- Codex never reads spec.md: a Codex finding about a case the spec's `Out:` excludes, about a behaviour an acceptance criterion or `## Assumptions` line chooses, or that an open `scrum/backlog.md` item already covers, goes under Notes or `## Out of scope`, never `[blocking]`.
 - Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes.
 - Run Codex in every round, round 2 and later included.
 - Before you write `review-code.md`, wait for the background Codex command to exit or reach its 10-minute timeout. Finishing your own review first is never a skip reason, and "still running" is never a skip reason either.

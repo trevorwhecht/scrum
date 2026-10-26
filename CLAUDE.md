@@ -4,7 +4,9 @@ This repo IS the scrum. `install.sh` symlinks `skills/trevskills-scrum`, `skills
 `agents/scrum-*.md` and `codex/AGENTS.md` into `~/.claude` / `~/.codex`, so the main checkout is live:
 never leave it dirty, and land changes with `/trevskills-commitpush` or the pipeline.
 
-- Test: `python3 -m unittest discover -s tests` (stdlib only, ~725 tests, ~90 s).
+- Test: `python3 -m unittest discover -s tests` (stdlib only). The full run takes 25-30 min under machine load, past the 600 s Bash timeout: run it with `run_in_background`, and run single modules (`python3 -m unittest tests.test_<name>`) while working.
+- Subprocess and timing tests with 5 s timeouts (`tests/test_board_small_fixes.py`, `tests/test_buildlock.py`, `DigestTest` in `tests/test_serve.py`) can fail in the full run under load; re-run a failing test alone before treating it as a real failure.
+- A load timeout that passes when re-run alone is not a review finding; at most one line under Notes.
 - `tests/test_contracts.py` pins exact agent and SKILL.md wording: `self.section(text, "## A", "## B")` slices a
   heading range and `assertIn(phrase, ...)` checks phrases. Before rewording an agent or SKILL.md line, grep the
   phrase there and change both in the same commit. `FIRST_LINE` pins each agent's first output line.
@@ -18,6 +20,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - Lane bodies live in `skills/trevskills-scrum/lanes/<lane>.md` (runall, debug, bigboy, roadmap, lilguy, cloud); their SKILL.md section is one `Read ... when this lane runs.` line. New lane text goes in the lane file, not SKILL.md.
 - Dashboard: `skills/trevskills-scrum/dashboard.html` is one file served by `serve.py` on :8765. The UI rules in
   `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it; test at 390 px first.
+- Dashboard: an async fetch or poll that writes into the viewer, a modal or a list returns early when its target changed while it waited (e.g. `if ($("viewer").dataset.key !== job.key) return;`).
 - Routing: `local/routing.json` + `local/route.py`. Codex lives at `/opt/homebrew/bin/codex` only on Trevor's
   Mac; `route.py codex-review` returns `skip` wherever the binary is missing (cloud sessions).
 - Agent, SKILL.md and lane edits merge like any other job, with no agent-rules stop (Trevor's choice, 2026-10-15).

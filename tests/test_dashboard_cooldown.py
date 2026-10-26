@@ -19,7 +19,7 @@ class CooldownButton(unittest.TestCase):
                          "right after #machine")
         btn = re.search(r'<button class="btn" id="cooldown"[^>]*>', header).group(0)
         self.assertIn("data-agent-hint=", btn, "the explanation is in the hint, not on screen")
-        self.assertIn("refuses every automatic start", btn)
+        self.assertIn("holds only new work", btn)
         self.assertIn('<span id="cooldownState"', header)
         click = text[text.index('$("cooldown").addEventListener("click"'):]
         click = click[:click.index("\n});\n")]

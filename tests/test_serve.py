@@ -10,6 +10,7 @@ os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, w
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly idle unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 
@@ -608,9 +609,9 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve, "resume_refusal", return_value="waiting: free RAM 5% (< 20%)"), \
                 mock.patch.object(self.serve, "spawn"):
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {"manual": True})[0], 202)
-        with self.cooling():
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 409)
-        self.assertEqual(lines(queued), [], "a queued click and a cooling-down 409 are not refused stops")
+        with self.cooling(), mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{queued}/resume", {})[0], 202)
+        self.assertEqual(lines(queued), [], "a queued click and a cooling-down resume are not refused stops")
         for j in (stalled, held, asked, queued):
             b.cmd_abort(self.root, j, False)
 
@@ -711,14 +712,18 @@ class ServeTest(unittest.TestCase):
             (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `{extra}`: why\n")
         with mock.patch.object(self.serve, "spawn") as spawn:
             code, out = self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {})
-        self.assertEqual((code, out), (409, {"error": f"can't resume yet: sibling {sib} shares src/shared.py. "
-                                                      f"Fix: click Resume when {sib} finish."}))
+            self.assertEqual((code, out), (202, {"id": kid, "action": "resume", "queued": True,
+                                                 "message": "queued, starts next"}))
+            mine = lambda: [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in (parent, kid, sib)]
+            self.assertFalse(self.serve.play_queue_tick("repo", self.root, mine()))  # the sibling still holds the file
         spawn.assert_not_called()
         self.assertEqual((self.stage_of(kid)["stage"], self.stage_of(kid)["reason"]), ("needs-human", reason))
+        self.assertIn("play_queued", self.stage_of(kid))
         self.edit_job(sib, stage="done")
-        with mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (202, {"id": kid, "action": "resume"}))
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve.board, "machine_ok", return_value=None):
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, mine()))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+        self.assertNotIn("play_queued", self.stage_of(kid))
 
     def test_dashboard_has_bigboy_lane_option(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
@@ -1033,13 +1038,19 @@ class ServeTest(unittest.TestCase):
                                                       "by hand in the main checkout and run /trevskills-commitpush, or "
                                                       "discard it, then click Abort."}))
         self.assert_nothing_ran(m)
+        self.assertNotIn("play_queued", self.stage_of(lil))
         blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         kid = self.asked("resume 1", parent="100-parent")
+        self.addCleanup(self.edit_job, kid, stage="aborted", play_queued=None)  # the shared board: no later tick resumes it
         with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
             code, out, m = self.answer(kid, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
-        self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
-                                                      "Fix: click Resume when 123-sib finish."}))
-        self.assert_nothing_ran(m)
+        self.assertEqual((code, out), (202, {"id": kid, "action": "answer", "command": "resume", "queued": True,
+                                             "message": "queued, starts next"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), kid, "a")
+        for name in ("spawn", "stop", "abort", "resume"):
+            m[name].assert_not_called()
+        self.assertIn("play_queued", self.stage_of(kid))
+        self.assertEqual(self.stage_of(kid)["stage"], "needs-human")
 
     def low_usage(self, base):
         """usage.json at 99 % used on both windows, resets 2 h and 3 days away: allowance 0."""
@@ -1130,28 +1141,36 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["cooldown", "free_disk_gb", "free_ram_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "sessions",
-                "swap_pct", "usage", "verdict"]
+        keys = ["cooldown", "cpu_load_pct", "free_disk_gb", "free_ram_pct", "max_cpu_load_pct", "max_swap_pct",
+                "min_free_disk_gb", "min_free_ram_pct", "sessions", "swap_pct", "usage", "verdict"]
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
-                               "usage": "unknown", "cooldown": False, "sessions": 0})
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25"):
+                               "usage": "unknown", "cooldown": False, "sessions": 0,
+                               "cpu_load_pct": 1.0, "max_cpu_load_pct": 150})
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
+                             SCRUM_CPU_LOAD_PCT="42.56"):
             self.assertEqual(self.req("GET", "/api/machine")[1],
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
-                              "usage": "unknown", "cooldown": False, "sessions": 0})
+                              "usage": "unknown", "cooldown": False, "sessions": 0,
+                              "cpu_load_pct": 42.6, "max_cpu_load_pct": 150})
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="190"):
+            out = self.req("GET", "/api/machine")[1]
+        self.assertEqual((out["cpu_load_pct"], out["verdict"][:13]), (190.0, "CPU load 190%"))
         disk = []
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB=""), \
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
+                mock.patch.object(self.serve.board.os, "getloadavg", side_effect=OSError("no load")), \
                 mock.patch.object(self.serve.board.shutil, "disk_usage",
                                   side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
-                                             "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0}))
+                                             "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
+                                             "cpu_load_pct": None, "max_cpu_load_pct": 150}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
@@ -1165,13 +1184,15 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
-                                            "five_hour_resets_at": now + 7200, "allowance": 3})  # 7 % left: rung 1
+                                            "five_hour_resets_at": now + 7200, "allowance": 3,
+                                            "fable": "paused"})  # 7 % left: rung 1
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             del fresh["rate_limits"]["seven_day"]["used_percentage"]
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None})
+                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None,
+                "fable": "unknown"})
             fresh["written_at"] = time.time() - 301
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
@@ -1179,6 +1200,22 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
             usage.unlink()
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+
+    def test_machine_usage_fable(self):
+        usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
+        now = time.time()
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            for five, seven, want in ((10, 10, "ok"), (70, 10, "warn"), (10, 75, "warn"), (80, 10, "paused"),
+                                      (10, 85, "paused")):
+                usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                    "five_hour": {"used_percentage": five, "resets_at": now + 3600},
+                    "seven_day": {"used_percentage": seven, "resets_at": now + 86400}}}))
+                self.assertEqual(self.serve.machine_usage(now)["fable"], want, (five, seven))
+            usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                "five_hour": {"used_percentage": 10, "resets_at": now + 3600}}}))
+            self.assertEqual(self.serve.machine_usage(now)["fable"], "unknown", "no 7d window")
+            usage.unlink()
+            self.assertEqual(self.serve.machine_usage(now), "unknown", "the string return is unchanged")
 
     PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
 
@@ -1213,34 +1250,29 @@ class ServeTest(unittest.TestCase):
         kid = self.paused_job("Blocked kid", parent="100-parent")
         blocker = b.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         with mock.patch.object(b, "resume_blocker", return_value=blocker), mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (409, {
-                "error": "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish."}))
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (202, {**queued, "id": kid}))
         spawn.assert_not_called()
-        self.assertNotIn("play_queued", self.stage_of(kid))
+        self.assertIn("play_queued", self.stage_of(kid))
 
-    # --- cool down (job 305): a flag file that refuses every automatic start; Trevor's clicks still start work ---
+    # --- cool down (jobs 305, 421): a flag file that holds only new work; in-flight work and Trevor's clicks still start ---
     def cooling(self):
         flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
         flag.write_text("")
         return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
 
-    def test_cooldown_refuses_automatic_resume_post(self):
-        """continue.py POSTs {} to Resume: while cooling down that is an automatic start, refused before the queue."""
+    def test_cooldown_allows_automatic_resume_post(self):
+        """Job 421: continue.py POSTs {} to Resume; cool-down holds only new work, so a stalled or paused job resumes."""
         stalled = self.serve.board.cmd_new(self.root, "Cool stalled")
         self.edit_job(stalled, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
         self.addCleanup(self.serve.board.cmd_abort, self.root, stalled, False)
         paused = self.paused_job("Cool paused")
         with self.cooling(), mock.patch.object(self.serve, "spawn") as spawn:
             for job_id in (stalled, paused):
-                for body in ({}, {"manual": "yes"}, {"manual": 1}):
-                    with self.subTest(job=job_id, body=body):
-                        before = self.stage_of(job_id)
-                        code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", body)
-                        self.assertEqual(code, 409)
-                        self.assertIn("cooling down", out["error"])
-                        self.assertEqual(self.stage_of(job_id), before, "not queued, nothing changed")
-                        self.assertNotIn("play_queued", self.stage_of(job_id))
-        spawn.assert_not_called()
+                with self.subTest(job=job_id):
+                    self.assertEqual(self.serve.resume_refusal("repo", self.root, self.stage_of(job_id)), None)
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}),
+                                     (202, {"id": job_id, "action": "resume"}))
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(stalled, "resume"), (paused, "resume")])
 
     def test_cooldown_manual_play_allowed(self):
         b = self.serve.board
@@ -1293,6 +1325,50 @@ class ServeTest(unittest.TestCase):
             with e:
                 return e.code, json.loads(e.read())
 
+    def rank_registry(self, *names):
+        """A fresh registry of repos `names` (each with a scrum/ folder); returns its path."""
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        reg = base / "projects.json"
+        reg.write_text(json.dumps([str(base / n) for n in names]))
+        for n in names:
+            (base / n / "scrum").mkdir(parents=True)
+        return reg
+
+    def test_project_rank_endpoint(self):
+        reg = self.rank_registry("a", "b", "c")
+        with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
+            self.assertEqual(self.raw_post("/api/projects/rank", {"name": "c", "to": 0}),
+                             (200, [{"name": "c"}, {"name": "a"}, {"name": "b"}]))
+            self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "c"}, {"name": "a"}, {"name": "b"}]))
+            self.assertEqual([Path(p).name for p in json.loads(reg.read_text())], ["c", "a", "b"])
+            ino = reg.stat().st_ino
+            self.assertEqual(self.raw_post("/api/projects/rank", {"name": "a", "to": 1}),
+                             (200, [{"name": "c"}, {"name": "a"}, {"name": "b"}]), "already at 1")
+            self.assertEqual(reg.stat().st_ino, ino, "a no-op move does not rewrite projects.json")
+            self.assertEqual(self.post_raw_bytes("/api/projects/rank", json.dumps({"name": "a", "to": 0}).encode(),
+                                                 {"Host": "evil.example"}), (403, {"error": "forbidden"}))
+            self.assertEqual([Path(p).name for p in json.loads(reg.read_text())], ["c", "a", "b"])
+
+    def test_project_rank_rejects_bad_input(self):
+        reg = self.rank_registry("a", "b")
+        with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
+            before = reg.read_text()
+            for body in ({"name": "nope", "to": 0}, {"name": 3, "to": 0}, {"to": 0}, {"name": "a", "to": 2},
+                         {"name": "a", "to": -1}, {"name": "a", "to": True}, {"name": "a", "to": "1"},
+                         {"name": "a", "to": 1.0}, {"name": "a"}, [1, 2]):
+                with self.subTest(body=body):
+                    code, out = self.raw_post("/api/projects/rank", body)
+                    self.assertEqual(code, 400)
+                    self.assertIsInstance(out["error"], str)
+                    self.assertEqual(reg.read_text(), before)
+            self.assertEqual(self.post_raw_bytes("/api/projects/rank", b"{not json"), (400, {"error": "body must be JSON"}))
+            self.assertEqual(reg.read_text(), before)
+        for reg in (Path(self.tmp.name) / "missing" / "projects.json", self.rank_registry()):
+            with self.subTest(reg=reg), mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
+                self.assertEqual(self.raw_post("/api/projects/rank", {"name": "a", "to": 0}),
+                                 (400, {"error": "no projects registered"}))
+                self.assertFalse(reg.exists() and reg.read_text() != "[]")
+
     def test_cooldown_endpoint(self):
         flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "nested" / "cooldown"
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
@@ -1321,9 +1397,9 @@ class ServeTest(unittest.TestCase):
             self.assertEqual((m["cooldown"], m["verdict"]), (False, None))
             flag.write_text("")  # left over from an earlier serve.py run: still counts
             self.assertEqual(self.req("GET", "/api/machine")[1]["cooldown"], True)
-            self.assertEqual(self.serve.board.machine_ok(self.root), "cooling down")
+            self.assertEqual(self.serve.board.machine_ok(self.root, claim=True), "cooling down")
             self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
-            self.assertIsNone(self.serve.board.machine_ok(self.root), "the next tick may start work, no restart")
+            self.assertIsNone(self.serve.board.machine_ok(self.root, claim=True), "the next tick may start work, no restart")
 
     def test_cooldown_chimes_once_at_zero(self):
         s, b = self.serve, self.serve.board
@@ -1414,7 +1490,7 @@ class ServeTest(unittest.TestCase):
         job = self.board_jobs()[kid]
         self.assertEqual(job["resumeRefusal"], f"can't resume yet: sibling {sib} shares skills/x/SKILL.md. "
                                                f"Fix: click Resume when {sib} finish.")
-        self.assertEqual(job["waitingOn"], {"ids": [sib], "why": "shares SKILL.md"})
+        self.assertEqual(job["waitingOn"], {"ids": [sib], "why": "shares SKILL.md", "titles": ["Busy sibling"]})
         B = b.Blocker
         self.assertEqual(self.serve.waiting_on(B("this job runs alone", ["1-a", "2-b"])), {"ids": ["1-a", "2-b"], "why": "runs alone"})
         many = B("sibling 1-a shares a/b/SKILL.md; sibling 2-b runs alone; sibling 3-c shares c/SKILL.md; sibling 4-d shares serve.py",
@@ -1422,6 +1498,35 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.serve.waiting_on(many), {"ids": ["1-a", "2-b", "3-c", "4-d"],
                                                        "why": "shares SKILL.md, runs alone, shares serve.py"})
         self.assertIsNone(self.serve.waiting_on(None))
+
+    def test_board_with_activity_waiting_on_unmerged_dependency(self):
+        b = self.serve.board
+        first, second, third = (b.cmd_new(self.root, t) for t in ("Blocker one", "Parked two", "Merged three"))
+        self.addCleanup(lambda: self.edit_job(second, stage="aborted"))  # the shared board: no later tick may claim it
+        self.edit_job(first, stage="merging")
+        self.edit_job(second, stage="waiting", depends_on=[first, third], reason=f"waiting on {first}")
+        self.edit_job(third, stage="done")
+        jobs = self.board_jobs()
+        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first], "why": "not merged yet", "titles": ["Blocker one"]})
+        self.assertNotIn("waitingOn", jobs[first])
+        self.edit_job(first, stage="done")
+        self.assertNotIn("waitingOn", self.board_jobs()[second])
+
+    def test_board_data_waiting_on_titles(self):
+        b = self.serve.board
+        first, untitled, second, kid = (b.cmd_new(self.root, t) for t in ("Owns the migration", "No title", "Parked", "Kid"))
+        self.addCleanup(lambda: [self.edit_job(i, stage="aborted") for i in (second, kid)])  # no later tick may claim them
+        self.edit_job(first, stage="merging")
+        self.edit_job(untitled, stage="build", title="")
+        self.edit_job(second, stage="waiting", depends_on=[first, untitled, "999-gone"], reason=f"waiting on {first}")
+        self.edit_job(kid, parent="100-parent", stage="build", paused=True)
+        blocker = b.Blocker(f"sibling {first} runs alone; sibling 998-missing runs alone", [first, "998-missing"])
+        with mock.patch.object(b, "resume_blocker", return_value=blocker), mock.patch.object(b, "machine_ok", return_value=None):
+            jobs = self.board_jobs()
+        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first, untitled, "999-gone"], "why": "not merged yet",
+                                                     "titles": ["Owns the migration", "", ""]})
+        self.assertEqual(jobs[kid]["waitingOn"], {"ids": [first, "998-missing"], "why": "runs alone",
+                                                  "titles": ["Owns the migration", ""]})
 
     def test_board_json_free_job_nulls(self):
         b = self.serve.board
@@ -2194,6 +2299,64 @@ class ServeTest(unittest.TestCase):
 
 
 SECRET = "sk-planted-secret-123"
+
+
+class LatestWindowsTest(unittest.TestCase):
+    """serve.latest_windows and GET /api/p/<project>/windows, on ServeTest's registered "repo" and live server."""
+    setUpClass = classmethod(ServeTest.setUpClass.__func__)
+    tearDownClass = classmethod(ServeTest.tearDownClass.__func__)
+    req = ServeTest.req
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def card(self, name, body):
+        (self.dir / "windows").mkdir(exist_ok=True)
+        (self.dir / "windows" / name).write_text(body if isinstance(body, str) else json.dumps(body))
+
+    def test_newest_per_window_trimmed(self):
+        self.card("five_hour-99999.json", {"headline": 1.0, "points_done": 1, "resets_at": 99999})
+        self.card("five_hour-100000.json", {"headline": 0.146, "points_done": 6, "budget": {"used_pct": 41, "hit_90_at": 5},
+                                            "first_pass_rate": 0.8, "wasted_pct": 12, "escapes": 0, "resets_at": 100000,
+                                            "tokens": {"total": 9}, "label": "5h"})
+        self.card("seven_day-500.json", {"points_done": 20, "resets_at": 500})
+        self.assertEqual(self.serve.latest_windows(self.dir), {
+            "five_hour": {"headline": 0.146, "points_done": 6, "budget": {"used_pct": 41}, "first_pass_rate": 0.8,
+                          "wasted_pct": 12, "escapes": 0, "resets_at": 100000},
+            "seven_day": {"headline": None, "points_done": 20, "budget": {"used_pct": None}, "first_pass_rate": None,
+                          "wasted_pct": None, "escapes": None, "resets_at": 500}})
+
+    def test_missing_dir_and_only_open_json(self):
+        self.assertEqual(self.serve.latest_windows(self.dir), {"five_hour": None, "seven_day": None})
+        self.card("open.json", {"five_hour": {"resets_at": 1}})
+        self.card(".lock", "")
+        self.assertEqual(self.serve.latest_windows(self.dir), {"five_hour": None, "seven_day": None})
+
+    def test_malformed_newest_falls_back(self):
+        self.card("five_hour-200.json", "{not json")
+        self.card("five_hour-150.json", "[1, 2]")
+        self.card("five_hour-100.json", {"points_done": 3, "resets_at": 100})
+        self.card("seven_day-900.json", "\"just a string\"")
+        out = self.serve.latest_windows(self.dir)
+        self.assertEqual(out["five_hour"]["points_done"], 3)
+        self.assertIsNone(out["seven_day"])
+
+    def test_endpoint(self):
+        self.card("seven_day-700.json", {"points_done": 4, "resets_at": 700})
+        windows = self.root / "windows"
+        shutil.rmtree(windows, ignore_errors=True)
+        shutil.copytree(self.dir / "windows", windows)
+        self.addCleanup(shutil.rmtree, windows, True)
+        self.assertEqual(self.req("GET", "/api/p/repo/windows"), (200, {"five_hour": None, "seven_day": {
+            "headline": None, "points_done": 4, "budget": {"used_pct": None}, "first_pass_rate": None, "wasted_pct": None,
+            "escapes": None, "resets_at": 700}}))
+        with self.assertRaises(urllib.error.HTTPError) as e:  # req drops an error's body
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/p/nope/windows")
+        with e.exception as res:
+            self.assertEqual((res.code, json.loads(res.read())), (404, {"error": "no such project"}))
+        self.assertEqual(self.req("GET", "/api/p/repo/windows", headers={"Host": "evil.example"})[0], 403)
 
 
 class AiSettingsTest(unittest.TestCase):
@@ -3749,7 +3912,7 @@ class DigestTest(unittest.TestCase):
         return f
 
     def test_digests_list_skips_malformed_proposals(self):
-        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "digests": []}))
+        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "due": False, "digests": []}))
         a = self.done_job()
         self.done_job("two")
         rule = self.rule()
@@ -3795,9 +3958,21 @@ class DigestTest(unittest.TestCase):
         self.board.cmd_digest_start(self.scrum)
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
 
+    def test_digest_now_spawns_on_questions_growth(self):
+        (self.scrum / "questions.log").write_text("{}\n" * 14)
+        self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
+        self.assertFalse(self.get("/api/p/reg/digests")[1]["due"])
+        (self.scrum / "questions.log").write_text("{}\n" * 15)
+        self.assertTrue(self.get("/api/p/reg/digests")[1]["due"])
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
+            code, out = self.post("/api/p/reg/digest", {})
+            self.assertEqual(code, 202, out)
+            popen.assert_called_once()
+
     def test_digest_now_retries_after_failed_digest(self):
         a = self.done_job()
-        self.assertEqual(self.board.cmd_digest_start(self.scrum), {"id": "001", "jobs": [a]})
+        self.assertEqual(self.board.cmd_digest_start(self.scrum), {"id": "001", "jobs": [a], "windows": []})
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
         (self.scrum / "digests" / "001" / "error.md").write_text("digester produced no valid proposals\nmore\n")
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
@@ -4173,7 +4348,8 @@ class DigestTest(unittest.TestCase):
         return r.stdout
 
     def git_repo(self, files=("agents/scrum-x.md",), text="keep A\nold line\nkeep B\n"):
-        """self.reg as a clean git checkout on branch main, with tests/test_contracts.py and `files` committed."""
+        """self.reg as a clean git checkout on branch main, with tests/test_contracts.py and `files` committed and pushed to
+        a bare `origin` at self.origin."""
         for rel in files:
             self.repo_file(rel, text)
         self.repo_file("tests/test_contracts.py", "import unittest\n")
@@ -4185,6 +4361,30 @@ class DigestTest(unittest.TestCase):
             self.git("config", key, value)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "init")
+        self.origin = Path(self.tmp.name) / "origin.git"
+        shutil.rmtree(self.origin, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True, capture_output=True)
+        self.git("remote", "add", "origin", str(self.origin))
+        self.git("push", "-q", "-u", "origin", "main")
+
+    def origin_head(self):
+        """main's SHA in the bare origin itself, not the checkout's remote-tracking ref."""
+        return subprocess.run(["git", "--git-dir", str(self.origin), "rev-parse", "refs/heads/main"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def assert_landed(self, heads):
+        """Local main, origin/main and the bare origin's main are one commit, `heads` deep, and no temp worktree is left."""
+        self.assertEqual(self.head_count(), heads)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.git("rev-parse", "origin/main").strip())
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.origin_head())
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
+    def assert_worktree_runs(self, runs, n):
+        """n contract-test runs, each in a temp worktree: never self.reg, and gone afterwards."""
+        self.assertEqual(len(runs), n)
+        for cwd in runs:
+            self.assertNotEqual(os.path.realpath(cwd), os.path.realpath(self.reg))
+            self.assertFalse(os.path.exists(cwd), cwd)
 
     def contract_tests(self, fail_on=()):
         """Patch DIGEST_CONTRACT_TESTS to a command that logs each run's cwd and exits 1 on the runs numbered in fail_on."""
@@ -4212,8 +4412,8 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [{"id": "p1", "target": str(claude_md), "why": "Seen in 001-a and 002-b (p1)."}],
                                "queued": [], "skipped": [], "job": job["id"]})
         self.assertEqual(claude_md.read_text(), "keep A\nnew line\nkeep B\n")
-        self.assertEqual(runs(), [str(self.reg)])
-        self.assertEqual(self.head_count(), 2)
+        self.assert_worktree_runs(runs(), 1)
+        self.assert_landed(2)
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["CLAUDE.md"])
         self.assertTrue((self.scrum / "jobs" / job["id"] / "feature.md").read_text().startswith("Apply digest 001 proposals:"))
         self.assertEqual(self.statuses(), ["applied"])
@@ -4232,11 +4432,11 @@ class DigestTest(unittest.TestCase):
                                "queued": [], "skipped": [], "job": job["id"]})
         self.assertTrue(link.is_symlink())
         self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
-        self.assertEqual(runs(), [str(self.reg)])
+        self.assert_worktree_runs(runs(), 1)
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
         self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
                          "Apply digest 001 proposals:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
-        self.assertEqual(self.head_count(), 2)
+        self.assert_landed(2)
         self.assertTrue(self.git("log", "-1", "--format=%s").startswith(f"[scrum {job['id']}] Apply digest 001"))
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
@@ -4250,6 +4450,7 @@ class DigestTest(unittest.TestCase):
         twice = self.reg / "agents" / "scrum-y.md"
         twice.write_text("old line\nold line\n")
         self.git("commit", "-q", "-am", "twice")
+        self.git("push", "-q")
         runs = self.contract_tests()
         agent = self.reg / "agents" / "scrum-x.md"
         self.digest([self.prop("p1", agent, old="not there"), self.prop("p2", twice)])
@@ -4277,10 +4478,10 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}], "skipped": [],
                                "job": job["id"], "queued": [{"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).",
                                                              "reason": "contract tests failed"}]})
-        self.assertEqual(len(runs()), 2)
+        self.assert_worktree_runs(runs(), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n", "keep A\nold line\nkeep B\n"))
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
-        self.assertEqual(self.head_count(), 2)
+        self.assert_landed(2)
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(self.statuses(), ["applied", "queued"])
@@ -4335,7 +4536,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [], "skipped": [], "job": job["id"],
                                "queued": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1).", "reason": why},
                                           {"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).", "reason": why}]})
-        self.assertEqual(len(runs()), 2)
+        self.assert_worktree_runs(runs(), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
         self.assertEqual(job["stage"], "needs-human")
         self.assertTrue(job["reason"].startswith("digest apply: git commit failed: hook says no"), job["reason"])
@@ -4344,10 +4545,131 @@ class DigestTest(unittest.TestCase):
                          [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
         [line] = (self.scrum / "questions.log").read_text().splitlines()
         self.assertEqual(json.loads(line)["job"], job["id"])
-        self.assertEqual(self.head_count(), 1)
+        self.assert_landed(1)
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
         self.assertEqual(self.statuses(), ["queued", "queued"])
         self.assertEqual(len(self.board.backlog_items(self.scrum)), 2)
+
+    def test_digest_apply_never_dirties_main_checkout(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        seen = []
+
+        def contract_ok(cwd):
+            seen.append((str(cwd), self.git("status", "--porcelain"), x.read_bytes(), y.read_bytes()))
+            return True
+
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        with mock.patch.object(self.serve, "digest_contract_ok", side_effect=contract_ok):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([a["id"] for a in out["applied"]], ["p1", "p2"])
+        self.assertEqual(len(seen), 2)
+        for cwd, status, xb, yb in seen:
+            self.assertNotEqual(os.path.realpath(cwd), os.path.realpath(self.reg))
+            self.assertEqual((status, xb, yb), ("", b"keep A\nold line\nkeep B\n", b"keep A\nold line\nkeep B\n"))
+        self.assertEqual(seen[0][0], seen[1][0])  # one worktree for the repo's proposals, so the tests are cumulative
+
+    def test_digest_apply_pushes_and_fast_forwards(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        runs = self.contract_tests()
+        before = self.origin_head()
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        self.assertEqual(out["job"], job["id"])
+        self.assertNotEqual(self.origin_head(), before)
+        self.assert_landed(2)
+        self.assert_worktree_runs(runs(), 2)
+        self.assertEqual(self.git("log", "-1", "--format=%s").strip(), f"[scrum {job['id']}] Apply digest 001 p1, p2")
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md", "agents/scrum-y.md"])
+        self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n",) * 2)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((job["lane"], job["stage"], job.get("reason") or ""), ("lilguy", "done", ""))
+        self.assertEqual(self.statuses(), ["applied", "applied"])
+
+    def test_digest_auto_queues_when_push_fails(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'origin says no' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        runs = self.contract_tests()
+        local, tracking, remote = self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"), self.origin_head()
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        why = "push failed: remote: origin says no"
+        self.assertEqual(out, {"applied": [], "skipped": [], "job": job["id"],
+                               "queued": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1).", "reason": why},
+                                          {"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).", "reason": why}]})
+        self.assert_worktree_runs(runs(), 2)
+        self.assertEqual((self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"), self.origin_head()),
+                         (local, tracking, remote))
+        self.assert_landed(1)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertTrue(job["reason"].startswith("digest apply: git push failed: remote: origin says no"), job["reason"])
+        self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
+                         [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
+        self.assertEqual(self.statuses(), ["queued", "queued"])
+        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
+                         ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
+                          "Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
+
+    def test_digest_apply_refuses_when_ahead_or_no_origin(self):
+        agent = self.reg / "agents" / "scrum-x.md"
+        other = self.reg / "agents" / "scrum-z.md"
+        cases = [("local main is ahead of origin", "001",
+                  lambda: (self.repo_file("agents/scrum-z.md", "z\n"), self.git("add", "-A"), self.git("commit", "-q", "-m", "stranded"))),
+                 ("fetch failed: fatal: 'origin' does not appear to be a git repository", "002",
+                  lambda: self.git("remote", "remove", "origin"))]
+        runs = self.contract_tests()
+        for why, digest_id, setup in cases:
+            with self.subTest(why):
+                shutil.rmtree(self.reg / ".git", ignore_errors=True)
+                other.unlink(missing_ok=True)
+                self.git_repo()
+                setup()
+                heads = self.head_count()
+                self.digest([self.prop("p1", agent)], digest_id)
+                out = self.serve.digest_apply(self.scrum, digest_id, [self.prop("p1", agent)])
+                self.assertEqual(out, ([], [{"id": "p1", "target": str(agent), "why": "Seen in 001-a and 002-b (p1).", "reason": why}], None))
+                self.assertEqual(agent.read_text(), "keep A\nold line\nkeep B\n")
+                self.assertEqual(self.head_count(), heads)
+                self.assertEqual(self.git("status", "--porcelain"), "")
+                self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+                self.assertEqual(self.jobs(), [])
+                self.assertEqual(self.statuses(digest_id), ["pending"])
+        self.assertEqual(runs(), [])
+
+    def test_digest_apply_fast_forward_blocked_after_push(self):
+        y = self.reg / "agents" / "scrum-y.md"
+        cases = [("uncommitted changes", "001", lambda cwd: y.write_text("edited during the tests\n")),
+                 ("not on main", "002", lambda cwd: self.git("checkout", "-q", "-b", "other"))]
+        for why, digest_id, during in cases:
+            with self.subTest(why):
+                shutil.rmtree(self.reg / ".git", ignore_errors=True)
+                self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+                x = self.reg / "agents" / "scrum-x.md"
+                local = self.git("rev-parse", "main").strip()
+                self.digest([self.prop("p1", x)], digest_id)
+                with mock.patch.object(self.serve, "digest_contract_ok", side_effect=lambda cwd: during(cwd) or True):
+                    out = self.serve.digest_auto(self.scrum, digest_id)
+                job = next(j for j in self.jobs() if j["id"] == out["job"])
+                self.assertEqual(out["applied"], [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}])
+                self.assertEqual(self.statuses(digest_id), ["applied"])
+                self.assertEqual((job["stage"], job["reason"]), ("done", f"merged, not live: {why}"))
+                self.assertEqual(self.git("rev-parse", "main").strip(), local)
+                self.assertEqual(self.git("rev-parse", "origin/main").strip(), self.origin_head())
+                self.assertEqual(self.git("rev-list", "--count", "main..origin/main").strip(), "1")
+                self.assertEqual(self.git("log", "-1", "--format=%s", "origin/main").strip(), f"[scrum {job['id']}] Apply digest {digest_id} p1")
+                self.assertEqual(x.read_text(), "keep A\nold line\nkeep B\n")
+                if why == "uncommitted changes":
+                    self.assertEqual(y.read_text(), "edited during the tests\n")
+                    self.assertEqual(self.git("stash", "list"), "")
+                self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
 
     def test_digest_revert_repo_edit_commits_under_lilguy_job(self):
         self.git_repo(text="keep A\nnew line\nkeep B\n")
@@ -4362,8 +4684,9 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((job["lane"], job["stage"], job["title"]), ("lilguy", "done", "Revert digest 001 p1"))
         self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
                          "Revert digest 001 p1:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
-        self.assertEqual(runs(), [str(self.reg)])
-        self.assertEqual(self.head_count(), 2)
+        self.assert_worktree_runs(runs(), 1)
+        self.assert_landed(2)
+        self.assertEqual(self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"))
         self.assertEqual(self.git("log", "-1", "--format=%s").strip(), f"[scrum {job['id']}] Revert digest 001 p1")
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
@@ -4389,6 +4712,7 @@ class DigestTest(unittest.TestCase):
         twice = self.reg / "agents" / "scrum-y.md"
         twice.write_text("new line\nnew line\n")
         self.git("commit", "-q", "-am", "twice")
+        self.git("push", "-q")
         agent = self.reg / "agents" / "scrum-x.md"
         rule = self.rule("edited since\n")
         self.digest([self.prop("p1", agent, old="old line", new="not there", status="applied"),
@@ -4437,6 +4761,54 @@ class DigestTest(unittest.TestCase):
                      self.skill("p7", target, new="---\n" + "line\n" * 149)])
         props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
         self.assertEqual([(p["id"], p["kind"]) for p in props], [("p1", "skill"), ("p6", "edit"), ("p7", "skill")])
+
+    def bl(self, pid="b1", **extra):
+        return {"id": pid, "why": "w", "kind": "backlog", "backlog": "Auto-answer watchdog stalls (4 stops)", **extra}
+
+    def test_backlog_proposal_shape_validated(self):
+        self.assertEqual(self.serve.valid_proposal(self.bl("p1")),
+                         {"id": "p1", "why": "w", "target": "", "old": "", "new": "", "status": "pending", "kind": "backlog",
+                          "backlog": "Auto-answer watchdog stalls (4 stops)"})
+
+    def test_backlog_proposal_empty_backlog_rejected(self):
+        for bad in ("", "  \n", None, 5):
+            self.assertIsNone(self.serve.valid_proposal(self.bl("p1", backlog=bad)))
+        p = self.bl("p1")
+        del p["backlog"]
+        self.assertIsNone(self.serve.valid_proposal(p))
+        self.digest([self.bl("p1", backlog=" ")])
+        self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_digest_auto_applies_backlog_proposal_at_priority_3(self):
+        job_id = self.done_job()
+        self.digest([self.bl("b1")], jobs=[job_id])
+        out = self.serve.digest_auto(self.scrum, "001")
+        items = self.board.backlog_items(self.scrum)
+        self.assertEqual([(i["text"], i["priority"], i["done"]) for i in items], [("Auto-answer watchdog stalls (4 stops)", 3, False)])
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual([e["id"] for e in out["applied"]], ["b1"])
+        self.assertIsNone(out["job"])
+        self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(len(self.board.backlog_items(self.scrum)), 1)
+
+    def test_digest_auto_skips_backlog_proposal_when_add_fails(self):
+        rule = self.rule()
+        self.digest([self.bl("b1"), self.prop("p2", rule)])
+        with mock.patch.object(self.board, "cmd_backlog_add", side_effect=SystemExit("boom")):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["skipped", "applied"])
+        self.assertEqual([(e["id"], e["reason"]) for e in out["skipped"]], [("b1", "backlog add failed")])
+
+    def test_digest_revert_backlog_proposal_returns_409(self):
+        self.digest([self.bl("b1", status="applied")])
+        self.board.cmd_backlog_add(self.scrum, ["x"])
+        before = ((self.scrum / "digests" / "001" / "proposals.json").read_text(), (self.scrum / "backlog.md").read_text())
+        self.assertEqual(self.revert("b1")[0], 409)
+        self.assertEqual(self.serve.digest_revert(self.scrum, "001", "b1"), (409, {"error": "a backlog proposal can't be reverted"}))
+        self.assertEqual(before, ((self.scrum / "digests" / "001" / "proposals.json").read_text(), (self.scrum / "backlog.md").read_text()))
 
     def test_digest_route_accepts_only_revert(self):
         rule = self.rule("keep A\nold line\nkept B\n")
@@ -4996,12 +5368,50 @@ class CloudPollTest(unittest.TestCase):
                   "worktree": None, "artifacts": False}]
         s = self.serve
         result = {"moved": moved, "arrived": ["003-late", "001-art", "004-busy"], "error": None}
-        with mock.patch.object(s.board, "cmd_cloud_sync", return_value=result), mock.patch.object(s, "spawn") as sp, \
+        order = []
+        with mock.patch.object(s.board, "cmd_cloud_sync", return_value=result), \
+                mock.patch.object(s, "spawn", side_effect=lambda *a: order.append(("spawn", a[2]))) as sp, \
+                mock.patch.object(s.board, "cloud_pending_clear",
+                                  side_effect=lambda root, job_id: order.append(("clear", job_id))) as clear, \
                 mock.patch.object(s, "running", side_effect=lambda project, job_id: job_id == "004-busy"):
             s.cloud_tick("p", self.root, self.cloud, now=10_000)
         self.assertEqual([c.args[2] for c in sp.call_args_list], ["001-art", "005-schema", "003-late"])
         self.assertEqual(sp.call_args_list[2].args,
                          ("p", self.root, "003-late", "cloud-home", "/trevskills-scrum cloud-home 003-late"))
+        self.assertEqual([c.args for c in clear.call_args_list], [(self.root, "001-art"), (self.root, "003-late")])
+        self.assertEqual(order, [("spawn", "001-art"), ("clear", "001-art"), ("spawn", "005-schema"),
+                                 ("spawn", "003-late"), ("clear", "003-late")],
+                         "a fetchable id is cleared once, right after its spawn returns; 005-schema (no artifacts "
+                         "branch yet) keeps its mark; 004-busy gets neither")
+
+    def test_cloud_poll_spawn_failure_keeps_pending(self):
+        s = self.serve
+        real = s.board
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "scrum"
+        job_id = real.cmd_new(root, "Late artifacts")
+        with real.locked_board(root) as b:
+            job = real.find(b, job_id)
+            job["stage"], job["artifactsPending"] = "done", real.now()
+        mark = real.read_board(root)["jobs"][0]["artifactsPending"]
+        jobs = real.read_board(root)["jobs"]
+        with mock.patch.object(real, "artifacts_pushed", return_value=True), \
+                mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "spawn", side_effect=RuntimeError("spawn boom")) as sp, \
+                mock.patch.object(s.board, "cloud_pending_clear", wraps=s.board.cloud_pending_clear) as clear, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.cloud_tick("p", root, jobs, now=10_000)
+            self.assertEqual([c.args[2] for c in sp.call_args_list], [job_id])
+            clear.assert_not_called()
+            self.assertEqual(err.getvalue(), "cloud-sync: p: spawn boom\n")
+            self.assertEqual(real.read_board(root)["jobs"][0]["artifactsPending"], mark, "spawn failed: mark kept")
+            jobs = real.read_board(root)["jobs"]
+            sp.side_effect = None
+            s.cloud_tick("p", root, jobs, now=10_000 + s.CLOUD_EVERY)
+        self.assertEqual([c.args[2] for c in sp.call_args_list], [job_id, job_id], "next poll reports it again")
+        clear.assert_called_once_with(root, job_id)
+        self.assertNotIn("artifactsPending", real.read_board(root)["jobs"][0])
 
     def test_cloud_poll_runs_for_pending_without_cloud_job(self):
         jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
@@ -5042,6 +5452,50 @@ class CloudPollTest(unittest.TestCase):
             s.watchdog_tick()
         self.assertEqual([c.args[0] for c in cs.call_args_list], [projects["bad"] / "scrum", projects["good"] / "scrum"])
         self.assertEqual(e.getvalue(), "cloud-sync: bad: gh exploded\n")
+
+    def window_projects(self):
+        base = Path(tempfile.mkdtemp())
+        projects = {}
+        for name in ("bad", "good"):
+            (base / name / "scrum").mkdir(parents=True)
+            (base / name / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+            projects[name] = base / name
+        return projects
+
+    def test_watchdog_tick_window_report_per_project_isolates_failures(self):
+        s = self.serve
+        projects = self.window_projects()
+        def report(root):
+            if root.parent.name == "bad":
+                raise RuntimeError("usage exploded")
+            return []
+        with mock.patch.object(s.board, "projects", return_value=projects), \
+                mock.patch.object(s.board, "cmd_window_report", side_effect=report) as wr, \
+                mock.patch("sys.stderr", new=io.StringIO()) as e:
+            s.watchdog_tick()
+        self.assertEqual([c.args for c in wr.call_args_list], [(projects["bad"] / "scrum",), (projects["good"] / "scrum",)])
+        self.assertEqual(e.getvalue(), "watchdog: bad: window report: usage exploded\n")
+
+    def test_watchdog_tick_bad_window_starts_digest(self):
+        s = self.serve
+        projects = {"good": self.window_projects()["good"]}
+        root = projects["good"] / "scrum"
+        def tick(written, reason, busy=False):
+            due = {"due": reason is not None, "undigested": 3, "questionsGrowth": 0, "reason": reason}
+            with mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.object(s.board, "cmd_window_report", return_value=written), \
+                    mock.patch.object(s.board, "cmd_digest_due", return_value=due), \
+                    mock.patch.object(s, "running", side_effect=lambda p, j: busy and j == "digest"), \
+                    mock.patch.object(s, "spawn", return_value="runs/d.log") as sp:
+                s.watchdog_tick()
+            return [c.args for c in sp.call_args_list]
+        card = [{"window": "five_hour"}]
+        self.assertEqual(tick(card, "bad window five_hour-1.json"),
+                         [("good", root, "digest", "digest", "/trevskills-scrum digest")])
+        self.assertEqual(tick([], "bad window five_hour-1.json"), [])
+        for reason in ("10 done", "questions", None):
+            self.assertEqual(tick(card, reason), [], reason)
+        self.assertEqual(tick(card, "bad window five_hour-1.json", busy=True), [])
 
 
 class ExitedRunSweepTest(unittest.TestCase):
@@ -5156,7 +5610,6 @@ class WatchdogIdleParentTest(unittest.TestCase):
         (self.root / "jobs").mkdir(parents=True)
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json"))  # no usage pacing
         env.start(); self.addCleanup(env.stop)
-        serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
         serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("idle/")])
 
@@ -5233,6 +5686,72 @@ class WatchdogIdleParentTest(unittest.TestCase):
                           "updatedAt": "2026-10-25T10:00:00+00:00"},
                          {"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
                           "updatedAt": "2026-10-25T09:00:00+00:00"})
+
+    def test_watchdog_starts_waiting_job_after_blocker_merges(self):
+        self.queue_board({"id": "001-first", "stage": "merging"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                          "reason": "waiting on 001-first"})
+        spawn, _, _ = self.tick()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                          "reason": "waiting on 001-first"})
+        with mock.patch.object(self.serve, "sweep_parents") as sweep:
+            spawn, _, _ = self.tick()
+        sweep.assert_called_once()
+        self.assertEqual([c.args for c in spawn.call_args_list],
+                         [("idle", self.root, "002-second", "start", "/trevskills-scrum start 002-second")])
+        self.assertEqual((self.job("002-second")["stage"], self.job("002-second")["reason"]), ("spec", None))
+
+    def test_wake_waiting_failure_still_sweeps_parents(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.board, "wake_waiting", side_effect=RuntimeError("boom")) as wake, \
+                mock.patch.object(self.serve, "sweep_parents") as sweep:
+            self.tick()
+        wake.assert_called_once()
+        sweep.assert_called_once()
+
+    def test_wake_waiting_starts_only_what_ram_room_allows(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["002-second"])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("spec", "waiting"))
+
+    def test_wake_waiting_spawns_approve_for_wake_job(self):
+        wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                "reason": "waiting on 001-first", "wake": "approve 002-second"}
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake))
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value="free RAM 14% (< 20%)"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake),
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                         [("002-second", "approve", "/trevskills-scrum approve 002-second")])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
+
+    def test_wake_waiting_holds_while_machine_busy(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
 
     def test_watchdog_tick_resume_blocks_claims(self):
         held = {"id": "010-held", "stage": "build", "limitResetAt": int(time.time()) - 300}  # reset + 120 s is past
@@ -5346,26 +5865,39 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],
                          [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
 
-    def test_cooldown_refuses_automatic_starts(self):
-        """Job 305: with the cool-down flag on, no watchdog path starts anything; with it gone the same boards start."""
+    def test_cooldown_holds_only_new_work(self):
+        """Job 421: with the cool-down flag on, the watchdog finishes work in flight (the 189 BigBoy parent, queued Plays,
+        auto-resumes, orphan respawns) and holds only new work (Run-all claims, auto continue); with it gone the same
+        boards start."""
         flag = self.repo / "cooldown"
         old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
         stalled = "stalled in build: no live session. Fix: click Resume."
+        review = "stalled in review: no board update for 2 min and no live session. Fix: click Resume."
         (self.root / "runs").mkdir()
         (self.root / "runs" / "solo.log").write_text("Traceback: something else broke")
         boards = {
-            "claim and orphan": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-claimed", "003-wait"]},
-                                 {"id": "002-claimed", "stage": "spec", "parent": "001-par", "updatedAt": old},
-                                 {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
+            "orphan": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-claimed", "003-wait"]},
+                       {"id": "002-claimed", "stage": "spec", "parent": "001-par", "updatedAt": old},
+                       {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
+            "runall claim": [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
+                             {"id": "002-done", "stage": "done", "parent": "001-par"},
+                             {"id": "003-wait", "stage": "waiting", "parent": "001-par"}],
             "queued play and auto-resume": [
                 {"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": "2026-10-25T09:00:00+00:00"},
                 {"id": "011-solo", "stage": "needs-human", "reason": stalled, "runlog": "runs/solo.log"}],
+            "bigboy review": [{"id": "020-big", "stage": "needs-human", "lane": "bigboy", "reason": review,
+                               "children": ["021-a", "022-b"]},
+                              {"id": "021-a", "stage": "done", "parent": "020-big"},
+                              {"id": "022-b", "stage": "done", "parent": "020-big"}],
             "auto continue": []}
+        want = {"orphan": [("002-claimed", "start")], "runall claim": [],
+                "queued play and auto-resume": [("010-q", "resume"), ("011-solo", "resume")],
+                "bigboy review": [("020-big", "resume")], "auto continue": []}
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
-        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
         for case, jobs in boards.items():
             for cooling in (True, False):
                 with self.subTest(case=case, cooling=cooling):
+                    (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
                     self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear(); self.serve.AUTO_RESUME.clear()
                     self.queue_board(*(dict(j) for j in jobs))
                     if cooling:
@@ -5374,14 +5906,15 @@ class WatchdogIdleParentTest(unittest.TestCase):
                         spawn, _, _ = self.tick()
                     flag.unlink(missing_ok=True)
                     if cooling:
-                        spawn.assert_not_called()
-                        if case == "claim and orphan":
+                        started = [c.args[2:4] for c in spawn.call_args_list]
+                        self.assertEqual(sorted(started), want[case])
+                        if case == "bigboy review":  # resumed, not re-flagged: its own session moves it on
+                            self.assertEqual(self.job("020-big")["reason"], review)
+                        if case in ("orphan", "runall claim"):
+                            self.assertEqual(self.job("003-wait")["stage"], "waiting")
+                        if case == "runall claim":  # a respawn skips that parent's claim for the tick, so its own board
                             self.assertTrue(self.job("001-par")["reason"].startswith("waiting: cooling down"))
-                            self.assertEqual((self.job("002-claimed")["stage"], self.job("003-wait")["stage"]),
-                                             ("spec", "waiting"))
-                        if case == "queued play and auto-resume":
-                            self.assertEqual(self.job("010-q")["play_queued"], "2026-10-25T09:00:00+00:00")
-                            self.assertEqual(self.job("011-solo")["reason"], stalled)
+                        self.assertIn("- [ ] Open item", (self.root / "backlog.md").read_text())
                     else:  # the control: the same board starts work once the flag is gone
                         self.assertTrue(spawn.called, case)
 
@@ -5577,9 +6110,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: each tick the watchdog starts one headless run-all in every opted-in
-    project with no work in flight and a claimable backlog line: Focus projects first, then the project that just
-    finished, then the most recently active, then the lowest n. Usage pace gates nothing; starts stop at the first
-    failed machine_ok (RAM or disk)."""
+    project with no work in flight and a claimable backlog line, in rank (board.projects()) order; n orders nothing.
+    Usage pace gates nothing; starts stop at the first failed machine_ok (RAM or disk)."""
 
     def setUp(self):
         import serve
@@ -5588,7 +6120,6 @@ class AutoContinueTest(unittest.TestCase):
         self.usage = self.base / "usage.json"
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
         env.start(); self.addCleanup(env.stop)
-        serve.LAST_BUSY.clear(); self.addCleanup(serve.LAST_BUSY.clear)
         self.projects = {}
 
     def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=(), focus=False):
@@ -5672,7 +6203,7 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick(), self.started("a"))
         self.project("b", n=2); self.project("c", n=3)
         answers = iter([None, "free RAM 14% (< 20%)", None])
-        with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
+        with mock.patch.object(self.board, "machine_ok", side_effect=lambda path, **kw: next(answers)):
             self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
     def test_auto_continue_disk_refusal_tries_next_project(self):
@@ -5750,50 +6281,18 @@ class AutoContinueTest(unittest.TestCase):
         (root / "project.md").write_bytes(b"- Auto continue: 1\n\xff\xfe caf\xe9\n")
         self.assertIsNone(self.serve.auto_continue(root))
 
-    def test_focus_parse(self):
-        for text in ("- Focus: yes\n", "- focus: YES\n", "- Focus:yes\n"):
-            self.assertTrue(self.focus(text), text)
-        for text in ("# P\n", "- Focus: no\n", "- Focus: yesterday\n", "- Focus:\n"):
-            self.assertFalse(self.focus(text), text)
-        self.assertFalse(self.serve.focus(self.base / "nowhere"))
-        root = self.base / "latin2"; root.mkdir()
-        (root / "project.md").write_bytes(b"- Focus: yes\n\xff\xfe caf\xe9\n")
-        self.assertFalse(self.serve.focus(root))
+    WAITING_RUN_ALL = [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
+                       {"id": "002-done", "stage": "done", "parent": "001-par"},
+                       {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
 
-    def focus(self, text):
-        root = self.base / "fparse"
-        root.mkdir(exist_ok=True)
-        (root / "project.md").write_text(text)
-        return self.serve.focus(root)
-
-    def test_focus_beats_recency(self):
-        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
-        self.project("b", n=5, focus=True)
-        self.assertEqual(self.tick(), self.started("b") + self.started("a"), "Focus goes first; a still starts")
-
-    def test_busy_non_focus_does_not_block_focus(self):
-        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5, focus=True)
-        self.assertEqual(self.tick(running=lambda p, j: p == "a"), self.started("b"))
-
-    def test_busy_focus_still_exclusive(self):
-        """Focus is ordering only: a Focus project that is busy, running its run-all or has nothing claimable never
-        stops the others."""
-        self.project("a", n=1); self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.assertEqual(self.tick(), self.started("a"), "focus has nothing claimable: a starts")
-        (self.projects["b"] / "scrum" / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
-        (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [
-            {"id": "001-y", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
-        self.assertEqual(self.tick(), self.started("a"), "busy focus: a starts anyway")
-        (self.projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
-        self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("b", "run-all")), self.started("a"),
-                         "focus run-all running: a starts anyway")
-
-    def test_busy_focus_holds_chaining(self):
+    def test_run_all_chains_beside_idle_start(self):
+        """A project whose run-all has a waiting child chains it; an idle lower-ranked project still starts."""
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        self.project("c", n=5, focus=True, jobs=[{"id": "001-y", "stage": "build"}])
-        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "busy focus: a still chains")
+        self.project("b", n=5)
+        self.assertEqual([c[:4] for c in self.tick()], [("a", self.base / "a" / "scrum", "003-wait", "start"),
+                                                        ("b", self.base / "b" / "scrum", "run-all", "run-all")])
 
-    BLOCKED_FOCUS = {
+    BLOCKED = {
         "setup-only": {"backlog": "- [ ] Needs a key {setup: add key}\n"},
         "prerequisite-only": {"backlog": "- [ ] Blocked {needs #ab12}\n- [ ] Prereq {#ab12} {setup: do it}\n"},
         "claimed-only": {"backlog": "- [x] Claimed → 001-x\n",
@@ -5801,77 +6300,40 @@ class AutoContinueTest(unittest.TestCase):
         "parked-parent-only": {"backlog": "- [x] Claimed → 002-k\n",
                                "jobs": [{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                         {"id": "002-k", "stage": "needs-human", "parent": "001-p"}]},
+        "busy": {"jobs": [{"id": "001-x", "stage": "build"}]},
+        "paused": {"jobs": [{"id": "9-pz", "stage": "build", "paused": True,
+                             "reason": "stalled in build: paused by Trevor. Fix: click Play."}]},
+        "not opted in": {"n": None},
     }
 
-    def test_blocked_focus_falls_through(self):
-        for case, kw in self.BLOCKED_FOCUS.items():
+    def test_rank_order_decides_start(self):
+        """Only one start fits (the second machine_ok refuses): the higher-ranked project gets it, whatever its n,
+        board activity or a leftover `- Focus: yes` line on the other."""
+        for first in ("a", "b"):
+            with self.subTest(first=first):
+                self.projects.clear()
+                for name in ("a", "b"):
+                    shutil.rmtree(self.base / name, ignore_errors=True)
+                lower = "b" if first == "a" else "a"
+                self.project(first, n=9, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-01-01T00:00:00+00:00"}])
+                self.project(lower, n=1, focus=True, jobs=[{"id": "001-y", "stage": "done", "updatedAt": self.board.now()}])
+                answers = iter([None, "free RAM 14% (< 20%)"])  # auto continue's two claim checks; resumes pass
+                with mock.patch.object(self.board, "machine_ok",
+                                       side_effect=lambda path, **kw: next(answers) if kw.get("claim") else None):
+                    self.assertEqual(self.tick(), self.started(first))
+                self.assertEqual(self.tick(), self.started(first) + self.started(lower), "room for both: rank order")
+
+    def test_rank_skips_unstartable_higher_rank(self):
+        for case, kw in {**self.BLOCKED, "run-all running": {}}.items():
             with self.subTest(case=case):
-                self.projects.clear(); shutil.rmtree(self.base / "a", ignore_errors=True)
-                shutil.rmtree(self.base / "b", ignore_errors=True)
-                self.project("a", n=1); self.project("b", n=5, focus=True, **kw)
-                self.assertEqual([c for c in self.tick() if c[2] == "run-all"], self.started("a"))
-
-    def test_focus_reclaims_slot(self):
-        a = self.project("a", n=1); b = self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.assertEqual(self.tick(), self.started("a"))
-        (b / "backlog.md").write_text("# Backlog\n- [ ] Now claimable\n")
-        (a / "board.json").write_text(json.dumps({"jobs": [
-            {"id": "001-a", "stage": "build", "updatedAt": self.board.now(), "reason": None}]}))
-        with mock.patch.object(self.serve, "stop") as stop, mock.patch.object(self.serve, "kill_session") as kill:
-            self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("a", "run-all")), self.started("b"))
-        stop.assert_not_called(); kill.assert_not_called()
-
-    def test_two_focus_one_blocked(self):
-        self.project("a", n=1)
-        self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.project("c", n=9, focus=True)
-        self.assertEqual(self.tick(), self.started("c") + self.started("a"), "c first; b has nothing claimable")
-        (self.projects["c"] / "scrum" / "backlog.md").write_text("# Backlog\n- [x] Claimed → 002-z\n")
-        self.serve.LAST_BUSY.clear()
-        self.assertEqual(self.tick(), self.started("a"), "neither Focus can start: a starts")
-        self.projects.clear()
-        for name in ("a", "b", "c"):
-            shutil.rmtree(self.base / name)
-        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        self.project("b", n=5, focus=True, backlog="- [x] Claimed → 001-x\n")
-        self.project("c", n=9, focus=True)
-        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start"), ("run-all", "run-all")],
-                         "a's run-all chains, then c starts")
-        self.assertFalse(hasattr(self.serve, "focus_holds"))
-
-    def test_focus_missing_from_busy_holds(self):
-        """A Focus project missing from busy (its sweep failed) is skipped; the others still start."""
-        self.project("a", n=1); self.project("b", n=5, focus=True)
-        with mock.patch.object(self.board, "projects", return_value=self.projects), \
-                mock.patch.object(self.serve, "running", return_value=False), \
-                mock.patch.object(self.serve, "spawn") as spawn:
-            self.serve.auto_continue_tick({"a": False})
-        self.assertEqual([c.args for c in spawn.call_args_list], self.started("a"))
-
-    def test_focus_without_opt_in_ignored(self):
-        self.project("a", n=1); self.project("b", focus=True)
-        self.assertEqual(self.tick(), self.started("a"))
-
-    WAITING_RUN_ALL = [{"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-done", "003-wait"]},
-                       {"id": "002-done", "stage": "done", "parent": "001-par"},
-                       {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
-
-    def test_focus_holds_other_projects(self):
-        """Focus elsewhere never holds a non-focus project's run-all: it chains whether the Focus project can start
-        or not."""
-        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        self.project("b", n=5)
-        self.assertEqual([c[:4] for c in self.tick()], [("a", self.base / "a" / "scrum", "003-wait", "start"),
-                                                        ("b", self.base / "b" / "scrum", "run-all", "run-all")],
-                         "no Focus anywhere: a's run-all chains and idle b starts")
-        self.projects.clear(); shutil.rmtree(self.base / "a")
-        self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        c = self.project("c", n=5, focus=True)
-        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start"), ("run-all", "run-all")],
-                         "Focus on c: a's run-all still chains, c starts")
-        (c / "backlog.md").write_text("# Backlog\n- [x] Claimed → 001-x\n")
-        shutil.rmtree(self.base / "a"); self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
-        self.assertEqual([c[2:4] for c in self.tick()], [("003-wait", "start")], "blocked Focus on c: a's run-all chains")
+                self.projects.clear()
+                for name in ("a", "b"):
+                    shutil.rmtree(self.base / name, ignore_errors=True)
+                self.project("a", **{"n": 1, **kw}); self.project("b", n=5)
+                (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # live: no auto-play
+                with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")):
+                    got = self.tick(running=lambda p, j: case == "run-all running" and (p, j) == ("a", "run-all"))
+                self.assertEqual([c for c in got if c[2] == "run-all"], self.started("b"))
 
     def test_prune_finished_worktrees(self):
         """Each tick deletes node_modules and .next in done/aborted jobs' worktrees under .claude/worktrees/, and
@@ -5901,32 +6363,9 @@ class AutoContinueTest(unittest.TestCase):
                     self.assertTrue((d / sub).is_dir(), d / sub)
             self.assertFalse(wt("missing").exists())
 
-    def test_starts_lowest_n(self):
-        self.project("a", n=5); self.project("b", n=1); self.project("c", n=1)
-        self.assertEqual(self.tick(), self.started("b") + self.started("c") + self.started("a"),
-                         "lowest n; b before c in projects() order")
-
-    def test_most_recent_activity_beats_n(self):
-        self.project("a", n=1, jobs=[{"id": "001-x", "stage": "done", "updatedAt": "2026-01-01T00:00:00+00:00"}])
-        self.project("b", n=5, jobs=[{"id": "001-y", "stage": "done", "updatedAt": "2026-02-01T00:00:00+00:00"}])
-        self.project("c", n=1)
-        self.assertEqual(self.tick(), self.started("b") + self.started("a") + self.started("c"),
-                         "newest board activity first; an empty board comes last")
-
-    def test_prefers_just_finished_project(self):
-        self.project("a", n=1); self.project("b", n=5)
-        self.serve.LAST_BUSY.add("b")
-        self.assertEqual(self.tick(), self.started("b") + self.started("a"))
-
-    def test_just_finished_without_claimable_falls_back(self):
-        self.project("a", n=1); self.project("b", n=5, backlog="- [x] Claimed → 001-x\n")
-        self.serve.LAST_BUSY.add("b")
-        self.assertEqual(self.tick(), self.started("a"))
-
     def test_no_start_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
         self.assertEqual(self.tick(), self.started("a"), "b in flight: only b is skipped")
-        self.assertEqual(self.serve.LAST_BUSY, {"b"})
         self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                      {"id": "002-k", "stage": "build", "paused": True, "parent": "001-p"}])
         del self.projects["b"], self.projects["a"]
@@ -5997,6 +6436,24 @@ class AutoContinueTest(unittest.TestCase):
         self.assertTrue(e.getvalue().startswith("watchdog: bad: "), e.getvalue())
 
 
+class MainFocusMigrationTest(unittest.TestCase):
+    def test_main_migrates_focus_before_watchdog(self):
+        import serve
+        calls = []
+        thread = mock.Mock(start=lambda: calls.append("watchdog"))
+        server = mock.Mock(serve_forever=lambda: calls.append("serve"))
+        with mock.patch.object(sys, "argv", ["serve.py", "--port", "0"]), \
+                mock.patch.object(serve, "make_server", return_value=server), \
+                mock.patch.object(serve, "tailnet_host", return_value=""), \
+                mock.patch.object(serve.threading, "Thread", side_effect=lambda **kw: thread
+                                  if kw.get("target") is serve.watchdog_loop else mock.Mock()), \
+                mock.patch.object(serve.board, "projects", return_value={}), \
+                mock.patch.object(serve.board, "migrate_focus", side_effect=lambda: calls.append("migrate")), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            serve.main()
+        self.assertEqual(calls, ["migrate", "watchdog", "serve"])
+
+
 class ParkedParentTest(unittest.TestCase):
     """A running Run-all/BigBoy parent whose idle children wait only on Trevor (needs-human, not stalled) is parked:
     not busy for auto continue, marked once with the WAITING_ON reason, and closed once its children finish."""
@@ -6007,7 +6464,7 @@ class ParkedParentTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp())
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.base / "no-usage.json"))
         env.start(); self.addCleanup(env.stop)
-        for s in (serve.LAST_BUSY, serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
+        for s in (serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
             s.clear(); self.addCleanup(s.clear)
         self.root = self.base / "p" / "scrum"
         (self.root / "jobs").mkdir(parents=True)
@@ -6050,7 +6507,6 @@ class ParkedParentTest(unittest.TestCase):
         }
         for case, (kids, kw) in cases.items():
             with self.subTest(case=case):
-                self.serve.LAST_BUSY.clear()
                 self.serve.STALL_RESUMED.update({"p/074-b/build"})  # its one retry spent: auto_resume leaves it
                 lock = self.root / "jobs" / "054-run-all" / ".chain.lock"
                 if case == "chain lock":

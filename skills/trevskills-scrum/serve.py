@@ -29,7 +29,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -169,13 +169,32 @@ def start_ready(project, root, parent_id):
     return out
 
 
+def wake_waiting(project, root):
+    """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
+    `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
+    them waiting, never needs-human. A `wait-on --then` job comes back at needs-human ("retry") and gets an approve
+    spawn instead, from the same room."""
+    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root):
+        return
+    room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
+    live = board.live_sessions()
+    allow = board.usage_allowance(board.read_usage(), time.time(), live)
+    if allow is not None:
+        room = min(room, max(0, allow - live))
+    out = board.wake_waiting(root, room)
+    for job_id in out["ready"]:
+        spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
+    for job_id in out.get("retry", []):
+        approve_job(project, root, job_id)
+
+
 def resume_job(project, root, job, jobs, manual=False):
     """Restart a watchdog-flagged or paused job (the Resume and Play buttons, and the auto-resume sweep). Play on a
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
     refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
     child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
-    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). manual (Trevor's click) lets
-    the children past cool-down; the new claims after them stay automatic, so they wait while cooling down."""
+    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). Cool-down never holds the
+    paused children (work in flight); a Run-all parent's new claims after them wait while cooling down."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -240,7 +259,8 @@ def play_queue_tick(project, root, jobs) -> bool:
     queued. True when it started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
-        if running(project, job["id"]) or not resumable(job):
+        answered = job["stage"] == "needs-human" and job.get("options")  # a resume pick answer_job queued
+        if running(project, job["id"]) or not (resumable(job) or answered):
             unqueue(root, job)
             continue
         refusal = resume_refusal(project, root, job)
@@ -263,7 +283,7 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok, whose cool-down check a manual click skips); a Run-all/BigBoy child also waits for the overlap
+    (board.machine_ok; cool-down holds only new claims, never a resume); a Run-all/BigBoy child also waits for the overlap
     rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
@@ -271,8 +291,6 @@ def resume_refusal(project, root, job, manual=False):
     machine = board.machine_ok(root, manual=manual)
     if machine and RESUME_ROOM is not None:
         RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
-    if machine == board.COOLING:
-        return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume work in the header."
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
@@ -364,9 +382,15 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 409, {"error": "job isn't waiting on that answer, or is already running"}
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
-    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        return refused(root, job["id"], refusal)
     job_id = job["id"]
+    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
+        if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
+            return refused(root, job_id, refusal)
+        board.cmd_answer(root, job_id, key)
+        with board.locked_board(root) as b:  # the machine guard or a sibling queues the pick like a Play; play_queue_tick starts it
+            if (live := board.find(b, job_id))["stage"] == "needs-human":
+                live.setdefault("play_queued", board.now())
+        return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
     if not parsed:
@@ -547,7 +571,9 @@ def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
     each moved job with an artifacts branch or a schema / agent-rules hard stop, and each job whose artifacts arrived
-    late. Errors are printed, never raised."""
+    late. Once spawn returns for an id whose artifacts branch exists (arrived, or moved with artifacts), clear its
+    artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
+    spawn keeps the mark, so a later poll reports the id again. Errors are printed, never raised."""
     now = time.time() if now is None else now
     if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
             or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
@@ -559,9 +585,13 @@ def cloud_tick(project, root, jobs, now=None):
             print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
         homes += out.get("arrived") or []
+        # only these can fetch scrum-artifacts/<id> now; a hard-stop move without it keeps its fresh mark
+        fetchable = {m["id"] for m in out["moved"] if m.get("artifacts")} | set(out.get("arrived") or [])
         for job_id in dict.fromkeys(homes):
             if not running(project, job_id):
                 spawn(project, root, job_id, "cloud-home", f"/trevskills-scrum cloud-home {job_id}")
+                if job_id in fetchable:
+                    board.cloud_pending_clear(root, job_id)
     except (Exception, SystemExit) as e:
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 
@@ -753,8 +783,6 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
 
 
 AUTO_CONTINUE_RE = re.compile(r"^- Auto continue: *(\d+)\s*$", re.M)
-FOCUS_RE = re.compile(r"^- Focus: *yes\s*$", re.M | re.I)
-LAST_BUSY: set[str] = set()  # projects with in-flight work on the previous tick: the one that just finished goes first
 
 
 def auto_continue(root: Path) -> int | None:
@@ -764,24 +792,6 @@ def auto_continue(root: Path) -> int | None:
     except (OSError, ValueError):  # missing, or not UTF-8
         return None
     return int(m.group(1)) if m else None
-
-
-def focus(root: Path) -> bool:
-    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). Focus is
-    ordering only: auto continue starts Focus projects first, and never holds any other project."""
-    try:
-        return bool(FOCUS_RE.search((root / "project.md").read_text()))
-    except (OSError, ValueError):
-        return False
-
-
-def last_active(root: Path) -> float:
-    """Epoch of the newest job updatedAt on board.json, 0 when there is none or it can't be read."""
-    try:
-        jobs = json.loads((root / "board.json").read_text()).get("jobs", [])
-        return max((datetime.fromisoformat(j["updatedAt"]).timestamp() for j in jobs if j.get("updatedAt")), default=0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return 0
 
 
 def claimable(root: Path) -> bool:
@@ -797,22 +807,15 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
-    Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
-    job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
-    first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
-    (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
+    Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no work in
+    flight, no paused or resumable stalled job (board.resume_first), no auto-started run-all still running and a
+    claimable backlog line, in rank order: board.projects() order, which the dashboard's Rank dialog sets. board.machine_ok
+    (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
-    global LAST_BUSY
-    last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
-    opted = []
     for project, repo in board.projects().items():
-        n = auto_continue(repo / "scrum")
-        if n is not None:
-            opted.append((project, repo / "scrum", n, last_active(repo / "scrum"), focus(repo / "scrum")))
-    # stable: ties keep projects() order
-    for project, root, *_ in sorted(opted, key=lambda o: (not o[4], o[0] not in last, -o[3], o[2])):
-        if busy.get(project, True):
+        root = repo / "scrum"
+        if auto_continue(root) is None or busy.get(project, True):
             continue
         try:
             jobs = json.loads((root / "board.json").read_text())["jobs"]
@@ -822,7 +825,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             continue
         try:
             if not running(project, "run-all") and claimable(root):
-                refused = board.machine_ok(root)
+                refused = board.machine_ok(root, claim=True)
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
                     continue
                 if refused:  # no room on this machine; retry next tick
@@ -926,7 +929,7 @@ def updated_at(job) -> float:
 def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
     """With no session running anywhere, Play the oldest paused job (updatedAt) that resume_refusal lets through: a
     pause Trevor left during an overload is no longer needed. A candidate refused for another reason (a sibling, a
-    lilguy job) is skipped; a machine refusal (cool-down included) stops here. True when it Played one."""
+    lilguy job) is skipped; a machine refusal stops here (cool-down holds no Play). True when it Played one."""
     for project, root, job, jobs in sorted(candidates, key=lambda c: updated_at(c[2])):
         refusal = resume_refusal(project, root, job)
         if refusal and refusal.startswith(board.MACHINE_WAIT):
@@ -951,8 +954,10 @@ def watchdog_tick():
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project.
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
-       let sweep_parents claim, and run auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick
-       and prune_worktrees run every tick."""
+       start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
+       auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
+       tick.
+    4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one."""
     global RESUME_ROOM
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = False
@@ -997,6 +1002,10 @@ def watchdog_tick():
             if claim:  # a flagged child frees its Run-all/BigBoy slot
                 for parent in dict.fromkeys(j["parent"] for j in jobs if j["id"] in flagged and j.get("parent")):
                     start_ready(project, root, parent)
+                try:  # its own guard: a wake failure must not skip sweep_parents
+                    wake_waiting(project, root)
+                except (Exception, SystemExit) as e:
+                    print(f"watchdog: {project}: wake waiting: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a sweep failure must not skip the cloud poll
                 sweep_parents(project, root, jobs, alive, claim=claim)
             except (Exception, SystemExit) as e:
@@ -1010,7 +1019,20 @@ def watchdog_tick():
             auto_continue_tick(busy)
         except (Exception, SystemExit) as e:
             print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
+    window_tick()
     cooldown_chime()
+
+
+def window_tick():
+    """board.cmd_window_report for every project, each in its own guard. When it wrote a scorecard and digest-due's
+    reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn while one runs)."""
+    for project, repo in board.projects().items():
+        try:
+            root = repo / "scrum"
+            if board.cmd_window_report(root) and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
+                digest_now(project, root)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
@@ -1178,20 +1200,21 @@ def machine_status():
     return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
-            "sessions": board.live_sessions()}
+            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
+            "sessions": board.live_sessions(), "cpu_load_pct": r(board.cpu_load_pct()),
+            "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT}
 
 
 def machine_usage(now):
-    """The meter's usage segment: 5h and 7d used %, the 5h reset and usage_allowance's live-session cap (null for no
-    taper), or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
+    """The meter's usage segment: 5h and 7d used %, the 5h reset, usage_allowance's live-session cap (null for no
+    taper) and board.fable_state, or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
     usage = board.read_usage() or {}
     at = usage.get("written_at")
     if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
         return "unknown"
     u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
     return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
-            "allowance": None if allow is None else int(allow)}
+            "allowance": None if allow is None else int(allow), "fable": board.fable_state(usage, now)}
 
 
 def claude_usage(now):
@@ -1210,6 +1233,30 @@ def claude_usage(now):
             continue
         out[key] = used if board.is_num(used) else None
         out[f"{key}_resets_at"] = resets if board.is_num(resets) else None
+    return out
+
+
+WINDOW_CARD_KEYS = ("headline", "points_done", "first_pass_rate", "wasted_pct", "escapes", "resets_at")
+
+
+def latest_windows(root):
+    """{"five_hour": card|None, "seven_day": card|None}: per key, the windows/<key>-<resets_at>.json with the highest
+    resets_at (as an int) that is a JSON object, trimmed to the fields the Usage dialog shows. Junk files are skipped."""
+    out = dict.fromkeys(("five_hour", "seven_day"))
+    w = Path(root) / "windows"
+    names = [p.name for p in w.iterdir() if board.WINDOW_FILE_RE.fullmatch(p.name)] if w.is_dir() else []
+    for name in sorted(names, key=lambda n: int(n[n.index("-") + 1:-5]), reverse=True):
+        key = name.split("-", 1)[0]
+        if out[key] is not None:
+            continue
+        try:
+            card = json.loads((w / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(card, dict):
+            budget = card.get("budget")
+            out[key] = {**{k: card.get(k) for k in WINDOW_CARD_KEYS},
+                        "budget": {"used_pct": budget.get("used_pct") if isinstance(budget, dict) else None}}
     return out
 
 
@@ -1807,8 +1854,11 @@ def activity(root, job):
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
-    Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`."""
+    Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
+    waiting job with a dependency not yet done or aborted ("not merged yet")."""
     data = json.loads((root / "board.json").read_text())
+    stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
+    title = {j.get("id"): j.get("title") or "" for j in data.get("jobs", [])}
     for job in data.get("jobs", []):
         job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
@@ -1818,6 +1868,11 @@ def board_with_activity(root, project):
             refusal = resume_refusal(project, root, job, manual=True)  # manual: as the dashboard's click sends it
             job["resumeRefusal"] = str(refusal) if refusal else None
             job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
+        if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
+                                                       if stage.get(d) not in ("done", "aborted")]):
+            job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
+            job["waitingOn"]["titles"] = [title.get(i, "") for i in job["waitingOn"]["ids"]]
     return data
 
 
@@ -2406,17 +2461,23 @@ SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 def valid_proposal(p):
     """The proposal with its status, kind and any stored reason (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
     or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
-    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
+    if isinstance(p, dict) and p.get("kind") == "backlog":  # one queued backlog line: no file, so no target, old or new
+        if not isinstance(p.get("backlog"), str) or not p["backlog"].strip():
+            return None
+        p = {"target": "", "old": "", "new": "", **p}
+    elif isinstance(p, dict) and p.get("old") == p.get("new"):
+        return None
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS):
         return None
     if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
     kind = p.get("kind", "edit")
-    if kind not in ("edit", "skill") or kind == "skill" and (
+    if kind not in ("edit", "skill", "backlog") or kind == "skill" and (
             p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
         return None
     reason = p.get("reason")
     return ({k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "kind": kind}
-            | ({"reason": reason} if isinstance(reason, str) else {}))
+            | ({"backlog": p["backlog"]} if kind == "backlog" else {}) | ({"reason": reason} if isinstance(reason, str) else {}))
 
 
 def read_proposals(path):
@@ -2435,14 +2496,15 @@ def digests(project, root, brief=False):
         out.append({"id": p.name, "jobs": jobs, "error": error[0] if error else None, "trimmed": (p / "trimmed").exists(),
                     "proposals": [{k: v[k] for k in v if not brief or k not in ("old", "new")}
                                   for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
-    return {"running": running(project, "digest"), "undigested": board.cmd_digest_due(root)["undigested"], "digests": out}
+    due = board.cmd_digest_due(root)
+    return {"running": running(project, "digest"), "undigested": due["undigested"], "due": due["due"], "digests": out}
 
 
 def digest_now(project, root):
     with DIGEST_LOCK:  # two quick clicks must not both pass the running() check
         if running(project, "digest"):
             return 409, {"error": "a digest is already running"}
-        if not board.cmd_digest_due(root)["undigested"]:
+        if not ((due := board.cmd_digest_due(root))["undigested"] or due["due"]):
             return 409, {"error": "nothing new to digest"}
         return 202, {"log": spawn(project, root, "digest", "digest", "/trevskills-scrum digest")}
 
@@ -2642,69 +2704,92 @@ def digest_mark_applied(root, digest_id, pids):
 
 def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
                  mark_applied: bool = True) -> tuple[list[dict], list[dict], str | None]:
-    """Apply one repo's edit proposals in place, running the contract tests after each, then commit the ones that
-    passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
-    to-queue entry carries the reason it wasn't applied, and nothing of it is left written. title (the job and commit
-    subject) and feature (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
+    """Apply one repo's edit proposals in a temporary detached worktree at origin/<branch>, running the contract tests
+    there after each, commit the ones that passed under one lilguy board job in that repo's scrum/, push that commit to
+    origin/<branch> and fast-forward the main checkout, which is never written to directly. Refuses (queues everything)
+    when the fetch fails or local <branch> is ahead of origin. Returns (applied, to queue, job id): each to-queue entry
+    carries the reason it wasn't applied, and nothing of it is landed. A blocked fast-forward after the push still counts
+    as applied, with the job done as `merged, not live: <why>`. title (the job and commit subject) and feature
+    (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
     repo = repo_of(props[0]["target"])[0]
     entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
+    first = lambda r: next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
     if why := digest_apply_ready(repo):
         return [], [entry(p, why) for p in props], None
-    done, queued = [], []  # done: (proposal, path relative to repo, original bytes)
-    for p in props:
-        target = Path(p["target"])
-        try:
-            orig = target.read_bytes()
-            text = orig.decode()
-        except (OSError, UnicodeDecodeError):
-            orig, text = b"", ""
-        if (n := text.count(p["old"])) != 1:
-            queued.append(entry(p, f"old text found {n} times"))
-            continue
-        try:
-            target.write_bytes(text.replace(p["old"], p["new"], 1).encode())  # in place: keeps a symlink
-        except OSError as e:
-            queued.append(entry(p, f"write failed: {e}"))
-            continue
-        if not digest_contract_ok(repo):
-            target.write_bytes(orig)
-            queued.append(entry(p, "contract tests failed"))
-            continue
-        done.append((p, repo_of(p["target"])[1], orig))
-    order = {p["id"]: i for i, p in enumerate(props)}
-    if not done:
-        return [], queued, None
-    scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel, _ in done))
-    pids = ", ".join(p["id"] for p, _, _ in done)
-    lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel, _ in done)
-    title = title or f"Apply digest {digest_id} {pids}"
-    feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
-
-    def undo(why):
-        for p, _, orig in reversed(done):  # reversed: two proposals on one file restore to its first bytes
-            Path(p["target"]).write_bytes(orig)
-        git_run(repo, "restore", "--staged", "--", *files)
-        return [], sorted(queued + [entry(p, why) for p, _, _ in done], key=lambda q: order[q["id"]])
-
+    branch = git_run(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    if (r := git_run(repo, "fetch", "-q", "origin", branch)).returncode:
+        return [], [entry(p, f"fetch failed: {first(r)}") for p in props], None
+    ahead = git_run(repo, "rev-list", "--count", f"origin/{branch}..{branch}")
+    if ahead.returncode or ahead.stdout.strip() != "0":
+        return [], [entry(p, f"local {branch} is ahead of origin") for p in props], None
+    wt = tempfile.mkdtemp(prefix="digest-apply-")
     try:
-        job_id = board.cmd_new(scrum, title)
-        (scrum / "jobs" / job_id / "feature.md").write_text(feature)
-        board.cmd_set(scrum, job_id, ["lane=lilguy"])
-    except (OSError, SystemExit) as e:
-        return (*undo(f"board job failed: {e}"), None)
-    r = git_run(repo, "add", "--", *files)
-    if not r.returncode:
-        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
-    if r.returncode:
-        first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
-        applied, queued = undo(f"commit failed: {first}")
-        board.cmd_ask(scrum, job_id, f"digest apply: git commit failed: {first}",
-                      [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
-        return applied, queued, job_id
-    if mark_applied:
-        digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
-    board.cmd_set(scrum, job_id, ["stage=done"])
-    return [entry(p) for p, _, _ in done], queued, job_id
+        if (r := git_run(repo, "worktree", "add", "-q", "--detach", wt, f"origin/{branch}")).returncode:
+            return [], [entry(p, f"worktree failed: {first(r)}") for p in props], None
+        done, queued = [], []  # done: (proposal, path relative to repo)
+        for p in props:
+            rel = repo_of(p["target"])[1]
+            target = Path(wt) / rel
+            try:
+                orig = target.read_bytes()
+                text = orig.decode()
+            except (OSError, UnicodeDecodeError):
+                orig, text = b"", ""
+            if (n := text.count(p["old"])) != 1:
+                queued.append(entry(p, f"old text found {n} times"))
+                continue
+            try:
+                target.write_bytes(text.replace(p["old"], p["new"], 1).encode())
+            except OSError as e:
+                queued.append(entry(p, f"write failed: {e}"))
+                continue
+            if not digest_contract_ok(wt):
+                target.write_bytes(orig)  # restored, so the proposals after it are tested without it
+                queued.append(entry(p, "contract tests failed"))
+                continue
+            done.append((p, rel))
+        order = {p["id"]: i for i, p in enumerate(props)}
+        if not done:
+            return [], queued, None
+        scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel in done))
+        pids = ", ".join(p["id"] for p, _ in done)
+        lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel in done)
+        title = title or f"Apply digest {digest_id} {pids}"
+        feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
+        # every write is in wt, so removing it (finally) is the undo
+        undo = lambda why: ([], sorted(queued + [entry(p, why) for p, _ in done], key=lambda q: order[q["id"]]))
+        try:
+            job_id = board.cmd_new(scrum, title)
+            (scrum / "jobs" / job_id / "feature.md").write_text(feature)
+            board.cmd_set(scrum, job_id, ["lane=lilguy"])
+        except (OSError, SystemExit) as e:
+            return (*undo(f"board job failed: {e}"), None)
+        r = git_run(wt, "add", "--", *files)
+        if not r.returncode:
+            r = git_run(wt, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
+        step = "commit"
+        if not r.returncode:
+            r, step = git_run(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}"), "push"
+        if r.returncode:
+            applied, queued = undo(f"{step} failed: {first(r)}")
+            board.cmd_ask(scrum, job_id, f"digest apply: git {step} failed: {first(r)}",
+                          [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
+            return applied, queued, job_id
+        # the commit is on origin: re-check the Merge guard on the live checkout, then fast-forward it; never stash or reset
+        not_live = None
+        if git_run(repo, "symbolic-ref", "--short", "HEAD").stdout.strip() != branch:
+            not_live = f"not on {branch}"
+        elif (st := git_run(repo, "status", "--porcelain", "--untracked-files=no")).returncode or st.stdout.strip():
+            not_live = "uncommitted changes"
+        elif git_run(repo, "merge", "-q", "--ff-only", f"origin/{branch}").returncode:
+            not_live = "fast-forward failed"
+        if mark_applied:
+            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done})
+        board.cmd_set(scrum, job_id, ["stage=done"] + ([f"reason=merged, not live: {not_live}"] if not_live else []))
+        return [entry(p) for p, _ in done], queued, job_id
+    finally:
+        git_run(repo, "worktree", "remove", "--force", wt)
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
@@ -2719,6 +2804,8 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
         return 404, {"error": "no such proposal"}
     if entry["status"] != "applied":
         return 409, {"error": f"proposal is {entry['status']}, not applied"}
+    if entry["kind"] == "backlog":
+        return 409, {"error": "a backlog proposal can't be reverted"}
     if digest_denied(entry["target"]):  # proposals.json is untrusted: never edit a settings or hooks file
         return 409, {"error": "target is not editable"}
     rev = entry | {"old": entry["new"], "new": entry["old"]}
@@ -2761,7 +2848,15 @@ def digest_auto(root, digest_id):
     if not pending:
         return out
     for p in pending:
-        if p["kind"] == "skill":
+        if p["kind"] == "backlog":
+            try:
+                board.cmd_backlog_add(root, [p["backlog"]], priority=3)
+            except (SystemExit, OSError):
+                skip(p, "backlog add failed")
+            else:
+                out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
+                updates[p["id"]] = ("applied", None)
+        elif p["kind"] == "skill":
             if why := digest_queue_skill(root, digest_id, p):
                 skip(p, why)
             else:
@@ -2884,6 +2979,9 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/windows", path):
+            root = scrum_dir(unquote(m.group(1)))
+            return self.send_json(200, latest_windows(root)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/api/p/(.+)/manual-checks", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.manual_items(root)) if root else self.send_json(404, {"error": "no such project"})
@@ -2949,6 +3047,11 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_research(body.get("id"))
             elif path == "/api/cooldown":
                 code, obj = set_cooldown(body.get("on"))
+            elif path == "/api/projects/rank":
+                to = body.get("to")
+                if type(to) is not int:
+                    raise SystemExit("to must be a whole number")
+                code, obj = 200, [{"name": name} for name in board.move_project(body.get("name"), to)]
             else:
                 m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
@@ -3043,8 +3146,6 @@ class Handler(BaseHTTPRequestHandler):
             if not job or running(project, job_id) or not resumable(job) and not limit_held(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
-            if not manual and board.cooling_down():
-                return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
             if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
                 if refusal := resume_refusal(project, root, job, manual=manual):
                     return refused(root, job_id, refusal)
@@ -3054,9 +3155,9 @@ class Handler(BaseHTTPRequestHandler):
                 resume_job(project, root, job, jobs, manual=manual)
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
-                if not refusal.startswith(board.MACHINE_WAIT):
+                if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
                     return refused(root, job_id, refusal)
-                with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
+                with board.locked_board(root) as b:  # the machine guard or a sibling queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
             resume_job(project, root, job, jobs, manual=manual)
@@ -3109,6 +3210,10 @@ def main():
     tn = tailnet_host(a.tailnet_host)
     TAILNET = {tn} if tn else set()
     server = make_server(a.port)
+    try:
+        board.migrate_focus()  # one-time: `- Focus: yes` projects become the top of the rank
+    except (OSError, SystemExit) as e:
+        print(f"focus migration: {e}", file=sys.stderr, flush=True)
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)

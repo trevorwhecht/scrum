@@ -10,6 +10,7 @@ os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly idle unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
@@ -1506,22 +1507,26 @@ class BoardTest(unittest.TestCase):
         return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
 
     def test_machine_ok_cooling_down(self):
-        """Job 305: the cool-down flag refuses every automatic start first; Trevor's manual click skips it."""
+        """Job 421: the cool-down flag refuses only new claims (claim=True), checked first; Trevor's manual click and
+        in-flight work (resumes, BigBoy children) skip it."""
         with self.cooling():
-            self.assertEqual(board.machine_ok(self.tmp.name), "cooling down")
-            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True))
-            with self.machine("14", "6.2"):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before RAM and disk")
-                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "free RAM 14% (< 20%)")
-            with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before swap")
-            with self.sessions(14):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before the ceiling")
-                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "14 sessions running (ceiling 14)")
-        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(Path(self.tmp.name) / "absent")):
             self.assertIsNone(board.machine_ok(self.tmp.name))
-            with self.machine("14", "1000"):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=False))
+            self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down")
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True, claim=True))
+            with self.machine("14", "6.2"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before RAM and disk")
                 self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+                self.assertEqual(board.machine_ok(self.tmp.name, manual=True, claim=True), "free RAM 14% (< 20%)")
+            with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before swap")
+            with self.sessions(14):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before the ceiling")
+                self.assertEqual(board.machine_ok(self.tmp.name), "14 sessions running (ceiling 14)")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(Path(self.tmp.name) / "absent")):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True))
+            with self.machine("14", "1000"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "free RAM 14% (< 20%)")
 
     def test_cooldown_path_default(self):
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):
@@ -1540,6 +1545,58 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(p["reason"].startswith("waiting: cooling down"), p["reason"])
         play.assert_not_called()
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b], "claims again once the flag is gone")
+
+    def test_ready_cooling_down_bigboy_claims_and_finishes(self):
+        """Job 421: a BigBoy parent's children already exist, so cool-down lets it claim them and reach its final review."""
+        parent, a, b = (board.cmd_new(self.root, t) for t in ("big", "a", "b"))
+        self.edit_jobs(**{parent: {"lane": "bigboy", "stage": "running", "reason": None, "children": [a, b]},
+                          a: {"parent": parent, "stage": "done"}, b: {"parent": parent, "stage": "done"}})
+        with self.cooling(), mock.patch.object(board, "play"):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["all_merged"], out["ready"]), (True, []))
+        self.assertEqual((self.child(parent)["stage"], self.child(parent)["reason"]), ("running", None))
+        c, d = board.cmd_new(self.root, "c"), board.cmd_new(self.root, "d")
+        self.edit_jobs(**{parent: {"children": [a, b, c, d]},
+                          c: {"parent": parent, "stage": "waiting", "depends_on": [a], "parallel": True},
+                          d: {"parent": parent, "stage": "waiting", "depends_on": [a, b], "parallel": True}})
+        self.spec(c, "src/c.py")
+        self.spec(d, "src/d.py")
+        with self.cooling(), mock.patch.object(board, "play"):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [c, d])
+        self.assertEqual((self.child(c)["stage"], self.child(d)["stage"]), ("spec", "spec"))
+        self.assertEqual(self.child(parent)["reason"], None)
+
+    def test_cooldown_refuses_new_backlog_claims(self):
+        """Job 421: cool-down refuses the automatic backlog claims; Trevor's Run now (an explicit index) still claims."""
+        msg = "cooling down: no new backlog claim. Fix: click Resume work in the header."
+        self.root.mkdir(parents=True, exist_ok=True)
+        backlog = "# Backlog\n- [ ] Alpha\n- [ ] Beta\n"
+        (self.root / "backlog.md").write_text(backlog)
+        (self.root / "backlog-specs").mkdir()
+        self.spec_file("Alpha").write_text("# Alpha\n\n## Likely files\n- `a.py`: edit\n")
+        board_before = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
+        with self.cooling():
+            for call in (lambda: board.cmd_next(self.root), lambda: board.cmd_runall_start(self.root)):
+                with self.assertRaises(SystemExit) as e:
+                    call()
+                self.assertEqual(str(e.exception), msg)
+            self.assertEqual(board.cmd_cloud_claim(self.root, 2), {"claimed": []})
+            self.assertEqual((self.root / "backlog.md").read_text(), backlog)
+            after = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
+            self.assertEqual(after, board_before, "no job created")
+            self.assertEqual(board.cmd_next(self.root, 1), {"id": "001-beta", "feature": "Beta"}, "Run now still claims")
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Alpha\n- [x] Beta → 001-beta\n")
+
+    def test_roadmap_next_cooling_down_holds_next_step(self):
+        """Job 421: cool-down leaves the finished step running (Roadmap resume marks it done later) and starts nothing."""
+        self.roadmap()
+        with self.cooling():
+            self.assertIsNone(board.cmd_roadmap_next(self.root, self.J2))
+        self.assertEqual(self.rm_text(), self.ROADMAP)
+        self.assertEqual(board.cmd_roadmap_next(self.root, self.J2),
+                         {"p": 1, "s": 3, "kind": "bigboy", "request": "Quote builder part 3, <request>"})
+        self.assertIn(f"- [x] S2 bigboy {self.J2}:", self.rm_text())
 
     def test_session_ages_reads_ps_etime(self):
         ps = Path(self.tmp.name) / "ps.txt"
@@ -1581,6 +1638,44 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
         with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="11"):
             self.assertIsNone(board.machine_ok(self.tmp.name))
+
+    def test_cpu_load_pct(self):
+        self.assertEqual(board.MAX_CPU_LOAD_PCT, 150)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=""):
+            with mock.patch.object(board.os, "getloadavg", return_value=(9.0, 12.0, 3.0)), \
+                    mock.patch.object(board.os, "cpu_count", return_value=8):
+                self.assertEqual(board.cpu_load_pct(), 150.0, "the 5-min reading, over all cores")
+            with mock.patch.object(board.os, "getloadavg", side_effect=OSError("no load")), \
+                    mock.patch.object(board.os, "cpu_count", return_value=8):
+                self.assertIsNone(board.cpu_load_pct())
+            with mock.patch.object(board.os, "getloadavg", return_value=(9.0, 12.0, 3.0)):
+                for cores in (None, 0):
+                    with self.subTest(cores=cores), mock.patch.object(board.os, "cpu_count", return_value=cores):
+                        self.assertIsNone(board.cpu_load_pct())
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="42.5"):
+            self.assertEqual(board.cpu_load_pct(), 42.5)
+
+    def test_machine_ok_cpu_load(self):
+        """2026-10-25: 5-min load ~15 on 8 cores with healthy RAM; nothing held new work back."""
+        reason = "CPU load 190% of 8 cores, limit 150%"
+        cores = mock.patch.object(board.os, "cpu_count", return_value=8)
+        high = mock.patch.object(board.os, "getloadavg", return_value=(1, 15.2, 1))
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=""), cores:
+            with high:
+                self.assertEqual(board.machine_ok(self.tmp.name), reason)
+                self.assertIsNone(board.machine_ok(self.tmp.name, manual=True), "Trevor's clicks skip the CPU check")
+                self.assertIsNone(board.machine_ok(self.tmp.name, manual=True, claim=True))
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), reason)
+                with self.machine("14", "1000"):
+                    self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "RAM first")
+                    self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "free RAM 14% (< 20%)",
+                                     "manual still checks RAM")
+                with self.sessions(14):
+                    self.assertEqual(board.machine_ok(self.tmp.name), reason, "CPU before the session ceiling")
+            with mock.patch.object(board.os, "getloadavg", return_value=(1, 12.0, 1)):
+                self.assertIsNone(board.machine_ok(self.tmp.name), "exactly 150% passes")
+            with mock.patch.object(board.os, "getloadavg", side_effect=OSError("no load")):
+                self.assertIsNone(board.machine_ok(self.tmp.name), "unknown passes")
 
     def swap_log(self, samples=None, raw=None):
         log = Path(self.tmp.name) / "swap.json"
@@ -2436,12 +2531,12 @@ class BoardTest(unittest.TestCase):
         self.done_jobs(2, "aborted")
         self.done_jobs(1, "review")
         self.done_jobs(1, "needs-human")
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 9})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 9, "questionsGrowth": 0, "reason": None})
         done += self.done_jobs(1)
-        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 10})
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 10, "questionsGrowth": 0, "reason": "10 done"})
         (self.root / "digests" / "001").mkdir(parents=True)
         (self.root / "digests" / "001" / "jobs.txt").write_text("\n".join(done[:4]) + "\n")
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6, "questionsGrowth": 0, "reason": None})
         self.assertEqual(board.digested_ids(self.root), set(done[:4]))
 
     def test_failed_digest_releases_its_jobs(self):
@@ -2450,27 +2545,166 @@ class BoardTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "jobs.txt").write_text(f"{a}\n{b}\n")
         self.assertEqual(board.digested_ids(self.root), {a, b})  # no error.md: still claimed
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
         (d / "error.md").write_text("digester produced no valid proposals\n")
         self.assertEqual(board.digested_ids(self.root), set())
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2})
-        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b]})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2, "questionsGrowth": 0, "reason": None})
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b], "windows": []})
         self.assertEqual(board.digested_ids(self.root), {a, b})
         self.assertTrue((d / "jobs.txt").exists())  # the failed digest stays as it was
 
     def test_digest_start_claims_jobs_once(self):
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertFalse((self.root / "digests").exists())
         done = self.done_jobs(3)
         aborted = self.done_jobs(1, "aborted")
-        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": done})
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": done, "windows": []})
         self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "\n".join(done) + "\n")
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
         more = self.done_jobs(1)
-        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more})
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more, "windows": []})
         self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+
+    def test_digest_start_claims_windows_once(self):
+        a = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": a, "windows": []})  # no windows/ folder
+        d1 = self.root / "digests" / "001"
+        self.assertEqual((d1 / "windows.txt").read_text(), "")
+        self.assertEqual(json.loads((d1 / "windows.json").read_text()), [])
+        w = self.root / "windows"
+        w.mkdir()
+        (w / "five_hour-200.json").write_text(json.dumps({"window": "five_hour", "resets_at": 200, "headline": "ok"}))
+        (w / "five_hour-100.json").write_text(json.dumps({"window": "five_hour", "resets_at": 100, "wasted_pct": 30}))
+        (w / "open.json").write_text(json.dumps({"window": "five_hour"}))
+        (w / ".lock").write_text("")
+        (w / "five_hour-9.json").write_text("{bad")
+        (w / "seven_day-5.json").write_text("[1, 2]")
+        b = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": b,
+                                                    "windows": ["five_hour-100.json", "five_hour-200.json"]})
+        d2 = self.root / "digests" / "002"
+        self.assertEqual((d2 / "windows.txt").read_text(), "five_hour-100.json\nfive_hour-200.json\n")
+        self.assertEqual(json.loads((d2 / "windows.json").read_text()),
+                         [{"window": "five_hour", "resets_at": 100, "wasted_pct": 30},
+                          {"window": "five_hour", "resets_at": 200, "headline": "ok"}])
+        c = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "003", "jobs": c, "windows": []})
+        (w / "seven_day-300.json").write_text(json.dumps({"window": "seven_day", "resets_at": 300}))
+        e = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "004", "jobs": e, "windows": ["seven_day-300.json"]})
+        (d2 / "error.md").write_text("failed\n")  # failed digest: its windows are claimed again
+        f = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "005", "jobs": b + f,
+                                                    "windows": ["five_hour-100.json", "five_hour-200.json"]})
+
+    def write_questions_log(self, n):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "questions.log").write_text("".join(f'{{"n": {i}}}\n' for i in range(n)))
+
+    def marker(self, digest_id, text, error=False):
+        d = self.root / "digests" / digest_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("")
+        (d / "questions.lines").write_text(text)
+        if error:
+            (d / "error.md").write_text("failed\n")
+
+    def test_digest_start_writes_questions_marker(self):
+        self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start")["id"], "001")
+        self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "0\n")
+        self.write_questions_log(7)
+        self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start")["id"], "002")
+        self.assertEqual((self.root / "digests" / "002" / "questions.lines").read_text(), "7\n")
+
+    def test_digest_due_on_questions_growth(self):
+        self.write_questions_log(20)
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 20, "reason": "questions"})  # no marker yet
+        self.marker("001", "5\n")
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 15, "reason": "questions"})
+        self.write_questions_log(19)
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14, "reason": None})
+        self.marker("002", "30\n")  # the log shrank below the marker
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+        self.marker("003", "junk\n")  # not an integer: ignored, 002 counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+        self.marker("004", "2\n", error=True)  # failed digest: skipped, 002 still counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+        (self.root / "digests" / "002" / "error.md").write_text("failed\n")  # now 001 counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14, "reason": None})
+
+    def test_digest_start_on_questions_growth_only(self):
+        self.write_questions_log(14)
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
+        self.assertFalse((self.root / "digests").exists())
+        self.write_questions_log(15)
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": [], "windows": []})
+        self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "")
+        self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "15\n")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
+        self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
+
+    def test_bad_window_thresholds(self):
+        self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
+                         (20, 0.5, 3, 3))
+        three = ["a", "b", "c"]
+        self.assertFalse(board.bad_window({"wasted_pct": 20, "first_pass_rate": None, "done_jobs": three}))
+        self.assertTrue(board.bad_window({"wasted_pct": 20.1, "first_pass_rate": None, "done_jobs": []}))
+        self.assertFalse(board.bad_window({"wasted_pct": None, "first_pass_rate": 0.4, "done_jobs": ["a", "b"]}))
+        self.assertTrue(board.bad_window({"wasted_pct": None, "first_pass_rate": 0.4, "done_jobs": three}))
+        self.assertFalse(board.bad_window({"wasted_pct": 0, "first_pass_rate": 0.5, "done_jobs": three}))
+        self.assertFalse(board.bad_window({"wasted_pct": None, "first_pass_rate": None, "done_jobs": three}))
+        self.assertFalse(board.bad_window({}))
+        self.assertFalse(board.bad_window({"wasted_pct": "99", "first_pass_rate": True, "done_jobs": three}))
+
+    def scorecard(self, name, written_at, wasted_pct=50.0):
+        (self.root / "windows").mkdir(parents=True, exist_ok=True)
+        (self.root / "windows" / name).write_text(json.dumps(
+            {"written_at": written_at, "wasted_pct": wasted_pct, "first_pass_rate": 1.0, "done_jobs": []}))
+
+    def test_digest_due_bad_window_early(self):
+        later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+        earlier = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        self.done_jobs(2)
+        self.scorecard("five_hour-2000.json", later)
+        self.scorecard("five_hour-1000.json", later)
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2, "questionsGrowth": 0, "reason": None})
+        self.done_jobs(1)
+        self.assertEqual(self.cli("digest-due"),
+                         {"due": True, "undigested": 3, "questionsGrowth": 0, "reason": "bad window five_hour-1000.json"})
+        d = self.root / "digests" / "001"
+        d.mkdir(parents=True)
+        (d / "windows.txt").write_text("five_hour-1000.json\nfive_hour-2000.json\n")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 3, "questionsGrowth": 0, "reason": None})
+        (d / "windows.txt").write_text("five_hour-1000.json\n")
+        self.assertEqual(self.cli("digest-due")["reason"], "bad window five_hour-2000.json")
+        self.scorecard("five_hour-2000.json", earlier)  # written before digest 001 was created
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 3, "questionsGrowth": 0, "reason": None})
+        self.scorecard("seven_day-3000.json", later, wasted_pct=5.0)  # a good window
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 3, "questionsGrowth": 0, "reason": None})
+
+    def test_digest_due_bad_window_ignores_junk(self):
+        self.done_jobs(3)
+        self.assertEqual(self.cli("digest-due")["reason"], None)  # no windows/ folder
+        w = self.root / "windows"
+        w.mkdir()
+        bad = {"written_at": "2026-01-01T00:00:00+00:00", "wasted_pct": 90, "first_pass_rate": 0.0,
+               "done_jobs": ["a", "b", "c"]}
+        (w / "open.json").write_text(json.dumps(bad))
+        (w / "five_hour-1.json.tmp").write_text(json.dumps(bad))
+        (w / "five_hour-2.json").write_text("{not json")
+        (w / "five_hour-3.json").write_text(json.dumps([bad]))
+        (w / "five_hour-4.json").write_text(json.dumps({**bad, "written_at": None}))
+        (w / "five_hour-5.json").write_text(json.dumps({**bad, "written_at": "yesterday"}))
+        (w / "five_hour-6.json").write_bytes(b"\xff\xfe")
+        (w / "seven_day-7.json").mkdir()
+        bad.pop("written_at")
+        (w / "seven_day-8.json").write_text(json.dumps(bad))
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 3, "questionsGrowth": 0, "reason": None})
 
     def fill(self, job_id):
         for rel in ("feature.md", "spec.md", "decision.md", "build.md", "round-1/check.md", "round-1/review-ui.md",
@@ -3269,6 +3503,212 @@ class BoardTest(unittest.TestCase):
                      "Set PRIVATE KEY in the vault", "TOKEN: see docs", ""):
             with self.subTest(text=text):
                 self.assertFalse(board.secret_filter(text))
+
+    # --- wait-on / wake_waiting ---
+    def wait_board(self, *jobs):
+        """Write a board of {"id", "stage", ...} jobs straight to board.json (no lock needed: no writer runs)."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"updatedAt": "2026-01-01T00:00:00+00:00", **j} for j in jobs]}))
+
+    def test_wait_on_parks_job_waiting_with_depends_on(self):
+        self.wait_board({"id": "001-first", "stage": "review"},
+                        {"id": "002-second", "stage": "build", "worktree": "/tmp/wt-002", "reason": "old"})
+        out = board.cmd_wait_on(self.root, "002-second", "001-first")
+        self.assertEqual(out, {"id": "002-second", "waiting_on": "001-first"})
+        job = self.jobs()[1]
+        self.assertEqual((job["stage"], job["depends_on"], job["reason"], job["worktree"]),
+                         ("waiting", ["001-first"], "waiting on 001-first", None))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertNotIn("question", job)
+        self.assertNotIn("options", job)
+        self.assertFalse((self.root / "questions.log").exists())
+        self.assertEqual(self.jobs()[0]["stage"], "review")
+
+    def test_wait_on_plays_no_sound(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        with mock.patch.object(board, "play") as play:
+            board.cmd_wait_on(self.root, "002-second", "001-first")
+        play.assert_not_called()
+
+    def test_wait_on_resolves_number_prefix(self):
+        self.wait_board({"id": "001-first", "stage": "merging"}, {"id": "0011-other", "stage": "spec"},
+                        {"id": "002-second", "stage": "build"})
+        self.assertEqual(board.cmd_wait_on(self.root, "002-second", "001"),
+                         {"id": "002-second", "waiting_on": "001-first"})
+        self.assertEqual(self.jobs()[2]["depends_on"], ["001-first"])
+
+    def test_wait_on_refuses_unknown_ambiguous_self_done_aborted_cycle(self):
+        jobs = [{"id": "001-first", "stage": "review"}, {"id": "001-twin", "stage": "review"},
+                {"id": "003-done", "stage": "done"}, {"id": "004-gone", "stage": "aborted"},
+                {"id": "005-loop", "stage": "waiting", "depends_on": ["006-me"]},
+                {"id": "006-me", "stage": "build", "worktree": "/tmp/wt"},
+                {"id": "007-paused", "stage": "build", "paused": True},
+                {"id": "008-aborted", "stage": "aborted"},
+                {"id": "009-chain", "stage": "waiting", "depends_on": ["005-loop"]}]
+        cases = [("006-me", "009-chain"),
+                 ("006-me", "999"), ("006-me", "999-nope"), ("006-me", "001"), ("006-me", "006-me"),
+                 ("006-me", "006"), ("006-me", "003-done"), ("006-me", "004"), ("006-me", "005-loop"),
+                 ("007-paused", "001-first"), ("008-aborted", "001-first"), ("006-me", "-1")]
+        for job_id, blocker in cases:
+            with self.subTest(job=job_id, blocker=blocker):
+                self.wait_board(*jobs)
+                before = (self.root / "board.json").read_text()
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_wait_on(self.root, job_id, blocker)
+                self.assertIsInstance(e.exception.code, str)
+                self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_wait_on_refuses_child_with_outside_blocker(self):
+        self.wait_board({"id": "001-outside", "stage": "review"},
+                        {"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a", "004-b"]},
+                        {"id": "003-a", "stage": "review", "parent": "002-parent"},
+                        {"id": "004-b", "stage": "build", "parent": "002-parent"})
+        before = (self.root / "board.json").read_text()
+        with self.assertRaises(SystemExit):
+            board.cmd_wait_on(self.root, "004-b", "001-outside")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertEqual(board.cmd_wait_on(self.root, "004-b", "003"), {"id": "004-b", "waiting_on": "003-a"})
+
+    def test_wait_on_cli_prints_json(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "wait-on", "002-second", "001"])
+        self.assertEqual(json.loads(buf.getvalue()), {"id": "002-second", "waiting_on": "001-first"})
+        self.assertIn("wait-on <id> <blocker>", board.__doc__)
+
+    def test_wake_waiting_claims_when_dependency_done(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"],
+                         "reason": "waiting on 001-first"})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": ["002-second"], "lost": []})
+        job = self.jobs()[1]
+        self.assertEqual((job["stage"], job["reason"]), ("spec", None))
+        self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_wake_waiting_claims_no_more_than_room(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        self.assertEqual(board.wake_waiting(self.root, 1), {"ready": ["002-second"], "lost": []})
+        self.assertEqual([j["stage"] for j in self.jobs()], ["done", "spec", "waiting"])
+        self.assertEqual(board.wake_waiting(self.root, 0), {"ready": [], "lost": []})
+        self.assertEqual(board.wake_waiting(self.root, 1), {"ready": ["003-third"], "lost": []})
+
+    def test_wake_waiting_leaves_unfinished_dependency(self):
+        jobs = [{"id": "001-first", "stage": "merging"},
+                {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "reason": "waiting on 001-first"},
+                {"id": "003-parent", "stage": "running", "lane": "bigboy", "children": ["004-kid"]},
+                {"id": "004-kid", "stage": "waiting", "parent": "003-parent", "depends_on": ["005-done"]},
+                {"id": "005-done", "stage": "done"},
+                {"id": "006-setup", "stage": "waiting", "setup": "pending", "depends_on": ["005-done"]},
+                {"id": "007-plain", "stage": "waiting"},
+                {"id": "008-paused", "stage": "waiting", "paused": True, "depends_on": ["005-done"]}]
+        self.wait_board(*jobs)
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+        self.assertEqual([j["stage"] for j in self.jobs()], [j["stage"] for j in jobs])
+
+    def test_wake_waiting_asks_when_dependency_aborted(self):
+        self.wait_board({"id": "001-first", "stage": "aborted"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["009-missing"]})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": ["002-second", "003-third"]})
+        second, third = self.jobs()[1], self.jobs()[2]
+        self.assertEqual(second["stage"], "needs-human")
+        self.assertEqual(second["question"],
+                         "blocked: 001-first was aborted or removed, so this job has nothing to wait for.")
+        self.assertEqual(second["options"], [
+            {"key": "a", "label": "Put back on the backlog", "command": "abort 002-second --requeue"},
+            {"key": "b", "label": "Remove this job", "command": "abort 002-second --cascade"}])
+        self.assertEqual(third["question"],
+                         "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_wait_on_then_keeps_worktree_and_records_wake(self):
+        self.wait_board({"id": "001-first", "stage": "review"},
+                        {"id": "002-second", "stage": "approve", "worktree": "/tmp/wt-002", "branch": "scrum/002-second",
+                         "round": 2, "files": ["build.md"], "reason": "old"})
+        out = board.cmd_wait_on(self.root, "002-second", "001", then="approve 002-second")
+        self.assertEqual(out, {"id": "002-second", "waiting_on": "001-first"})
+        job = self.jobs()[1]
+        self.assertEqual({k: v for k, v in job.items() if k != "updatedAt"},
+                         {"id": "002-second", "stage": "waiting", "worktree": "/tmp/wt-002", "branch": "scrum/002-second",
+                          "round": 2, "files": ["build.md"], "reason": "waiting on 001-first",
+                          "depends_on": ["001-first"], "wake": "approve 002-second"})
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "wait-on", "002-second", "001", "--then", "approve 002-second"])
+        self.assertEqual(json.loads(buf.getvalue()), {"id": "002-second", "waiting_on": "001-first"})
+        self.assertEqual(self.jobs()[1]["wake"], "approve 002-second")
+        self.assertIn('wait-on <id> <blocker> [--then "approve <id>"]', board.__doc__)
+
+    def test_wait_on_then_rejects_other_command(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "approve", "worktree": "/w"})
+        before = (self.root / "board.json").read_text()
+        for then in ("approve 001-first", "resume 002-second", "approve  002-second", "approve 002-second --x", "",
+                     "abort 002-second"):
+            with self.subTest(then=then):
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_wait_on(self.root, "002-second", "001-first", then=then)
+                self.assertIsInstance(e.exception.code, str)
+                self.assertEqual((self.root / "board.json").read_text(), before)
+        with self.assertRaises(SystemExit):  # the existing checks still run with then
+            board.cmd_wait_on(self.root, "002-second", "002-second", then="approve 002-second")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_wake_waiting_retries_wake_job_at_needs_human(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                         "reason": "waiting on 001-first", "wake": "approve 002-second", "recommend": {"key": "a", "why": "x"}},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "004-par", "stage": "running", "lane": "bigboy", "children": ["005-kid", "006-sib"]},
+                        {"id": "005-kid", "stage": "waiting", "parent": "004-par", "depends_on": ["006-sib"],
+                         "worktree": "/k", "wake": "approve 005-kid"},
+                        {"id": "006-sib", "stage": "done", "parent": "004-par"})
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(board.wake_waiting(self.root, 1), {"ready": [], "lost": [], "retry": ["002-second"]})
+            self.assertEqual([j["stage"] for j in self.jobs()], ["done", "needs-human", "waiting", "running", "waiting", "done"])
+            self.assertEqual(board.wake_waiting(self.root), {"ready": ["003-third"], "lost": [], "retry": ["005-kid"]})
+        play.assert_not_called()
+        for job_id, dep in (("002-second", "001-first"), ("005-kid", "006-sib")):
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            q = f"retry: {dep} is done, so this job tries again."
+            self.assertEqual((job["stage"], job["question"], job["reason"]), ("needs-human", q, q))
+            self.assertEqual(job["options"], [
+                {"key": "a", "label": "Try again", "command": f"approve {job_id}"},
+                {"key": "b", "label": "Remove this job", "command": f"abort {job_id} --cascade"}])
+            self.assertNotIn("wake", job)
+            self.assertNotIn("recommend", job)
+            self.assertIn("worktree", job)
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_cmd_ready_skips_wake_child(self):
+        self.wait_board({"id": "001-par", "stage": "running", "lane": "bigboy", "children": ["002-kid", "003-sib"]},
+                        {"id": "002-kid", "stage": "waiting", "parent": "001-par", "depends_on": ["003-sib"],
+                         "worktree": "/k", "wake": "approve 002-kid"},
+                        {"id": "003-sib", "stage": "done", "parent": "001-par"})
+        with mock.patch.object(board, "machine_ok", return_value=None), \
+                mock.patch.object(board, "usage_allowance", return_value=None), \
+                mock.patch.object(board, "ram_room", return_value=5):
+            self.assertEqual(board.cmd_ready(self.root, "001-par")["ready"], [])
+        self.assertEqual(self.jobs()[1]["stage"], "waiting")
+
+    def test_wake_waiting_wake_job_blocker_aborted_offers_retry(self):
+        self.wait_board({"id": "001-first", "stage": "aborted"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                         "reason": "waiting on 001-first", "wake": "approve 002-second"})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": ["002-second"]})
+        job = self.jobs()[1]
+        q = "retry: 001-first was aborted or removed, so this job no longer waits on it."
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
+        self.assertNotIn("waiting on", job["reason"])
+        self.assertEqual(job["options"], [
+            {"key": "a", "label": "Try again", "command": "approve 002-second"},
+            {"key": "b", "label": "Remove this job", "command": "abort 002-second --cascade"}])
+        self.assertNotIn("wake", job)
 
 
 class SpawnTest(unittest.TestCase):
@@ -4159,18 +4599,41 @@ class CloudSyncTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "artifactsPending"):
             board.cmd_set(self.root, second, ["artifactsPending=2026-01-01T00:00:00+00:00"])
 
-    def test_cloud_sync_arrived_clears_pending(self):
+    def test_cloud_sync_arrived_keeps_pending(self):
         self.pend(self.job, "done", 1)
+        mark = self.get()["artifactsPending"]
         board.cmd_set(self.root, board.cmd_new(self.root, "Cloud two"), ["stage=cloud"])
         board.artifacts_pushed.return_value = True
         with self.gh([]):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
-        self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get()["artifactsPending"], mark, "arrived: kept until cloud-home starts")
         board.artifacts_pushed.assert_called_once_with(self.root.parent, self.job)
-        self.pend(self.job, "done", 1)  # a gh failure on the pulls call still reports this run's arrivals
+        with self.gh([]):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
+        self.assertEqual(self.get()["artifactsPending"], mark)
+        # a gh failure on the pulls call still reports this run's arrivals
         with mock.patch.object(board, "gh_api", side_effect=board.GhError("HTTP 502")):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": "HTTP 502"})
+        self.assertEqual(self.get()["artifactsPending"], mark)
+
+    def test_cloud_pending_clear(self):
+        other = board.cmd_new(self.root, "Cloud two")
+        bare = board.cmd_new(self.root, "Cloud three")
+        self.pend(self.job, "done", 1)
+        self.pend(other, "done", 2)
+        other_mark = self.get(other)["artifactsPending"]
+        board.cloud_pending_clear(self.root, self.job)
         self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get(other)["artifactsPending"], other_mark, "other jobs' marks untouched")
+        board.cloud_pending_clear(self.root, self.job)  # already cleared: no-op
+        board.cloud_pending_clear(self.root, bare)  # never marked: no-op
+        board.cloud_pending_clear(self.root, "999-missing")  # not on the board: no-op
+        self.assertNotIn("artifactsPending", self.get(bare))
+        self.assertEqual(self.get(other)["artifactsPending"], other_mark)
+        with mock.patch.object(board, "locked_board", wraps=board.locked_board) as lb:
+            board.cloud_pending_clear(self.root, other)
+        lb.assert_called_once_with(self.root)
+        self.assertNotIn("artifactsPending", self.get(other))
 
     def test_cloud_sync_pending_expires_after_24h(self):
         board.cmd_set(self.root, board.cmd_new(self.root, "Cloud two"), ["stage=cloud"])
@@ -4185,11 +4648,12 @@ class CloudSyncTest(unittest.TestCase):
 
     def test_cloud_sync_pending_only_runs_without_cloud_jobs(self):
         self.pend(self.job, "needs-human", 2)
+        mark = self.get()["artifactsPending"]
         board.artifacts_pushed.return_value = True
         with self.gh([self.pr()]):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
         self.assertEqual(self.calls, [], "no cloud job: no pulls call")
-        self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get()["artifactsPending"], mark, "arrived: kept until cloud-home starts")
 
     def test_cloud_sync_removes_worktree_when_set_refused(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
@@ -5474,6 +5938,70 @@ class PipelineFitTest(unittest.TestCase):
         self.assertEqual(j["agents"], ["spec", "builder", "review-ux", "review-ui", "review-code", "approver"])
         self.assertEqual((j["over_routed"], j["fit"]), (True, "lilguy"))
 
+    def test_pipeline_fit_sensitive_path_not_over_routed(self):
+        (self.root / "project.md").parent.mkdir(parents=True, exist_ok=True)
+        (self.root / "project.md").write_text("- UI globs: *.html\n")
+        for path in ("src/auth/login.py", "prisma/schema.prisma", ".env.local", "web/page.html"):
+            with self.subTest(path=path):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard(lines=10, files=1)
+                self.commit({path: "y\n" * 10})
+                self.digest(job)
+                before = self.snapshot()
+                j = self.fit()["jobs"][0]
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual((j["added"], j["deleted"], j["files"]), (20, 0, 2))
+                self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+                board.cmd_set(self.root, job, ["lane=debug"])
+                j = self.fit()["jobs"][0]
+                self.assertEqual((j["over_routed"], j["fit"]), (False, "debug"))
+
+    def test_pipeline_fit_pr_files_block_over_routing(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])
+        self.reviews(b, 1)
+        self.digest(b)
+        before = self.snapshot()
+        small = '{"additions": 20, "deletions": 5, "changed_files": 2}'
+        plain = '[{"filename": "src/a.py", "additions": 10, "deletions": 5}, ' \
+                '{"filename": "src/b.py", "additions": 10, "deletions": 0}]'
+        renamed = '[{"filename": "src/a.py", "additions": 10, "deletions": 5}, ' \
+                  '{"filename": "src/b.py", "previous_filename": "src/session.py", "additions": 10, "deletions": 0}]'
+
+        def run_with(totals, files):
+            calls = []
+
+            def fake_run(argv, *a, **kw):
+                calls.append(argv)
+                if isinstance(files, BaseException) and len(calls) == 2:
+                    raise files
+                out = totals if len(calls) == 1 else files
+                return subprocess.CompletedProcess(argv, 0 if out is not None else 1, out or "", "HTTP 500\n")
+
+            with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+                return self.fit()["jobs"][0], calls
+
+        j, calls = run_with(small, plain)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("repos/acme/app/pulls/42/files", calls[1])
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"], j["fit"]),
+                         (20, 5, 2, True, "lilguy"))
+        j, calls = run_with(small, renamed)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((j["added"], j["over_routed"], j["fit"]), (20, False, "standard"))
+        j, calls = run_with('{"additions": 200, "deletions": 5, "changed_files": 2}', plain)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((j["added"], j["over_routed"], j["fit"]), (200, False, "standard"))
+        for bad in (None, subprocess.TimeoutExpired("gh", 30), '{"filename": "src/a.py"}', '[{"filename": 3}]',
+                    '[{"additions": 1, "deletions": 0}]'):
+            with self.subTest(bad=bad):
+                j, calls = run_with(small, bad)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"], j["fit"]),
+                                 (20, 5, 2, False, "standard"))
+        self.assertEqual(self.snapshot(), before)
+
     def test_pipeline_fit_flags_mid_size_job_as_fast(self):
         job = self.small_standard(lines=60, files=2)
         board.cmd_set(self.root, job, ["lane=debug"])
@@ -5514,6 +6042,340 @@ class PipelineFitTest(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=bad) as cm:
                 board.cmd_pipeline_fit(self.root, bad)
             self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
+
+
+class WindowReportTest(unittest.TestCase):
+    """board.py window-report: remembers open usage windows and writes one scorecard per closed window."""
+
+    R = 1_700_000_000  # five_hour resets_at; the window is [R - 18000, R)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.repo = (self.base / "repo").resolve()
+        self.root = self.repo / "scrum"
+        self.root.mkdir(parents=True)
+        self.other = (self.base / "other").resolve()
+        (self.other / "scrum").mkdir(parents=True)
+        self.reg = self.base / "projects.json"
+        self.reg.write_text(json.dumps([str(self.repo), str(self.other)]))
+        self.tx = self.base / "projects"
+        self.tx.mkdir()
+        self.usage_file = self.base / "usage.json"
+        self.env = {"SCRUM_REGISTRY": str(self.reg), "SCRUM_TRANSCRIPTS": str(self.tx),
+                    "SCRUM_USAGE": str(self.usage_file)}
+        env = mock.patch.dict(os.environ, self.env)
+        env.start()
+        self.addCleanup(env.stop)
+        no_claude_pid(self)
+
+    @staticmethod
+    def at(t):
+        return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+
+    def usage(self, limits, written_at=None):
+        self.usage_file.write_text(json.dumps({"rate_limits": limits, **({"written_at": written_at}
+                                                                         if written_at is not None else {})}))
+
+    def five(self, used=50, written_at=None):
+        w = {"resets_at": self.R} if used is None else {"used_percentage": used, "resets_at": self.R}
+        self.usage({"five_hour": w}, written_at)
+
+    def board(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": i, "stage": stage, **({"updatedAt": self.at(t)} if t is not None else {}), **extra}
+            for i, stage, t, extra in ((*j, {}) if len(j) == 3 else j for j in jobs)]}))
+
+    def backlog(self, *lines):
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"{l}\n" for l in lines))
+
+    def questions(self, *entries):
+        (self.root / "questions.log").write_text("".join(
+            (e if isinstance(e, str) else json.dumps(e)) + "\n" for e in entries))
+
+    def put(self, rel, text, mtime=None):
+        p = self.root / "jobs" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        if mtime is not None:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def transcript(self, rel, lines, agent=None):
+        p = self.tx / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(x) + "\n" for x in lines))
+        if agent:
+            p.with_name(p.stem + ".meta.json").write_text(json.dumps({"agentType": agent}))
+
+    def card(self, t=None):
+        out = board.cmd_window_report(self.root, self.R + 60 if t is None else t)
+        self.assertEqual(len(out), 1, out)
+        return out[0]
+
+    def open_json(self):
+        return json.loads((self.root / "windows" / "open.json").read_text())
+
+    def test_window_report_writes_once(self):
+        self.five(used=50, written_at=self.R - 1000)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [])
+        self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()), [".lock", "open.json"])
+        out = board.cmd_window_report(self.root, self.R)
+        path = self.root / "windows" / f"five_hour-{self.R}.json"
+        self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()),
+                         [".lock", f"five_hour-{self.R}.json", "open.json"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(json.loads(path.read_text()), out[0])
+        self.assertEqual((out[0]["window"], out[0]["label"], out[0]["resets_at"], out[0]["start"], out[0]["end"]),
+                         ("five_hour", "5h", 1_700_000_000, 1_699_982_000, 1_700_000_000))
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        self.assertEqual(board.cmd_window_report(self.root, self.R), [])
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(self.open_json(), {})
+
+    def test_window_report_cli_prints_list(self):
+        self.five(used=50)
+        argv = [sys.executable, str(BOARD_PY), "--dir", str(self.root), "window-report"]
+        env = {**os.environ, **self.env}
+        first = subprocess.run(argv, capture_output=True, text=True, env=env)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        cards = json.loads(first.stdout)  # the real clock is long past R
+        self.assertEqual([(c["window"], c["resets_at"]) for c in cards], [("five_hour", 1_700_000_000)])
+        second = subprocess.run(argv, capture_output=True, text=True, env=env)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout), [])
+
+    def test_window_report_remembers_dropped_window(self):
+        self.five(used=40, written_at=self.R - 1000)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 1000), [])
+        self.assertEqual(self.open_json(), {f"five_hour-{self.R}": {
+            "window": "five_hour", "resets_at": 1_700_000_000, "used_pct": 40, "hit_90_at": None, "hit_cap_at": None,
+            "idle_secs": 0, "last_tick": 1_699_999_000}})
+        self.five(used=93, written_at=1_699_999_480)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 500), [])
+        self.usage({})
+        c = self.card(self.R + 10)
+        self.assertEqual((c["budget"]["used_pct"], c["budget"]["hit_90_at"]), (93, 1_699_999_480))
+        self.assertNotIn(f"five_hour-{self.R}", self.open_json())
+
+    def test_window_report_bad_open_json(self):
+        (self.root / "windows").mkdir()
+        for bad in ("not json", "[1, 2]", '"x"', '{"five_hour-1": 7, "x": {"window": "nope", "resets_at": 1}}'):
+            (self.root / "windows" / "open.json").write_text(bad)
+            self.usage({})
+            self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [], bad)
+        self.five(used=10)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [])
+        self.assertEqual(list(self.open_json()), [f"five_hour-{self.R}"])
+        (self.root / "windows" / "open.json").unlink()
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 50), [])
+
+    def test_window_report_budget_fields(self):
+        self.board(("101-a", "done", self.R - 100))
+        self.backlog("- [x] [5] Thing → 101-a")
+        for t, used in ((self.R - 4000, 50), (self.R - 3000, 91), (self.R - 2000, 99), (self.R - 1000, 99.5)):
+            self.five(used=used, written_at=t)
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        c = self.card()
+        self.assertEqual(c["budget"], {"used_pct": 99.5, "hit_90_at": 1_699_997_000, "left_at_reset_pct": 0.5,
+                                       "cap_idle_secs": 2000})
+        self.assertEqual(c["points_done"], 5)
+        self.assertEqual(c["headline"], 0.05)
+
+    def test_window_report_null_budget(self):
+        self.board(("101-a", "done", self.R - 100))
+        self.backlog("- [x] [2] Thing → 101-a")
+        self.five(used=None)
+        c = self.card()
+        self.assertEqual(c["budget"], {"used_pct": None, "hit_90_at": None, "left_at_reset_pct": None,
+                                       "cap_idle_secs": None})
+        self.assertIsNone(c["headline"])
+        self.assertEqual(c["points_done"], 2)
+        self.R += 3600
+        self.five(used=0)
+        c = self.card()
+        self.assertEqual(c["budget"]["used_pct"], 0)
+        self.assertIsNone(c["headline"])
+
+    def scoring_fixture(self):
+        R = self.R
+        self.board(("101-a", "done", R - 100), ("102-b", "done", R - 200, {"lane": "fast"}), ("103-c", "done", R - 300),
+                   ("104-d", "done", R - 20000), ("105-e", "done", R - 50, {"lane": "bigboy"}),
+                   ("106-f", "build", R - 10))
+        self.backlog("- [x] [3] A → 101-a", "- [x] [?] B → 102-b", "- [x] [5] D → 104-d", "- [x] [2] E → 105-e",
+                     "- [ ] [8] F")
+        (self.root / "jobs" / "101-a" / "round-1").mkdir(parents=True)
+        for n in (1, 2):
+            (self.root / "jobs" / "102-b" / f"round-{n}").mkdir(parents=True)
+        self.transcript("p/s1.jsonl", [
+            prompt("JOB_DIR=/x/scrum/jobs/101-a"),
+            reply(R - 1000, "m1", cwd=str(self.repo), model="claude-opus", input_tokens=100, output_tokens=50,
+                  cache_read_input_tokens=300, cache_creation_input_tokens=50),
+            reply(R + 10, "m9", cwd=str(self.repo), input_tokens=7777)])
+        self.transcript("p/s2.jsonl", [
+            prompt("JOB_DIR=/x/scrum/jobs/102-b"),
+            reply(R - 900, "m2", cwd=str(self.repo / "src"), model="claude-sonnet", input_tokens=10, output_tokens=20,
+                  cache_read_input_tokens=60, cache_creation_input_tokens=10),
+            reply(R - 800, "m3", cwd=str(self.other), input_tokens=9999)])
+        self.transcript("p/s1/subagents/agent-x.jsonl", [
+            reply(R - 700, "m4", cwd=str(self.repo), model="claude-opus", input_tokens=40, output_tokens=60)],
+            agent="scrum-review-code")
+        self.five(used=50)
+
+    def test_window_report_scoring_math(self):
+        self.scoring_fixture()
+        c = self.card()
+        self.assertEqual(c["points_done"], 5)
+        self.assertEqual(c["done_jobs"], [{"id": "101-a", "points": 3}, {"id": "102-b", "points": None},
+                                          {"id": "103-c", "points": None}, {"id": "105-e", "points": 2}])
+        self.assertEqual(c["tokens"], {"total": 700, "by_job": {"101-a": 600, "102-b": 100}})
+        self.assertEqual(c["tokens_per_point"], 140.0)
+        self.assertEqual(c["first_pass_rate"], 0.667)
+        self.assertEqual(c["cache_hit_rate"], 0.706)
+        self.assertEqual(c["model_mix"], {"main": {"claude-opus": 500, "claude-sonnet": 100},
+                                          "scrum-review-code": {"claude-opus": 100}})
+
+    def test_window_report_wasted(self):
+        R = self.R
+        self.board(("201-x", "aborted", R - 100), ("202-y", "done", R - 100), ("203-z", "running", R - 100),
+                   ("204-w", "review", R - 100), ("205-v", "aborted", R - 20000), ("206-u", "done", R - 100),
+                   ("207-t", "needs-human", R - 100), ("208-s", "done", R - 100))
+        ask = [{"key": "a", "label": "Resume", "command": "resume 203-z"}, {"key": "b", "label": "Abort",
+                                                                             "command": "abort 203-z"}]
+        self.questions(
+            {"date": self.at(R - 500), "job": "202-y", "kind": "stall", "reason": "no progress"},
+            {"date": self.at(R - 450), "job": "202-y", "kind": "check-fail", "unblock": 1, "question": "q"},
+            {"date": self.at(R - 400), "job": "203-z", "kind": "ask", "options": ask, "reason": "stalled in build: x"},
+            {"date": self.at(R - 300), "job": "204-w", "kind": "check-fail", "unblock": 1, "question": "q"},
+            {"date": self.at(R - 20000), "job": "206-u", "kind": "stall", "reason": "old"},
+            {"date": self.at(R - 200), "job": "207-t", "kind": "ask", "options": ask, "reason": "pick one"},
+            {"date": self.at(R - 150), "job": "999-gone", "kind": "stall", "reason": "not this board"},
+            "garbage")
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/201-x"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=100)])
+        self.transcript("p/t.jsonl", [prompt("JOB_DIR=/x/jobs/202-y"),
+                                      reply(R - 900, "b", cwd=str(self.repo), input_tokens=150),
+                                      reply(R - 800, "c", cwd=str(self.repo), output_tokens=50)])
+        self.transcript("p/u.jsonl", [prompt("JOB_DIR=/x/jobs/204-w"),
+                                      reply(R - 900, "d", cwd=str(self.repo), input_tokens=50)])
+        self.transcript("p/v.jsonl", [prompt("JOB_DIR=/x/jobs/208-s"),
+                                      reply(R - 900, "e", cwd=str(self.repo), input_tokens=650)])
+        self.five(used=50)
+        c = self.card()
+        self.assertEqual(c["wasted_jobs"], ["201-x", "202-y", "203-z", "204-w"])
+        self.assertEqual(c["wasted_tokens"], 350)
+        self.assertEqual(c["wasted_pct"], 35.0)
+
+    def test_window_report_lane_fit(self):
+        wt = self.base / "wt"
+        wt.mkdir()
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                           capture_output=True)
+        (wt / "README.md").write_text("readme\n")
+        git("init", "-q", "-b", "main")
+        git("add", "README.md")
+        git("commit", "-q", "-m", "base")
+        git("checkout", "-q", "-b", "work")
+        (wt / "src").mkdir()
+        (wt / "src" / "f.py").write_text("x\n" * 20)
+        git("add", "-A")
+        git("commit", "-q", "-m", "change")
+        R = self.R
+        self.board(("301-a", "done", R - 100, {"worktree": str(wt), "base": "main", "lane": "standard"}),
+                   ("302-b", "done", R - 100), ("303-c", "done", R - 100, {"worktree": str(wt), "base": "main",
+                                                                          "lane": "bigboy"}))
+        for job in ("301-a", "302-b", "303-c"):
+            for r in ("security", "ux", "ui", "code"):
+                self.put(f"{job}/round-1/review-{r}.md", "VERDICT: PASS\nok\n")
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/301-a"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=300)])
+        self.transcript("p/t.jsonl", [prompt("JOB_DIR=/x/jobs/302-b"),
+                                      reply(R - 900, "b", cwd=str(self.repo), input_tokens=700)])
+        self.five(used=50)
+        self.assertEqual(self.card()["lane_fit"], {"over_routed": ["301-a"], "over_routed_tokens": 300,
+                                                   "over_routed_pct": 30.0})
+
+    def test_window_report_yield_routing_escapes(self):
+        R = self.R
+        self.board(("401-r", "done", R - 100), ("402-p", "done", R - 100, {"lane": "bigboy"}),
+                   ("403-d", "running", R - 100, {"lane": "debug"}), ("404-q", "done", R - 5000),
+                   ("405-d", "done", R - 100, {"lane": "debug"}), ("406-s", "done", R - 50),
+                   ("407-d", "done", R - 100, {"lane": "debug"}))
+        self.put("401-r/round-1/review-code.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] a\n2. [minor] b\n"
+                 "not a finding\n## Notes\n3. [minor] not counted\n", mtime=R - 100)
+        self.put("401-r/round-1/review-ux.md", "VERDICT: PASS\nSkipped by orchestrator: fast lane.\n## Findings\n"
+                 "1. [blocking] stub\n", mtime=R - 100)
+        self.put("401-r/round-1/review-security.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] old\n",
+                 mtime=R - 20000)
+        rl = lambda t, runner, outcome: json.dumps({"ts": self.at(t), "role": "r", "runner": runner, "model": "m",
+                                                    "duration_s": 1.0, "outcome": outcome})
+        self.put("401-r/routing.log", "\n".join([rl(R - 900, "local", "ok"), rl(R - 800, "cloud", "ok"),
+                                                 rl(R - 700, "skip", "ok"), rl(R - 600, "local", "fail"),
+                                                 rl(R - 20000, "local", "ok"), "bad line"]) + "\n")
+        self.questions(
+            {"date": self.at(R - 300), "job": "402-p", "kind": "bigboy", "reason": "merged + gaps: two gaps"},
+            {"date": self.at(R - 250), "job": "401-r", "kind": "bigboy", "reason": "bigboy review: main not updated"},
+            {"date": self.at(R - 20000), "job": "401-r", "kind": "bigboy", "reason": "merged + gaps: old"})
+        self.put("403-d/feature.md", "Regression from job 404 in the header\n", mtime=R - 100)
+        self.put("405-d/feature.md", "405-d broke after 406-s\n", mtime=R - 100)
+        self.put("407-d/feature.md", "404-q again\n", mtime=R - 20000)
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/401-r"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=500)])
+        self.transcript("p/s/subagents/agent-r.jsonl", [reply(R - 800, "b", cwd=str(self.repo), output_tokens=500)],
+                        agent="scrum-review-code")
+        self.five(used=50)
+        c = self.card()
+        self.assertEqual(c["reviewer_yield"], 4.0)
+        self.assertEqual(c["local_routing"], 0.5)
+        self.assertEqual(c["escapes"], 2)
+        self.assertEqual(c["escaped_jobs"], ["402-p", "404-q"])
+
+    def test_window_report_idle(self):
+        R = self.R
+        self.backlog("- [ ] [2] Do thing", "- [ ] [1] Later {setup: buy a key}")
+        jobs = [("502-a", "done", None), ("503-b", "done", None), ("504-c", "needs-human", R - 600),
+                ("505-d", "done", None)]
+        self.board(*jobs)
+        self.five(used=10)
+        for t in (R - 1000, R - 900):  # first tick, then +100 idle
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        self.board(*jobs, ("506-e", "build", None))
+        self.assertEqual(board.cmd_window_report(self.root, R - 800), [])  # an active job: not idle
+        self.board(*jobs)
+        for t in (R - 200, R - 100):  # a 600 s gap is no sample; then +100
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        ask = [{"key": "a", "label": "Resume", "command": "resume 502-a"}, {"key": "b", "label": "Abort",
+                                                                             "command": "abort 502-a"}]
+        self.questions(
+            {"date": self.at(R - 3000), "job": "502-a", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 2500), "job": "504-c", "kind": "stall", "reason": "other job"},
+            {"date": self.at(R - 2000), "job": "502-a", "kind": "check-fail", "unblock": 1},
+            {"date": self.at(R - 20000), "job": "503-b", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 17000), "job": "503-b", "kind": "stall", "reason": "s"},
+            {"date": self.at(R - 600), "job": "504-c", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 500), "job": "505-d", "kind": "ask", "options": ask, "reason": "q"})
+        c = self.card(R + 50)
+        self.assertEqual(c["idle"], {"ready_idle_secs": 200, "needs_human_secs": 2600})
+
+    def test_window_report_missing_tokens_null(self):
+        self.assertIn("window-report", board.__doc__)
+        self.scoring_fixture()
+        for env in ({"SCRUM_REGISTRY": str(self.base / "empty.json")},
+                    {"SCRUM_TRANSCRIPTS": str(self.base / "missing")}):
+            with mock.patch.dict(os.environ, env), self.subTest(env=env):
+                self.R += 3600
+                self.board(("101-a", "done", self.R - 100), ("102-b", "done", self.R - 200))
+                self.five(used=50)
+                c = self.card()
+                for k in ("tokens", "tokens_per_point", "wasted_tokens", "wasted_pct", "cache_hit_rate",
+                          "reviewer_yield", "model_mix"):
+                    self.assertIsNone(c[k], k)
+                self.assertEqual(c["lane_fit"], {"over_routed": [], "over_routed_tokens": None,
+                                                 "over_routed_pct": None})
+                self.assertEqual((c["points_done"], c["first_pass_rate"], c["escapes"]), (3, 0.5, 0))
 
 
 USAGE_NOW = 1_000_000
@@ -5595,6 +6457,158 @@ class UsageAllowanceTest(unittest.TestCase):
         a = board.usage_allowance(usage(five=(92, 3600), seven=(93, 3600)), USAGE_NOW, 0)
         self.assertEqual(a.reason, f"usage 5h 92% used, resets {seven_at} (allowance 3, 0 live)", "tie: five_hour")
 
+    def test_windows_constant_drives_allowance(self):
+        self.assertEqual(board.WINDOWS, (("five_hour", "5h"), ("seven_day", "7d")))
+        a = board.usage_allowance(usage(seven=(96, 3600)), USAGE_NOW, 0)
+        self.assertTrue(a.reason.startswith("usage 7d "), a.reason)
+
+
+T0 = 1_700_000_000  # 2023-11-14; fixture files written now are newer than every window start
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def prompt(text, **extra):
+    return {"type": "user", "message": {"role": "user", "content": text}, **extra}
+
+
+def reply(t, mid, cwd="/nowhere", model="claude-x", **usage_counts):
+    return {"type": "assistant", "timestamp": iso(t), "cwd": cwd,
+            "message": {"id": mid, "model": model, "usage": usage_counts}}
+
+
+class TranscriptTokensTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.dir = self.base / "projects"
+        self.repo = (self.base / "repo").resolve()
+        (self.repo / "scrum").mkdir(parents=True)
+        reg = self.base / "projects.json"
+        reg.write_text(json.dumps([str(self.repo)]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, rel, lines):
+        p = self.dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join((x if isinstance(x, str) else json.dumps(x)) + "\n" for x in lines))
+        return p
+
+    def rows(self, start=T0 - 100, end=T0 + 100):
+        return board.transcript_tokens(start, end, self.dir)
+
+    def test_transcript_tokens_rows_and_dedupe(self):
+        self.write("p/s1.jsonl", [prompt("hi"),
+                                  reply(T0 + 2, "m2", input_tokens=7),
+                                  reply(T0, "m1", input_tokens=1, output_tokens=2),
+                                  reply(T0 + 1, "m1", model="claude-y", input_tokens=3, output_tokens=40,
+                                        cache_read_input_tokens=500, cache_creation_input_tokens=60)])
+        self.assertEqual(self.rows(), [
+            {"ts": T0 + 1.0, "input_tokens": 3, "output_tokens": 40, "cache_read_input_tokens": 500,
+             "cache_creation_input_tokens": 60, "model": "claude-y", "project": None, "job": None,
+             "agent": "main", "skill": None},
+            {"ts": T0 + 2.0, "input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0, "model": "claude-x", "project": None, "job": None,
+             "agent": "main", "skill": None}])
+
+    def test_transcript_tokens_window_bounds(self):
+        self.write("p/s1.jsonl", [reply(T0 - 1, "a", input_tokens=1), reply(T0, "b", input_tokens=2),
+                                  reply(T0 + 9, "c", input_tokens=3), reply(T0 + 10, "d", input_tokens=4)])
+        old = self.write("p/old.jsonl", [reply(T0 + 5, "e", input_tokens=5)])
+        os.utime(old, (T0 - 50, T0 - 50))
+        real_open, opened = open, []
+
+        def spy(path, *a, **k):
+            opened.append(Path(path).name)
+            return real_open(path, *a, **k)
+        with mock.patch("builtins.open", side_effect=spy):
+            got = board.transcript_tokens(T0, T0 + 10, self.dir)
+        self.assertEqual([r["input_tokens"] for r in got], [2, 3])
+        self.assertIn("s1.jsonl", opened)
+        self.assertNotIn("old.jsonl", opened)
+        self.assertEqual(board.transcript_tokens(T0, T0 + 10, self.base / "missing"), [])
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.dir)}):
+            self.assertEqual([r["input_tokens"] for r in board.transcript_tokens(T0, T0 + 10)], [2, 3])
+
+    def test_transcript_tokens_attribution(self):
+        nested = self.repo / "sub"
+        (nested / "scrum").mkdir(parents=True)
+        reg = self.base / "projects.json"
+        reg.write_text(json.dumps([str(self.repo), str(nested)]))
+        wt = self.repo / ".claude" / "worktrees" / "scrum-123-x"
+        self.write("p/a.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"),
+                                 reply(T0, "a", cwd=str(wt / "src"), input_tokens=1)])
+        self.write("p/b.jsonl", [prompt("ignored meta JOB_DIR=/x/jobs/999-no", isMeta=True),
+                                 prompt("JOB_DIR=/r/scrum/jobs/124-y\nWORKTREE=none"),
+                                 reply(T0 + 1, "b", cwd=str(nested / "deep"), input_tokens=2)])
+        self.write("p/c.jsonl", [{"type": "user", "message": {"content": [
+                                     {"type": "text", "text": "<command-name>/trevskills-scrum</command-name>"},
+                                     {"type": "text", "text": "<command-args>start 125-z</command-args>"}]}},
+                                 reply(T0 + 2, "c", cwd="/elsewhere", input_tokens=3)])
+        self.write("p/d.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"
+                                        "<command-args>status all</command-args>"),
+                                 reply(T0 + 3, "d", cwd=str(self.repo), input_tokens=4)])
+        got = [(r["input_tokens"], r["project"], r["job"], r["skill"]) for r in self.rows()]
+        self.assertEqual(got, [(1, "repo", "123-x", "trevskills-scrum"), (2, "sub", "124-y", None),
+                               (3, None, "125-z", "trevskills-scrum"), (4, "repo", None, "trevskills-scrum")])
+
+    def test_transcript_tokens_subagent(self):
+        self.write("p/s1.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"
+                                         "<command-args>start 125-z</command-args>"),
+                                  reply(T0, "m", input_tokens=1)])
+        sub = self.dir / "p" / "s1" / "subagents"
+        self.write("p/s1/subagents/agent-aa.jsonl", [prompt("JOB_DIR=/r/scrum/jobs/200-own"),
+                                                     reply(T0 + 1, "x", input_tokens=2)])
+        (sub / "agent-aa.meta.json").write_text(json.dumps({"agentType": "scrum-builder"}))
+        self.write("p/s1/subagents/agent-bb.jsonl", [prompt("no job here"), reply(T0 + 2, "y", input_tokens=3)])
+        (sub / "agent-bb.meta.json").write_text("{not json")
+        self.write("p/s1/subagents/agent-cc.jsonl", [reply(T0 + 3, "z", input_tokens=4)])
+        self.write("p/s1/subagents/agent-dd.jsonl", [reply(T0 + 4, "w", input_tokens=5)])
+        (sub / "agent-dd.meta.json").write_text(json.dumps(["scrum-builder"]))
+        self.write("q/orphan/subagents/agent-ee.jsonl", [reply(T0 + 5, "v", input_tokens=6)])
+        got = [(r["input_tokens"], r["agent"], r["job"], r["skill"]) for r in self.rows()]
+        self.assertEqual(got, [(1, "main", "125-z", "trevskills-scrum"),
+                               (2, "scrum-builder", "200-own", "trevskills-scrum"),
+                               (3, "subagent", "125-z", "trevskills-scrum"),
+                               (4, "subagent", "125-z", "trevskills-scrum"),
+                               (5, "subagent", "125-z", "trevskills-scrum"),
+                               (6, "subagent", None, None)])
+
+    def test_transcript_tokens_malformed_lines(self):
+        good = reply(T0, "ok", input_tokens=9, output_tokens="lots", cache_read_input_tokens=None,
+                     cache_creation_input_tokens=True)
+        self.write("p/s1.jsonl", ["not json", "[1, 2]", "42", '"str"', "",
+                                  {"type": "assistant", "timestamp": iso(T0), "message": "x"},
+                                  {"type": "assistant", "timestamp": iso(T0), "message": {"id": "u", "usage": [1]}},
+                                  {"type": "assistant", "message": {"id": "n", "usage": {"input_tokens": 1}}},
+                                  {"type": "assistant", "timestamp": "yesterday", "message": {"usage": {}}},
+                                  {"type": "assistant", "timestamp": 5, "message": {"usage": {}}},
+                                  {"type": "user", "timestamp": iso(T0), "message": {"usage": {"input_tokens": 1}}},
+                                  {"type": "user", "message": "not a dict"},
+                                  good])
+        with open(self.dir / "p" / "s1.jsonl", "ab") as f:
+            f.write(b"\xff\xfe broken utf8\n")
+        (self.dir / "p" / "dir.jsonl").mkdir()  # open() raises IsADirectoryError, an OSError
+        got = self.rows()
+        self.assertEqual([(r["input_tokens"], r["output_tokens"], r["cache_read_input_tokens"],
+                           r["cache_creation_input_tokens"]) for r in got], [(9, 0, 0, 0)])
+        self.write("q/odd.jsonl", ['{"type": "assistant", "timestamp": "%s", "cwd": "/a\\u0000b", "message": '
+                                   '{"id": ["list"], "usage": {"input_tokens": Infinity, "output_tokens": NaN}}}'
+                                   % iso(T0 + 1), reply(T0 + 2, "L", cwd=["a"])])  # unhashable id and cwd,
+        # non-finite counts, a NUL in cwd
+        self.assertEqual([(r["input_tokens"], r["output_tokens"], r["project"]) for r in self.rows()],
+                         [(9, 0, None), (0, 0, None), (0, 0, None)])
+        src = BOARD_PY.read_text()
+        body = src[src.index("def read_transcript("):src.index("def transcript_tokens(")]
+        self.assertNotIn(".read()", body)
+        self.assertNotIn("readlines(", body)
+        self.assertIn("for line in f", body)
+
 
 class ReadyUsageTest(unittest.TestCase):
     def setUp(self):
@@ -5645,6 +6659,150 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids)
         p = self.parent_job()
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+
+class FableTest(unittest.TestCase):
+    """board.fable_state / fable_ok / fable-ok: Fable for the planner and big standard-ticket spec-writers."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        self.usage_file = Path(self.tmp.name) / "usage.json"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(self.usage_file)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def state(self, five, seven):
+        return board.fable_state(usage(five=(five, 3600), seven=(seven, 86400)), USAGE_NOW)
+
+    def test_fable_state_thresholds(self):
+        self.assertEqual(board.FABLE_MODEL, "claude-fable-5-1")
+        self.assertEqual((board.FABLE_WARN_5H_PCT, board.FABLE_WARN_7D_PCT, board.FABLE_SWITCH_5H_PCT,
+                          board.FABLE_SWITCH_7D_PCT), (65, 75, 80, 85))
+        for five, seven, want in ((79.9, 0, "warn"), (80, 0, "paused"), (0, 84.9, "warn"), (0, 85, "paused"),
+                                  (65, 0, "warn"), (64.9, 74.9, "ok"), (0, 75, "warn"), (0, 0, "ok"),
+                                  (100, 100, "paused"), (70, 90, "paused")):
+            self.assertEqual(self.state(five, seven), want, (five, seven))
+        self.assertEqual(board.fable_state(usage(five=(79.9, 3600), seven=(0, 86400)), USAGE_NOW), "warn")
+        self.assertEqual(board.fable_state(usage(five=(95, 0), seven=(0, 86400)), USAGE_NOW), "ok",
+                         "a 5h window resetting now counts as 0% used")
+        self.assertEqual(board.fable_state(usage(five=(10, 3600), seven=(99, -5)), USAGE_NOW), "ok",
+                         "a past 7d reset counts as 0% used")
+        self.assertTrue(board.fable_ok(usage(five=(70, 3600), seven=(0, 86400)), USAGE_NOW))
+        self.assertTrue(board.fable_ok(usage(five=(0, 3600), seven=(0, 86400)), USAGE_NOW))
+        self.assertFalse(board.fable_ok(usage(five=(80, 3600), seven=(0, 86400)), USAGE_NOW))
+
+    def test_fable_state_unknown_fails_safe(self):
+        good = usage(five=(10, 3600), seven=(10, 86400))
+        self.assertEqual(board.fable_state(good, USAGE_NOW), "ok")
+        bad = [None, [], "x", {}, {"rate_limits": []}, {"written_at": USAGE_NOW},
+               {**good, "written_at": None}, {**good, "written_at": "1000000"},
+               {"rate_limits": good["rate_limits"]},
+               usage(five=(10, 3600), seven=(10, 86400), written_at=USAGE_NOW - 301),
+               usage(five=(10, 3600)), usage(seven=(10, 86400)),
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "seven_day": {"used_percentage": 1}}},
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"used_percentage": "10",
+                                                                            "resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "seven_day": {"used_percentage": True,
+                                                                            "resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": "80%"}}]
+        for u in bad:
+            self.assertEqual(board.fable_state(u, USAGE_NOW), "unknown", u)
+            self.assertFalse(board.fable_ok(u, USAGE_NOW), u)
+        self.assertEqual(board.fable_state(usage(five=(10, 3600), seven=(10, 86400), written_at=USAGE_NOW - 300),
+                                           USAGE_NOW), "ok", "exactly 300 s old is still fresh")
+
+    def write_usage(self, five, seven):
+        now = time.time()
+        self.usage_file.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": five, "resets_at": now + 3600},
+            "seven_day": {"used_percentage": seven, "resets_at": now + 86400}}}))
+
+    def setup_jobs(self):
+        lanes = {"001-std": None, "002-empty": "", "003-standard": "standard", "004-fast": "fast", "005-debug": "debug",
+                 "006-lil": "lilguy", "007-cloud": "cloud", "008-bigboy": "bigboy", "009-road": "roadmap",
+                 "010-small": None, "011-unlinked": None}
+        jobs = []
+        for job_id, lane in lanes.items():
+            job = {"id": job_id, "stage": "spec"}
+            if lane is not None:
+                job["lane"] = lane
+            jobs.append(job)
+            (self.root / "jobs" / job_id).mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        linked = [j for j in lanes if j not in ("010-small", "011-unlinked")] + ["099-gone"]
+        (self.root / "backlog.md").write_text("# Backlog\n\n" + "".join(f"- [x] [8] Item {j} → {j}\n" for j in linked)
+                                              + "- [x] [3] Small → 010-small\n")
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "fable-ok", *args],
+                              capture_output=True, text=True)
+
+    def test_fable_ok_cli_gating(self):
+        self.setup_jobs()
+        self.write_usage(10, 10)
+        spec_fable = ("001-std", "002-empty", "003-standard")
+        spec_none = ("004-fast", "005-debug", "006-lil", "007-cloud", "008-bigboy", "009-road", "010-small",
+                     "011-unlinked", "099-gone")
+        for job_id in spec_fable:
+            out = self.cli(job_id, "spec-writer")
+            self.assertEqual((out.returncode, out.stdout), (0, "claude-fable-5-1\n"), (job_id, out.stderr))
+        for job_id in spec_none:
+            out = self.cli(job_id, "spec-writer")
+            self.assertEqual((out.returncode, out.stdout), (0, "none\n"), (job_id, out.stderr))
+        for job_id in ("008-bigboy", "011-unlinked", "099-gone"):
+            self.assertEqual(self.cli(job_id, "planner").stdout, "claude-fable-5-1\n", job_id)
+        for bad in ("builder", "approver", "", "Planner"):
+            out = self.cli("001-std", bad)
+            self.assertNotEqual(out.returncode, 0, bad)
+            self.assertEqual(out.stdout, "", bad)
+        self.write_usage(70, 10)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n", "warn still gets Fable")
+        self.write_usage(80, 10)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n")
+        self.write_usage(10, 85)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        self.usage_file.unlink()
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n", "no usage.json: Opus")
+
+    def test_fable_ok_logs_decision(self):
+        self.setup_jobs()
+        log = self.root / "jobs" / "008-bigboy" / "fable.log"
+        log.write_text("earlier line\n")
+        self.write_usage(10.4, 20)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n")
+        self.write_usage(81, 20)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        lines = log.read_text().splitlines()
+        self.assertEqual(lines[0], "earlier line")
+        self.assertEqual(len(lines), 3)
+        first, second = (l.split("\t") for l in lines[1:])
+        self.assertRegex(first[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+        self.assertEqual(first[1:], ["planner", "fable", "5h 10%", "7d 20%", "ok"])
+        self.assertEqual(second[1:], ["planner", "opus", "5h 81%", "7d 20%", "paused"])
+        now = time.time()
+        self.usage_file.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 50, "resets_at": now + 3600}}}))
+        self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n")
+        self.assertEqual((self.root / "jobs" / "001-std" / "fable.log").read_text().split("\t")[1:],
+                         ["spec-writer", "opus", "5h 50%", "7d —", "unknown\n"])
+        self.usage_file.unlink()
+        self.assertEqual(self.cli("003-standard", "spec-writer").stdout, "none\n")
+        self.assertEqual((self.root / "jobs" / "003-standard" / "fable.log").read_text().split("\t")[1:],
+                         ["spec-writer", "opus", "5h —", "7d —", "unknown\n"])
+        self.write_usage(10, 10)
+        self.assertEqual(self.cli("004-fast", "spec-writer").stdout, "none\n")
+        self.assertEqual(self.cli("010-small", "spec-writer").stdout, "none\n")
+        self.assertFalse((self.root / "jobs" / "004-fast" / "fable.log").exists(), "ineligible: no log")
+        self.assertFalse((self.root / "jobs" / "010-small" / "fable.log").exists(), "ineligible: no log")
+        self.assertEqual(self.cli("099-gone", "planner").stdout, "claude-fable-5-1\n", "no job dir: still answers")
+        self.assertFalse((self.root / "jobs" / "099-gone").exists())
+        for name in ("jev.log", "routing.log"):
+            self.assertFalse((self.root / "jobs" / "008-bigboy" / name).exists(), name)
+        self.assertFalse((self.root / "routing.log").exists())
 
 
 if __name__ == "__main__":

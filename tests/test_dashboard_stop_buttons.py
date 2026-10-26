@@ -174,13 +174,30 @@ class StopBox(unittest.TestCase):
         status, = js(f"renderActions({json.dumps(ASKED)}); out(els.viewerStatus.textContent);")
         self.assertEqual(status, "Waiting on you: The migration drops a column.")
 
+    def test_status_line_waiting_on_titles(self):
+        queued = {"key": "p/229-m", "project": "p", "id": "229-m", "stage": "needs-human", "play_queued": "2026-01-01",
+                  "reason": "stalled in build: x. Fix: click Resume.", "updatedAt": "2026-01-01T00:00:00Z",
+                  "waitingOn": {"ids": ["221-a", "222-b", "223-c"], "why": "shares SKILL.md",
+                                "titles": ["Add the orders table", "", None]}}
+        got, = js(f"""const j = {json.dumps(queued)};
+          out([statusLine(j), statusLine({{...j, waitingOn: {{ids: ["221-a"], why: "not merged yet", titles: ["Add the orders table"]}}}}),
+               statusLine({{...j, waitingOn: {{ids: ["221-a"], why: "runs alone"}}}}), stopBox(j)]);""")
+        self.assertEqual(got, ["Waiting on 221-a Add the orders table, 222-b, 223-c (shares SKILL.md)",
+                               "Waiting on 221-a Add the orders table (not merged yet)", "Waiting on 221-a (runs alone)",
+                               ""])
+        text = DASHBOARD.read_text()
+        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;', text)
+        card = text[text.index("function card(job)"):text.index("function render(")]
+        self.assertIn('const human = (job.stage === "needs-human" && !playQueued(job))', card)
+
     def test_play_hidden_when_refused(self):
         paused = {"key": "p/030-p", "project": "p", "id": "030-p", "stage": "build", "paused": True,
                   "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
         stalled = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
         refusal = "can't resume yet: 222. Fix: click Resume when 222 finish."
-        # The note names what blocks the click, even for a job Trevor paused (whose status line says "Paused by you").
-        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222.")):
+        # The note names what blocks the click only for a job Trevor paused with no waitingOn (its status line says "Paused by you").
+        waiting = {**paused, "waitingOn": {"ids": ["222"], "why": "still running"}}
+        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", None), (waiting, "Play", None)):
             with self.subTest(label=label):
                 for missing in ({}, {"resumeRefusal": None}):
                     html, = js(f"renderActions({json.dumps({**job, **missing})}); out(els.actions.innerHTML);")
@@ -188,7 +205,8 @@ class StopBox(unittest.TestCase):
                 html, = js(f"renderActions({json.dumps({**job, 'resumeRefusal': refusal})}); out(els.actions.innerHTML);")
                 self.assertNotIn('data-act="resume"', html)
                 self.assertNotIn(f">{label}</button>", html)
-                self.assertIn(f'<p class="note" role="status">{want}</p>', html)
+                if want: self.assertIn(f'<p class="note" role="status">{want}</p>', html)
+                else: self.assertNotIn('<p class="note" role="status">', html)
 
     def test_more_menu_open_state_stays_with_its_job(self):
         a, b = {**ASKED, "stage": "build", "reason": None}, {**ASKED, "key": "p/021-r", "id": "021-r", "stage": "build", "reason": None}

@@ -14,6 +14,11 @@
                                    for K) the job is not parked: it keeps its stage, the unblock is logged and
                                    {"unblock": true, "n": N} is printed; else it parks and prints {"unblock": false}
                                    (lanes/unblock.md)
+  board.py wait-on <id> <blocker> [--then "approve <id>"]
+                                   park a builder-blocked job at stage waiting with depends_on=[blocker] (a full id or a
+                                   number like 001); serve.py starts it once that job is done, print {"id","waiting_on"}.
+                                   With --then the worktree is kept and the wake goes to needs-human with Try again, and
+                                   serve.py spawns approve (SKILL.md Migrate step 2)
   board.py unblock-log <id>        read jobs/<id>/unblock-<unblocks>.md, log its verdict line to questions.log, print
                                    {"verdict","blocker","kind","n"} (verdict INVALID when missing or unreadable)
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
@@ -46,11 +51,20 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
-  board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
-  board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
+  board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
+                                   and questions.log lines since the last digest's questions.lines; due at 10+ jobs ("10
+                                   done"), 15+ lines ("questions"), or 3+ jobs and a bad windows/ scorecard (wasted >20%,
+                                   or first pass <0.5 over 3+ jobs) no digests/*/windows.txt lists, written after the
+                                   newest digest folder ("bad window <file>"); reason null when not due
+  board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
+                                   scorecard no live digest lists as windows.txt + windows.json, print {"id","jobs","windows"}
+                                   (id null = nothing new; starts with no jobs when the questions trigger fired)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
+  board.py window-report           remember each open usage window in windows/open.json; for each one that has closed,
+                                   write windows/<window>-<resets_at>.json once (points, tokens, waste, lane fit, idle)
+                                   and print the scorecards written as a JSON list
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
@@ -93,13 +107,17 @@
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
                                    fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id> head PR and
                                    its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
-                                   re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
-                                   error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
+                                   re-checked each run and keeps its mark until cloud-home starts, or until 24 h pass
+                                   with no branch; print {"moved","arrived","error"}, exit 1 on a gh error (nothing
+                                   changed). serve.py runs it every 10 min while a job is in stage cloud
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
                                    board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
+  board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
+                                   the spec-writer of a big_ticket job on lane standard (or unset), gets Fable while
+                                   fable_state is ok or warn; each such call appends a line to jobs/<id>/fable.log
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -113,6 +131,11 @@ from itertools import permutations
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
+FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and big standard-ticket spec-writers, while usage allows
+FABLE_WARN_5H_PCT = 65  # used % at which the dashboard warns Fable is near its limit (Fable still runs)
+FABLE_WARN_7D_PCT = 75
+FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
+FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
@@ -485,7 +508,10 @@ def claim_item(lines, item, job_id):
 
 
 def cmd_next(root, index=None):
-    """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one."""
+    """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
+    Cool-down refuses the automatic claim (no index); an explicit index is Trevor's Run now and still claims."""
+    if index is None and cooling_down():
+        raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
@@ -515,6 +541,8 @@ def cmd_cloud_claim(root, n) -> dict:
     anything, so it blocks every item."""
     if n < 1:
         raise SystemExit("N must be at least 1")
+    if cooling_down():  # cool-down: no new backlog claim
+        return {"claimed": []}
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         taken, blocked_all = set(), False
@@ -641,28 +669,105 @@ def read_registry():
         return []
 
 
-def cmd_register(repo):
-    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+@contextmanager
+def registry_lock():
+    """projects.lock: every read-modify-write of projects.json runs inside it."""
     path = registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_name("projects.lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def write_registry(paths):
+    """Replace projects.json atomically (tmp + os.replace). Call it under registry_lock()."""
+    path = registry_path()
+    tmp = path.with_name("projects.json.tmp")
+    tmp.write_text(json.dumps(paths, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_register(repo):
+    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+    with registry_lock():
         paths = read_registry()
         repo = str(Path(repo).resolve())
         if repo not in paths:
-            tmp = path.with_name("projects.json.tmp")
-            tmp.write_text(json.dumps(paths + [repo], indent=2) + "\n")
-            os.replace(tmp, path)
+            write_registry(paths + [repo])
+
+
+def ranked(paths):
+    """{display name: index in paths} for the registry entries that have a scrum/ folder, in registry order. Names
+    are the folder name, or parent/folder when two repos share one."""
+    repos = [(i, Path(p)) for i, p in enumerate(paths) if (Path(p) / "scrum").is_dir()]
+    counts = {}
+    for _, r in repos:
+        counts[r.name] = counts.get(r.name, 0) + 1
+    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): i for i, r in repos}
 
 
 def projects():
-    """{display name: repo path} for registered repos that still have a scrum/ folder. Names are the folder
-    name, or parent/folder when two repos share one."""
-    repos = [Path(p) for p in read_registry() if (Path(p) / "scrum").is_dir()]
-    counts = {}
-    for r in repos:
-        counts[r.name] = counts.get(r.name, 0) + 1
-    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
+    """{display name: repo path} for registered repos that still have a scrum/ folder, in rank (registry) order."""
+    paths = read_registry()
+    return {name: Path(paths[i]) for name, i in ranked(paths).items()}
+
+
+def rerank(paths, slots, names):
+    """Write the registry with the projects in `names` order. Entries without a scrum/ folder keep their places;
+    an unchanged order writes nothing."""
+    if names != list(slots):
+        new = list(paths)
+        for slot, name in zip(slots.values(), names):  # slots.values() is ascending: registry order
+            new[slot] = paths[slots[name]]
+        write_registry(new)
+
+
+def move_project(name, to):
+    """Put project `name` at rank `to` (0-based) of projects(); returns the names in the new order. The lookup, the
+    bounds check and the write all run under projects.lock, so a stale caller gets a SystemExit, not a wrong move."""
+    with registry_lock():
+        paths = read_registry()
+        slots = ranked(paths)
+        if not slots:
+            raise SystemExit("no projects registered")
+        if not isinstance(name, str) or name not in slots:
+            raise SystemExit("no such project")
+        if type(to) is not int or not 0 <= to < len(slots):
+            raise SystemExit(f"to must be a whole number from 0 to {len(slots) - 1}")
+        names = [n for n in slots if n != name]
+        names.insert(to, name)
+        rerank(paths, slots, names)
+        return names
+
+
+FOCUS_RE = re.compile(r"^- Focus: *yes\s*$", re.M | re.I)
+
+
+def migrate_focus():
+    """One-time move from `- Focus: yes` to rank: every project whose scrum/project.md has the line goes to the top,
+    keeping its relative order, and the line is deleted. Returns the names moved; a second call finds none. A
+    missing, unreadable or non-UTF-8 project.md is skipped."""
+    with registry_lock():
+        paths = read_registry()
+        slots = ranked(paths)
+        focused = {}
+        for name, i in slots.items():
+            md = Path(paths[i]) / "scrum" / "project.md"
+            try:
+                text = md.read_text()
+            except (OSError, ValueError):
+                continue
+            if FOCUS_RE.search(text):
+                focused[name] = (md, text)
+        if not focused:
+            return []
+        rerank(paths, slots, list(focused) + [n for n in slots if n not in focused])
+        for md, text in focused.values():  # after the registry write: a failed strip only leaves a no-op line
+            try:
+                md.write_text("".join(line for line in text.splitlines(True) if not FOCUS_RE.match(line)))
+            except OSError:
+                pass
+        return list(focused)
 
 
 def cmd_backlog_add(root, items, setup=None, priority=None):
@@ -825,6 +930,12 @@ def diverged(d):
 # --- digests: scrum/digests/<NNN>/jobs.txt lists the done jobs one digest learned from ---
 DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
+QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many lines since the last one
+BAD_WASTED_PCT = 20  # a window scorecard is bad above this wasted_pct
+BAD_FIRST_PASS = 0.5  # ... or below this first_pass_rate, once it has BAD_MIN_JOBS done jobs
+BAD_MIN_JOBS = 3
+EARLY_DIGEST_MIN = 3  # a bad window brings the digest forward once this many done jobs are undigested
+WINDOW_FILE_RE = re.compile(r"(five_hour|seven_day)-\d+\.json")
 
 
 def digested_ids(root):
@@ -833,26 +944,112 @@ def digested_ids(root):
             for line in f.read_text().splitlines() if line.strip()}
 
 
+def claimed_windows(root):
+    """Every scorecard name listed in any digest's windows.txt, except a failed digest's (error.md), like digested_ids."""
+    return {line.strip() for f in (Path(root) / "digests").glob("*/windows.txt") if not f.with_name("error.md").exists()
+            for line in f.read_text().splitlines() if line.strip()}
+
+
 def undigested(root, board):
     seen = digested_ids(root)
     return [j["id"] for j in board["jobs"] if j.get("stage") == "done" and j["id"] not in seen]
 
 
+def questions_lines(root):
+    """Number of newline bytes in <scrum>/questions.log; 0 when it is missing."""
+    path = Path(root) / "questions.log"
+    return path.read_bytes().count(b"\n") if path.is_file() else 0
+
+
+def questions_growth(root):
+    """questions.log lines added since the newest digest with an integer questions.lines and no error.md, floored at 0.
+    With no such digest, the whole line count."""
+    d = Path(root) / "digests"
+    for p in sorted((x for x in d.iterdir() if DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
+        try:
+            if not (p / "error.md").exists() and re.fullmatch(r"\d+", text := (p / "questions.lines").read_text().strip()):
+                return max(questions_lines(root) - int(text), 0)
+        except (OSError, UnicodeDecodeError):
+            pass
+    return questions_lines(root)
+
+
+def bad_window(card: dict) -> bool:
+    """True when a scorecard's wasted_pct is above BAD_WASTED_PCT, or its first_pass_rate is below BAD_FIRST_PASS over
+    BAD_MIN_JOBS+ done jobs. A null or missing field is never bad."""
+    jobs = card.get("done_jobs")
+    return (is_num(card.get("wasted_pct")) and card["wasted_pct"] > BAD_WASTED_PCT) or (
+        is_num(card.get("first_pass_rate")) and card["first_pass_rate"] < BAD_FIRST_PASS
+        and isinstance(jobs, list) and len(jobs) >= BAD_MIN_JOBS)
+
+
+def early_window(root) -> str | None:
+    """The first (by name) bad windows/<window>-<resets_at>.json no digests/*/windows.txt lists, written after the
+    newest NNN digest folder was created (st_birthtime, else st_mtime); None when there is none. Junk is skipped."""
+    root = Path(root)
+    listed, newest = set(), None
+    d = root / "digests"
+    for p in d.iterdir() if d.is_dir() else []:
+        try:
+            if DIGEST_RE.fullmatch(p.name):
+                st = p.stat()
+                newest = max(newest or 0, getattr(st, "st_birthtime", st.st_mtime))
+            if (p / "windows.txt").is_file():
+                listed |= {x.strip() for x in (p / "windows.txt").read_text().splitlines() if x.strip()}
+        except (OSError, UnicodeDecodeError):
+            pass
+    w = root / "windows"
+    for p in sorted(w.iterdir()) if w.is_dir() else []:
+        if not WINDOW_FILE_RE.fullmatch(p.name) or p.name in listed:
+            continue
+        try:
+            card = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        at = _epoch(card.get("written_at")) if isinstance(card, dict) else None
+        if at is not None and (newest is None or at > newest) and bad_window(card):
+            return p.name
+    return None
+
+
 def cmd_digest_due(root):
+    """{"due","undigested","questionsGrowth","reason"}. reason, in this order: "10 done", "questions" or
+    "bad window <file>" (early_window, at EARLY_DIGEST_MIN+ undigested jobs); null when not due."""
     path = Path(root) / "board.json"
     n = len(undigested(root, json.loads(path.read_text()) if path.exists() else {"jobs": []}))
-    return {"due": n >= 10, "undigested": n}
+    growth = questions_growth(root)
+    reason = "10 done" if n >= 10 else "questions" if growth >= QUESTIONS_DIGEST_LINES else None
+    if reason is None and n >= EARLY_DIGEST_MIN and (name := early_window(root)):
+        reason = f"bad window {name}"
+    return {"due": reason is not None, "undigested": n, "questionsGrowth": growth, "reason": reason}
 
 
 def cmd_digest_start(root):
-    """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job."""
+    """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job. Also starts
+    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES since the last digest; questions.lines records its count.
+    Also claims every valid windows/ scorecard no live digest lists: names to windows.txt, contents to windows.json."""
     with locked_board(root) as board:
         jobs = undigested(root, board)
-        if not jobs:
-            return {"id": None, "jobs": []}
+        if not jobs and questions_growth(root) < QUESTIONS_DIGEST_LINES:
+            return {"id": None, "jobs": [], "windows": []}
         digest_id = claim_folder(Path(root) / "digests")
-        (Path(root) / "digests" / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
-        return {"id": digest_id, "jobs": jobs}
+        d = Path(root) / "digests" / digest_id
+        d.joinpath("jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        d.joinpath("questions.lines").write_text(f"{questions_lines(root)}\n")
+        names, cards, seen, w = [], [], claimed_windows(root), Path(root) / "windows"
+        for p in sorted(w.iterdir()) if w.is_dir() else []:
+            if not WINDOW_FILE_RE.fullmatch(p.name) or p.name in seen:
+                continue
+            try:
+                card = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(card, dict):
+                names.append(p.name)
+                cards.append(card)
+        d.joinpath("windows.txt").write_text("".join(f"{n}\n" for n in names))
+        d.joinpath("windows.json").write_text(json.dumps(cards, indent=2) + "\n")
+        return {"id": digest_id, "jobs": jobs, "windows": names}
 
 
 def claim_folder(parent):
@@ -902,53 +1099,294 @@ def _real_review(p):
 
 
 def _fit_diff(root, job):
-    """(added, deleted, files) from the worktree, else the PR's REST totals; (None, None, None) when unreadable."""
+    """(added, deleted, files, paths) from the worktree, else the PR's REST totals; paths is the (rows, names) pair
+    _promote_trigger takes, None when unreadable. (None, None, None, None) when the diff is unreadable."""
     if job.get("worktree") and Path(job["worktree"]).is_dir():
         diff = _route_diff(job)
         if diff is None or any(a is None for a, _, _ in diff[0]):
-            return None, None, None
+            return None, None, None, None
         rows, names = diff
-        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names)
+        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names), diff
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", job.get("pr") or "")
     if not m:
-        return None, None, None
+        return None, None, None, None
     try:
         pr = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}")
         out = tuple(pr[k] for k in ("additions", "deletions", "changed_files"))
     except (GhError, TypeError, KeyError):
-        return None, None, None
-    return out if all(type(v) is int for v in out) else (None, None, None)
+        return None, None, None, None
+    if not all(type(v) is int for v in out):
+        return None, None, None, None
+    if out[0] + out[1] > FAST_MAX_LINES or out[2] > FAST_MAX_FILES:
+        return *out, None  # too big to be over-routed: no files call
+    try:  # one page is enough: at most FAST_MAX_FILES files
+        listed = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}/files")
+        rows = [(f["additions"], f["deletions"], f["filename"]) for f in listed]
+        names = [n for f in listed for n in (f["filename"], f.get("previous_filename")) if n is not None]
+    except (GhError, TypeError, KeyError, AttributeError):
+        return *out, None
+    ok = all(type(a) is int and type(d) is int and type(p) is str for a, d, p in rows) \
+        and all(type(n) is str for n in names)
+    return *out, ((rows, names) if ok else None)
+
+
+def _fit_job(root, job_id: str, job: dict, globs) -> dict:
+    """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
+    verdicts per round, fix rounds, over_routed and the cheapest lane that would have done."""
+    folder = Path(root) / "jobs" / job_id
+    lane = job.get("lane") or "standard"
+    rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
+                    if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+    agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
+    agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
+                                                       for n in rounds)]
+    agents += ["approver"] if (folder / "decision.md").is_file() else []
+    verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
+                         for r in REVIEWERS} for n in rounds}
+    added, deleted, files, paths = _fit_diff(root, job)
+    size = None if added is None else added + deleted
+    over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+            and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
+            and paths is not None and _promote_trigger(*paths) is None
+            and not (globs and any(glob_match(n, globs) for n in paths[1])))
+    fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+    return {"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
+            "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit}
 
 
 def cmd_pipeline_fit(root, digest_id: str) -> dict:
     """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
-    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed."""
+    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed: never
+    when its paths are unreadable, _promote_trigger would have promoted it, or a path matches UI globs."""
     d = Path(root) / "digests" / str(digest_id)
     if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
         raise SystemExit(f"no digest {digest_id!r}")
     listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
+    globs = ui_globs(root)
+    return {"digest": str(digest_id), "jobs": [_fit_job(root, job_id, jobs.get(job_id, {}), globs) for job_id in listed]}
+
+
+# --- window-report: remembers each open usage window in windows/open.json (merge_limits drops closed ones) and, once
+# one has closed, writes a zero-LLM scorecard windows/<window>-<resets_at>.json. Every timestamp in it is epoch seconds.
+WINDOW_SECS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+HIT_PCT = 90  # budget.hit_90_at: the first sighting at or above this used %
+IDLE_SAMPLE_MAX_SECS = 300  # a gap between two runs longer than this is no idle sample
+
+
+def _epoch(s):
+    """An ISO timestamp as epoch seconds, None when it is not one."""
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_lines(path):
+    """The dict lines of a JSON-lines file; bad lines and an unreadable file are skipped."""
     out = []
-    for job_id in listed:
-        job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
-        lane = job.get("lane") or "standard"
-        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
-                        if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
-        agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
-        agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
-                                                           for n in rounds)]
-        agents += ["approver"] if (folder / "decision.md").is_file() else []
-        verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
-                             for r in REVIEWERS} for n in rounds}
-        added, deleted, files = _fit_diff(root, job)
-        size = None if added is None else added + deleted
-        over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
-                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES)
-        fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
-        out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
-                    "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
-                    "fit": fit})
-    return {"digest": str(digest_id), "jobs": out}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict):
+                    out.append(d)
+    except OSError:
+        pass
+    return out
+
+
+def _project_idle(root, board) -> bool:
+    """True when no board job is in an ACTIVE stage and some open backlog item could be claimed now (cmd_next's test)."""
+    if any(j.get("stage") in ACTIVE for j in board["jobs"]):
+        return False
+    _, items = read_backlog(root)
+    return any(not i["done"] and not i["setup"] and not waiting_on(i, items, board) for i in items)
+
+
+def _scorecard(root, e, t, board, questions):
+    """The scorecard dict for one remembered window entry `e` (resets_at <= t)."""
+    root = Path(root)
+    end = e["resets_at"]
+    start = end - WINDOW_SECS[e["window"]]
+    within = lambda ts: ts is not None and start <= ts < end
+    jobs = {j["id"]: j for j in board["jobs"] if isinstance(j, dict) and isinstance(j.get("id"), str)}
+    # budget
+    used = e.get("used_pct")
+    if is_num(used):
+        budget = {"used_pct": used, "hit_90_at": e.get("hit_90_at"), "left_at_reset_pct": 100 - used,
+                  "cap_idle_secs": end - e["hit_cap_at"] if is_num(e.get("hit_cap_at")) else 0}
+    else:
+        budget = dict.fromkeys(("used_pct", "hit_90_at", "left_at_reset_pct", "cap_idle_secs"))
+    # done jobs and points
+    _, items = read_backlog(root)
+    done = sorted(i for i, j in jobs.items() if j.get("stage") == "done" and within(_epoch(j.get("updatedAt"))))
+    done_jobs = []
+    for i in done:
+        pts = [it["points"] for it in items if it["job"] == i and it["points"] is not None]
+        done_jobs.append({"id": i, "points": sum(pts) if pts else None})
+    points_done = sum(d["points"] or 0 for d in done_jobs)
+    globs = ui_globs(root)
+    fits = [_fit_job(root, i, jobs[i], globs) for i in done if jobs[i].get("lane") not in ("bigboy", "runall")]
+    # tokens: only this project's rows
+    me = root.resolve().parent
+    name = next((n for n, p in projects().items() if p.resolve() == me), None)
+    rows = [r for r in transcript_tokens(start, end) if r["project"] == name] \
+        if name is not None and transcripts_dir().is_dir() else None
+    tok = lambda r: sum(r[k] for k in TOKEN_KEYS)
+    tokens = model_mix = None
+    if rows is not None:
+        by_job, model_mix = {}, {}
+        for r in rows:
+            if r["job"]:
+                by_job[r["job"]] = by_job.get(r["job"], 0) + tok(r)
+            mix = model_mix.setdefault(r["agent"], {})
+            mix[r["model"] or "unknown"] = mix.get(r["model"] or "unknown", 0) + tok(r)
+        tokens = {"total": sum(tok(r) for r in rows), "by_job": by_job}
+    total = tokens and tokens["total"]
+    share = lambda ids: None if tokens is None else sum(tokens["by_job"].get(i, 0) for i in ids)
+    pct = lambda n: round(100 * n / total, 1) if n is not None and total else None
+    cache_read = rows and sum(r["cache_read_input_tokens"] for r in rows)
+    fresh = rows and sum(r["input_tokens"] for r in rows)
+    # wasted spend: aborted, stalled or unblocked in the window
+    wasted = {i for i, j in jobs.items() if j.get("stage") == "aborted" and within(_epoch(j.get("updatedAt")))}
+    for q in questions:
+        if q.get("job") in jobs and within(q["_ts"]) and (
+                q.get("kind") == "stall" or "unblock" in q
+                or ("options" in q and str(q.get("reason") or "").startswith(STALLED))):
+            wasted.add(q["job"])
+    wasted = sorted(wasted)
+    over = [f["id"] for f in fits if f["over_routed"]]
+    # reviewer yield
+    findings = 0
+    for p in root.glob("jobs/*/round-*/review-*.md"):
+        try:
+            if not within(p.stat().st_mtime) or not _real_review(p):
+                continue
+            body = md_section(p.read_text(encoding="utf-8"), "Findings") or ""
+        except (OSError, ValueError):
+            continue
+        findings += len(re.findall(r"^\d+\. \[", body, re.M))
+    review_tokens = rows and sum(tok(r) for r in rows if str(r["agent"]).startswith("scrum-review"))
+    # local routing
+    routed = [d for p in root.glob("jobs/*/routing.log") for d in _json_lines(p) if within(_epoch(d.get("ts")))]
+    # escapes: merged-with-gaps bigboy parents, and done jobs a later debug-lane job names
+    escaped, escapes = set(), 0
+    for q in questions:
+        if q.get("kind") == "bigboy" and within(q["_ts"]) and str(q.get("reason") or "").startswith("merged + gaps"):
+            escapes += 1
+            escaped.add(q.get("job"))
+    all_done = {i: _epoch(j.get("updatedAt")) for i, j in jobs.items() if j.get("stage") == "done"}
+    for i, j in jobs.items():
+        f = root / "jobs" / i / "feature.md"
+        try:
+            if j.get("lane") != "debug" or not within(mtime := f.stat().st_mtime):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        nums = set(re.findall(r"\bjob (\d{3,})\b", text))
+        named = [d for d, at in all_done.items() if d != i and at is not None and at < mtime
+                 and (re.search(rf"(?<![\w-]){re.escape(d)}(?![\w-])", text) or d.split("-", 1)[0] in nums)]
+        if named:
+            escapes += 1
+            escaped.update(named)
+    # needs-human time: each ask line's span until the job's next questions.log line, clipped to the window
+    needs_human = 0
+    for n, q in enumerate(questions):
+        if "options" not in q or q["_ts"] is None:
+            continue
+        nxt = next((x["_ts"] for x in questions[n + 1:] if x.get("job") == q.get("job") and x["_ts"] is not None),
+                   None)
+        if nxt is None:
+            if jobs.get(q.get("job"), {}).get("stage") != "needs-human":
+                continue
+            nxt = end
+        needs_human += max(0, min(nxt, end) - max(q["_ts"], start))
+    label = dict(WINDOWS)[e["window"]]
+    return {
+        "window": e["window"], "label": label, "resets_at": end, "start": start, "end": end,
+        "written_at": datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds"),
+        "budget": budget, "headline": round(points_done / used, 3) if is_num(used) and used else None,
+        "points_done": points_done, "done_jobs": done_jobs, "tokens": tokens,
+        "tokens_per_point": round(total / points_done, 3) if tokens is not None and points_done else None,
+        "first_pass_rate": round(sum(f["fix_rounds"] == 0 for f in fits) / len(fits), 3) if fits else None,
+        "cache_hit_rate": round(cache_read / (fresh + cache_read), 3) if rows and fresh + cache_read else None,
+        "model_mix": model_mix,
+        "wasted_jobs": wasted, "wasted_tokens": share(wasted), "wasted_pct": pct(share(wasted)),
+        "lane_fit": {"over_routed": over, "over_routed_tokens": share(over), "over_routed_pct": pct(share(over))},
+        "reviewer_yield": round(findings / (review_tokens / 1000), 3) if tokens is not None and review_tokens else None,
+        "local_routing": round(sum(d.get("runner") != "skip" and d.get("outcome") == "ok" for d in routed)
+                               / len(routed), 3) if routed else None,
+        "escapes": escapes, "escaped_jobs": sorted(x for x in escaped if isinstance(x, str)),
+        "idle": {"ready_idle_secs": e.get("idle_secs") or 0, "needs_human_secs": round(needs_human)},
+    }
+
+
+def _write_json(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_window_report(root, now=None) -> list[dict]:
+    """Record every usage.json window into windows/open.json, then score each remembered window whose resets_at has
+    passed into windows/<window>-<resets_at>.json (once: an existing scorecard is never rewritten) and drop it from
+    open.json. Returns the scorecards written this run. The whole run holds windows/.lock."""
+    t = time.time() if now is None else now
+    wdir = Path(root) / "windows"
+    wdir.mkdir(parents=True, exist_ok=True)
+    with open(wdir / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            raw = json.loads((wdir / "open.json").read_text())
+        except (OSError, ValueError):
+            raw = {}
+        opened = {k: v for k, v in raw.items() if isinstance(v, dict) and v.get("window") in WINDOW_SECS
+                  and type(v.get("resets_at")) is int} if isinstance(raw, dict) else {}
+        usage = read_usage() or {}
+        limits = usage.get("rate_limits") if isinstance(usage.get("rate_limits"), dict) else {}
+        at = usage["written_at"] if is_num(usage.get("written_at")) else t
+        board, idle = read_board(root), None
+        for key, _ in WINDOWS:
+            w = limits.get(key)
+            if not isinstance(w, dict) or not is_num(w.get("resets_at")):
+                continue
+            r = int(w["resets_at"])
+            e = opened.setdefault(f"{key}-{r}", {"window": key, "resets_at": r, "used_pct": None, "hit_90_at": None,
+                                                 "hit_cap_at": None, "idle_secs": 0, "last_tick": None})
+            used = w.get("used_percentage")
+            if is_num(used):
+                e["used_pct"] = used
+                if used >= HIT_PCT and e.get("hit_90_at") is None:
+                    e["hit_90_at"] = at
+                if 100 - used < USAGE_STOP_PCT and e.get("hit_cap_at") is None:
+                    e["hit_cap_at"] = at
+            if r > t:
+                gap = t - e["last_tick"] if is_num(e.get("last_tick")) else None
+                if gap is not None and 0 < gap <= IDLE_SAMPLE_MAX_SECS:
+                    if idle is None:
+                        idle = _project_idle(root, board)
+                    if idle:
+                        e["idle_secs"] = (e.get("idle_secs") or 0) + gap
+                e["last_tick"] = t
+        written, questions = [], None
+        for name, e in sorted(opened.items()):
+            if e["resets_at"] > t:
+                continue
+            path = wdir / f"{name}.json"
+            if not path.exists():
+                if questions is None:
+                    questions = [{**q, "_ts": _epoch(q.get("date"))} for q in _json_lines(Path(root) / "questions.log")]
+                card = _scorecard(root, e, t, board, questions)
+                _write_json(path, card)
+                written.append(card)
+            del opened[name]
+        _write_json(wdir / "open.json", opened)
+    return written
 
 
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
@@ -1140,6 +1578,23 @@ def _named(rel, texts):
     return False
 
 
+MOVED_TEXT_RE = re.compile(r"^Rules case: moved-text — `?(\S+?)`? holds the .+ the ticket names in `?(\S+?)`?\.?$", re.M)
+
+
+def _moved_text_ok(y: str, decision: str, ticket: tuple[str, str], base_text) -> bool:
+    """Rule 7's one known safe case: the approver's decision.md line says lane file y holds text the ticket named in
+    rules file X, X is named in the ticket and is no scrum agent, and X already pointed to y at the merge-base."""
+    if not re.search(r"(^|/)trevskills-scrum/lanes/[^/]*\.md$", y):
+        return False
+    for line_y, x in MOVED_TEXT_RE.findall(decision):
+        if line_y != y or not RULES_RE.search(x) or re.search(r"(^|/)agents/scrum-[^/]*\.md$", x) or not _named(x, ticket):
+            continue
+        text = base_text(x)
+        if text and re.search(rf"{re.escape(y)}(?![\w/-]|\.\w)", text):
+            return True
+    return False
+
+
 def _first_line_pins(text):
     block = re.search(r"^FIRST_LINE = \{(.*?)^\}", text or "", re.M | re.S)
     return set(re.findall(r'"([\w-]+)": "([^"]*)"', block.group(1))) if block else set()
@@ -1195,8 +1650,10 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
         jd = Path(root) / "jobs" / job_id
         feature, spec = (p.read_text(errors="replace") if p.is_file() else "" for p in (jd / "feature.md", jd / "spec.md"))
         likely = md_section(spec, "Likely files") or ""
+        decision = (jd / "decision.md").read_text(errors="replace") if (jd / "decision.md").is_file() else ""
         fails += [f"rule 7: {f} is not named in feature.md or spec.md ## Likely files" for f in diff
-                  if not _named(f, (feature, likely))]
+                  if not _named(f, (feature, likely))
+                  and not _moved_text_ok(f, decision, (feature, likely), lambda p: show(mb, p))]
         for f in diff:
             if f in HUMAN_ONLY_FILES:
                 fails.append(f"rule 8: {f} is human-only")
@@ -1787,6 +2244,122 @@ def read_usage():
     return u if isinstance(u, dict) else None
 
 
+WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))  # usage.json's rate-limit windows and their short labels
+TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def token_count(v):
+    """A usage count as an int; anything else (a string, None, a bool, NaN, Infinity) is 0."""
+    try:
+        return int(v) if is_num(v) else 0
+    except (OverflowError, ValueError):
+        return 0
+
+
+def transcripts_dir():
+    return Path(os.environ.get("SCRUM_TRANSCRIPTS") or Path.home() / ".claude" / "projects")
+
+
+def first_prompt_tags(text):
+    """(job, skill) from a transcript's first prompt: JOB_DIR=<path>/jobs/<id>, else a <command-args> whose second
+    word starts with a digit; skill is the /trevskills-… in <command-name>, without the slash."""
+    m = re.search(r"JOB_DIR=\S*/jobs/([^/\s]+)", text)
+    job = m and m.group(1)
+    if not job and (m := re.search(r"<command-args>(.*?)</command-args>", text, re.S)):
+        words = m.group(1).split()
+        job = words[1] if len(words) > 1 and words[1][0].isdigit() else None
+    m = re.search(r"<command-name>/?(trevskills-[\w-]*)</command-name>", text)
+    return job or None, m and m.group(1)
+
+
+def read_transcript(path):
+    """({message.id: row} for the file's assistant messages, last line per id winning, first prompt text). Bad
+    lines are skipped; an unreadable file gives ({}, "")."""
+    rows, first = {}, None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if first is not None and '"usage"' not in line:
+                    continue  # most lines are tool output; skip parsing what cannot hold a usage dict
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(d, dict) or not isinstance(msg := d.get("message"), dict):
+                    continue
+                if d.get("type") == "user" and first is None and not d.get("isMeta"):
+                    c = msg.get("content")
+                    first = c if isinstance(c, str) else "\n".join(
+                        b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)
+                    ) if isinstance(c, list) else ""
+                if d.get("type") != "assistant" or not isinstance(u := msg.get("usage"), dict):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(d["timestamp"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                row = {"ts": ts, **{k: token_count(u.get(k)) for k in TOKEN_KEYS},
+                       "model": msg.get("model"),
+                       "cwd": d.get("cwd") if isinstance(d.get("cwd"), str) else None}
+                mid = msg.get("id")
+                rows[mid if isinstance(mid, str) and mid else object()] = row  # no id: a key of its own
+    except OSError:
+        return {}, ""
+    return rows, first or ""
+
+
+def transcript_tokens(start, end, projects_dir=None):
+    """One row per Claude Code assistant message stamped in [start, end) (epoch seconds), sorted by ts: token counts,
+    model, and the project, job, agent and skill it is attributed to. Reads <dir>/*/*.jsonl (main sessions) and
+    <dir>/*/<session>/subagents/agent-*.jsonl; files last written before start are never opened. Read-only."""
+    root = Path(projects_dir) if projects_dir else transcripts_dir()
+    repos = sorted(((n, p.resolve()) for n, p in projects().items()), key=lambda r: -len(r[1].parts))
+    tags, out, where = {}, [], {}
+
+    def place(cwd):  # (project, worktree job) for a cwd; the longest (deepest) repo path wins
+        if cwd not in where:
+            where[cwd] = None, None
+            try:
+                c = Path(cwd).resolve() if isinstance(cwd, str) and cwd else None
+            except (OSError, ValueError):  # a NUL byte, a symlink loop
+                c = None
+            if c:
+                for name, repo in repos:
+                    if c.is_relative_to(repo):
+                        rel = c.relative_to(repo).parts
+                        wt = rel[2].removeprefix("scrum-") if len(rel) > 2 and rel[:2] == (".claude", "worktrees") \
+                            else None
+                        where[cwd] = name, wt or None
+                        break
+        return where[cwd]
+
+    files = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/agent-*.jsonl"))
+    for path in files:  # main sessions first, so a subagent finds its parent's tags
+        try:
+            if path.stat().st_mtime < start:
+                continue
+        except OSError:
+            continue
+        rows, first = read_transcript(path)
+        job, skill = first_prompt_tags(first)
+        if path.parent.name == "subagents":
+            pjob, skill = tags.get(path.parent.parent.with_suffix(".jsonl"), (None, None))
+            job = job or pjob
+            try:
+                meta = json.loads(path.with_name(path.stem + ".meta.json").read_text())
+                agent = meta["agentType"] if isinstance(meta.get("agentType"), str) else "subagent"
+            except (OSError, ValueError, AttributeError, KeyError):
+                agent = "subagent"
+        else:
+            tags[path] = job, skill
+            agent = "main"
+        for row in rows.values():
+            if start <= row["ts"] < end:
+                project, wt = place(row.pop("cwd"))
+                out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill})
+    return sorted(out, key=lambda r: r["ts"])
+
+
 def is_num(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
@@ -1821,7 +2394,7 @@ def usage_allowance(usage, now, live):
         return None
     rungs = (None,) + USAGE_STEPS
     best = None
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label in WINDOWS:
         w = usage["rate_limits"].get(key)
         if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
             continue
@@ -1845,6 +2418,37 @@ def usage_allowance(usage, now, live):
                         f"(allowance {n}, {count} live)")
 
 
+def fable_used(usage, now):
+    """{"5h": %, "7d": %} for the Fable guard: a window whose reset is at or before now reads 0, an unreadable one None."""
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    out = {}
+    for key, label in WINDOWS:
+        w = limits.get(key) if isinstance(limits, dict) else None
+        ok = isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
+        out[label] = None if not ok else 0 if w["resets_at"] <= now else w["used_percentage"]
+    return out
+
+
+def fable_state(usage, now):
+    """"paused" at 5h >= FABLE_SWITCH_5H_PCT or 7d >= FABLE_SWITCH_7D_PCT used, else "warn" at the WARN levels, else
+    "ok"; "unknown" when usage.json is missing, malformed, missing a window or older than USAGE_STALE_SECS."""
+    used = fable_used(usage, now)
+    at = usage.get("written_at") if isinstance(usage, dict) else None
+    if None in used.values() or not is_num(at) or now - at > USAGE_STALE_SECS:
+        return "unknown"
+    five, seven = used["5h"], used["7d"]
+    if five >= FABLE_SWITCH_5H_PCT or seven >= FABLE_SWITCH_7D_PCT:
+        return "paused"
+    if five >= FABLE_WARN_5H_PCT or seven >= FABLE_WARN_7D_PCT:
+        return "warn"
+    return "ok"
+
+
+def fable_ok(usage, now):
+    """True when a new eligible spawn may run on Fable: unknown usage never does."""
+    return fable_state(usage, now) in ("ok", "warn")
+
+
 def pace_cap(usage, now, base):
     """Always None: usage pacing no longer caps sessions (job 282); machine_ok and the overlap rules gate instead.
     Kept for continue.py (outside this repo), which skips its tick when this is not None."""
@@ -1856,7 +2460,7 @@ def merge_limits(old, new, now):
     def ok(w):
         return isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
     merged = dict(new)
-    for key in ("five_hour", "seven_day"):
+    for key, _ in WINDOWS:
         o = old.get(key) if isinstance(old, dict) else None
         if not ok(o) or o["resets_at"] <= now:
             continue
@@ -1889,7 +2493,7 @@ def cmd_statusline(text):
         os.replace(tmp, path)
         # ponytail: unlinking under the lock can let a racing session lock a new inode; the worst case is one lost merge
         lock.unlink(missing_ok=True)
-    return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
+    return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in WINDOWS
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
 
@@ -2004,7 +2608,9 @@ def cmd_runall_start(root):
     """One Run-all parent whose waiting children are every open backlog item, claimed in priority order (priority_key) under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
-    open, and so does every item that needs it."""
+    open, and so does every item that needs it. Cool-down refuses it (COOLING_CLAIM)."""
+    if cooling_down():
+        raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         held = {i["index"] for i in items if not i["done"] and i["setup"]}  # indexes of open items left open
@@ -2041,6 +2647,7 @@ MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
 MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
+MAX_CPU_LOAD_PCT = 150  # ... or with the 5-min load average above this share of all cores (2026-10-25: load ~15 on 8 cores, healthy RAM)
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
@@ -2080,6 +2687,19 @@ def swap_used_pct():
     return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
 
 
+def cpu_load_pct():
+    """The 5-min load average as a percent of all cores (100 = every core busy), or None when unknown (no getloadavg
+    or no core count). SCRUM_CPU_LOAD_PCT stands in for the reading."""
+    fake = os.environ.get("SCRUM_CPU_LOAD_PCT")
+    if fake:
+        return float(fake)
+    cores = os.cpu_count()
+    try:
+        return os.getloadavg()[1] / cores * 100 if cores else None
+    except OSError:
+        return None
+
+
 def free_disk_gb(path):
     """Free disk in GB on path's volume, or None when unknown. SCRUM_FREE_DISK_GB stands in for the reading."""
     fake = os.environ.get("SCRUM_FREE_DISK_GB")
@@ -2091,11 +2711,13 @@ def free_disk_gb(path):
         return None
 
 
-COOLING = "cooling down"  # machine_ok's reason while Trevor's cool-down flag is on
+COOLING = "cooling down"  # machine_ok's reason (claim=True) while Trevor's cool-down flag is on
+COOLING_CLAIM = f"{COOLING}: no new backlog claim. Fix: click Resume work in the header."
 
 
 def cooldown_path():
-    """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no automatic start runs."""
+    """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no new work starts on its own (backlog
+    claims, Run-all child claims, auto-continue, cloud-claim, the next roadmap step); work already on the board finishes."""
     return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
 
@@ -2121,11 +2743,12 @@ def swap_grew(swap):
     return grew
 
 
-def machine_ok(path, manual=False):
-    """None when the machine has room for new work, else why not: cool-down (skipped for Trevor's manual clicks), then
-    free RAM, then swap, then free disk, then the session ceiling. Gates new claims, resumes and auto-continue starts
-    only; a running job is never touched. An unknown reading passes."""
-    if not manual and cooling_down():
+def machine_ok(path, manual=False, claim=False):
+    """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
+    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU load (also skipped for manual
+    clicks), then the session ceiling. Gates new claims, resumes and auto-continue starts only; a running job is never
+    touched. An unknown reading passes."""
+    if claim and not manual and cooling_down():
         return COOLING
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
@@ -2136,6 +2759,9 @@ def machine_ok(path, manual=False):
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
+    cpu = None if manual else cpu_load_pct()
+    if cpu is not None and cpu > MAX_CPU_LOAD_PCT:
+        return f"CPU load {cpu:.0f}% of {os.cpu_count()} cores, limit {MAX_CPU_LOAD_PCT}%"
     live = live_sessions()
     if live >= MAX_SESSIONS:
         return f"{live} sessions running (ceiling {MAX_SESSIONS})"
@@ -2265,7 +2891,7 @@ def cmd_ready(root, parent_id, live=()):
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
-        machine = go and machine_ok(root)  # checked once: a machine-wide state, so it gates the whole call
+        machine = go and machine_ok(root, claim=runall)  # checked once: a machine-wide state, so it gates the whole call
         # paused or stalled work goes before new claims; a job with a live session is already being resumed
         first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper
@@ -2291,7 +2917,7 @@ def cmd_ready(root, parent_id, live=()):
         for k in kids if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
-            if k["stage"] != "waiting" or k.get("setup") == "pending" \
+            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
                 continue
             if slot_conflict(k, slots, files):
@@ -2556,6 +3182,86 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
     return parsed
 
 
+def cmd_wait_on(root, job_id, blocker, then=None) -> dict:
+    """Park a builder-blocked job at stage waiting on another job on this board (SKILL.md New job step 5), so
+    wake_waiting restarts it once that job merges. blocker is a full id or a number matching one id's NNN- start.
+    then="approve <job_id>" (SKILL.md Migrate step 2) keeps the worktree and records it as `wake`: wake_waiting then
+    parks the job at needs-human with Try again, and serve.py spawns approve."""
+    if then is not None and then != f"approve {job_id}":
+        raise SystemExit(f"bad --then {then!r}; expected \"approve {job_id}\"")
+    with locked_board(root) as board:
+        job = live(board, check_id(job_id))
+        ids = [j["id"] for j in board["jobs"]]
+        hits = [blocker] if blocker in ids else [i for i in ids if blocker.isdigit() and i.startswith(blocker + "-")]
+        if len(hits) != 1:
+            raise SystemExit(f"blocker {blocker!r} matches {len(hits)} jobs on the board; expected one")
+        dep = find(board, hits[0])
+        if dep["id"] == job_id:
+            raise SystemExit(f"job {job_id} cannot wait on itself")
+        if dep["stage"] in ("done", "aborted"):
+            raise SystemExit(f"blocker {dep['id']} is {dep['stage']}; there is nothing to wait for")
+        seen, todo = set(), [dep["id"]]
+        while todo:  # follow depends_on from the blocker: reaching job_id would leave the whole cycle waiting for good
+            i = todo.pop()
+            if i == job_id:
+                raise SystemExit(f"blocker {dep['id']} already waits on {job_id}")
+            if i not in seen:
+                seen.add(i)
+                todo += next((j.get("depends_on") or [] for j in board["jobs"] if j["id"] == i), [])
+        if job.get("parent") and dep["id"] not in (find(board, job["parent"]).get("children") or []):
+            raise SystemExit(f"job {job_id} is a child of {job['parent']}; it may only wait on a sibling")
+        job.update(stage="waiting", depends_on=[dep["id"]], reason=f"waiting on {dep['id']}", updatedAt=now(),
+                   **({"wake": then} if then else {"worktree": None}))
+    return {"id": job_id, "waiting_on": dep["id"]}
+
+
+def parked_waiting(job) -> bool:
+    """A job wake_waiting may claim or park: waiting on depends_on, with no parent (cmd_ready's) unless it has `wake`,
+    and no Human setup or pause."""
+    return bool(job["stage"] == "waiting" and (job.get("wake") or not job.get("parent")) and job.get("setup") != "pending"
+                and not job.get("paused") and job.get("depends_on"))
+
+
+def wake_waiting(root, room=None) -> dict:
+    """Claim (stage -> spec) up to room (None = no cap) parentless waiting jobs whose depends_on are all done; park one
+    whose dependency was aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. A `wake` job
+    (cmd_wait_on then=, child or not) is never claimed into spec: it goes back to needs-human with Try again, counts
+    against room and is listed under "retry" (only when any is). Returns {"ready", "lost"[, "retry"]}."""
+    ready, lost, retry = [], {}, []
+    if not any(map(parked_waiting, read_board(root)["jobs"])):  # nothing parked: never rewrite board.json each tick
+        return {"ready": ready, "lost": []}
+    with locked_board(root) as board:
+        stage = {j["id"]: j["stage"] for j in board["jobs"]}
+        for j in filter(parked_waiting, board["jobs"]):
+            deps = j["depends_on"]
+            gone = [d for d in deps if stage.get(d) in (None, "aborted")]
+            if gone:
+                lost[j["id"]] = (gone[0], j.pop("wake", None))
+            elif all(stage[d] == "done" for d in deps) and (room is None or len(ready) + len(retry) < room):  # rest wait a tick
+                if j.get("wake"):  # no sound: serve.py spawns the retry right away, the card only covers a dead session
+                    q = f"retry: {deps[0]} is done, so this job tries again."
+                    j.update(stage="needs-human", question=q, reason=q, updatedAt=now(), options=[
+                        {"key": "a", "label": "Try again", "command": f"approve {j['id']}"},
+                        {"key": "b", "label": "Remove this job", "command": f"abort {j['id']} --cascade"}])
+                    j.pop("wake")
+                    j.pop("recommend", None)
+                    retry.append(j["id"])
+                else:
+                    j.update(stage="spec", reason=None, updatedAt=now())
+                    ready.append(j["id"])
+    for job_id, (dep, wake) in lost.items():
+        try:  # one refused ask (the job was aborted meanwhile) must not hide the claimed ready jobs from the caller
+            if wake:
+                cmd_ask(root, job_id, f"retry: {dep} was aborted or removed, so this job no longer waits on it.",
+                        [f"Try again=approve {job_id}", f"Remove this job=abort {job_id} --cascade"])
+            else:
+                cmd_ask(root, job_id, f"blocked: {dep} was aborted or removed, so this job has nothing to wait for.",
+                        [f"Put back on the backlog=abort {job_id} --requeue", f"Remove this job=abort {job_id} --cascade"])
+        except SystemExit as e:
+            print(f"wake_waiting: {job_id}: {e}", file=sys.stderr)
+    return {"ready": ready, "lost": list(lost), **({"retry": retry} if retry else {})}
+
+
 def cmd_unblock_log(root, job_id):
     """Log the verdict of the job's latest scrum-unblocker file (jobs/<id>/unblock-<unblocks>.md) to questions.log."""
     with locked_board(root) as board:
@@ -2697,15 +3403,15 @@ def _cloud_trusted(pr, job_id):
 
 
 def _cloud_arrivals(root, repo):
-    """Re-check every job carrying artifactsPending: drop the mark once scrum-artifacts/<id> exists (returned) or the
-    mark is CLOUD_PENDING_HOURS old (not returned)."""
+    """Re-check every job carrying artifactsPending: return those whose scrum-artifacts/<id> exists, keeping their mark
+    until cloud_pending_clear runs once cloud-home spawns; drop the mark, unreturned, when the branch is missing and
+    the mark is CLOUD_PENDING_HOURS old or unreadable."""
     pending = [j for j in read_board(root)["jobs"] if j.get("artifactsPending")]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=CLOUD_PENDING_HOURS)
     arrived, drop = [], set()
     for job in pending:
         if artifacts_pushed(repo, job["id"]):
             arrived.append(job["id"])
-            drop.add(job["id"])
             continue
         try:
             stale = datetime.fromisoformat(job["artifactsPending"]) < cutoff
@@ -2719,6 +3425,15 @@ def _cloud_arrivals(root, repo):
                 if job["id"] in drop:
                     job.pop("artifactsPending", None)
     return arrived
+
+
+def cloud_pending_clear(root: Path, job_id: str) -> None:
+    """Drop job_id's artifactsPending mark under the board lock (serve.py calls it once cloud-home spawned). A missing
+    job or mark is a no-op."""
+    with locked_board(root) as board:
+        for job in board["jobs"]:
+            if job["id"] == job_id:
+                job.pop("artifactsPending", None)
 
 
 def _cloud_plan(repo, job_id, prs):
@@ -3202,8 +3917,9 @@ def cmd_roadmap_link(root, p, s, job_id):
 
 
 def cmd_roadmap_next(root, job_id):
-    """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing."""
-    if not (Path(root) / "roadmap.md").is_file():
+    """Mark job_id's step done and return the next todo step. A job in no step (or no roadmap.md) changes nothing.
+    Cool-down holds the next step: the step stays running and None is returned; Roadmap resume marks it done later."""
+    if cooling_down() or not (Path(root) / "roadmap.md").is_file():
         return None
     with locked_board(root):
         lines, rm = roadmap_locked(root)
@@ -3300,6 +4016,10 @@ def main(argv=None):
     ak.add_argument("--c", metavar="LABEL=COMMAND")
     ak.add_argument("--kind")
     ak.add_argument("--recommend", nargs=2, metavar=("KEY", "WHY"))
+    wo = sub.add_parser("wait-on")
+    wo.add_argument("id")
+    wo.add_argument("blocker")
+    wo.add_argument("--then")
     sub.add_parser("unblock-log").add_argument("id")
     an = sub.add_parser("answer")
     an.add_argument("id")
@@ -3338,6 +4058,7 @@ def main(argv=None):
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("pipeline-fit").add_argument("digest")
+    sub.add_parser("window-report")
     dv = sub.add_parser("digest-verify")
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
@@ -3356,6 +4077,9 @@ def main(argv=None):
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
     sub.add_parser("statusline")
+    fo = sub.add_parser("fable-ok")
+    fo.add_argument("id")
+    fo.add_argument("role")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
@@ -3405,6 +4129,8 @@ def main(argv=None):
                       a.recommend)
         if a.kind is not None:
             print(json.dumps(out if isinstance(out, dict) else {"unblock": False}))
+    elif a.cmd == "wait-on":
+        print(json.dumps(cmd_wait_on(a.dir, a.id, a.blocker, a.then)))
     elif a.cmd == "unblock-log":
         print(json.dumps(cmd_unblock_log(a.dir, a.id)))
     elif a.cmd == "answer":
@@ -3439,6 +4165,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "pipeline-fit":
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
+    elif a.cmd == "window-report":
+        print(json.dumps(cmd_window_report(a.dir)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))
@@ -3481,6 +4209,8 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "fable-ok":
+        print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "spawn":
         proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
         print(json.dumps({"log": log, "pid": proc.pid}))
@@ -3522,6 +4252,33 @@ def big_ticket(root: Path, job_id: str) -> bool:
     if job.get("lane") in BIG_LANES:
         return True
     return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in read_backlog(root)[1])
+
+
+def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
+    """fable-ok: FABLE_MODEL or "none" for a new planner or spec-writer spawn. The spec-writer is eligible only for a
+    big_ticket job whose board lane is missing, empty or standard. Each eligible call appends a tab-separated line to
+    jobs/<id>/fable.log (skipped when that dir is missing); an ineligible one writes nothing."""
+    if role not in ("planner", "spec-writer"):
+        raise SystemExit(f"fable-ok: role must be planner or spec-writer, not {role!r}")
+    check_id(job_id)
+    if role == "spec-writer":
+        try:
+            lane = find(read_board(root), job_id).get("lane")
+        except SystemExit:  # not on the board, or a broken board.json
+            return "none"
+        if lane not in (None, "", "standard") or not big_ticket(root, job_id):
+            return "none"
+    now = time.time()
+    usage = read_usage()
+    state = fable_state(usage, now)
+    model = FABLE_MODEL if state in ("ok", "warn") else "none"
+    job = Path(root) / "jobs" / job_id
+    if job.is_dir():
+        pct = {k: "—" if v is None else f"{round(v)}%" for k, v in fable_used(usage, now).items()}
+        with open(job / "fable.log", "a") as fh:
+            fh.write(f"{datetime.now().isoformat(timespec='seconds')}\t{role}\t{'opus' if model == 'none' else 'fable'}"
+                     f"\t5h {pct['5h']}\t7d {pct['7d']}\t{state}\n")
+    return model
 
 
 def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:

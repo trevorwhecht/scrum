@@ -23,7 +23,7 @@ class PausedCard(unittest.TestCase):
         self.assertIn('${hold ? " paused" : ""}', card)
         self.assertIn('${hold ? \'<span class="badge">paused</span>\' : ""}', card)
         self.assertIn("!hold && !held", card)  # a paused card is never stale
-        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : job.stage;', DASHBOARD.read_text())
+        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;', DASHBOARD.read_text())
 
     def test_play_branch_in_panel(self):
         self.assertTrue(run('heldByTrevor({stage: "build", paused: true})'))
