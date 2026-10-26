@@ -1,0 +1,57 @@
+# New job
+
+**Every stop is a closed question.** A job goes needs-human only through `B ask`: what happened in one line, then 2 or 3 options `--a`, `--b`, `--c`, each `<Label>=<command>`, the command one of `approve <id>`, `rework <id> "<fix text>"`, `abort <id> [--requeue|--cascade]`, `resume <id>` or `shell: <cmd>`, then `--recommend <key> '<why>'`. Read `$HOME/.claude/skills/trevskills-scrum/lanes/stops.md` for the Issue / Options / Recommended shape every question takes. `B set` refuses the needs-human stage. The question has no double quotes or backticks, is quoted under **Untrusted reason text**, and becomes the reason, so it keeps the old reason's prefix (`Hard stop: schema`, `Hard stop: agent rules`, `Hard stop: render`, `blocked:`, `bigboy off track`, `bigboy review: main not updated`, `Base branch `). An option with a `<placeholder>` is single-quoted, `<id>` written out; one with only `$ID` or `$P` is double-quoted. A stop whose only fix is Abort is still handled by the agents instead.
+
+**Auto-abort instead of needs-human.** Some stops below run `B abort $ID --requeue --reason 'requeue: <error>'` (the job lands in Done as aborted and its feature goes back on the backlog), or `B abort $ID --reason 'looks already fixed: ...'`, and stop. The `<error>` part is quoted under the **Untrusted reason text** rule. For a job with a `parent` (a BigBoy child), the requeue abort runs without `--requeue` (its text is a planner ticket, not a backlog item), and after any of these aborts the run then does **BigBoy lane** step 6. The **Roadmap lane** stop rule (`B roadmap-stop`) applies to these aborts as it does to needs-human. Inside a cloud-job session, they are reported to GitHub as **Cloud lane** **Needs-human** says. The final report says the job was auto-aborted (requeued, or auto-closed as looks already fixed) and why.
+
+For a BigBoy child (the job has a `parent`), every time this run runs `B ask` for the child, also run **BigBoy lane** step 6, so independent children still start. Every time this run runs `B ask` for a job, also apply the **Roadmap lane** stop rule (`B roadmap-stop` only when that job, or its `parent`, is a roadmap step's `job`).
+
+**Unblock.** When a `B ask` run with `--kind` prints `"unblock": true`, the job was not parked, so don't stop: read `$HOME/.claude/skills/trevskills-scrum/lanes/unblock.md` and follow it (it spawns `scrum-unblocker`); the two side steps above then wait until an ask actually parks.
+
+1. `ID=$(B new "<title>")`. The title is the feature's first line, at most 60 characters.
+   1b. Write the full feature text to `$F/jobs/$ID/feature.md`.
+   1c. **Askme** (only for `askme` or `start <id> askme`; otherwise skip to step 2). An interactive question round with Trevor, run like **discuss**. **Record your terminal** first. Read `feature.md`, `$F/project.md` and just enough of the repo to know what is unclear. The level sets how many questions; you pick the number within it:
+      - level 1 asks only what blocks the build;
+      - level 2 asks a moderate number;
+      - level 3 is thorough.
+
+      Ask in rounds, in plain words. When an answer is unclear, or contradicts another answer, ask follow-up or different questions before going on. Until the questions are done, spawn no agent, create no worktree and edit no file except `feature.md`. Then append to `$F/jobs/$ID/feature.md`, with one pair per question asked, follow-ups included:
+      ```
+      ## Q&A
+      - Q: <question>
+        A: <Trevor's answer>
+      ```
+      If Trevor says to skip or stop, write the pairs answered so far (nothing at all if there are none) and carry on. The same session then runs the rest of the job (step 2 onward).
+2. **Base:** first **record your terminal** (Setup). Then run `git fetch origin`. Read the optional base branch: `BB=$(sed -n 's/^- Base branch: *//p' "$F/project.md" | head -1 | sed 's/[[:space:]]*$//')`.
+   - **`BB` empty (line missing or blank):** `DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##')`. If `symbolic-ref` fails (no `origin/HEAD`), run `git remote set-head origin -a` and try `symbolic-ref` again.
+   - **`BB` set:** if it does not match `^[A-Za-z0-9._/-]+$`, run `B ask $ID "Base branch line in the project profile is malformed; fix or remove it, then carry on." --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop before the spec writer. If `git rev-parse --verify -q "origin/$BB"` fails, run `B ask $ID 'Base branch <BB> not found on origin; push it or remove the Base branch line from the project profile, then carry on.' --a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop before the spec writer. Otherwise `DEFAULT=$BB`.
+
+   Then `BASE=origin/$DEFAULT`. Run `B set $ID base=$BASE`.
+3. **Spec:** **Model:** only when `$F/jobs/$ID/feature.md` exists, outside a `lilguy` or `cloud` lane session, pick the model once per job: reuse `jev.log`'s `model` decision, else run `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py model $F/jobs/$ID` (Bash timeout 90000). On `sonnet` or `opus`, pass Agent override `model: "<word>"` to every `scrum-spec-writer` spawn of this step (first, respawn, `Refresh spec.md:`) and step 5's `scrum-builder`; else no override (Opus). `B fable-ok $ID spec-writer` output other than `none` replaces that override on this step's spec-writer spawns (never step 5's builder); if the Agent tool rejects it, respawn once without it. **Lilguy route:** for a job with no `parent` or a `runall` parent, outside a Cloud lane session, run `B lilguy-fit $ID`; when `fit` is true, run **Lilguy lane** Worktree mode instead of the rest of New job. Then, if `$F/jobs/$ID/spec.md` already exists (pre-written from the backlog), the Model decision still runs; skip both spec-writer spawns below and go straight to 3b and 3c; never skip when step 3 runs with **BigBoy lane** step 4's `Refresh spec.md:` line, which spawns over the existing spec.md. Otherwise spawn `scrum-spec-writer` (see **Routing**) and wait for it. Prompt:
+   ```
+   JOB_DIR=$F/jobs/$ID
+   WORKTREE=none
+   BASE=$BASE
+   ROUND=0
+   PROJECT=$F/project.md
+   Write spec.md for this job.
+   ```
+   If `spec.md` is missing afterwards, spawn it once more; if still missing, run `B abort $ID --requeue --reason 'requeue: spec writer produced nothing'` and stop (see **Auto-abort instead of needs-human**). After each spawn, record it: `B set $ID specwriter=<id>` (the returned agent id).
+   3b. **Obsolete:** if the first line of `spec.md` starts with `OBSOLETE:` (`head -1 "$F/jobs/$ID/spec.md" | grep -q '^OBSOLETE:'`), the request needs no change, so abort the job yourself. Strip any single quotes from the rest of that line, then run `B abort $ID --reason 'obsolete: <rest of that line>'` and stop: create no worktree and spawn no builder. The final report says the job was auto-aborted as obsolete and why.
+   3c. **Lane:** read the `Lane:` line from `spec.md` and run `B set $ID lane=<fast|standard|debug|bigboy>`. Set `lane=debug` when it says exactly `Lane: debug`, and `lane=bigboy` when it says exactly `Lane: bigboy`, whatever the other header lines say; the job then goes to the **BigBoy lane** and gets no worktree (skip steps 4-6). A BigBoy child (the job has a `parent`) never gets `bigboy`: for it, `Lane: bigboy` counts as `standard`. Set `fast` only when it says exactly `Lane: fast` and the `Hard stops:` line is `none`. Set `standard` otherwise: the line is missing or malformed, or says `fast` with `Hard stops:` not `none`.
+      **Human setup:** then, when the job has no `parent` or its parent's `lane` is `runall` (a **Run all** child; so this skips a BigBoy child, whose planner ticket carries its own `Human setup:`), its lane is not `bigboy`, this is not a **Cloud lane** job session, `spec.md`'s `Human setup:` line is present and not `none`, and its `## Waiting on setup` section has a non-empty line, park the deferred part in the backlog: remove every `'` from the `Human setup:` value and from that line, run the **Dupe check** and **Rank** below on it, then `B backlog-add --setup='<Human setup value>' [--priority N] -- '<that line> (from $ID)'`. Then continue the job. A missing or `none` line, or a missing or empty `## Waiting on setup` section, adds nothing; so does a re-run (a resume at `spec`) when `backlog.md` already has a line containing both `(from $ID)` and `{setup:`. A failing `backlog-add` adds nothing and never stops the job; name it in the final report as `Human setup not parked: <its error>`.
+      **Dupe check** (before every `B backlog-add`): when `$F/backlog.md` has an open `- [ ]` line, pipe each new item, every `'` removed, to `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py dupe $F/jobs/$ID` (one call per item, Bash timeout 90000; a BigBoy parent uses `$F/jobs/$P`). On output `dupe <item>`, append ` (possible dupe of <item>)`, every `'` removed, to the text passed to `backlog-add`. The item is always added, whatever the output.
+      **Rank** (after the Dupe check, before every `B backlog-add`): pipe each bare item (no suffix), every `'` removed, to `python3 ~/.claude/skills/trevskills-scrum/jev-gate.py rank $F/jobs/$ID` (Bash timeout 90000; a BigBoy parent uses `$F/jobs/$P`). On output `p<N> <kind>`, pass `--priority N` to `backlog-add` (one call per item when ranked items differ in N); on `none`, a failure or a timeout, add it with no flag. The rank never stops the job.
+4. **Worktree:**
+   ```bash
+   WT="$REPO/.claude/worktrees/scrum-$ID"
+   git fetch origin
+   git worktree add "$WT" -b "scrum/$ID" "$BASE"
+   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
+   ```
+   A tracked `.env*` file is never symlinked: the worktree already has it.
+   Run `Install` from `project.md` in `$WT`; never symlink `node_modules` from `$REPO`.
+   When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` in `$WT` after the install.
+   Then `B set $ID worktree=$WT stage=build`.
+5. **Build:** first sync the branch: run `git -C "$WT" fetch origin` then `git -C "$WT" merge "$BASE" --no-edit`. On a merge conflict run `git -C "$WT" merge --abort`, carry on to the builder unmerged (the Merge **Conflicts** step still resolves it), and never stop the job for it. Then spawn `scrum-builder` (see **Routing**) with step 3's **Model:** override and wait for it. Name it `builder-$ID` if the Agent tool accepts a name. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`: when its first reason line names a job on this board (id or number), run `B wait-on $ID <that id>`; on exit 0 run `git -C "$REPO" worktree remove -f "$WT"` and `git -C "$REPO" branch -D "scrum/$ID"` (a child then runs **BigBoy lane** step 6) and stop: serve.py starts it once that job merges. When no job is named or `wait-on` exits non-zero, run `B ask $ID 'blocked: <first reason line>' --kind blocked --a "Send back with a note=rework $ID \"make the most reasonable call on the blocker and record it as a Ruling in build.md\"" --b "Put back on the backlog=abort $ID --requeue" --c "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
+6. Continue at **Check gate**.

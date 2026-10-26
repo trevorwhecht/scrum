@@ -1,5 +1,8 @@
 import json, re, shutil, subprocess, unittest
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from skilltext import MOVED, skill_text
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = {
@@ -88,11 +91,11 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(fm.get("name"), "trevskills-scrum")
 
     def test_skill_no_longer_links_a_per_project_dashboard(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertNotIn('"$F/dashboard.html"', text)
 
     def test_skill_only_merges_via_gh_squash(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("gh pr merge", text)
         self.assertIn("--squash", text)
         for line in text.splitlines():
@@ -101,7 +104,7 @@ class ContractTest(unittest.TestCase):
                     self.assertIn("never", line.lower(), f"{banned!r} outside a 'never' line: {line}")
 
     def test_skill_guards_against_review_findings(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         for phrase in (
             "Hard stop: schema",                 # approve reminder matches the stored reason
             r"prisma/(schema\.prisma|migrations/)",  # deterministic schema guard before merge
@@ -172,13 +175,13 @@ class ContractTest(unittest.TestCase):
             self.assertIn("see **Routing**", line, step)
 
     def test_skill_new_job_skips_spec_when_prewritten(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step = next(l for l in text.splitlines() if l.startswith("3. **Spec:**"))
         for phrase in ("spec.md` already exists", "skip", "3b", "Refresh spec.md:", "see **Routing**"):
             self.assertIn(phrase, step, phrase)
 
     def test_skill_records_specwriter_id(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         new_job = self.section(text, "## New job", "## Run all")
         self.assertIn("After each spawn, record it: `B set $ID specwriter=<id>` (the returned agent id).", new_job)
         for phrase in ("specwriter" + "=local", STALE_BUILDER, "cloud retry"):
@@ -193,7 +196,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("background subprocesses", self.lane("bigboy"))
 
     def test_skill_approve_prewrites_followups(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         approve = self.section(text, "## Approve", "## Merge")
         for phrase in ("## Follow-ups", "SendMessage", "specwriter", "scrum-spec-writer",
                        "when `specwriter` is missing, empty or not an agent id, or when SendMessage fails",
@@ -359,7 +362,7 @@ class ContractTest(unittest.TestCase):
                        "goes under `## Manual checks`, never under `## Follow-ups`"):
             self.assertIn(phrase, text, phrase)
         self.assertIn('"manual":   [{"item": "<exact text>", "reason":', (ROOT / "agents" / "scrum-triager.md").read_text())
-        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        skill = skill_text()
         step3 = self.section(skill, "3. **Manual checks and follow-ups.**", "4. Route:")
         self.assertIn('B manual-add "<item> (from $ID)" ...', step3)
         self.assertIn("whether or not `## Follow-ups` is empty", step3)
@@ -386,47 +389,47 @@ class ContractTest(unittest.TestCase):
         return text[text.index(start):text.index(end, text.index(start))]
 
     def test_skill_checks_prereqs_at_setup(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         setup = self.section(text, "## Setup", "## Commands")
         for phrase in ("gh auth status", "git remote", "git remote add origin <url>", "brew install gh && gh auth login"):
             self.assertIn(phrase, setup, phrase)
         self.assertIn("GitHub CLI is not installed or not signed in", self.section(text, "## Merge", "## Resuming the builder"))
 
     def test_skill_has_no_board_string_variable(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertNotIn("$BOARD", text)
         self.assertNotIn("BOARD=", text)
         self.assertIn('B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; }', text)
         self.assertIn("board function `B`", text)
 
     def test_skill_zsh_safe_snippets(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertNotIn('"$REPO"/.env*', text)
         self.assertIn('find "$REPO" -maxdepth 1', text)
         self.assertIn("git remote set-head origin -a", text)
 
     def test_skill_base_step_has_no_no_remote_fallback(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertNotIn("skip it if there is no remote", text)
         self.assertNotIn("With no remote", text)
         self.assertIn("BASE=origin/$DEFAULT", text)
         self.assertIn("B set $ID base=$BASE", text)
 
     def test_skill_project_template_has_ui_globs(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         template = self.section(text, "# Project profile", "```")
         self.assertIn("- UI globs: <space-separated globs|none>", template)
         self.assertIn("*.tsx *.jsx *.css *.scss *.html *.vue *.svelte components/ app/", text)
 
     def test_skill_skips_ui_reviewers_without_ui_files(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review", "## Approve")
         for phrase in ("B review-plan $ID", "UI globs", "never from the spec's `UI surface:` line"):
             self.assertIn(phrase, review, phrase)
         self.assertIn("Skipped by orchestrator: no UI files in diff.", BOARD_PY.read_text())  # review-plan writes it
 
     def test_skill_passes_move_only_on_move_refactors(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("B move-ratio $ID", "MOVE_ONLY=yes", ">= 0.9", "never `scrum-review-security`"):
             self.assertIn(phrase, review, phrase)
@@ -444,20 +447,20 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("MOVE_ONLY", (ROOT / "agents" / "scrum-review-security.md").read_text())
 
     def test_skill_review_respawns_missing_reviewers(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("`missing`", "Reviewer produced no output."):
             self.assertIn(phrase, review, phrase)
 
     def test_skill_review_file_exceptions_named(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertTrue("except" in line or "exception" in line, line)
         self.assertIn("Reviewer produced no output.", line)
         self.assertIn("fast lane", line)
 
     def test_skill_uses_sonnet_approver_only_when_green(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         approve = self.section(text, "## Approve", "## Merge")
         self.assertIn('model: "sonnet"', approve)
         self.assertIn("scrum-approver", approve)
@@ -469,7 +472,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("schema guard regex matches nothing", approve)
 
     def test_skill_skips_security_when_not_sensitive(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         self.assertIn("B review-plan $ID", review)
         self.assertIn("scrum-review-security", review)
@@ -482,7 +485,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(text.count("permission|payment|billing"), 1)
 
     def test_skill_security_skip_treats_api_paths_as_sensitive(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         self.assertIn("B review-plan $ID", review)
         api = r"(^|/)api/|(^|/)route\.[cm]?[jt]sx?$"
@@ -496,7 +499,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(text.count("permission|payment|billing"), 1)
 
     def test_skill_debug_repro_needs_interpreter_when_no_test_command(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         debug = self.lane("debug")
         for phrase in ("`python3`", "`python`", "`node`", "`bash`", "`sh`", "`ruby`", "`perl`", "second word",
                        "first space-separated word"):
@@ -504,7 +507,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("must instead contain the", debug)
 
     def test_agent_rule_edits_have_no_hard_stop(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.section(text, "## Merge", "## Routing")
         for phrase in ("Agent rules guard", "agent rules guard", "rules gate", "rules-gate.md", "Hard stop: agent rules",
                        "B digest-verify"):
@@ -530,7 +533,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Batch rule edits", claude)
 
     def test_skill_clean_round_skips_approver(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("Clean round: check gate + reviews", "Conflicts", "schema guard", "Hard stops:", "**Approve**"):
             self.assertIn(phrase, review, phrase)
@@ -543,7 +546,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("line starting `Rendered: blocked`", route)
 
     def test_skill_incremental_rereview(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("head.txt", "B review-plan $ID", "--incremental", "SINCE=", "Re-review:", "REWORK", "Conflicts"):
             self.assertIn(phrase, review, phrase)
@@ -552,7 +555,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Carried forward", line)
 
     def test_skill_review_shares_one_dev_server(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("Dev command:", "UI globs", "not `none`", "round-$N/dev.log", "free port", "3001",
                        "round-$N/dev-url.txt", "unreachable: <why>", "200", "/api/", "DEV_URL=<url>",
@@ -563,7 +566,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("-sTCP:LISTEN", review[url:])
 
     def test_skill_review_dev_server_serve_py(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("serve.py --port <port>", 'HOME="$T" CLAUDE_HOME="$T/.claude"', "mktemp -d", "never 8765",
                        "projects.json", "exec env PORT=<port> nohup"):
@@ -577,7 +580,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
 
     def test_skill_jev_model_step(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         new_job = self.section(text, "## New job", "## Run all")
         for phrase in ("jev-gate.py model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
             self.assertIn(phrase, new_job, phrase)
@@ -587,13 +590,13 @@ class ContractTest(unittest.TestCase):
         plan = self.section(self.lane("bigboy"), "1. **Plan.**", "\n2. ")
         self.assertEqual(plan.count("B fable-ok $ID planner"), 2, "the first planner spawn and the respawn")
         self.assertIn("respawns once with no override", plan)
-        new_job = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## New job", "## Run all")
+        new_job = self.section(skill_text(), "## New job", "## Run all")
         self.assertIn("B fable-ok $ID spec-writer", new_job)
         self.assertIn("never step 5's builder", new_job)
         self.assertIn("respawn once without it", new_job)
 
     def test_skill_jev_promote_step(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         resume = self.section(text, "## Resuming the builder", "## Digest")
         for phrase in ("jev-gate.py promote", "CHECK: FAIL", "VERDICT: CHANGES", 'model: "opus"',
                        "A builder already promoted is never promoted again.",
@@ -603,21 +606,21 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("local builder", resume)
 
     def test_skill_jev_dupe_step(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         for phrase in ("jev-gate.py dupe", "possible dupe of", "always added"):
             self.assertIn(phrase, text, phrase)
         self.assertIn("jev-gate.py dupe", self.lane("bigboy"))
         self.assertIn("jev-gate.py dupe", self.section(text, "## Approve", "## Migrate"))
 
     def test_skill_jev_rank_step(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         new_job = self.section(text, "## New job", "## Run all")
         for phrase in ("jev-gate.py rank", "--priority", "p<N>", "never stops"):
             self.assertIn(phrase, new_job, phrase)
         self.assertLess(new_job.index("**Dupe check** (before"), new_job.index("**Rank** (after the Dupe check"))
 
     def test_skill_rank_on_every_backlog_add(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.section(text, "## Merge", "## Routing")
         for body in (self.section(text, "## Approve", "## Migrate"), merge, self.lane("bigboy"), self.lane("cloud")):
             self.assertTrue("jev-gate.py rank" in body or "**Rank**" in body, body[:80])
@@ -626,24 +629,24 @@ class ContractTest(unittest.TestCase):
         self.assertIn("--setup='<Human setup value>' [--priority N]", text)
 
     def test_skill_rank_backlog_after_backlog_spec(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("rank-backlog", self.section(text, "## Approve", "## Migrate"))
         self.assertIn("rank-backlog", self.lane("cloud"))
 
     def test_skill_fallback_already_done_check(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         phrase = "the repository shows is already done"
         self.assertIn(phrase, self.section(text, "## Approve", "## Migrate"))
         self.assertIn(phrase, (ROOT / "agents" / "scrum-spec-writer.md").read_text())
 
     def test_skill_jev_approver_step(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         approve = self.section(text, "## Approve", "## Migrate")
         for phrase in ("approver_sonnet", "jev-gate.py approver", "schema guard", "timeout 90000"):
             self.assertIn(phrase, approve, phrase)
 
     def test_skill_jev_gate_additive_only(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("jev-gate.py", "0.7", "never removes", "timeout"):
             self.assertIn(phrase, review, phrase)
@@ -651,7 +654,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("never approves a merge", text)
 
     def test_skill_e2e_hook(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("E2E:", self.section(text, "## Check gate", "## Review (WAIT FOR ALL)"))
         self.assertIn("E2E:", self.section(text, "### First-run setup", "## Commands"))
         self.assertIn("E2E", (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text())
@@ -705,7 +708,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, body, phrase)
 
     def test_skill_wires_e2e_reviewer(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         self.assertIn("scrum-review-e2e", check)
@@ -716,7 +719,7 @@ class ContractTest(unittest.TestCase):
         self.assertTrue(any("rm -f" in l and "review-e2e.md" in l for l in review.splitlines()))
 
     def test_fast_lane_deletes_stale_e2e_review(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Debug lane")
         self.assertIn("review-e2e.md", fast)
         self.assertIn("rm -f", fast)
@@ -743,7 +746,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("all up front", text)
 
     def test_skill_defines_obsolete_stop(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("OBSOLETE:", text)
         new_job = text[text.index("## New job"):]
         self.assertNotIn("B ask $ID 'obsolete:", new_job)
@@ -774,7 +777,7 @@ class ContractTest(unittest.TestCase):
         self.assertRegex(text, r"[^.\n]*`debug`[^.\n]*\bbug\b")
 
     def test_skill_reads_lane_from_spec(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         new_job = self.section(text, "## New job", "## Fast lane")
         step = new_job[new_job.index("B abort $ID --reason"):new_job.index("git worktree add")]
         for phrase in ("B set $ID lane=", "Lane:"):
@@ -801,7 +804,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("parent", cleanup)
 
     def test_skill_documents_resume_and_watchdog(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("resume", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
         commands = self.section(text, "## Commands", "## New job")
         resume = next(l for l in commands.splitlines() if "**`/trevskills-scrum resume <id>`**" in l)
@@ -816,7 +819,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("B watchdog", runall)
 
     def test_skill_headless_sessions_block(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("**Headless sessions block.**", text)
         para = self.section(text, "**Headless sessions block.**", "\n\n")
         self.assertLess(text.index("The session running this skill **is the orchestrator**"), text.index(para),
@@ -829,7 +832,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("skip SendMessage", resuming)
 
     def test_skill_documents_lilguy_lane(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("lilguy", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
         commands = self.section(text, "## Commands", "## New job")
         entry = next(l for l in commands.splitlines() if "/trevskills-scrum lilguy <feature text>" in l)
@@ -882,7 +885,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, path_a, phrase)
 
     def test_new_job_routes_tiny_jobs_to_lilguy(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
         for phrase in ("B lilguy-fit $ID", "**Lilguy lane**", "**Lilguy route:**"):
             self.assertIn(phrase, step3, phrase)
@@ -891,7 +894,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("lilguy-fit", self.lane("runall"))
 
     def test_skill_bigboy_lane_handles_runall_parent(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         bigboy = self.lane("bigboy")
         self.assertIn("runall", self.section(bigboy, "# BigBoy lane", "1. **Plan.**"))
         self.assertIn("runall", self.section(bigboy, "1. **Tracker.**", "   2. Run `B ready $P`"))
@@ -908,7 +911,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, line, phrase)
 
     def test_skill_debug_lane(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertLess(text.index("## Fast lane"), text.index("## Debug lane"))
         self.assertLess(text.index("## Debug lane"), text.index("## Check gate"))
         debug = self.lane("debug")
@@ -1012,7 +1015,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
 
     def test_skill_fast_lane_promotes(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
         for phrase in ("--numstat", "100", "3 files", "UI globs", "promoted.md", "lane=standard",
                        "Skipped by orchestrator: fast lane.", "LANE=fast"):
@@ -1029,7 +1032,7 @@ class ContractTest(unittest.TestCase):
         import sys
         sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
         import board
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
         self.assertEqual(re.search(r"`grep -iE '([^']+)'`", fast).group(1), board.SENSITIVE_RE.pattern)
         self.assertTrue(board.SENSITIVE_RE.flags & re.I)
@@ -1041,7 +1044,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(text.count(board.SENSITIVE_RE.pattern), 1)
 
     def test_skill_fast_lane_promotes_on_sensitive_paths(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
         regex = (r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password"
                  r"|permission|payment|billing|checkout|stripe|webhook|secret|credential")
@@ -1064,7 +1067,7 @@ class ContractTest(unittest.TestCase):
             self.assertIsNone(re.search(pattern, path, re.I), path)
 
     def test_skill_fast_lane_skips_approver(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
         for phrase in ("**Merge**", "no decision.md", "Fast lane: check gate + code review", "**Approve**"):
             self.assertIn(phrase, fast, phrase)
@@ -1081,14 +1084,14 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, rule, phrase)
 
     def test_skill_new_job_fast_ignores_ui_surface(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step = next(l for l in text.splitlines() if l.strip().startswith("3c. **Lane:**"))
         fast_rule = step[step.index("Set `fast`"):]
         self.assertNotIn("UI surface:", fast_rule)
         self.assertIn("Hard stops:", fast_rule)
 
     def test_skill_fast_lane_ui_reviewer(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         fast = self.section(text, "## Fast lane", "## Debug lane")
         for phrase in ("scrum-review-ui", "scrum-review-e2e", "E2E:", "UI globs"):
             self.assertIn(phrase, fast, phrase)
@@ -1146,7 +1149,7 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn(phrase, digester, phrase)
 
     def test_skill_digest_flow(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("digest", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
         self.assertIn("- **`/trevskills-scrum digest`**", text)
         digest = self.lane("digest")
@@ -1201,7 +1204,7 @@ class ContractTest(unittest.TestCase):
         self.assertRegex(DASHBOARD.read_text(), r'<div class="stop" role="status"')
 
     def test_skill_registers_waiting_hooks(self):
-        fm = re.match(r"^---\n(.*?)\n---\n", (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), re.S).group(1)
+        fm = re.match(r"^---\n(.*?)\n---\n", skill_text(), re.S).group(1)
         self.assertIn("\nhooks:\n", fm)
         for event in ("PermissionRequest:", "PreToolUse:", "matcher: AskUserQuestion", "Stop:", "UserPromptSubmit:", "PostToolUse:"):
             self.assertIn(event, fm, event)
@@ -1244,7 +1247,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("obsolete", m.group(1).split("|"))
 
     def test_skill_defines_run_all(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         description = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"]
         self.assertIn("run-all", description)
         self.assertIn("in parallel", description)
@@ -1269,7 +1272,7 @@ class ContractTest(unittest.TestCase):
         self.assertLess(askme, run_all.index("**BigBoy lane** step 2"))
 
     def test_skill_run_all_triager_on_sonnet(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         run_all = self.lane("runall")
         step2 = run_all[run_all.index("2. Spawn"):run_all.index("3. Run")]
         self.assertIn('model: "sonnet"', step2)
@@ -1287,7 +1290,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
 
     def test_backlog_dependency_docs(self):
-        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        skill = skill_text()
         triager = (ROOT / "agents" / "scrum-triager.md").read_text()
         writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for name, text in (("SKILL.md", skill), ("scrum-triager.md", triager), ("scrum-spec-writer.md", writer)):
@@ -1310,7 +1313,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("one after another", button)
 
     def test_skill_documents_askme(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("askme [1-3]", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
         for phrase in ("askme [1-3]", "## Q&A", "start <id> askme", "- Q: ", "  A: ", "level 2",
                        "only what blocks the build", "moderate", "thorough", "follow-up"):
@@ -1389,7 +1392,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("curl -sf localhost", text)
 
     def test_skill_syncs_branch_before_builder(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         s4 = self.section(text, "4. **Worktree:**", "5. **Build:**")
         self.assertLess(s4.index("git fetch origin"), s4.index("git worktree add"))
         s5 = text[text.index("5. **Build:** first sync"):]
@@ -1400,7 +1403,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("the one sanctioned", text)
 
     def test_skill_pulls_and_restarts_after_merge(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         for phrase in ("Restart:", "pull --ff-only", "status --porcelain", "Restart pending",
                        "never `git reset`, `git rebase`"):
             self.assertIn(phrase, text, phrase)
@@ -1413,14 +1416,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn("restarted + verified", self.section(text, "## Final report", "and, for needs-human"))
 
     def test_project_template_has_dev_command(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("- Build: <command|none>\n- Dev command: <command|none>\n", text)
         detect = self.section(text, "4. Detect the project", "```markdown")
         self.assertIn("`Dev command:`", detect)
         self.assertIn("`dev` package script", detect)
 
     def test_base_branch_line_drives_base(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step2 = self.section(text, "2. **Base:**", "3. **Spec:**")
         for phrase in ("Base branch:", "sed -n 's/^- Base branch: *//p' \"$F/project.md\" | head -1",
                        "refs/remotes/origin/HEAD", "git remote set-head origin -a", "B set $ID base=$BASE",
@@ -1440,7 +1443,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("Base branch", self.section(detect, "```markdown", "\n```\n"))
 
     def test_skill_test_sign_in_line(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         detect = self.section(text, "4. Detect the project", "5. Tell the user")
         self.assertIn("- Test sign-in: <account> — credentials in <where>", detect)
         self.assertNotIn("Test sign-in", self.section(detect, "```markdown", "\n```\n"))
@@ -1454,7 +1457,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("never waits", tell)
 
     def test_restart_commands_are_allow_listed(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         restart = cleanup[cleanup.index("**Restart.**"):]
         for phrase in ("Dev command:", "restart command not allowed", "curl -sfL localhost:<port>/",
@@ -1465,20 +1468,20 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`restart command not allowed`", cleanup[cleanup.index("merged, not live: <why>"):])
 
     def test_restart_has_behavioural_fallback(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertIn("PID", cleanup[cleanup.index("**Restart.**"):])
         self.assertIn("restarted + verified (behavioural)", self.section(text, "## Final report", "and, for needs-human"))
 
     def test_verify_string_is_shell_safe(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         for phrase in ('grep -F -- "$VERIFY"', "<<'EOF'"):
             self.assertIn(phrase, cleanup, phrase)
         self.assertNotIn("grep -F '<verify string>'", cleanup)
 
     def test_merge_always_fast_forwards(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertEqual(text.count("pull --ff-only"), 1)
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         restart = cleanup.index("**Restart.**")
@@ -1497,7 +1500,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**Merge** step 7", rules)
 
     def test_skill_records_terminal(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         for phrase in ("ps -o tty= -p $PPID", "B set $ID tty=", "ttys[0-9]*"):
             self.assertIn(phrase, text, phrase)
         self.assertNotIn("B set $ID term=", text)
@@ -1722,7 +1725,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("Never PASS a UI diff you did not render unless it is Rendered: blocked or Rendered: n/a", para, name)
 
     def test_ui_glob_matching_excludes_server_only(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         setup = self.section(text, "### First-run setup", "## Commands")
         matching = next(l for l in setup.splitlines() if "Matching:" in l)
         for phrase in ("an `api/` path component directly under `app/`", "`route.ts`, `route.js` or `route.tsx`",
@@ -1737,7 +1740,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("matching rules are in the orchestrator's First-run setup", rule)
 
     def test_approve_maps_render_stop(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         approve = self.section(text, "## Approve", "## Merge")
         self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' "
                       "--kind render --a \"Merge anyway=approve $ID\" --b \"Send back with a note=rework $ID \\\"render the changed page and "
@@ -1751,7 +1754,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`Hard stop: render`", rule)
 
     def test_merge_guards_main_checkout_before_merge(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
         step1 = self.section(merge, "1. **Preconditions:**", "\n2. ")
         for phrase in ("--untracked-files=no", "symbolic-ref --short HEAD", "Uncommitted change in"):
@@ -1765,7 +1768,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("--untracked-files=no", self.section(text, "7. **Clean up:**", "## Resuming the builder"))
 
     def test_done_refusal_fallback_in_skill(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         line = ("If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the PR on GitHub "
                 "before you retry.' --a ")
         self.assertIn(line + '"Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> \'<why>\'` and stop.',
@@ -1775,7 +1778,7 @@ class ContractTest(unittest.TestCase):
                       self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
 
     def test_done_only_when_live(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         restart = cleanup.index("**Restart.**")
         self.assertIn("merged, not live: <why>", cleanup)
@@ -1875,7 +1878,7 @@ class ContractTest(unittest.TestCase):
             self.assertTrue(any(q.startswith(prefix) for q in questions), prefix)
 
     def test_migrate_waits_on_owning_job(self):
-        migrate = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Migrate", "## Merge")
+        migrate = self.section(skill_text(), "## Migrate", "## Merge")
         wait = '`B wait-on $ID <that id> --then "approve $ID"`'
         self.assertIn(wait, migrate)
         self.assertIn('git -C "$REPO" ls-tree -r --name-only "scrum/<id>"', migrate)
@@ -1884,7 +1887,7 @@ class ContractTest(unittest.TestCase):
                       "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'`", migrate)
 
     def test_migrate_duplicate_column_auto_reworks(self):
-        migrate = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Migrate", "## Merge")
+        migrate = self.section(skill_text(), "## Migrate", "## Merge")
         for phrase in ("duplicate-column", "Auto-rework: duplicate column — <the alternative>", "/trevskills-scrum rework",
                        "never migrate anyway", "dev or prod data", "otherwise fall through"):
             self.assertIn(phrase, migrate)
@@ -1928,14 +1931,14 @@ class ContractTest(unittest.TestCase):
                        "`--recommend <key> '<why>'`", "by your own judgement", "every `'` removed",
                        "A re-ask passes the same question, options and --recommend"):
             self.assertIn(phrase, stops, phrase)
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         rule = self.section(text, "**Every stop is a closed question.**", "\n\n")
         self.assertIn("Read `$HOME/.claude/skills/trevskills-scrum/lanes/stops.md` for the Issue / Options / Recommended "
                       "shape every question takes.", rule)
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
 
     def test_merge_main_checkout_self_heal(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.section(text, "## Merge", "## Routing")
         guard = self.section(merge, "**Main checkout guard", "2. Run `B set $ID stage=merging`")
         for phrase in ("run project.md's Test command (its `- Test:` line; `none` or missing counts as a fail) in `$REPO`",
@@ -1989,7 +1992,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
 
     def test_merge_conflicts_ask_after_two(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step5 = self.section(text, "5. **Conflicts.**", "6. **Merge:**")
         self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
                       "$DEFAULT after 2 tries.\" --kind conflict --a \"Put back on the backlog=abort $ID --requeue\" "
@@ -2001,7 +2004,7 @@ class ContractTest(unittest.TestCase):
             self.assertLess(step5.index(phrase), step5.index("go to **Check gate**"), phrase)
 
     def test_stop_rules_trigger_on_ask(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         self.assertIn("4. **Stop rule.** Whenever this session runs `B ask` for a job, or auto-aborts it", self.lane("roadmap"))
         self.assertIn("6. **After a child stops.** When a child's run runs `B ask` for it or auto-aborts it", self.lane("bigboy"))
         self.assertIn("every time this run runs `B ask` for the child, also run **BigBoy lane** step 6", text)
@@ -2028,7 +2031,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, sync, phrase)
 
     def test_debug_no_repro_auto_closes(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         debug = self.lane("debug")
         self.assertIn("B abort $ID --reason 'looks already fixed: no repro — <line 2>'", debug)
         self.assertIn("B abort $ID --reason 'looks already fixed: repro passes on <short HEAD> — see repro-before.md'", debug)
@@ -2425,7 +2428,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_debugger_respawn_reuses_or_drops_repro(self):
         line = ("An earlier attempt may have committed a repro test: reuse it if it still fails for the reported "
                 "reason, otherwise remove it with git rm and commit that removal.")
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         debug = self.lane("debug")
         self.assertIn(line, debug)
         self.assertIn("re-spawn line", self.section(debug, "2. **Validate", "\n3. "))
@@ -2436,7 +2439,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("leave no repro test at HEAD that you added", debugger)
 
     def test_rework_debug_routes_to_diagnosis(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         rework = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum rework <id> <feedback>`**"))
         for phrase in ("`lane` is `debug`", "ASSESSMENT: READY", "**Debug lane**", "assessment-prev.md",
                        "Read JOB_DIR/rework.md first.", "re-spawn line"):
@@ -2444,7 +2447,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(rework.index("**Debug lane**"), rework.index("Otherwise resume the builder"))
 
     def test_merge_reruns_debug_checks_after_ci_fix(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
         for phrase in ("`lane` is `debug`", "after CI fix", "Repro test untouched",
                        "B ask $ID 'debug: checks fail after CI fix — <first failing check>' --a \"Send back with a note=rework $ID"):
@@ -2452,7 +2455,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(step6.index("after CI fix"), step6.index("gh pr merge"))
 
     def test_merge_gh_missing_fix_installs_first(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
         self.assertIn("GitHub CLI is not installed or not signed in, so the branch is local only; run brew "
                       "install gh, then gh auth login, before you retry.\" --a \"Try again=approve $ID\"", merge)
@@ -2474,7 +2477,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, step3, phrase)
         for gone in ("OM=", "MODEL=(", "nohup"):
             self.assertNotIn(gone, step3, gone)
-        setup = self.section(text, "## Setup", "## Commands")
+        setup = self.section(skill_text(), "## Setup", "## Commands")
         self.assertIn("`- Orchestrator model: <model>`", setup)
         doc = setup[setup.index("`- Orchestrator model: <model>`"):]
         doc = doc[:doc.index("\n\n")]
@@ -2507,7 +2510,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def rules(self) -> str:
         skill = ROOT / "skills" / "trevskills-scrum"
-        return "\n".join(f.read_text() for f in [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))])
+        return "\n".join([skill_text(), *(f.read_text() for f in sorted((skill / "lanes").glob("*.md")) if f.stem not in MOVED)])
 
     def test_lane_files_hold_moved_sections(self):
         steps = {
@@ -2529,8 +2532,37 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in phrases:
                 self.assertIn(phrase, path.read_text(), f"{name}: {phrase}")
 
-    def test_skill_lane_pointers(self):
+    def test_skill_md_within_body_budget(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("board_budget", BOARD_PY)
+        board = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(board)
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        self.assertLessEqual(text.count("\n"), board.BODY_MAX_LINES)
+        self.assertLessEqual(len(text), 19500)
+        self.assertLessEqual(len(text) // 4, board.BODY_MAX_TOKENS)
+
+    def test_moved_sections_have_lane_files(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        pointers = re.findall(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", text, re.M)
+        self.assertEqual(sorted(pointers), sorted(MOVED))
+        for name in pointers:
+            path = ROOT / "skills" / "trevskills-scrum" / "lanes" / f"{name}.md"
+            self.assertTrue(path.is_file(), path)
+            self.assertGreater(len(path.read_text().splitlines()), 3, name)
+
+    def test_lane_pointers_resolve(self):
+        skill = ROOT / "skills" / "trevskills-scrum"
+        files = [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]
+        referenced = set()
+        for f in files:
+            for name in re.findall(r"Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/([\w-]+)\.md`", f.read_text()):
+                self.assertTrue((skill / "lanes" / f"{name}.md").is_file(), f"{f.name} -> {name}")
+                referenced.add(name)
+        self.assertLessEqual(set(MOVED), referenced)
+
+    def test_skill_lane_pointers(self):
+        text = skill_text()
         for title, name in (("Run all", "runall"), ("Debug", "debug"), ("BigBoy", "bigboy"), ("Roadmap", "roadmap"), ("Lilguy", "lilguy"), ("Cloud", "cloud"), ("Digest", "digest")):
             heading = "## Run all" if name == "runall" else "## Digest" if name == "digest" else f"## {title} lane"
             body = [l for l in self.h2(text, heading).splitlines()[2:] if l.strip()]
@@ -2542,7 +2574,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(text.index("\n## ", a + 1), b)
 
     def test_build_runs_under_machine_wide_lock(self):
-        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        skill = skill_text()
         check = self.section(skill, "## Check gate", "## Review (WAIT FOR ALL)")
         self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
         self.assertNotIn("'<Build>'", check)
@@ -2562,7 +2594,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, text, phrase)
 
     def test_skill_points_to_unblock_lane(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         pointer = next(l for l in text.splitlines() if "lanes/unblock.md" in l)
         self.assertIn("scrum-unblocker", pointer)
         self.assertIn('"unblock": true', pointer)
@@ -2599,7 +2631,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 83000)
 
     def test_rank_orders_auto_continue(self):
-        setup = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Setup", "## Commands")
+        setup = self.section(skill_text(), "## Setup", "## Commands")
         self.assertIn("serve.py starts one headless run-all per idle opted-in project in dashboard rank order "
                       "(the Rank dialog, stored as `projects.json` order", setup)
         self.assertIn("only `board.machine_ok` and `MAX_SESSIONS` gate new work", setup)
@@ -2607,7 +2639,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertNotIn("Focus: yes", setup)
 
     def test_skill_documents_roadmap_lane(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         lane = self.lane("roadmap")
         for phrase in ("roadmap.md", "## Constraints", "roadmap-show", "roadmap-link", "roadmap-insert",
                        "roadmap-next", "roadmap-stop"):
@@ -2630,7 +2662,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, bullet, phrase)
 
     def test_skill_merge_chains_roadmap(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
         clean = merge[merge.index("7. **Clean up:**"):]
         self.assertIn("roadmap-next $ID", clean)
@@ -2638,7 +2670,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(clean.index("roadmap-next $ID"), clean.index("**Digest check"))
 
     def test_skill_merge_files_spec_followups(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
         clean = merge[merge.index("7. **Clean up:**"):]
         start = clean.index("**Spec follow-ups.**")
@@ -2658,7 +2690,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, text, phrase)
 
     def test_skill_merge_applies_scrum_map(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
         clean = merge[merge.index("7. **Clean up:**"):]
         start = clean.index("**Scrum map.**")
@@ -2671,7 +2703,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(start, clean.index("**Spec follow-ups.**"))
 
     def test_skill_merge_roadmap_done_starts_run_all(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
         clean = merge[merge.index("7. **Clean up:**"):]
         step = clean[clean.index("roadmap-next $ID"):clean.index("**Digest check")]
@@ -2687,7 +2719,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         out = subprocess.run(["git", "ls-files", "*.mp3"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
         self.assertEqual(out, "")
     def test_skill_cloud_lane(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cloud = self.lane("cloud")
         for phrase in (
             "script -q /dev/null claude", "- Cloud environment:",   # dispatch, TTY, environment
@@ -2758,7 +2790,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertLess(cloud.index(phrase), feat, phrase)
 
     def test_skill_cloud_artifacts_come_home(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "B artifacts $ID", "git write-tree",
@@ -2781,7 +2813,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("scrum-artifacts/<id>", readme)
 
     def test_skill_cloud_stale_skill_stops(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
@@ -2797,7 +2829,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("HEAD", intro)
 
     def test_skill_cloud_schema_migrates_locally(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertIn("first line starts `Hard stop: schema`", job)  # cloud reports, never migrates
@@ -2815,7 +2847,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)
 
     def test_cloud_sync_reverifies_agent_rules_digest_jobs(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         cloud = self.lane("cloud")
         sync = cloud[cloud.index("3. **Sync**"):]
         start = sync.index("**Digest rules edits.**")
@@ -2859,7 +2891,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("always writes `Human setup: none`", exit_rule)
 
     def test_skill_routes_human_setup_to_backlog(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step = self.section(text, "3c. **Lane:**", "4. **Worktree:**")
         for phrase in ("backlog-add --setup", "## Waiting on setup", "Human setup:", "(from $ID)", "no `parent`",
                        "never stops the job", "Human setup not parked"):
@@ -2869,7 +2901,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, fmt, phrase)
 
     def test_skill_human_setup_parks_for_runall_children_not_bigboy_children(self):
-        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        text = skill_text()
         step = self.section(text, "**Human setup:** then,", "4. **Worktree:**")
         self.assertIn("has no `parent` or its parent's `lane` is `runall`", step)
         self.assertIn("so this skips a BigBoy child", step)
