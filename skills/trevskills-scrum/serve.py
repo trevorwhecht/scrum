@@ -1152,6 +1152,26 @@ def set_cooldown(on):
     return 200, {"cooldown": on}
 
 
+def set_volume(level, muted) -> tuple[int, dict]:
+    """POST /api/volume {"level": 0-100, "muted": bool}: write board.volume_path(), which board.play reads per sound.
+    One writer and an atomic replace, so no lock; a bad value touches nothing."""
+    if type(level) is not int or not 0 <= level <= 100:
+        return 400, {"error": "level must be a whole number from 0 to 100"}
+    if type(muted) is not bool:
+        return 400, {"error": "muted must be true or false"}
+    path = board.volume_path()
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"level": level, "muted": muted}))
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"set_volume: {path}: {e!r}", file=sys.stderr)
+        tmp.unlink(missing_ok=True)
+        return 500, {"error": "could not save the volume"}
+    return 200, {"level": level, "muted": muted}
+
+
 SELF_FILES = (HERE / "serve.py", HERE / "board.py", Path(route.__file__).resolve())
 
 
@@ -3206,6 +3226,8 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_research(body.get("id"))
             elif path == "/api/cooldown":
                 code, obj = set_cooldown(body.get("on"))
+            elif path == "/api/volume":
+                code, obj = set_volume(body.get("level"), body.get("muted"))
             elif path == "/api/projects/rank":
                 to = body.get("to")
                 if type(to) is not int:

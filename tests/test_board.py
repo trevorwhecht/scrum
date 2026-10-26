@@ -1110,9 +1110,9 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board.subprocess, "Popen") as popen:
             board.play("/x.aiff")
             popen.assert_not_called()
-            with mock.patch.dict(os.environ, {"SCRUM_MUTE": ""}):
+            with mock.patch.dict(os.environ, {"SCRUM_MUTE": "", "SCRUM_VOLUME": str(Path(self.tmp.name) / "no-volume")}):
                 board.play("/x.aiff")
-        popen.assert_called_once_with(["afplay", "/x.aiff"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        popen.assert_called_once_with(["afplay", "-v", "1.0", "/x.aiff"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, start_new_session=True)
 
     def test_needs_human_sound_fallback(self):  # covers every scrum sound: a clip when present, else its system sound
