@@ -283,8 +283,9 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds only new claims, never a resume); a Run-all/BigBoy child also waits for the overlap
-    rules `ready` applies to new claims."""
+    (board.machine_ok; cool-down holds only new claims, never a resume); a heavy job waits while a usage window is
+    nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules `ready`
+    applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM
@@ -823,7 +824,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no work in
     flight, no paused or resumable stalled job (board.resume_first), no auto-started run-all still running and a
     claimable backlog line, in rank order: board.projects() order, which the dashboard's Rank dialog sets. board.machine_ok
-    (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
+    (cool-down, RAM, disk, the session ceiling; claim=True), board.usage_allowance and heavy_refusal are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():

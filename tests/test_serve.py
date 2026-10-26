@@ -1065,7 +1065,8 @@ class ServeTest(unittest.TestCase):
         usage = self.low_usage(Path(tempfile.mkdtemp(dir=self.tmp.name)))
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
                 mock.patch.object(self.serve.board, "usage_allowance", wraps=self.serve.board.usage_allowance) as allow:
-            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "standard"}))
+            # fast: a heavy lane waits near the limit (job 340), a separate check from the ladder
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "fast"}))
         self.assertEqual(allow.call_count, 0)
 
     def test_start_ready_usage_hold_not_needs_human(self):
@@ -1088,9 +1089,9 @@ class ServeTest(unittest.TestCase):
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         ps, usage, root = base / "ps.txt", base / "usage.json", base / "scrum"
         ps.write_text("claude -p /trevskills-scrum resume 1-a\n" * 7)
-        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %
+        now = time.time()  # 89 % used with 1 h of 5 left projects to 111 %; 90 % holds heavy jobs (job 340)
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
-            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+            "five_hour": {"used_percentage": 89, "resets_at": now + 3600}}}))
         root.mkdir()
         (root / "backlog.md").write_text("- [ ] one\n- [ ] two\n")
         a, b = self.serve.board.cmd_runall_start(root)["children"]
@@ -5807,7 +5808,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 99, "resets_at": now + 7200},
             "seven_day": {"used_percentage": 10, "resets_at": now + 3 * 86400}}}))
-        self.queue_board({"id": "012-c", "stage": "needs-human", "reason": self.STALLED})
+        # fast: at 99 % a heavy job waits for the reset (job 340); the ladder itself never holds a resume
+        self.queue_board({"id": "012-c", "stage": "needs-human", "reason": self.STALLED, "lane": "fast"})
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
             self.assertEqual(self.board.usage_allowance(self.board.read_usage(), now, 0), 0)
             spawn, _, _ = self.tick()
@@ -6227,7 +6229,7 @@ class AutoContinueTest(unittest.TestCase):
             ps.write_text("claude -p /trevskills-scrum start 1-a\n")
             self.assertEqual(self.tick(), [], "1 live of allowance 1: held")
             ps.write_text("")
-            self.assertEqual(self.tick(), self.started("a"), "0 live: starts")
+            self.assertEqual(self.tick(), [], "0 live, but 96 % used holds every run-all start (job 340)")
             ps.write_text("claude -p /trevskills-scrum start 1-a\n")
             self.usage.unlink()
             self.assertEqual(self.tick(), self.started("a"), "no usage.json: no taper")
@@ -6379,9 +6381,9 @@ class AutoContinueTest(unittest.TestCase):
 
     def test_auto_continue_ignores_pace(self):
         self.project("a", n=1)
-        now = time.time()  # 90 % used with 1 h of 5 left projects to 112.5 %: the old pace gate skipped this tick
-        self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {
-            "five_hour": {"used_percentage": 90, "resets_at": now + 3600}}}))
+        now = time.time()  # 89 % used with 1 h of 5 left projects to 111 %: the old pace gate skipped this tick
+        self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {  # 90 % holds heavy starts (job 340)
+            "five_hour": {"used_percentage": 89, "resets_at": now + 3600}}}))
         with mock.patch.object(self.board, "machine_ok", return_value="free RAM 14% (< 20%)"):
             self.assertEqual(self.tick(), [])
         self.assertEqual(self.tick(), self.started("a"))
