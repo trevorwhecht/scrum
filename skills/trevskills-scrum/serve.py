@@ -560,8 +560,9 @@ def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
     each moved job with an artifacts branch or a schema / agent-rules hard stop, and each job whose artifacts arrived
-    late, then clear that id's artifactsPending mark (board.cloud_pending_clear) once spawn returns. A skipped or
-    failed spawn keeps the mark, so a later poll reports the id again. Errors are printed, never raised."""
+    late. Once spawn returns for an id whose artifacts branch exists (arrived, or moved with artifacts), clear its
+    artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
+    spawn keeps the mark, so a later poll reports the id again. Errors are printed, never raised."""
     now = time.time() if now is None else now
     if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
             or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
@@ -573,10 +574,13 @@ def cloud_tick(project, root, jobs, now=None):
             print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
         homes += out.get("arrived") or []
+        # only these can fetch scrum-artifacts/<id> now; a hard-stop move without it keeps its fresh mark
+        fetchable = {m["id"] for m in out["moved"] if m.get("artifacts")} | set(out.get("arrived") or [])
         for job_id in dict.fromkeys(homes):
             if not running(project, job_id):
                 spawn(project, root, job_id, "cloud-home", f"/trevskills-scrum cloud-home {job_id}")
-                board.cloud_pending_clear(root, job_id)
+                if job_id in fetchable:
+                    board.cloud_pending_clear(root, job_id)
     except (Exception, SystemExit) as e:
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 

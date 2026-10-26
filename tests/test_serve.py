@@ -5084,11 +5084,11 @@ class CloudPollTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in sp.call_args_list], ["001-art", "005-schema", "003-late"])
         self.assertEqual(sp.call_args_list[2].args,
                          ("p", self.root, "003-late", "cloud-home", "/trevskills-scrum cloud-home 003-late"))
-        self.assertEqual([c.args for c in clear.call_args_list],
-                         [(self.root, "001-art"), (self.root, "005-schema"), (self.root, "003-late")])
+        self.assertEqual([c.args for c in clear.call_args_list], [(self.root, "001-art"), (self.root, "003-late")])
         self.assertEqual(order, [("spawn", "001-art"), ("clear", "001-art"), ("spawn", "005-schema"),
-                                 ("clear", "005-schema"), ("spawn", "003-late"), ("clear", "003-late")],
-                         "each clear runs once, right after its spawn returns; 004-busy gets neither")
+                                 ("spawn", "003-late"), ("clear", "003-late")],
+                         "a fetchable id is cleared once, right after its spawn returns; 005-schema (no artifacts "
+                         "branch yet) keeps its mark; 004-busy gets neither")
 
     def test_cloud_poll_spawn_failure_keeps_pending(self):
         s = self.serve
