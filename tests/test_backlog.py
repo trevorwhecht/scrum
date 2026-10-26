@@ -441,6 +441,25 @@ class BacklogTest(unittest.TestCase):
         board.cmd_abort(self.root, job_id, requeue=True)
         self.assertTrue(self.text().endswith("- [ ] " + "r" * 1000 + "\n"))
 
+    def aborted_files(self, job_id):
+        with board.locked_board(self.root) as b:
+            return board.find(b, job_id)["files"]
+
+    def test_abort_requeue_moved_spec_not_in_files(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Ship it\n")
+        self.put_spec("Ship it", "# Ship\n")
+        job_id = board.cmd_next(self.root)["id"]
+        board.cmd_abort(self.root, job_id, requeue=True)
+        self.assertNotIn("spec.md", self.aborted_files(job_id))
+        self.assertEqual(self.spec_file("Ship it").read_text(), "# Ship\n")
+
+    def test_abort_keeps_spec_in_files(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Ship it\n")
+        self.put_spec("Ship it", "# Ship\n")
+        job_id = board.cmd_next(self.root)["id"]
+        board.cmd_abort(self.root, job_id, requeue=False)
+        self.assertEqual(self.aborted_files(job_id), ["spec.md"])
+
     # --- backlog-spec: pre-written specs for follow-up items ---
     JOB = "095-bigboy"
 
