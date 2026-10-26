@@ -1176,13 +1176,15 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
-                                            "five_hour_resets_at": now + 7200, "allowance": 3})  # 7 % left: rung 1
+                                            "five_hour_resets_at": now + 7200, "allowance": 3,
+                                            "fable": "paused"})  # 7 % left: rung 1
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             del fresh["rate_limits"]["seven_day"]["used_percentage"]
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None})
+                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None,
+                "fable": "unknown"})
             fresh["written_at"] = time.time() - 301
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
@@ -1190,6 +1192,22 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
             usage.unlink()
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+
+    def test_machine_usage_fable(self):
+        usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
+        now = time.time()
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            for five, seven, want in ((10, 10, "ok"), (70, 10, "warn"), (10, 75, "warn"), (80, 10, "paused"),
+                                      (10, 85, "paused")):
+                usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                    "five_hour": {"used_percentage": five, "resets_at": now + 3600},
+                    "seven_day": {"used_percentage": seven, "resets_at": now + 86400}}}))
+                self.assertEqual(self.serve.machine_usage(now)["fable"], want, (five, seven))
+            usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                "five_hour": {"used_percentage": 10, "resets_at": now + 3600}}}))
+            self.assertEqual(self.serve.machine_usage(now)["fable"], "unknown", "no 7d window")
+            usage.unlink()
+            self.assertEqual(self.serve.machine_usage(now), "unknown", "the string return is unchanged")
 
     PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
 

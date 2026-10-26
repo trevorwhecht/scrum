@@ -1202,15 +1202,15 @@ def machine_status():
 
 
 def machine_usage(now):
-    """The meter's usage segment: 5h and 7d used %, the 5h reset and usage_allowance's live-session cap (null for no
-    taper), or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
+    """The meter's usage segment: 5h and 7d used %, the 5h reset, usage_allowance's live-session cap (null for no
+    taper) and board.fable_state, or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
     usage = board.read_usage() or {}
     at = usage.get("written_at")
     if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
         return "unknown"
     u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
     return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
-            "allowance": None if allow is None else int(allow)}
+            "allowance": None if allow is None else int(allow), "fable": board.fable_state(usage, now)}
 
 
 def claude_usage(now):

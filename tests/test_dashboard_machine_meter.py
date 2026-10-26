@@ -108,6 +108,25 @@ class MachineMeter(unittest.TestCase):
         self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU 5-min load 145% · limit 150%" '
                          'title="CPU 5-min load 145% · limit 150%">145%</span> CPU · <span class="ok">disk 100 GB</span>')
 
+    def test_machine_meter_fable_text(self):
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
+        u = {"five_hour_pct": 70, "seven_day_pct": 20, "five_hour_resets_at": 1, "allowance": None}
+        cases = [{**u, "fable": "warn"}, {**u, "fable": "paused"}, {**u, "fable": "ok"}, u, {**u, "fable": "unknown"},
+                 "unknown"]
+        script = (f"{esc}\n{fn_body(text, 'usagePart')}\n"
+                  f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        plain = '<span class="ok">5h 70% · 7d 20%</span>'
+        self.assertEqual(out, [plain + ' · <span class="low">Fable near limit</span>',
+                               plain + ' · <span class="danger">Fable paused, using Opus</span>',
+                               plain, plain, plain, '<span class="ok">usage: unknown</span>'])
+        meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
+        self.assertRegex(meter, r'Fable[^"]*65%[^"]*75%[^"]*80%[^"]*85%')
+
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()
         css = re.findall(r"#machine[^{]*\{[^}]*\}", text)

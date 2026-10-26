@@ -6577,5 +6577,149 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
 
+class FableTest(unittest.TestCase):
+    """board.fable_state / fable_ok / fable-ok: Fable for the planner and big standard-ticket spec-writers."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        self.usage_file = Path(self.tmp.name) / "usage.json"
+        env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(self.usage_file)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def state(self, five, seven):
+        return board.fable_state(usage(five=(five, 3600), seven=(seven, 86400)), USAGE_NOW)
+
+    def test_fable_state_thresholds(self):
+        self.assertEqual(board.FABLE_MODEL, "claude-fable-5-1")
+        self.assertEqual((board.FABLE_WARN_5H_PCT, board.FABLE_WARN_7D_PCT, board.FABLE_SWITCH_5H_PCT,
+                          board.FABLE_SWITCH_7D_PCT), (65, 75, 80, 85))
+        for five, seven, want in ((79.9, 0, "warn"), (80, 0, "paused"), (0, 84.9, "warn"), (0, 85, "paused"),
+                                  (65, 0, "warn"), (64.9, 74.9, "ok"), (0, 75, "warn"), (0, 0, "ok"),
+                                  (100, 100, "paused"), (70, 90, "paused")):
+            self.assertEqual(self.state(five, seven), want, (five, seven))
+        self.assertEqual(board.fable_state(usage(five=(79.9, 3600), seven=(0, 86400)), USAGE_NOW), "warn")
+        self.assertEqual(board.fable_state(usage(five=(95, 0), seven=(0, 86400)), USAGE_NOW), "ok",
+                         "a 5h window resetting now counts as 0% used")
+        self.assertEqual(board.fable_state(usage(five=(10, 3600), seven=(99, -5)), USAGE_NOW), "ok",
+                         "a past 7d reset counts as 0% used")
+        self.assertTrue(board.fable_ok(usage(five=(70, 3600), seven=(0, 86400)), USAGE_NOW))
+        self.assertTrue(board.fable_ok(usage(five=(0, 3600), seven=(0, 86400)), USAGE_NOW))
+        self.assertFalse(board.fable_ok(usage(five=(80, 3600), seven=(0, 86400)), USAGE_NOW))
+
+    def test_fable_state_unknown_fails_safe(self):
+        good = usage(five=(10, 3600), seven=(10, 86400))
+        self.assertEqual(board.fable_state(good, USAGE_NOW), "ok")
+        bad = [None, [], "x", {}, {"rate_limits": []}, {"written_at": USAGE_NOW},
+               {**good, "written_at": None}, {**good, "written_at": "1000000"},
+               {"rate_limits": good["rate_limits"]},
+               usage(five=(10, 3600), seven=(10, 86400), written_at=USAGE_NOW - 301),
+               usage(five=(10, 3600)), usage(seven=(10, 86400)),
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "seven_day": {"used_percentage": 1}}},
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"used_percentage": "10",
+                                                                            "resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "seven_day": {"used_percentage": True,
+                                                                            "resets_at": USAGE_NOW + 60}}},
+               {**good, "rate_limits": {**good["rate_limits"], "five_hour": "80%"}}]
+        for u in bad:
+            self.assertEqual(board.fable_state(u, USAGE_NOW), "unknown", u)
+            self.assertFalse(board.fable_ok(u, USAGE_NOW), u)
+        self.assertEqual(board.fable_state(usage(five=(10, 3600), seven=(10, 86400), written_at=USAGE_NOW - 300),
+                                           USAGE_NOW), "ok", "exactly 300 s old is still fresh")
+
+    def write_usage(self, five, seven):
+        now = time.time()
+        self.usage_file.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": five, "resets_at": now + 3600},
+            "seven_day": {"used_percentage": seven, "resets_at": now + 86400}}}))
+
+    def setup_jobs(self):
+        lanes = {"001-std": None, "002-empty": "", "003-standard": "standard", "004-fast": "fast", "005-debug": "debug",
+                 "006-lil": "lilguy", "007-cloud": "cloud", "008-bigboy": "bigboy", "009-road": "roadmap",
+                 "010-small": None, "011-unlinked": None}
+        jobs = []
+        for job_id, lane in lanes.items():
+            job = {"id": job_id, "stage": "spec"}
+            if lane is not None:
+                job["lane"] = lane
+            jobs.append(job)
+            (self.root / "jobs" / job_id).mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        linked = [j for j in lanes if j not in ("010-small", "011-unlinked")] + ["099-gone"]
+        (self.root / "backlog.md").write_text("# Backlog\n\n" + "".join(f"- [x] [8] Item {j} → {j}\n" for j in linked)
+                                              + "- [x] [3] Small → 010-small\n")
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "fable-ok", *args],
+                              capture_output=True, text=True)
+
+    def test_fable_ok_cli_gating(self):
+        self.setup_jobs()
+        self.write_usage(10, 10)
+        spec_fable = ("001-std", "002-empty", "003-standard")
+        spec_none = ("004-fast", "005-debug", "006-lil", "007-cloud", "008-bigboy", "009-road", "010-small",
+                     "011-unlinked", "099-gone")
+        for job_id in spec_fable:
+            out = self.cli(job_id, "spec-writer")
+            self.assertEqual((out.returncode, out.stdout), (0, "claude-fable-5-1\n"), (job_id, out.stderr))
+        for job_id in spec_none:
+            out = self.cli(job_id, "spec-writer")
+            self.assertEqual((out.returncode, out.stdout), (0, "none\n"), (job_id, out.stderr))
+        for job_id in ("008-bigboy", "011-unlinked", "099-gone"):
+            self.assertEqual(self.cli(job_id, "planner").stdout, "claude-fable-5-1\n", job_id)
+        for bad in ("builder", "approver", "", "Planner"):
+            out = self.cli("001-std", bad)
+            self.assertNotEqual(out.returncode, 0, bad)
+            self.assertEqual(out.stdout, "", bad)
+        self.write_usage(70, 10)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n", "warn still gets Fable")
+        self.write_usage(80, 10)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n")
+        self.write_usage(10, 85)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        self.usage_file.unlink()
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n", "no usage.json: Opus")
+
+    def test_fable_ok_logs_decision(self):
+        self.setup_jobs()
+        log = self.root / "jobs" / "008-bigboy" / "fable.log"
+        log.write_text("earlier line\n")
+        self.write_usage(10.4, 20)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n")
+        self.write_usage(81, 20)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
+        lines = log.read_text().splitlines()
+        self.assertEqual(lines[0], "earlier line")
+        self.assertEqual(len(lines), 3)
+        first, second = (l.split("\t") for l in lines[1:])
+        self.assertRegex(first[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+        self.assertEqual(first[1:], ["planner", "fable", "5h 10%", "7d 20%", "ok"])
+        self.assertEqual(second[1:], ["planner", "opus", "5h 81%", "7d 20%", "paused"])
+        now = time.time()
+        self.usage_file.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 50, "resets_at": now + 3600}}}))
+        self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n")
+        self.assertEqual((self.root / "jobs" / "001-std" / "fable.log").read_text().split("\t")[1:],
+                         ["spec-writer", "opus", "5h 50%", "7d —", "unknown\n"])
+        self.usage_file.unlink()
+        self.assertEqual(self.cli("003-standard", "spec-writer").stdout, "none\n")
+        self.assertEqual((self.root / "jobs" / "003-standard" / "fable.log").read_text().split("\t")[1:],
+                         ["spec-writer", "opus", "5h —", "7d —", "unknown\n"])
+        self.write_usage(10, 10)
+        self.assertEqual(self.cli("004-fast", "spec-writer").stdout, "none\n")
+        self.assertEqual(self.cli("010-small", "spec-writer").stdout, "none\n")
+        self.assertFalse((self.root / "jobs" / "004-fast" / "fable.log").exists(), "ineligible: no log")
+        self.assertFalse((self.root / "jobs" / "010-small" / "fable.log").exists(), "ineligible: no log")
+        self.assertEqual(self.cli("099-gone", "planner").stdout, "claude-fable-5-1\n", "no job dir: still answers")
+        self.assertFalse((self.root / "jobs" / "099-gone").exists())
+        for name in ("jev.log", "routing.log"):
+            self.assertFalse((self.root / "jobs" / "008-bigboy" / name).exists(), name)
+        self.assertFalse((self.root / "routing.log").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
