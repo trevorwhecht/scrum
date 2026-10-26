@@ -255,7 +255,8 @@ def play_queue_tick(project, root, jobs) -> bool:
     queued. True when it started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
-        if running(project, job["id"]) or not resumable(job):
+        answered = job["stage"] == "needs-human" and job.get("options")  # a resume pick answer_job queued
+        if running(project, job["id"]) or not (resumable(job) or answered):
             unqueue(root, job)
             continue
         refusal = resume_refusal(project, root, job)
@@ -377,9 +378,15 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 409, {"error": "job isn't waiting on that answer, or is already running"}
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
-    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        return refused(root, job["id"], refusal)
     job_id = job["id"]
+    if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
+        if not refusal.startswith(board.MACHINE_WAIT):
+            return refused(root, job_id, refusal)
+        board.cmd_answer(root, job_id, key)
+        with board.locked_board(root) as b:  # the machine guard queues the pick like a Play; play_queue_tick starts it
+            if (live := board.find(b, job_id))["stage"] == "needs-human":
+                live.setdefault("play_queued", board.now())
+        return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
     if not parsed:

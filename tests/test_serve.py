@@ -1034,6 +1034,7 @@ class ServeTest(unittest.TestCase):
                                                       "by hand in the main checkout and run /trevskills-commitpush, or "
                                                       "discard it, then click Abort."}))
         self.assert_nothing_ran(m)
+        self.assertNotIn("play_queued", self.stage_of(lil))
         blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         kid = self.asked("resume 1", parent="100-parent")
         with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
@@ -1041,6 +1042,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
                                                       "Fix: click Resume when 123-sib finish."}))
         self.assert_nothing_ran(m)
+        self.assertNotIn("play_queued", self.stage_of(kid))
 
     def low_usage(self, base):
         """usage.json at 99 % used on both windows, resets 2 h and 3 days away: allowance 0."""

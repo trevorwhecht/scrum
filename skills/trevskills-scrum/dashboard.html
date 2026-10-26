@@ -687,7 +687,7 @@ $("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; s
 
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
-  const url = `${job.base ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
+  const url = `${job.docBase ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
   try {
     const res = await fetch(url, {cache: "no-store"});
     if (!res.ok) throw new Error(`${res.status}`);
@@ -718,7 +718,7 @@ function open(job) {
 
 // The roadmap card's viewer: the project's roadmap.md, rendered by show(), with no job actions. The key is never a
 // board job key (those are project/id), so a poll leaves #actions and #diverged empty.
-const roadmapDoc = p => ({key: `${p}#roadmap`, project: p, id: "roadmap", base: `p/${enc(p)}/`});
+const roadmapDoc = p => ({key: `${p}#roadmap`, project: p, id: "roadmap", docBase: `p/${enc(p)}/`});
 function openRoadmap(p) {
   const rm = roadmaps[p];
   if (!rm) return;
@@ -832,7 +832,7 @@ function stopBox(job) {
   if (job.stage !== "needs-human") return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const rec = job.recommend, dis = off ? " disabled" : "";
-  const buttons = stopOptions(job).map((o, i) => {
+  const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
     const armed = st.armed === o.key, top = i === 0 && !!rec && o.key === rec.key;
     return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}</button>`
       + (top && rec.why ? `<p class="note">${esc(rec.why)}</p>` : "");
