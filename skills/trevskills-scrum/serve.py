@@ -171,10 +171,16 @@ def start_ready(project, root, parent_id):
 
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
-    `start` spawn start_ready makes. A full machine leaves them waiting, never needs-human."""
+    `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
+    them waiting, never needs-human."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root):
         return
-    for job_id in board.wake_waiting(root)["ready"]:
+    room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
+    live = board.live_sessions()
+    allow = board.usage_allowance(board.read_usage(), time.time(), live)
+    if allow is not None:
+        room = min(room, max(0, allow - live))
+    for job_id in board.wake_waiting(root, room)["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
 
 

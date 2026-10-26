@@ -2572,8 +2572,14 @@ def cmd_wait_on(root, job_id, blocker) -> dict:
             raise SystemExit(f"job {job_id} cannot wait on itself")
         if dep["stage"] in ("done", "aborted"):
             raise SystemExit(f"blocker {dep['id']} is {dep['stage']}; there is nothing to wait for")
-        if job_id in (dep.get("depends_on") or []):
-            raise SystemExit(f"blocker {dep['id']} already waits on {job_id}")
+        seen, todo = set(), [dep["id"]]
+        while todo:  # follow depends_on from the blocker: reaching job_id would leave the whole cycle waiting for good
+            i = todo.pop()
+            if i == job_id:
+                raise SystemExit(f"blocker {dep['id']} already waits on {job_id}")
+            if i not in seen:
+                seen.add(i)
+                todo += next((j.get("depends_on") or [] for j in board["jobs"] if j["id"] == i), [])
         if job.get("parent") and dep["id"] not in (find(board, job["parent"]).get("children") or []):
             raise SystemExit(f"job {job_id} is a child of {job['parent']}; it may only wait on a sibling")
         job.update(stage="waiting", depends_on=[dep["id"]], reason=f"waiting on {dep['id']}", worktree=None,
@@ -2587,9 +2593,10 @@ def parked_waiting(job) -> bool:
                 and not job.get("paused") and job.get("depends_on"))
 
 
-def wake_waiting(root) -> dict:
-    """Claim (stage -> spec) every parentless waiting job whose depends_on are all done; park one whose dependency was
-    aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. Returns {"ready", "lost"}."""
+def wake_waiting(root, room=None) -> dict:
+    """Claim (stage -> spec) up to room (None = no cap) parentless waiting jobs whose depends_on are all done; park one
+    whose dependency was aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. Returns
+    {"ready", "lost"}."""
     ready, lost = [], {}
     if not any(map(parked_waiting, read_board(root)["jobs"])):  # nothing parked: never rewrite board.json each tick
         return {"ready": ready, "lost": []}
@@ -2600,7 +2607,7 @@ def wake_waiting(root) -> dict:
             gone = [d for d in deps if stage.get(d) in (None, "aborted")]
             if gone:
                 lost[j["id"]] = gone[0]
-            elif all(stage[d] == "done" for d in deps):
+            elif all(stage[d] == "done" for d in deps) and (room is None or len(ready) < room):  # rest wait a tick
                 j.update(stage="spec", reason=None, updatedAt=now())
                 ready.append(j["id"])
     for job_id, dep in lost.items():

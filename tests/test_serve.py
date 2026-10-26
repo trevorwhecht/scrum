@@ -5273,6 +5273,18 @@ class WatchdogIdleParentTest(unittest.TestCase):
         wake.assert_called_once()
         sweep.assert_called_once()
 
+    def test_wake_waiting_starts_only_what_ram_room_allows(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["002-second"])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("spec", "waiting"))
+
     def test_wake_waiting_holds_while_machine_busy(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})

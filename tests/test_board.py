@@ -3310,8 +3310,10 @@ class BoardTest(unittest.TestCase):
                 {"id": "005-loop", "stage": "waiting", "depends_on": ["006-me"]},
                 {"id": "006-me", "stage": "build", "worktree": "/tmp/wt"},
                 {"id": "007-paused", "stage": "build", "paused": True},
-                {"id": "008-aborted", "stage": "aborted"}]
-        cases = [("006-me", "999"), ("006-me", "999-nope"), ("006-me", "001"), ("006-me", "006-me"),
+                {"id": "008-aborted", "stage": "aborted"},
+                {"id": "009-chain", "stage": "waiting", "depends_on": ["005-loop"]}]
+        cases = [("006-me", "009-chain"),
+                 ("006-me", "999"), ("006-me", "999-nope"), ("006-me", "001"), ("006-me", "006-me"),
                  ("006-me", "006"), ("006-me", "003-done"), ("006-me", "004"), ("006-me", "005-loop"),
                  ("007-paused", "001-first"), ("008-aborted", "001-first"), ("006-me", "-1")]
         for job_id, blocker in cases:
@@ -3351,6 +3353,15 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["reason"]), ("spec", None))
         self.assertNotEqual(job["updatedAt"], "2026-01-01T00:00:00+00:00")
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_wake_waiting_claims_no_more_than_room(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        self.assertEqual(board.wake_waiting(self.root, 1), {"ready": ["002-second"], "lost": []})
+        self.assertEqual([j["stage"] for j in self.jobs()], ["done", "spec", "waiting"])
+        self.assertEqual(board.wake_waiting(self.root, 0), {"ready": [], "lost": []})
+        self.assertEqual(board.wake_waiting(self.root, 1), {"ready": ["003-third"], "lost": []})
 
     def test_wake_waiting_leaves_unfinished_dependency(self):
         jobs = [{"id": "001-first", "stage": "merging"},
