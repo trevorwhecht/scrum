@@ -301,8 +301,17 @@ const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type"
   .then(async r => { const data = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), {status: r.status}); return data; });
 // A 404 from one of our own routes means serve.py predates this dashboard.html; callers pass STALE as `missing` to say so.
 const STALE = "Dashboard server is out of date. Restart serve.py.";
+// A dropped or failed read (a busy serve.py) repeats that URL's last good body instead of the fallback, so one slow
+// request never empties a column or hides the usage button; `missed` counts them for poll's status line.
+const lastGood = {};
+let missed = 0;
 const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
-  .then(r => r.ok ? r.json() : r.status === 404 ? missing : fallback).catch(() => fallback);
+  .then(r => r.ok ? r.json().then(v => (lastGood[url] = v)) : r.status === 404 ? (delete lastGood[url], missing) : Promise.reject())
+  .catch(() => { missed++; return url in lastGood ? lastGood[url] : fallback; });
+// One run at a time: a call while the last is still in flight shares it, so slow polls never stack up behind
+// Chrome's 6 connections per host.
+const single = fn => { let p = null; return () => p || (p = fn().finally(() => { p = null; })); };
+const SLOW = "Server is slow: showing the last good data.";
 
 let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
@@ -605,6 +614,7 @@ function renderMachine(m) {
 
 async function poll() {
   getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
+  missed = 0;
   try {
     const res = await fetch("api/projects", {cache: "no-store"});
     if (res.status === 404) return $("status").textContent = STALE;
@@ -645,6 +655,8 @@ async function poll() {
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
     if ($("digest").open) loadDigests();
     tickAgo();
+    if (missed) $("status").textContent = SLOW;
+    else if ($("status").textContent === SLOW) $("status").textContent = "";
   } catch (e) {
     $("status").textContent = `Can't reach the dashboard server (${e.message}). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py`;
   }
@@ -1717,9 +1729,9 @@ $("cooldown").addEventListener("click", async e => {
 });
 
 poll();
-setInterval(poll, 2000);
+setInterval(single(poll), 2000);
 loadRouting();
-setInterval(loadRouting, 60000);
+setInterval(single(loadRouting), 60000);
 </script>
 </body>
 </html>
