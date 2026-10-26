@@ -4,7 +4,8 @@ This repo IS the scrum. `install.sh` symlinks `skills/trevskills-scrum`, `skills
 `agents/scrum-*.md` and `codex/AGENTS.md` into `~/.claude` / `~/.codex`, so the main checkout is live:
 never leave it dirty, and land changes with `/trevskills-commitpush` or the pipeline.
 
-- Test: `python3 -m unittest discover -s tests` (stdlib only, ~725 tests, ~90 s).
+- Test: `python3 -m unittest discover -s tests` (stdlib only). The full run takes 25-30 min under machine load, past the 600 s Bash timeout: run it with `run_in_background`, and run single modules (`python3 -m unittest tests.test_<name>`) while working.
+- Subprocess and timing tests with 5 s timeouts (`tests/test_board_small_fixes.py`, `tests/test_buildlock.py`) can fail in the full run under load; re-run a failing test alone before treating it as a real failure.
 - `tests/test_contracts.py` pins exact agent and SKILL.md wording: `self.section(text, "## A", "## B")` slices a
   heading range and `assertIn(phrase, ...)` checks phrases. Before rewording an agent or SKILL.md line, grep the
   phrase there and change both in the same commit. `FIRST_LINE` pins each agent's first output line.
