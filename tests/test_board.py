@@ -3381,6 +3381,7 @@ class BoardTest(unittest.TestCase):
                          "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
 
+
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""
     STUB = """import json, os, sys

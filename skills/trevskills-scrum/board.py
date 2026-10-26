@@ -2611,6 +2611,7 @@ def wake_waiting(root) -> dict:
             print(f"wake_waiting: {job_id}: {e}", file=sys.stderr)
     return {"ready": ready, "lost": list(lost)}
 
+
 def cmd_unblock_log(root, job_id):
     """Log the verdict of the job's latest scrum-unblocker file (jobs/<id>/unblock-<unblocks>.md) to questions.log."""
     with locked_board(root) as board:
