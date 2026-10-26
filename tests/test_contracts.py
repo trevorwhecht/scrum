@@ -1510,6 +1510,19 @@ class ContractTest(unittest.TestCase):
             self.assertIn(harness, para, name)
             self.assertEqual(text.count("throwaway harness"), 1, name)
 
+    def test_review_ui_signin_before_harness(self):
+        text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        self.assertLess(text.index("**Signing in.**"), text.index("throwaway harness"))
+        para = next(l for l in text.splitlines() if l.startswith("**Signing in.**"))
+        self.assertIn("real card", para)
+        self.assertIn("existing dev row", para)
+
+    def test_review_ui_deleted_jsx_not_na(self):
+        text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        para = next(l for l in text.splitlines() if l.startswith("**No rendered change.**"))
+        self.assertIn("deletes UI JSX", para)
+        self.assertIn("absent", para)
+
     def test_review_ui_db_not_a_block(self):
         text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
         para = next(l for l in text.splitlines() if l.startswith("**Database.**"))
