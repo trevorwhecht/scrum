@@ -2951,6 +2951,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "WT=$REPO/.claude/worktrees/scrum-$ID", "BASE=origin/<baseRefName>", "needs-human",
                        "**Artifacts home**", "**Follow-ups**"):
             self.assertIn(phrase, rule, phrase)
+        for phrase in ("lanes/rules-gate.md", "B rules-check", "scrum-review-rules", "rules-review.md"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertLess(rule.index("B digest-verify $ID"), rule.index("rules-gate.md"))
         self.assertNotIn("approve $ID", rule)  # approve would write human-approval.md, "Approved by Trevor"
         # It runs after the folder comes home and its follow-ups are queued.
         self.assertLess(sync.index("**Follow-ups.**"), start)
