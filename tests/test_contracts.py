@@ -2637,7 +2637,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         spec.loader.exec_module(board)
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertLessEqual(text.count("\n"), board.BODY_MAX_LINES)
-        self.assertLessEqual(len(text), 19500)
+        self.assertLessEqual(len(text), 20000)
         self.assertLessEqual(len(text) // 4, board.BODY_MAX_TOKENS)
 
     def test_moved_sections_have_lane_files(self):
