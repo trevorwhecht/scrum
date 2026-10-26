@@ -1530,6 +1530,31 @@ class ServeTest(unittest.TestCase):
         self.edit_job(first, stage="done")
         self.assertNotIn("waitingOn", self.board_jobs()[second])
 
+    def test_board_with_activity_fable_badge(self):
+        b = self.serve.board
+        big, plain, pts = (b.cmd_new(self.root, t) for t in ("Fable bigboy", "Fable plain", "Fable points"))
+        self.addCleanup(lambda: [self.edit_job(i, stage="aborted") for i in (big, plain, pts)])  # no later tick may claim them
+        self.edit_job(big, lane="bigboy", stage="build")
+        self.edit_job(plain, stage="build")
+        self.edit_job(pts, stage="build")
+        backlog, project = self.root / "backlog.md", self.root / "project.md"
+        saved = backlog.read_text()
+        self.addCleanup(backlog.write_text, saved)
+        self.addCleanup(project.unlink, missing_ok=True)
+        backlog.write_text(saved + f"- [x] [5] Fable points → {pts}\n")
+        project.write_text("- Orchestrator model: sonnet\n- Big ticket model: claude-fable-5-1\n")
+        jobs = self.board_jobs()
+        self.assertIs(jobs[big]["fable"], True)
+        self.assertIs(jobs[pts]["fable"], True)
+        self.assertNotIn("fable", jobs[plain])
+        for line in ("- Orchestrator model: sonnet\n", "- Big ticket model: opus\n"):
+            project.write_text(line)
+            self.assertNotIn("fable", self.board_jobs()[big], line)
+        project.write_text("- Orchestrator model: sonnet\n- Big ticket model: claude-fable-5-1\n")
+        for stage in ("done", "aborted"):
+            self.edit_job(big, stage=stage)
+            self.assertNotIn("fable", self.board_jobs()[big], stage)
+
     def test_board_data_waiting_on_titles(self):
         b = self.serve.board
         first, untitled, second, kid = (b.cmd_new(self.root, t) for t in ("Owns the migration", "No title", "Parked", "Kid"))
