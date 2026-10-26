@@ -1883,6 +1883,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`B ask $ID 'migrate stopped: we should <what to change> because <why>.' --a \"Try again=approve $ID\" "
                       "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'`", migrate)
 
+    def test_migrate_duplicate_column_auto_reworks(self):
+        migrate = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Migrate", "## Merge")
+        for phrase in ("duplicate-column", "Auto-rework: duplicate column — <the alternative>", "/trevskills-scrum rework",
+                       "never migrate anyway", "dev or prod data", "otherwise fall through"):
+            self.assertIn(phrase, migrate)
+        self.assertLess(migrate.index("Auto-rework: duplicate column"), migrate.index("On any other stop"))
+        self.assertIn("`rework.md`", (ROOT / "agents" / "scrum-digest-reader.md").read_text())
+
     def test_ask_questions_have_no_paths(self):
         for _, span in self.ask_spans():
             q = self.ask_question(span)
