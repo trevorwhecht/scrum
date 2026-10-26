@@ -47,7 +47,22 @@ class ProjectHues(unittest.TestCase):
         text = DASHBOARD.read_text()
         poll = text[text.index("async function poll()"):]
         poll = poll[:poll.index("\n}\n")]
-        self.assertLess(poll.index("projects = (await res.json())"), poll.index("projectHue = projectHues(projects)"))
+        self.assertLess(poll.index("const list = await res.json()"), poll.index("projects = list.map(p => p.name)"))
+        self.assertLess(poll.index("projects = list.map(p => p.name)"), poll.index("projectHue = projectHues(projects)"))
+        self.assertIn("projectColour = Object.fromEntries(list.map(p => [p.name, p.colour ?? null]))", poll)
+
+    def test_override_wins_over_auto_hue(self):
+        text = DASHBOARD.read_text()
+        tail = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "let projectColour = ", "const tagStyle = ", "const tag = ")))
+        got = hues(f"(projectHue = projectHues({json.dumps(SIX)}), (() => {{ {tail}\n"
+                   "projectColour = {'trevskills-scrum': 90, onewitharts: '#a1b2c3', boisepartyco: null};"
+                   "return ['trevskills-scrum', 'onewitharts', 'boisepartyco', 'imessageHelper'].map(tag); })())")
+        self.assertEqual(got, ['<span class="tag" data-project="trevskills-scrum" style="--h:90">trevskills-scrum</span>',
+                               '<span class="tag" data-project="onewitharts" style="--h:150;--c:#a1b2c3">onewitharts</span>',
+                               '<span class="tag" data-project="boisepartyco" style="--h:30">boisepartyco</span>',
+                               '<span class="tag" data-project="imessageHelper" style="--h:210">imessageHelper</span>'])
+        self.assertIn("background:var(--c,hsl(var(--h) 50% 42%))", text[text.index(".tag{"):text.index("}", text.index(".tag{"))],
+                      "--c (a stored #rrggbb) beats the hue in the tag's CSS")
 
 
 class Header(unittest.TestCase):

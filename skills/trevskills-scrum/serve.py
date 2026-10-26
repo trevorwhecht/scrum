@@ -813,6 +813,68 @@ def auto_continue(root: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+COLOUR_RE = re.compile(r"^- Colour: *(\S+)[ \t]*$", re.M)
+COLOUR_ERROR = "colour must be a hue 0-359, #rrggbb or null"
+PROJECT_MD_LOCK = threading.Lock()  # ponytail: one lock for every project.md; only set_colour writes it
+
+
+def parse_colour(value) -> int | str | None:
+    """A project colour: an int (not bool) hue 0-359, or a `#rrggbb` string lowercased. Anything else gives None."""
+    if type(value) is int and 0 <= value <= 359:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        return value.lower()
+    return None
+
+
+def project_colour(root: Path) -> int | str | None:
+    """The `- Colour: <hue|#rrggbb>` line of scrum/project.md, or None (missing, unreadable, no line, or malformed)."""
+    try:
+        m = COLOUR_RE.search((root / "project.md").read_text())
+    except (OSError, ValueError):  # missing, or not UTF-8
+        return None
+    v = m and m.group(1)
+    return parse_colour(int(v) if v and v.isascii() and v.isdigit() else v)
+
+
+def set_colour(root: Path, value) -> tuple[int, dict]:
+    """POST /api/p/<project>/colour: set (a hue or #rrggbb) or remove (None) the one `- Colour:` line of scrum/project.md.
+    The first `- Colour:` line is replaced in place and any others dropped, else one is appended; every other byte stays.
+    Read, edit and write run under PROJECT_MD_LOCK, and the write is a tmp file then os.replace. Never creates the file."""
+    colour = parse_colour(value)
+    if colour is None and value is not None:
+        return 400, {"error": COLOUR_ERROR}
+    path = root / "project.md"
+    with PROJECT_MD_LOCK:
+        try:
+            text = path.read_bytes().decode()
+        except FileNotFoundError:
+            return 409, {"error": "scrum/project.md is missing. Run /trevskills-scrum in that repo first."}
+        except (OSError, ValueError) as e:  # unreadable, or not UTF-8
+            print(f"set_colour: {path}: {e!r}", file=sys.stderr)
+            return 500, {"error": "could not update scrum/project.md"}
+        lines = re.findall(r"[^\n]*\n|[^\n]+", text)  # each keeps its own line ending
+        hits = [i for i, line in enumerate(lines) if line.startswith("- Colour:")]
+        if colour is None and not hits:
+            return 200, {"colour": None}
+        new = f"- Colour: {colour}"
+        if colour is not None and hits:
+            lines[hits[0]] = new + lines[hits[0]][len(lines[hits[0]].rstrip("\r\n")):]
+            hits = hits[1:]
+        elif colour is not None:
+            lines.append(("\n" if text and not text.endswith("\n") else "") + new + "\n")
+        out = "".join(line for i, line in enumerate(lines) if i not in hits)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_bytes(out.encode())
+            os.replace(tmp, path)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            print(f"set_colour: {path}: {e!r}", file=sys.stderr)
+            return 500, {"error": "could not update scrum/project.md"}
+    return 200, {"colour": colour}
+
+
 def claimable(root: Path) -> bool:
     """A backlog line `next` could claim: open, no Human setup, no open prerequisite."""
     return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
@@ -3055,7 +3117,8 @@ class Handler(BaseHTTPRequestHandler):
             data = ai_settings_item(parse_qs(urlparse(self.path).query).get("id", [""])[0])
             return self.send_json(200, data) if data else self.send_json(404, {"error": "no such item"})
         if path == "/api/projects":
-            return self.send_json(200, [{"name": name} for name in board.projects()])
+            return self.send_json(200, [{"name": name, "colour": project_colour(repo / "scrum")}
+                                        for name, repo in board.projects().items()])
         if path == "/api/routing-status":  # the header spans every project, so no scrum dir
             t = time.time()
             s = route.status()  # only the keys the dashboard shows: route.py may still report its local model server
@@ -3146,7 +3209,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise SystemExit("to must be a whole number")
                 code, obj = 200, [{"name": name} for name in board.move_project(body.get("name"), to)]
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/colour|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -3166,6 +3229,10 @@ class Handler(BaseHTTPRequestHandler):
         return 200, read_agent(target)
 
     def route(self, project, root, rest, body):
+        if rest == "/colour":
+            if "colour" not in body:
+                raise SystemExit(COLOUR_ERROR)
+            return set_colour(root, body["colour"])
         if rest == "/attachments":
             return 200, save_attachment(root, body.get("data"), body.get("type"))
         if rest == "/manual-checks":  # tick only: open -> done

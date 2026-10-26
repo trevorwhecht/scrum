@@ -24,6 +24,11 @@ h1{font-size:16px;margin:0}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 #rank{width:min(480px,94vw);overscroll-behavior:contain}#rank .close,#rankBtn,#rankList .btn{min-height:44px;min-width:44px}
 #rankList{list-style:none;margin:0;padding:0;display:grid;gap:6px}#rankList li{display:flex;align-items:center;gap:8px;min-width:0}
+#colour{width:min(480px,94vw);overscroll-behavior:contain}#colour .close,#colourInput,#colourReset{min-height:44px;min-width:44px}
+#colour article{display:grid;gap:12px;padding-top:14px}@media (max-width:640px){#colour{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#colour article{padding-inline:12px}}#colourSwatches{display:grid;grid-template-columns:repeat(6,minmax(44px,1fr));gap:8px}
+#colourSwatches button{min-height:44px;min-width:44px;border:2px solid transparent;border-radius:6px;background:hsl(var(--h) 50% 42%);cursor:pointer;touch-action:manipulation}
+#colourSwatches button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 2px var(--card)}
+#colour label{display:flex;align-items:center;gap:8px}#colourInput{padding:2px;border:1px solid var(--line);border-radius:6px;background:var(--card);cursor:pointer}
 #rankList .rnum{color:var(--muted);min-width:2ch;text-align:right}#rankList .rname{flex:1;min-width:0;overflow-wrap:anywhere}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
 .usage td:nth-child(2),.usage td:nth-child(3),.usage thead th:nth-child(2),.usage thead th:nth-child(3){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -88,7 +93,7 @@ body:has(dialog[open]){overflow:hidden}
 .badge{color:var(--changes);border:1px solid var(--changes)}
 #diverged{padding:12px 20px;border-bottom:1px solid var(--line)}#diverged:empty{display:none}
 #diverged h3{font-size:13px;margin:0 0 4px}#diverged ul{margin:0;padding-left:18px;overflow-wrap:anywhere}
-.tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:hsl(var(--h) 50% 42%)}
+.tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:var(--c,hsl(var(--h) 50% 42%));cursor:pointer}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
@@ -266,6 +271,15 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div class="tabs"><b>Rank</b><button class="close" type="button" aria-label="Close">✕</button></div>
   <article><p class="error" id="rankError" aria-live="polite"></p><ol id="rankList"></ol></article>
 </dialog>
+<dialog id="colour" aria-labelledby="colourTitle">
+  <div class="tabs"><b id="colourTitle"></b><button class="close" type="button" aria-label="Close">✕</button></div>
+  <article>
+    <div id="colourSwatches" role="group" aria-label="Hues"></div>
+    <label>Custom colour <input type="color" id="colourInput"></label>
+    <button class="btn" id="colourReset" type="button" data-agent-hint="Removes the - Colour: line from this project's scrum/project.md, so the tag takes its automatic hue again.">Reset to automatic</button>
+    <p class="error" id="colourError" role="alert"></p>
+  </article>
+</dialog>
 <dialog id="usage" aria-label="Usage">
   <div class="tabs"><b>Usage</b><button class="close" type="button" aria-label="Close">✕</button></div>
   <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
@@ -345,7 +359,10 @@ function projectHues(names) {
 }
 let projectHue = {};  // poll() rebuilds it from projects
 const hue = p => projectHue[p] ?? fnv1a(p) % 12 * 30;
-const tag = p => `<span class="tag" style="--h:${hue(p)}">${esc(p)}</span>`;
+// A stored colour (poll() fills it from GET /api/projects): a hue, or a #rrggbb set as --c, which the .tag CSS prefers.
+let projectColour = {};
+const tagStyle = p => { const c = projectColour[p]; return typeof c === "string" ? `--h:${hue(p)};--c:${esc(c)}` : `--h:${Number.isInteger(c) ? c : hue(p)}`; };
+const tag = p => `<span class="tag" data-project="${esc(p)}" style="${tagStyle(p)}">${esc(p)}</span>`;
 
 // Pinned by test_dashboard_lane_label.
 function laneLabel(job) {
@@ -643,8 +660,10 @@ async function poll() {
     const res = await fetch("api/projects", {cache: "no-store"});
     if (res.status === 404) return $("status").textContent = STALE;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    projects = (await res.json()).map(p => p.name);
+    const list = await res.json();
+    projects = list.map(p => p.name);
     projectHue = projectHues(projects);
+    projectColour = Object.fromEntries(list.map(p => [p.name, p.colour ?? null]));
     if (filter && !projects.includes(filter)) filter = "";
     const [boards, items, checks, runList, roadmapList] = await Promise.all([
       Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
@@ -669,9 +688,9 @@ async function poll() {
     manuals = nextManuals;
     renderSelect($("filter"), filter, true);
     if ($("rank")?.open) renderRank();
-    const text = JSON.stringify([all, runs, backlogs, roadmaps, filter, routes]);
+    const text = JSON.stringify([all, runs, backlogs, roadmaps, filter, routes, projectColour]);
     if (text !== lastText) {
-      jobs = all; lastText = text; render();
+      jobs = all; lastText = text; render(); paintTags();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
       if (openJob) renderDiverged(openJob);
@@ -1713,12 +1732,16 @@ $("board").addEventListener("click", e => {
   if (!$("board").querySelector("[data-more]")) doneCards()[before]?.focus();
 });
 $("board").addEventListener("click", e => {
+  const t = e.target.closest(".tag[data-project]");
+  if (t) return openColour(t.dataset.project);
   const el = e.target.closest(".card");
   if (el?.dataset.roadmap) return openRoadmap(el.dataset.roadmap);
   const job = el && jobs.find(j => j.key === el.dataset.key);
   if (job) open(job);
 });
 $("tabs").addEventListener("click", e => {
+  const t = e.target.closest(".tag[data-project]");
+  if (t) return openColour(t.dataset.project);
   const b = e.target.closest("button[data-file]"), key = $("viewer").dataset.key;
   const job = b && (jobs.find(j => j.key === key) || (key.endsWith("#roadmap") ? roadmapDoc(key.slice(0, -8)) : null));
   if (job) show(job, b.dataset.file);
@@ -1726,6 +1749,55 @@ $("tabs").addEventListener("click", e => {
 document.querySelectorAll("dialog").forEach(d => d.addEventListener("click", e => {
   if ((e.target === d || e.target.closest(".close")) && !(d.id === "aiSettings" && aiBlockLeave())) d.close();
 }));
+
+// The colour dialog: 12 hue swatches (the projectHues slots), a custom #rrggbb and Reset. Each POSTs
+// api/p/<project>/colour, which writes `- Colour:` to that project's scrum/project.md, so every browser sees it.
+const HUE_NAMES = ["Red", "Orange", "Yellow", "Chartreuse", "Green", "Spring green", "Cyan", "Azure", "Blue", "Violet", "Magenta", "Rose"];
+// hsl(h 50% 42%), the tag's own colour, as #rrggbb for the colour input.
+const hueHex = h => "#" + [0, 8, 4].map(n => { const k = (n + h / 30) % 12, v = .42 - .5 * Math.min(.42, .58) * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  return Math.round(v * 255).toString(16).padStart(2, "0"); }).join("");
+// Repaints every tag in the page (board, viewer tabs) and the open colour dialog from projectColour.
+function paintTags() {
+  document.querySelectorAll(".tag[data-project]").forEach(t => t.setAttribute("style", tagStyle(t.dataset.project)));
+  if ($("colour")?.open) renderColour();
+}
+function renderColour() {
+  const p = $("colour").dataset.project, c = projectColour[p], cur = typeof c === "string" ? null : Number.isInteger(c) ? c : hue(p);
+  const box = $("colourSwatches");
+  if (!box) return;
+  if (!box.childElementCount) box.innerHTML = HUE_NAMES.map((n, i) => `<button type="button" data-hue="${i * 30}" style="--h:${i * 30}" aria-label="${n} (${i * 30}°)"></button>`).join("");
+  box.querySelectorAll("[data-hue]").forEach(b => b.setAttribute("aria-pressed", String(Number(b.dataset.hue) === cur)));
+  const input = $("colourInput");
+  if (input && document.activeElement !== input) input.value = typeof c === "string" ? c : hueHex(cur);
+}
+function openColour(p) {
+  const d = $("colour");
+  if (!d) return;
+  d.dataset.project = p;
+  $("colourTitle").textContent = `${p} colour`;
+  $("colourError").textContent = "";
+  renderColour();
+  if (!d.open) d.showModal();
+}
+let colouring = false;
+async function saveColour(colour) {
+  const p = $("colour").dataset.project;
+  if (colouring || !p) return;
+  colouring = true;
+  try {
+    const out = await post(`api/p/${enc(p)}/colour`, {colour});
+    projectColour[p] = out.colour;
+    paintTags();
+    $("colour").close();
+  } catch (err) {
+    $("colourError").textContent = err.message;
+  } finally {
+    colouring = false;
+  }
+}
+$("colourSwatches").addEventListener("click", e => { const b = e.target.closest("[data-hue]"); if (b) saveColour(Number(b.dataset.hue)); });
+$("colourInput").addEventListener("change", e => saveColour(e.target.value));
+$("colourReset").addEventListener("click", () => saveColour(null));
 
 // Pinned by test_dashboard_routing.
 function routingText(s) {
