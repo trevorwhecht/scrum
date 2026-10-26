@@ -3077,7 +3077,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise SystemExit("to must be a whole number")
                 code, obj = 200, [{"name": name} for name in board.move_project(body.get("name"), to)]
             else:
-                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
+                m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path)
                 root = m and scrum_dir(unquote(m.group(1)))
                 code, obj = self.route(unquote(m.group(1)), root, m.group(2), body) \
                     if root else (404, {"error": "no such project or endpoint"})
@@ -3147,6 +3147,8 @@ class Handler(BaseHTTPRequestHandler):
                 return 400, {"error": "decision must be revert"}
             return digest_revert(root, digest_id, unquote(pid))
         job_id, action = board.check_id(rest.split("/")[2]), rest.split("/")[3]
+        if action not in ("abort", "pause", "setup-done", "reopen", "answer", "resume", "approve", "discuss", "rework"):
+            return 404, {"error": "no such action"}  # else it would fall through to rework
         if action == "abort" and not isinstance(body.get("cascade", False), bool):
             raise SystemExit("cascade must be true or false")
         if action == "answer" and body.get("note") is not None and not isinstance(body["note"], str):
