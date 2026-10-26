@@ -16,7 +16,8 @@ class JevModelGaps(unittest.TestCase):
         self.assertLess(new_job.index("jev-gate.py model"), new_job.index("pre-written from the backlog"))
 
     def test_skill_resume_keeps_jev_model(self):
-        resume = (LANES / "resume.md").read_text()
+        merge = (LANES / "merge.md").read_text()
+        resume = merge[merge.index("## Resuming the builder"):]
         step1 = section(resume, "1. Spawn a fresh `scrum-builder`", "\n2. ")
         for phrase in ("jev.log", 'model: "sonnet"', "promote"):
             self.assertIn(phrase, step1, phrase)

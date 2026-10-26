@@ -173,7 +173,7 @@ Ignore a failed `record` call. Logging never blocks the pipeline.
 
 ## Resuming the builder
 
-Read `$HOME/.claude/skills/trevskills-scrum/lanes/resume.md` when this section runs.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section runs.
 
 ## Digest
 

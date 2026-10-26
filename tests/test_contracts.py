@@ -23,7 +23,7 @@ FIRST_LINE = {
 }
 
 SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "trevskills-scrum"
-MOVED = ("setup", "commands", "newjob", "review", "merge", "resume")  # lanes/ files holding sections moved out of SKILL.md
+MOVED = ("setup", "commands", "newjob", "review", "merge")  # lanes/ files holding sections moved out of SKILL.md
 POINTER = re.compile(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", re.M)
 
 
