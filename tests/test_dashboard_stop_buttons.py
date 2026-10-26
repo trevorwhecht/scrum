@@ -179,8 +179,9 @@ class StopBox(unittest.TestCase):
                   "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
         stalled = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
         refusal = "can't resume yet: 222. Fix: click Resume when 222 finish."
-        # The note names what blocks the click, even for a job Trevor paused (whose status line says "Paused by you").
-        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222.")):
+        # The note names what blocks the click only for a job Trevor paused with no waitingOn (its status line says "Paused by you").
+        waiting = {**paused, "waitingOn": {"ids": ["222"], "why": "still running"}}
+        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", None), (waiting, "Play", None)):
             with self.subTest(label=label):
                 for missing in ({}, {"resumeRefusal": None}):
                     html, = js(f"renderActions({json.dumps({**job, **missing})}); out(els.actions.innerHTML);")
@@ -188,7 +189,8 @@ class StopBox(unittest.TestCase):
                 html, = js(f"renderActions({json.dumps({**job, 'resumeRefusal': refusal})}); out(els.actions.innerHTML);")
                 self.assertNotIn('data-act="resume"', html)
                 self.assertNotIn(f">{label}</button>", html)
-                self.assertIn(f'<p class="note" role="status">{want}</p>', html)
+                if want: self.assertIn(f'<p class="note" role="status">{want}</p>', html)
+                else: self.assertNotIn('<p class="note" role="status">', html)
 
     def test_more_menu_open_state_stays_with_its_job(self):
         a, b = {**ASKED, "stage": "build", "reason": None}, {**ASKED, "key": "p/021-r", "id": "021-r", "stage": "build", "reason": None}

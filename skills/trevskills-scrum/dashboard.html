@@ -754,14 +754,14 @@ const moreMenu = job => { const a = abortForm(job); return a ? `<details class="
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
-// When serve.py says a click would be refused (job.resumeRefusal), the waiting status shows in its place: what it waits
-// on, not "Paused by you", which the status line above already says.
+// When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
+// what blocks it, except for a paused job with no waitingOn: it says "Paused by you", so a note gives the refusal.
 const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = job => {
   const reason = job.reason || "";
   if (!RESUMABLE.some(p => reason.startsWith(p))) return "";
-  if (job.resumeRefusal) return `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
+  if (job.resumeRefusal) return !job.paused || job.waitingOn ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
   return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 };
 // A paused job keeps its stage, so its panel takes the not-needs-human branch: Play goes there in place of Pause.
