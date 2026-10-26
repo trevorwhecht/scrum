@@ -1874,6 +1874,15 @@ class ContractTest(unittest.TestCase):
                        "bigboy chain lock held by "):
             self.assertTrue(any(q.startswith(prefix) for q in questions), prefix)
 
+    def test_migrate_waits_on_owning_job(self):
+        migrate = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Migrate", "## Merge")
+        wait = '`B wait-on $ID <that id> --then "approve $ID"`'
+        self.assertIn(wait, migrate)
+        self.assertIn('git -C "$REPO" ls-tree -r --name-only "scrum/<id>"', migrate)
+        self.assertLess(migrate.index(wait), migrate.index("On any other stop"))
+        self.assertIn("`B ask $ID 'migrate stopped: we should <what to change> because <why>.' --a \"Try again=approve $ID\" "
+                      "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'`", migrate)
+
     def test_ask_questions_have_no_paths(self):
         for _, span in self.ask_spans():
             q = self.ask_question(span)

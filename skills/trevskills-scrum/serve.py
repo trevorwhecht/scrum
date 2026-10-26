@@ -172,7 +172,8 @@ def start_ready(project, root, parent_id):
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
     `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
-    them waiting, never needs-human."""
+    them waiting, never needs-human. A `wait-on --then` job comes back at needs-human ("retry") and gets an approve
+    spawn instead, from the same room."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root):
         return
     room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
@@ -180,8 +181,11 @@ def wake_waiting(project, root):
     allow = board.usage_allowance(board.read_usage(), time.time(), live)
     if allow is not None:
         room = min(room, max(0, allow - live))
-    for job_id in board.wake_waiting(root, room)["ready"]:
+    out = board.wake_waiting(root, room)
+    for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
+    for job_id in out.get("retry", []):
+        approve_job(project, root, job_id)
 
 
 def resume_job(project, root, job, jobs, manual=False):
@@ -380,10 +384,10 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     job_id = job["id"]
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        if not refusal.startswith(board.MACHINE_WAIT):
+        if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
             return refused(root, job_id, refusal)
         board.cmd_answer(root, job_id, key)
-        with board.locked_board(root) as b:  # the machine guard queues the pick like a Play; play_queue_tick starts it
+        with board.locked_board(root) as b:  # the machine guard or a sibling queues the pick like a Play; play_queue_tick starts it
             if (live := board.find(b, job_id))["stage"] == "needs-human":
                 live.setdefault("play_queued", board.now())
         return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
@@ -1854,6 +1858,7 @@ def board_with_activity(root, project):
     waiting job with a dependency not yet done or aborted ("not merged yet")."""
     data = json.loads((root / "board.json").read_text())
     stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
+    title = {j.get("id"): j.get("title") or "" for j in data.get("jobs", [])}
     for job in data.get("jobs", []):
         job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
@@ -1866,6 +1871,8 @@ def board_with_activity(root, project):
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
+            job["waitingOn"]["titles"] = [title.get(i, "") for i in job["waitingOn"]["ids"]]
     return data
 
 
@@ -3148,9 +3155,9 @@ class Handler(BaseHTTPRequestHandler):
                 resume_job(project, root, job, jobs, manual=manual)
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
-                if not refusal.startswith(board.MACHINE_WAIT):
+                if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
                     return refused(root, job_id, refusal)
-                with board.locked_board(root) as b:  # the machine guard queues the click; the watchdog starts it
+                with board.locked_board(root) as b:  # the machine guard or a sibling queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
             resume_job(project, root, job, jobs, manual=manual)
