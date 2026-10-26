@@ -63,7 +63,8 @@ or the standard (harness tampering, arXiv 2609.00069).
 
 ### 6. Contract tests `script`
 - Why: `tests/test_contracts.py` pins the wording the pipeline parses; a reworded pin silently breaks a step.
-- Check: `python3 -m unittest tests.test_contracts` passes in the worktree, and every `FIRST_LINE` pin on the base
+- Check: when the repo has `tests/test_contracts.py` (at the base or in the diff), `python3 -m unittest tests.test_contracts`
+  passes in the worktree; and every `FIRST_LINE` pin on the base
   is still in `tests/test_contracts.py` with the same phrase.
 - Fix: change the pinned phrase and its test in the same diff; never drop a `FIRST_LINE` pin.
 
