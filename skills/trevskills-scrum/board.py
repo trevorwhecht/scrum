@@ -48,8 +48,11 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
-  board.py digest-due              print {"due","undigested","questionsGrowth"}: done jobs in no digests/*/jobs.txt and
-                                   questions.log lines since the last digest's questions.lines; due at 10+ jobs or 15+ lines
+  board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
+                                   and questions.log lines since the last digest's questions.lines; due at 10+ jobs ("10
+                                   done"), 15+ lines ("questions"), or 3+ jobs and a bad windows/ scorecard (wasted >20%,
+                                   or first pass <0.5 over 3+ jobs) no digests/*/windows.txt lists, written after the
+                                   newest digest folder ("bad window <file>"); reason null when not due
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), print {"id","jobs"}
                                    (id null = nothing new; starts with no jobs when the questions trigger fired)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
@@ -916,6 +919,11 @@ def diverged(d):
 DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
 QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many lines since the last one
+BAD_WASTED_PCT = 20  # a window scorecard is bad above this wasted_pct
+BAD_FIRST_PASS = 0.5  # ... or below this first_pass_rate, once it has BAD_MIN_JOBS done jobs
+BAD_MIN_JOBS = 3
+EARLY_DIGEST_MIN = 3  # a bad window brings the digest forward once this many done jobs are undigested
+WINDOW_FILE_RE = re.compile(r"(five_hour|seven_day)-\d+\.json")
 
 
 def digested_ids(root):
@@ -948,11 +956,54 @@ def questions_growth(root):
     return questions_lines(root)
 
 
+def bad_window(card: dict) -> bool:
+    """True when a scorecard's wasted_pct is above BAD_WASTED_PCT, or its first_pass_rate is below BAD_FIRST_PASS over
+    BAD_MIN_JOBS+ done jobs. A null or missing field is never bad."""
+    jobs = card.get("done_jobs")
+    return (is_num(card.get("wasted_pct")) and card["wasted_pct"] > BAD_WASTED_PCT) or (
+        is_num(card.get("first_pass_rate")) and card["first_pass_rate"] < BAD_FIRST_PASS
+        and isinstance(jobs, list) and len(jobs) >= BAD_MIN_JOBS)
+
+
+def early_window(root) -> str | None:
+    """The first (by name) bad windows/<window>-<resets_at>.json no digests/*/windows.txt lists, written after the
+    newest NNN digest folder was created (st_birthtime, else st_mtime); None when there is none. Junk is skipped."""
+    root = Path(root)
+    listed, newest = set(), None
+    d = root / "digests"
+    for p in d.iterdir() if d.is_dir() else []:
+        try:
+            if DIGEST_RE.fullmatch(p.name):
+                st = p.stat()
+                newest = max(newest or 0, getattr(st, "st_birthtime", st.st_mtime))
+            if (p / "windows.txt").is_file():
+                listed |= {x.strip() for x in (p / "windows.txt").read_text().splitlines() if x.strip()}
+        except (OSError, UnicodeDecodeError):
+            pass
+    w = root / "windows"
+    for p in sorted(w.iterdir()) if w.is_dir() else []:
+        if not WINDOW_FILE_RE.fullmatch(p.name) or p.name in listed:
+            continue
+        try:
+            card = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        at = _epoch(card.get("written_at")) if isinstance(card, dict) else None
+        if at is not None and (newest is None or at > newest) and bad_window(card):
+            return p.name
+    return None
+
+
 def cmd_digest_due(root):
+    """{"due","undigested","questionsGrowth","reason"}. reason, in this order: "10 done", "questions" or
+    "bad window <file>" (early_window, at EARLY_DIGEST_MIN+ undigested jobs); null when not due."""
     path = Path(root) / "board.json"
     n = len(undigested(root, json.loads(path.read_text()) if path.exists() else {"jobs": []}))
     growth = questions_growth(root)
-    return {"due": n >= 10 or growth >= QUESTIONS_DIGEST_LINES, "undigested": n, "questionsGrowth": growth}
+    reason = "10 done" if n >= 10 else "questions" if growth >= QUESTIONS_DIGEST_LINES else None
+    if reason is None and n >= EARLY_DIGEST_MIN and (name := early_window(root)):
+        reason = f"bad window {name}"
+    return {"due": reason is not None, "undigested": n, "questionsGrowth": growth, "reason": reason}
 
 
 def cmd_digest_start(root):

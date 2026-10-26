@@ -952,7 +952,8 @@ def watchdog_tick():
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
-       tick."""
+       tick.
+    4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one."""
     global RESUME_ROOM
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = False
@@ -1014,7 +1015,20 @@ def watchdog_tick():
             auto_continue_tick(busy)
         except (Exception, SystemExit) as e:
             print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
+    window_tick()
     cooldown_chime()
+
+
+def window_tick():
+    """board.cmd_window_report for every project, each in its own guard. When it wrote a scorecard and digest-due's
+    reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn while one runs)."""
+    for project, repo in board.projects().items():
+        try:
+            root = repo / "scrum"
+            if board.cmd_window_report(root) and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
+                digest_now(project, root)
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
