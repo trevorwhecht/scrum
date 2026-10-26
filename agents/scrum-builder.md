@@ -53,11 +53,14 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
     - Ruling: <what you decided> — <why> — <cost if wrong>
     ## Diverged             ← only when the build departs from spec.md
     - <what the source said> → <what was done instead> — <why>
+    ## Scrum map            ← one `- Scrum map: <edit>` line per map change, or `- none`
     ## Commits
     ## Round N response      ← added for each fix round
     - <reviewer> finding K: fixed in <commit> | declined: <reason>
 
 **Diverged.** Compare your build against spec.md. For every place it departs from what the spec says, add one bullet under `## Diverged` in the shape above. Leave the section out entirely when nothing diverged. A call the spec left open is a Ruling, not a divergence.
+
+**Scrum map.** When the change alters what `~/.claude/scrum-map.md` describes (processes, Codex routing, lanes, pacing/caps, Focus, idle checklist, agent models), write each edit under `## Scrum map` as `- Scrum map: add "<line>" under <map heading>` or `- Scrum map: replace "<old line>" with "<new line>"`, quoting the map's lines exactly. Otherwise write `- none`. You never edit the map yourself (it is outside WORKTREE): Merge applies these lines.
 
 **Resumed runs.** You'll be pointed at a round folder (`JOB_DIR/round-N/`) holding `check.md` and/or `review-*.md`, or at `JOB_DIR/decision.md`, `JOB_DIR/rework.md` or `JOB_DIR/ci.md`:
 - If the worktree is mid-merge (the orchestrator merged the default branch in, and there are conflict markers): resolve every conflict, keeping both sides' intent. Then `git add -A && git commit --no-edit`, and note what you resolved in build.md.

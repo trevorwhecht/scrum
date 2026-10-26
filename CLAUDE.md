@@ -31,8 +31,8 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
   lanes, pacing/caps, Focus, idle checklist). Any change to those (board.py, serve.py, continue.py, routing.json,
   LaunchAgents, lanes, agent models) updates the map in the same chat. It lives outside the repo, so editing
   it never dirties this checkout.
-- A scrum job never edits the map (it is outside WORKTREE): the builder notes the map change in build.md and the
-  approver lists it under `## Manual checks`. Specs need not restate this.
+- A scrum job never edits the map (it is outside WORKTREE): the builder writes each map edit under build.md's
+  `## Scrum map`, and Merge step 7 applies it to the map after the job is done. Specs need not restate this.
 
 ## Git
 - The main checkout stays on `main` and is live in `~/.claude`; scrum jobs branch from `origin/main` and squash-merge
