@@ -4221,9 +4221,9 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(len(list((self.scrum / "jobs" / job_id).rglob("*"))), 6)
         self.assertFalse(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
         self.assertEqual([e["id"] for e in self.serve.digest_auto(self.scrum, "001")["applied"]], ["p2"])
-        self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["decision.md", "feature.md", "spec.md"])
+        self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["decision.md", "feature.md", "round-1", "spec.md"])
         job = next(j for j in json.loads((self.scrum / "board.json").read_text())["jobs"] if j["id"] == job_id)
-        self.assertEqual(job["files"], ["decision.md", "feature.md", "spec.md"])
+        self.assertEqual(job["files"], ["decision.md", "feature.md", "round-1/check.md", "spec.md"])
         self.assertTrue(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
 
 
