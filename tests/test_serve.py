@@ -1927,8 +1927,25 @@ class ServeTest(unittest.TestCase):
             with mock.patch.object(self.serve.subprocess, "run", side_effect=AssertionError("run")) as run, \
                     mock.patch.object(self.serve.subprocess, "Popen", side_effect=AssertionError("popen")) as popen:
                 code, _ = self.req("POST", f"/api/p/repo/jobs/{job_id}/{action}", {})
-            self.assertEqual(code, 409, action)  # the router's fallback is rework with no feedback
+            self.assertEqual(code, 404, action)  # unknown action: the router must not fall through to rework
             run.assert_not_called(); popen.assert_not_called()
+
+    def test_unknown_job_action_is_404_not_rework(self):
+        job_id = self.job("stuck")
+        self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
+        with mock.patch.object(self.serve, "spawn", side_effect=AssertionError("spawn")) as spawn, \
+                mock.patch.object(self.serve.subprocess, "run", side_effect=AssertionError("run")) as run, \
+                mock.patch.object(self.serve.subprocess, "Popen", side_effect=AssertionError("popen")) as popen:
+            for action in ("terminal", "ask", "bogus"):
+                r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/jobs/{job_id}/{action}", method="POST",
+                                           headers={"Content-Type": "application/json"}, data=b'{"feedback": "do it"}')
+                with self.assertRaises(urllib.error.HTTPError) as cm:  # req() drops error bodies
+                    urllib.request.urlopen(r)
+                self.assertEqual((cm.exception.code, json.loads(cm.exception.read())), (404, {"error": "no such action"}), action)
+                cm.exception.close()
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": ""})[0], 400)
+        spawn.assert_not_called(); run.assert_not_called(); popen.assert_not_called()
+        self.assertFalse((self.root / "jobs" / job_id / "rework.md").exists())
 
     def test_discuss_opens_interactive_claude_with_note_as_argv(self):
         job_id = self.job("discuss me")
