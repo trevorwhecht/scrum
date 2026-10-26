@@ -172,7 +172,7 @@ def start_ready(project, root, parent_id):
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
     `start` spawn start_ready makes. A full machine leaves them waiting, never needs-human."""
-    if board.machine_ok(root):
+    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root):
         return
     for job_id in board.wake_waiting(root)["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")

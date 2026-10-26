@@ -2581,16 +2581,22 @@ def cmd_wait_on(root, job_id, blocker) -> dict:
     return {"id": job_id, "waiting_on": dep["id"]}
 
 
+def parked_waiting(job) -> bool:
+    """A job wake_waiting may claim or park: waiting on depends_on, with no parent (cmd_ready's), Human setup or pause."""
+    return bool(job["stage"] == "waiting" and not job.get("parent") and job.get("setup") != "pending"
+                and not job.get("paused") and job.get("depends_on"))
+
+
 def wake_waiting(root) -> dict:
     """Claim (stage -> spec) every parentless waiting job whose depends_on are all done; park one whose dependency was
     aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. Returns {"ready", "lost"}."""
     ready, lost = [], {}
+    if not any(map(parked_waiting, read_board(root)["jobs"])):  # nothing parked: never rewrite board.json each tick
+        return {"ready": ready, "lost": []}
     with locked_board(root) as board:
         stage = {j["id"]: j["stage"] for j in board["jobs"]}
-        for j in board["jobs"]:
-            deps = j.get("depends_on") or []
-            if j["stage"] != "waiting" or j.get("parent") or j.get("setup") == "pending" or j.get("paused") or not deps:
-                continue
+        for j in filter(parked_waiting, board["jobs"]):
+            deps = j["depends_on"]
             gone = [d for d in deps if stage.get(d) in (None, "aborted")]
             if gone:
                 lost[j["id"]] = gone[0]

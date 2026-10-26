@@ -5265,10 +5265,12 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual((self.job("002-second")["stage"], self.job("002-second")["reason"]), ("spec", None))
 
     def test_wake_waiting_failure_still_sweeps_parents(self):
-        self.queue_board({"id": "001-first", "stage": "done"})
-        with mock.patch.object(self.board, "wake_waiting", side_effect=RuntimeError("boom")), \
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.board, "wake_waiting", side_effect=RuntimeError("boom")) as wake, \
                 mock.patch.object(self.serve, "sweep_parents") as sweep:
             self.tick()
+        wake.assert_called_once()
         sweep.assert_called_once()
 
     def test_wake_waiting_holds_while_machine_busy(self):
