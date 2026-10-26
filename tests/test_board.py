@@ -4425,18 +4425,41 @@ class CloudSyncTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "artifactsPending"):
             board.cmd_set(self.root, second, ["artifactsPending=2026-01-01T00:00:00+00:00"])
 
-    def test_cloud_sync_arrived_clears_pending(self):
+    def test_cloud_sync_arrived_keeps_pending(self):
         self.pend(self.job, "done", 1)
+        mark = self.get()["artifactsPending"]
         board.cmd_set(self.root, board.cmd_new(self.root, "Cloud two"), ["stage=cloud"])
         board.artifacts_pushed.return_value = True
         with self.gh([]):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
-        self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get()["artifactsPending"], mark, "arrived: kept until cloud-home starts")
         board.artifacts_pushed.assert_called_once_with(self.root.parent, self.job)
-        self.pend(self.job, "done", 1)  # a gh failure on the pulls call still reports this run's arrivals
+        with self.gh([]):
+            self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
+        self.assertEqual(self.get()["artifactsPending"], mark)
+        # a gh failure on the pulls call still reports this run's arrivals
         with mock.patch.object(board, "gh_api", side_effect=board.GhError("HTTP 502")):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": "HTTP 502"})
+        self.assertEqual(self.get()["artifactsPending"], mark)
+
+    def test_cloud_pending_clear(self):
+        other = board.cmd_new(self.root, "Cloud two")
+        bare = board.cmd_new(self.root, "Cloud three")
+        self.pend(self.job, "done", 1)
+        self.pend(other, "done", 2)
+        other_mark = self.get(other)["artifactsPending"]
+        board.cloud_pending_clear(self.root, self.job)
         self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get(other)["artifactsPending"], other_mark, "other jobs' marks untouched")
+        board.cloud_pending_clear(self.root, self.job)  # already cleared: no-op
+        board.cloud_pending_clear(self.root, bare)  # never marked: no-op
+        board.cloud_pending_clear(self.root, "999-missing")  # not on the board: no-op
+        self.assertNotIn("artifactsPending", self.get(bare))
+        self.assertEqual(self.get(other)["artifactsPending"], other_mark)
+        with mock.patch.object(board, "locked_board", wraps=board.locked_board) as lb:
+            board.cloud_pending_clear(self.root, other)
+        lb.assert_called_once_with(self.root)
+        self.assertNotIn("artifactsPending", self.get(other))
 
     def test_cloud_sync_pending_expires_after_24h(self):
         board.cmd_set(self.root, board.cmd_new(self.root, "Cloud two"), ["stage=cloud"])
@@ -4451,11 +4474,12 @@ class CloudSyncTest(unittest.TestCase):
 
     def test_cloud_sync_pending_only_runs_without_cloud_jobs(self):
         self.pend(self.job, "needs-human", 2)
+        mark = self.get()["artifactsPending"]
         board.artifacts_pushed.return_value = True
         with self.gh([self.pr()]):
             self.assertEqual(board.cmd_cloud_sync(self.root), {"moved": [], "arrived": [self.job], "error": None})
         self.assertEqual(self.calls, [], "no cloud job: no pulls call")
-        self.assertNotIn("artifactsPending", self.get())
+        self.assertEqual(self.get()["artifactsPending"], mark, "arrived: kept until cloud-home starts")
 
     def test_cloud_sync_removes_worktree_when_set_refused(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])

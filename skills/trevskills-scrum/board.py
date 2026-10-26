@@ -97,8 +97,9 @@
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
                                    fixed: reason aborts it and closes the PR instead); only a same-repo scrum/<id> head PR and
                                    its author's comments count. A moved job with no scrum-artifacts/<id> branch yet is
-                                   re-checked each run (24 h max); print {"moved","arrived","error"}, exit 1 on a gh
-                                   error (nothing changed). serve.py runs it every 10 min while a job is in stage cloud
+                                   re-checked each run and keeps its mark until cloud-home starts, or until 24 h pass
+                                   with no branch; print {"moved","arrived","error"}, exit 1 on a gh error (nothing
+                                   changed). serve.py runs it every 10 min while a job is in stage cloud
   board.py spawn <id> <action> ["<prompt>"] [--model M]  start a detached headless `claude -p <prompt>` (default
                                    "/trevskills-scrum <action> <id>") from the repo, logging to runs/; start/resume get the
                                    Orchestrator model unless --model; set the job's runlog (ignored when <id> is not on the
@@ -2812,15 +2813,15 @@ def _cloud_trusted(pr, job_id):
 
 
 def _cloud_arrivals(root, repo):
-    """Re-check every job carrying artifactsPending: drop the mark once scrum-artifacts/<id> exists (returned) or the
-    mark is CLOUD_PENDING_HOURS old (not returned)."""
+    """Re-check every job carrying artifactsPending: return those whose scrum-artifacts/<id> exists, keeping their mark
+    until cloud_pending_clear runs once cloud-home spawns; drop the mark, unreturned, when the branch is missing and
+    the mark is CLOUD_PENDING_HOURS old or unreadable."""
     pending = [j for j in read_board(root)["jobs"] if j.get("artifactsPending")]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=CLOUD_PENDING_HOURS)
     arrived, drop = [], set()
     for job in pending:
         if artifacts_pushed(repo, job["id"]):
             arrived.append(job["id"])
-            drop.add(job["id"])
             continue
         try:
             stale = datetime.fromisoformat(job["artifactsPending"]) < cutoff
@@ -2834,6 +2835,15 @@ def _cloud_arrivals(root, repo):
                 if job["id"] in drop:
                     job.pop("artifactsPending", None)
     return arrived
+
+
+def cloud_pending_clear(root: Path, job_id: str) -> None:
+    """Drop job_id's artifactsPending mark under the board lock (serve.py calls it once cloud-home spawned). A missing
+    job or mark is a no-op."""
+    with locked_board(root) as board:
+        for job in board["jobs"]:
+            if job["id"] == job_id:
+                job.pop("artifactsPending", None)
 
 
 def _cloud_plan(repo, job_id, prs):

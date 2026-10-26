@@ -560,7 +560,8 @@ def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
     each moved job with an artifacts branch or a schema / agent-rules hard stop, and each job whose artifacts arrived
-    late. Errors are printed, never raised."""
+    late, then clear that id's artifactsPending mark (board.cloud_pending_clear) once spawn returns. A skipped or
+    failed spawn keeps the mark, so a later poll reports the id again. Errors are printed, never raised."""
     now = time.time() if now is None else now
     if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
             or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
@@ -575,6 +576,7 @@ def cloud_tick(project, root, jobs, now=None):
         for job_id in dict.fromkeys(homes):
             if not running(project, job_id):
                 spawn(project, root, job_id, "cloud-home", f"/trevskills-scrum cloud-home {job_id}")
+                board.cloud_pending_clear(root, job_id)
     except (Exception, SystemExit) as e:
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 

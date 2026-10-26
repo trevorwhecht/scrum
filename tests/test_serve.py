@@ -5074,12 +5074,50 @@ class CloudPollTest(unittest.TestCase):
                   "worktree": None, "artifacts": False}]
         s = self.serve
         result = {"moved": moved, "arrived": ["003-late", "001-art", "004-busy"], "error": None}
-        with mock.patch.object(s.board, "cmd_cloud_sync", return_value=result), mock.patch.object(s, "spawn") as sp, \
+        order = []
+        with mock.patch.object(s.board, "cmd_cloud_sync", return_value=result), \
+                mock.patch.object(s, "spawn", side_effect=lambda *a: order.append(("spawn", a[2]))) as sp, \
+                mock.patch.object(s.board, "cloud_pending_clear",
+                                  side_effect=lambda root, job_id: order.append(("clear", job_id))) as clear, \
                 mock.patch.object(s, "running", side_effect=lambda project, job_id: job_id == "004-busy"):
             s.cloud_tick("p", self.root, self.cloud, now=10_000)
         self.assertEqual([c.args[2] for c in sp.call_args_list], ["001-art", "005-schema", "003-late"])
         self.assertEqual(sp.call_args_list[2].args,
                          ("p", self.root, "003-late", "cloud-home", "/trevskills-scrum cloud-home 003-late"))
+        self.assertEqual([c.args for c in clear.call_args_list],
+                         [(self.root, "001-art"), (self.root, "005-schema"), (self.root, "003-late")])
+        self.assertEqual(order, [("spawn", "001-art"), ("clear", "001-art"), ("spawn", "005-schema"),
+                                 ("clear", "005-schema"), ("spawn", "003-late"), ("clear", "003-late")],
+                         "each clear runs once, right after its spawn returns; 004-busy gets neither")
+
+    def test_cloud_poll_spawn_failure_keeps_pending(self):
+        s = self.serve
+        real = s.board
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = tmp / "scrum"
+        job_id = real.cmd_new(root, "Late artifacts")
+        with real.locked_board(root) as b:
+            job = real.find(b, job_id)
+            job["stage"], job["artifactsPending"] = "done", real.now()
+        mark = real.read_board(root)["jobs"][0]["artifactsPending"]
+        jobs = real.read_board(root)["jobs"]
+        with mock.patch.object(real, "artifacts_pushed", return_value=True), \
+                mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "spawn", side_effect=RuntimeError("spawn boom")) as sp, \
+                mock.patch.object(s.board, "cloud_pending_clear", wraps=s.board.cloud_pending_clear) as clear, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.cloud_tick("p", root, jobs, now=10_000)
+            self.assertEqual([c.args[2] for c in sp.call_args_list], [job_id])
+            clear.assert_not_called()
+            self.assertEqual(err.getvalue(), "cloud-sync: p: spawn boom\n")
+            self.assertEqual(real.read_board(root)["jobs"][0]["artifactsPending"], mark, "spawn failed: mark kept")
+            jobs = real.read_board(root)["jobs"]
+            sp.side_effect = None
+            s.cloud_tick("p", root, jobs, now=10_000 + s.CLOUD_EVERY)
+        self.assertEqual([c.args[2] for c in sp.call_args_list], [job_id, job_id], "next poll reports it again")
+        clear.assert_called_once_with(root, job_id)
+        self.assertNotIn("artifactsPending", real.read_board(root)["jobs"][0])
 
     def test_cloud_poll_runs_for_pending_without_cloud_job(self):
         jobs = [{"id": "003-late", "stage": "done", "artifactsPending": "2026-10-22T00:00:00+00:00"}]
