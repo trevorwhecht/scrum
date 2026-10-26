@@ -2048,6 +2048,7 @@ MIN_FREE_DISK_GB = 10  # ... or below this much free disk on the repo volume
 MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM (4 GB on 16 GB): memory_pressure's
 #                    free % counts inactive pages as free, so 19 sessions ran at "32% free" with 9 GB swapped (2026-10-24).
 #                    A share of RAM, not of the swap file: macOS resizes the swap file as it frees, so used/total lies too
+MAX_CPU_LOAD_PCT = 150  # ... or with the 5-min load average above this share of all cores (2026-10-25: load ~15 on 8 cores, healthy RAM)
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
 SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
@@ -2085,6 +2086,19 @@ def swap_used_pct():
         return None
     m = re.search(r"used = ([\d.]+)M.*\n(\d+)\s*$", out)
     return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
+
+
+def cpu_load_pct():
+    """The 5-min load average as a percent of all cores (100 = every core busy), or None when unknown (no getloadavg
+    or no core count). SCRUM_CPU_LOAD_PCT stands in for the reading."""
+    fake = os.environ.get("SCRUM_CPU_LOAD_PCT")
+    if fake:
+        return float(fake)
+    cores = os.cpu_count()
+    try:
+        return os.getloadavg()[1] / cores * 100 if cores else None
+    except OSError:
+        return None
 
 
 def free_disk_gb(path):
@@ -2132,7 +2146,8 @@ def swap_grew(swap):
 
 def machine_ok(path, manual=False, claim=False):
     """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
-    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then the session ceiling. Gates new
+    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU load (also skipped for manual
+    clicks), then the session ceiling. Gates new
     claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
@@ -2145,6 +2160,9 @@ def machine_ok(path, manual=False, claim=False):
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
         return f"free disk {disk:.1f} GB (< {MIN_FREE_DISK_GB} GB)"
+    cpu = None if manual else cpu_load_pct()
+    if cpu is not None and cpu > MAX_CPU_LOAD_PCT:
+        return f"CPU load {cpu:.0f}% of {os.cpu_count()} cores, limit {MAX_CPU_LOAD_PCT}%"
     live = live_sessions()
     if live >= MAX_SESSIONS:
         return f"{live} sessions running (ceiling {MAX_SESSIONS})"
