@@ -65,9 +65,12 @@ class RefusedResume(unittest.TestCase):
                     renderActions(jobs[0]); renderActions(jobs[0]); out(els.actions.innerHTML);
                     jobs[0] = {{...jobs[0], resumeRefusal: {json.dumps(MSG)}}}; renderActions(jobs[0]); out(els.actions.innerHTML);""")
                 assert_inline(self, again, label)
-                # The poll swapped Play for the "Waiting:" note: the full reason is still there once, right under it.
+                # The poll swapped the button out; only a paused job gets the "Waiting:" note (its status line hides the reason).
+                # Either way the full reason is still there once.
                 self.assertNotIn('data-act="resume"', waiting)
-                self.assertIn(f'<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>{ALERT}', waiting)
+                note = '<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>'
+                if job is PAUSED: self.assertIn(f'{note}{ALERT}', waiting)
+                else: self.assertNotIn(note, waiting)
                 self.assertEqual(waiting.count(SHOWN), 1, waiting)
 
     def test_refused_resume_reason_clears(self):
