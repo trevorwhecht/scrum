@@ -1535,6 +1535,16 @@ class ContractTest(unittest.TestCase):
         for phrase in (start, "never 8765", check, lsof, 'rm -rf "$T"', "Never use port 3001"):
             self.assertIn(phrase, bullet, f"builder: {phrase}")
 
+    def test_review_ux_db_never_blocks(self):
+        ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        self.assertNotIn("required DB or session backend", ux)
+        self.assertIn("**Database.**", ux)
+        para = ux.split("**Database.**", 1)[1].split("\n\n", 1)[0]
+        for phrase in ("never a reason to write `Rendered: blocked`", "PROJECT's Notes",
+                       "docker start boisepartyco-pg", "5433", "5432", "new columns",
+                       "the `/tmp` harness"):
+            self.assertIn(phrase, para, phrase)
+
     def test_review_ux_ui_digest_rules(self):
         ux = (ROOT / "agents" / "scrum-review-ux.md").read_text()
         ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
