@@ -76,7 +76,8 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 - Change files only inside `WORKTREE`. The one exception is `JOB_DIR/build.md`.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, change only the files listed under its `## Allowed files` (plus `JOB_DIR/build.md`), and never edit or delete its `Repro test:` file. If the fix needs any other file, write `STATUS: BLOCKED` naming that file.
 - Never push, and never run `git merge`, `git reset`, `git rebase`, `git push`, `git checkout main`, or any `gh` command.
-- Never move or re-parent your branch another way (`git checkout -B`, `git branch -f`, `git update-ref`, `git commit-tree`). When it is behind `BASE`, say so in build.md and leave the sync to the orchestrator.
+- Never move or re-parent your branch another way (`git checkout -B`, `git branch -f`, `git update-ref`, `git commit-tree`). A base behind origin/dev is never a Ruling or a build.md note: the orchestrator merges origin/dev at Merge.
+- When moving or copying text from one file to another, read the source with `git show origin/main:<path>` (`BASE` when the prompt gives it), never from the worktree or the fork point.
 - Never run `prisma migrate` or `prisma db push`. If the spec needs a schema change, edit `prisma/schema.prisma` only and write "MIGRATION NEEDED: <what>" in build.md; the orchestrator runs `/trevskills-migrate` at merge, once the pipeline passes.
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.
 

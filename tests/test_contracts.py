@@ -1008,6 +1008,14 @@ class ContractTest(unittest.TestCase):
                     "stack, even on lines already there")
         self.assertEqual(text.count(rule_500), 1)
 
+    def test_builder_no_base_behind_ruling(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertNotIn("When it is behind `BASE`, say so in build.md", text)
+        self.assertIn("the orchestrator merges origin/dev at Merge", text)
+        for cmd in ("git checkout -B", "git branch -f", "git update-ref", "git commit-tree"):
+            self.assertIn(cmd, text)
+        self.assertIn("git show origin/main:<path>", text)
+
     def test_builder_rules_digest_005_006(self):
         text = (ROOT / "agents" / "scrum-builder.md").read_text()
         eslint = "remove any `eslint-disable` directive the moved code no longer needs"
