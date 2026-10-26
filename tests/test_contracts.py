@@ -1334,6 +1334,17 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         self.assertNotIn("curl -sf localhost", text)
 
+    def test_skill_syncs_branch_before_builder(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        s4 = self.section(text, "4. **Worktree:**", "5. **Build:**")
+        self.assertLess(s4.index("git fetch origin"), s4.index("git worktree add"))
+        s5 = text[text.index("5. **Build:** first sync"):]
+        s5 = s5[:s5.index("Record the returned agent id")]
+        self.assertLess(s5.index('git -C "$WT" merge "$BASE" --no-edit'), s5.index("spawn `scrum-builder`"))
+        self.assertIn('git -C "$WT" merge --abort', s5)
+        self.assertIn("never `git merge` except the conflict step in **Merge** and the pre-build sync in **New job**", text)
+        self.assertNotIn("the one sanctioned", text)
+
     def test_skill_pulls_and_restarts_after_merge(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for phrase in ("Restart:", "pull --ff-only", "status --porcelain", "Restart pending",
