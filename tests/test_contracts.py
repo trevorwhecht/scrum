@@ -835,6 +835,27 @@ class ContractTest(unittest.TestCase):
                        "promoted.md", "30", "spawns no subagents"):
             self.assertIn(phrase, mode, phrase)
 
+    def test_lilguy_land_refuses_when_main_behind_origin(self):
+        land = self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**")
+        invoke = land.index("Invoke commitpush only through the Skill tool")
+        fetch = land.find('git -C "$REPO" fetch')
+        self.assertNotEqual(fetch, -1, "no fetch before commitpush")
+        self.assertLess(fetch, invoke)
+        behind = land.find('git -C "$REPO" rev-list HEAD..@{u}')
+        self.assertNotEqual(behind, -1, "no behind check")
+        self.assertLess(fetch, behind)
+        self.assertLess(behind, invoke)
+        sentence = land[land.rfind(". ", 0, fetch) + 1:land.find(". ", fetch)]
+        self.assertIn("$DEFAULT", sentence)
+        ask = ("`B ask $ID 'lilguy: main is behind origin, so the push would be rejected; pull it first, then land "
+               "the change yourself or throw it away.' --a \"Land it myself=abort $ID\" --b 'Throw away the "
+               "changes=shell: git checkout -- <changed tracked files>' --recommend <key> '<why>'`")
+        self.assertIn(ask, land)
+        path_a = next(l for l in land.splitlines() if l.startswith("   - **Path A"))
+        for phrase in ("status --porcelain -- . ':(exclude)scrum'", "rev-list @{u}..HEAD", "commitpush did not finish",
+                       "never"):
+            self.assertIn(phrase, path_a, phrase)
+
     def test_new_job_routes_tiny_jobs_to_lilguy(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
