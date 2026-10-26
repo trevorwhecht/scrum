@@ -817,9 +817,9 @@ const stopIssue = text => noPaths(String(text || "").replace(STOP_PREFIX, "").sp
 const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check: "Checking", review: "Reviewing", approve: "Approving",
   merging: "Merging", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
-// waitingOn(job) helper above.
+// waitingOn(job) helper above; its titles run parallel to ids.
 const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
-  : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).join(", ")} (${job.waitingOn.why})`
+  : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
   : playQueued(job) ? "Queued, starts next"

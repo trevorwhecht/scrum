@@ -3626,6 +3626,90 @@ class BoardTest(unittest.TestCase):
                          "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
 
+    def test_wait_on_then_keeps_worktree_and_records_wake(self):
+        self.wait_board({"id": "001-first", "stage": "review"},
+                        {"id": "002-second", "stage": "approve", "worktree": "/tmp/wt-002", "branch": "scrum/002-second",
+                         "round": 2, "files": ["build.md"], "reason": "old"})
+        out = board.cmd_wait_on(self.root, "002-second", "001", then="approve 002-second")
+        self.assertEqual(out, {"id": "002-second", "waiting_on": "001-first"})
+        job = self.jobs()[1]
+        self.assertEqual({k: v for k, v in job.items() if k != "updatedAt"},
+                         {"id": "002-second", "stage": "waiting", "worktree": "/tmp/wt-002", "branch": "scrum/002-second",
+                          "round": 2, "files": ["build.md"], "reason": "waiting on 001-first",
+                          "depends_on": ["001-first"], "wake": "approve 002-second"})
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            board.main(["--dir", str(self.root), "wait-on", "002-second", "001", "--then", "approve 002-second"])
+        self.assertEqual(json.loads(buf.getvalue()), {"id": "002-second", "waiting_on": "001-first"})
+        self.assertEqual(self.jobs()[1]["wake"], "approve 002-second")
+        self.assertIn('wait-on <id> <blocker> [--then "approve <id>"]', board.__doc__)
+
+    def test_wait_on_then_rejects_other_command(self):
+        self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "approve", "worktree": "/w"})
+        before = (self.root / "board.json").read_text()
+        for then in ("approve 001-first", "resume 002-second", "approve  002-second", "approve 002-second --x", "",
+                     "abort 002-second"):
+            with self.subTest(then=then):
+                with self.assertRaises(SystemExit) as e:
+                    board.cmd_wait_on(self.root, "002-second", "001-first", then=then)
+                self.assertIsInstance(e.exception.code, str)
+                self.assertEqual((self.root / "board.json").read_text(), before)
+        with self.assertRaises(SystemExit):  # the existing checks still run with then
+            board.cmd_wait_on(self.root, "002-second", "002-second", then="approve 002-second")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_wake_waiting_retries_wake_job_at_needs_human(self):
+        self.wait_board({"id": "001-first", "stage": "done"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                         "reason": "waiting on 001-first", "wake": "approve 002-second", "recommend": {"key": "a", "why": "x"}},
+                        {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]},
+                        {"id": "004-par", "stage": "running", "lane": "bigboy", "children": ["005-kid", "006-sib"]},
+                        {"id": "005-kid", "stage": "waiting", "parent": "004-par", "depends_on": ["006-sib"],
+                         "worktree": "/k", "wake": "approve 005-kid"},
+                        {"id": "006-sib", "stage": "done", "parent": "004-par"})
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(board.wake_waiting(self.root, 1), {"ready": [], "lost": [], "retry": ["002-second"]})
+            self.assertEqual([j["stage"] for j in self.jobs()], ["done", "needs-human", "waiting", "running", "waiting", "done"])
+            self.assertEqual(board.wake_waiting(self.root), {"ready": ["003-third"], "lost": [], "retry": ["005-kid"]})
+        play.assert_not_called()
+        for job_id, dep in (("002-second", "001-first"), ("005-kid", "006-sib")):
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            q = f"retry: {dep} is done, so this job tries again."
+            self.assertEqual((job["stage"], job["question"], job["reason"]), ("needs-human", q, q))
+            self.assertEqual(job["options"], [
+                {"key": "a", "label": "Try again", "command": f"approve {job_id}"},
+                {"key": "b", "label": "Remove this job", "command": f"abort {job_id} --cascade"}])
+            self.assertNotIn("wake", job)
+            self.assertNotIn("recommend", job)
+            self.assertIn("worktree", job)
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+
+    def test_cmd_ready_skips_wake_child(self):
+        self.wait_board({"id": "001-par", "stage": "running", "lane": "bigboy", "children": ["002-kid", "003-sib"]},
+                        {"id": "002-kid", "stage": "waiting", "parent": "001-par", "depends_on": ["003-sib"],
+                         "worktree": "/k", "wake": "approve 002-kid"},
+                        {"id": "003-sib", "stage": "done", "parent": "001-par"})
+        with mock.patch.object(board, "machine_ok", return_value=None), \
+                mock.patch.object(board, "usage_allowance", return_value=None), \
+                mock.patch.object(board, "ram_room", return_value=5):
+            self.assertEqual(board.cmd_ready(self.root, "001-par")["ready"], [])
+        self.assertEqual(self.jobs()[1]["stage"], "waiting")
+
+    def test_wake_waiting_wake_job_blocker_aborted_offers_retry(self):
+        self.wait_board({"id": "001-first", "stage": "aborted"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                         "reason": "waiting on 001-first", "wake": "approve 002-second"})
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": ["002-second"]})
+        job = self.jobs()[1]
+        q = "retry: 001-first was aborted or removed, so this job no longer waits on it."
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
+        self.assertNotIn("waiting on", job["reason"])
+        self.assertEqual(job["options"], [
+            {"key": "a", "label": "Try again", "command": "approve 002-second"},
+            {"key": "b", "label": "Remove this job", "command": "abort 002-second --cascade"}])
+        self.assertNotIn("wake", job)
+
 
 class SpawnTest(unittest.TestCase):
     """B spawn: the one headless `claude -p` launcher. SCRUM_CLAUDE / board.CLAUDE point at a stub that records how it ran."""

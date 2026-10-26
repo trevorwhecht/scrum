@@ -712,14 +712,18 @@ class ServeTest(unittest.TestCase):
             (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `{extra}`: why\n")
         with mock.patch.object(self.serve, "spawn") as spawn:
             code, out = self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {})
-        self.assertEqual((code, out), (409, {"error": f"can't resume yet: sibling {sib} shares src/shared.py. "
-                                                      f"Fix: click Resume when {sib} finish."}))
+            self.assertEqual((code, out), (202, {"id": kid, "action": "resume", "queued": True,
+                                                 "message": "queued, starts next"}))
+            mine = lambda: [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in (parent, kid, sib)]
+            self.assertFalse(self.serve.play_queue_tick("repo", self.root, mine()))  # the sibling still holds the file
         spawn.assert_not_called()
         self.assertEqual((self.stage_of(kid)["stage"], self.stage_of(kid)["reason"]), ("needs-human", reason))
+        self.assertIn("play_queued", self.stage_of(kid))
         self.edit_job(sib, stage="done")
-        with mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (202, {"id": kid, "action": "resume"}))
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve.board, "machine_ok", return_value=None):
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, mine()))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+        self.assertNotIn("play_queued", self.stage_of(kid))
 
     def test_dashboard_has_bigboy_lane_option(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
@@ -1037,12 +1041,16 @@ class ServeTest(unittest.TestCase):
         self.assertNotIn("play_queued", self.stage_of(lil))
         blocker = self.serve.board.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         kid = self.asked("resume 1", parent="100-parent")
+        self.addCleanup(self.edit_job, kid, stage="aborted", play_queued=None)  # the shared board: no later tick resumes it
         with mock.patch.object(self.serve.board, "resume_blocker", return_value=blocker):
             code, out, m = self.answer(kid, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
-        self.assertEqual((code, out), (409, {"error": "can't resume yet: sibling 123-sib shares src/x.py. "
-                                                      "Fix: click Resume when 123-sib finish."}))
-        self.assert_nothing_ran(m)
-        self.assertNotIn("play_queued", self.stage_of(kid))
+        self.assertEqual((code, out), (202, {"id": kid, "action": "answer", "command": "resume", "queued": True,
+                                             "message": "queued, starts next"}))
+        m["answer"].assert_called_once_with(self.root.resolve(), kid, "a")
+        for name in ("spawn", "stop", "abort", "resume"):
+            m[name].assert_not_called()
+        self.assertIn("play_queued", self.stage_of(kid))
+        self.assertEqual(self.stage_of(kid)["stage"], "needs-human")
 
     def low_usage(self, base):
         """usage.json at 99 % used on both windows, resets 2 h and 3 days away: allowance 0."""
@@ -1242,10 +1250,9 @@ class ServeTest(unittest.TestCase):
         kid = self.paused_job("Blocked kid", parent="100-parent")
         blocker = b.Blocker("sibling 123-sib shares src/x.py", ["123-sib"])
         with mock.patch.object(b, "resume_blocker", return_value=blocker), mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (409, {
-                "error": "can't resume yet: sibling 123-sib shares src/x.py. Fix: click Resume when 123-sib finish."}))
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {}), (202, {**queued, "id": kid}))
         spawn.assert_not_called()
-        self.assertNotIn("play_queued", self.stage_of(kid))
+        self.assertIn("play_queued", self.stage_of(kid))
 
     # --- cool down (jobs 305, 421): a flag file that holds only new work; in-flight work and Trevor's clicks still start ---
     def cooling(self):
@@ -1483,7 +1490,7 @@ class ServeTest(unittest.TestCase):
         job = self.board_jobs()[kid]
         self.assertEqual(job["resumeRefusal"], f"can't resume yet: sibling {sib} shares skills/x/SKILL.md. "
                                                f"Fix: click Resume when {sib} finish.")
-        self.assertEqual(job["waitingOn"], {"ids": [sib], "why": "shares SKILL.md"})
+        self.assertEqual(job["waitingOn"], {"ids": [sib], "why": "shares SKILL.md", "titles": ["Busy sibling"]})
         B = b.Blocker
         self.assertEqual(self.serve.waiting_on(B("this job runs alone", ["1-a", "2-b"])), {"ids": ["1-a", "2-b"], "why": "runs alone"})
         many = B("sibling 1-a shares a/b/SKILL.md; sibling 2-b runs alone; sibling 3-c shares c/SKILL.md; sibling 4-d shares serve.py",
@@ -1500,10 +1507,26 @@ class ServeTest(unittest.TestCase):
         self.edit_job(second, stage="waiting", depends_on=[first, third], reason=f"waiting on {first}")
         self.edit_job(third, stage="done")
         jobs = self.board_jobs()
-        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first], "why": "not merged yet"})
+        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first], "why": "not merged yet", "titles": ["Blocker one"]})
         self.assertNotIn("waitingOn", jobs[first])
         self.edit_job(first, stage="done")
         self.assertNotIn("waitingOn", self.board_jobs()[second])
+
+    def test_board_data_waiting_on_titles(self):
+        b = self.serve.board
+        first, untitled, second, kid = (b.cmd_new(self.root, t) for t in ("Owns the migration", "No title", "Parked", "Kid"))
+        self.addCleanup(lambda: [self.edit_job(i, stage="aborted") for i in (second, kid)])  # no later tick may claim them
+        self.edit_job(first, stage="merging")
+        self.edit_job(untitled, stage="build", title="")
+        self.edit_job(second, stage="waiting", depends_on=[first, untitled, "999-gone"], reason=f"waiting on {first}")
+        self.edit_job(kid, parent="100-parent", stage="build", paused=True)
+        blocker = b.Blocker(f"sibling {first} runs alone; sibling 998-missing runs alone", [first, "998-missing"])
+        with mock.patch.object(b, "resume_blocker", return_value=blocker), mock.patch.object(b, "machine_ok", return_value=None):
+            jobs = self.board_jobs()
+        self.assertEqual(jobs[second]["waitingOn"], {"ids": [first, untitled, "999-gone"], "why": "not merged yet",
+                                                     "titles": ["Owns the migration", "", ""]})
+        self.assertEqual(jobs[kid]["waitingOn"], {"ids": [first, "998-missing"], "why": "runs alone",
+                                                  "titles": ["Owns the migration", ""]})
 
     def test_board_json_free_job_nulls(self):
         b = self.serve.board
@@ -5701,6 +5724,26 @@ class WatchdogIdleParentTest(unittest.TestCase):
             self.serve.wake_waiting("idle", self.root)
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["002-second"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("spec", "waiting"))
+
+    def test_wake_waiting_spawns_approve_for_wake_job(self):
+        wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                "reason": "waiting on 001-first", "wake": "approve 002-second"}
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake))
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value="free RAM 14% (< 20%)"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake),
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                         [("002-second", "approve", "/trevskills-scrum approve 002-second")])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
 
     def test_wake_waiting_holds_while_machine_busy(self):
         self.queue_board({"id": "001-first", "stage": "done"},
