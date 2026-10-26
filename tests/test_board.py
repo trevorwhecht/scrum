@@ -2528,7 +2528,7 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
 
-    def log_lines(self, n):
+    def write_questions_log(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "questions.log").write_text("".join(f'{{"n": {i}}}\n' for i in range(n)))
 
@@ -2544,17 +2544,17 @@ class BoardTest(unittest.TestCase):
         self.done_jobs(1)
         self.assertEqual(self.cli("digest-start")["id"], "001")
         self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "0\n")
-        self.log_lines(7)
+        self.write_questions_log(7)
         self.done_jobs(1)
         self.assertEqual(self.cli("digest-start")["id"], "002")
         self.assertEqual((self.root / "digests" / "002" / "questions.lines").read_text(), "7\n")
 
     def test_digest_due_on_questions_growth(self):
-        self.log_lines(20)
+        self.write_questions_log(20)
         self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 20})  # no marker yet
         self.marker("001", "5\n")
         self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 15})
-        self.log_lines(19)
+        self.write_questions_log(19)
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14})
         self.marker("002", "30\n")  # the log shrank below the marker
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
@@ -2566,10 +2566,10 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14})
 
     def test_digest_start_on_questions_growth_only(self):
-        self.log_lines(14)
+        self.write_questions_log(14)
         self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
         self.assertFalse((self.root / "digests").exists())
-        self.log_lines(15)
+        self.write_questions_log(15)
         self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": []})
         self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "")
         self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "15\n")
