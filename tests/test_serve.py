@@ -6555,3 +6555,133 @@ class ParkedParentTest(unittest.TestCase):
         self.assertEqual([c for c in spawn.call_args_list if c.args[2] == "run-all"], [],
                          "a stalled child does not park its parent")
         self.assertEqual(self.jobs()["054-run-all"]["reason"], None)
+
+
+class HeavyWaitTest(unittest.TestCase):
+    """Job 340: at 90% used or more on a usage window, only light jobs (fast, lilguy) start or resume; heavy ones wait
+    in place and start by themselves after the reset, or a one-shot start is refused with a 409."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        serve.AUTO_RESUME.clear()
+        self.base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.root = self.base / "repo" / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
+        self.usage = self.base / "usage.json"
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
+        env.start(); self.addCleanup(env.stop)
+        for name, value in (("spawn", None), ("running", False)):
+            p = mock.patch.object(serve, name, return_value=value)
+            setattr(self, name, p.start()); self.addCleanup(p.stop)
+
+    def high(self, used=93):
+        self.usage.write_text(json.dumps({"written_at": time.time(), "rate_limits": {
+            "five_hour": {"used_percentage": used, "resets_at": time.time() + 3600}}}))
+
+    def low(self):
+        self.high(40)
+
+    def put(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j} for j in jobs]}))
+
+    def job(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+
+    def route(self, rest, body=None):
+        return self.serve.Handler.route(None, "repo", self.root, rest, body or {})
+
+    STALLED = "stalled in build: no live session"
+
+    def test_resume_refusal_heavy_and_fast(self):
+        s = self.serve
+        self.put({"id": "001-heavy", "stage": "needs-human", "reason": self.STALLED},
+                 {"id": "002-fast", "stage": "needs-human", "reason": self.STALLED, "lane": "fast"})
+        self.high()
+        for manual in (False, True):
+            refusal = s.resume_refusal("repo", self.root, self.job("001-heavy"), manual=manual)
+            self.assertTrue(refusal.startswith("heavy jobs wait: usage 5h 93% used"), refusal)
+            self.assertIsNone(s.resume_refusal("repo", self.root, self.job("002-fast"), manual=manual))
+        self.low()
+        self.assertIsNone(s.resume_refusal("repo", self.root, self.job("001-heavy")))
+
+    def test_held_job_resumes_after_reset(self):
+        s = self.serve
+        held = {"id": "001-held", "stage": "build", "limitResetAt": int(time.time()) - 600}
+        stalled = {"id": "002-stalled", "stage": "needs-human", "reason": "stalled in plan: no live session",
+                   "runlog": "runs/002.log"}
+        (self.root / "runs").mkdir()
+        (self.root / "runs" / "002.log").write_text("You've hit your limit")
+        self.put(held, stalled)
+        self.high()
+        with mock.patch.object(s, "resume_job") as resume:
+            s.auto_resume("repo", self.root, [self.job("001-held"), self.job("002-stalled")])
+            self.assertEqual(resume.call_args_list, [], "held in place over 90%")
+            self.assertEqual(self.job("001-held")["stage"], "build")
+            self.assertEqual(s.AUTO_RESUME.get("repo/001-held", [0])[0], 0, "a refusal spends no try")
+            self.assertEqual(s.AUTO_RESUME.get("repo/002-stalled", [0])[0], 0)
+            self.low()
+            s.auto_resume("repo", self.root, [self.job("001-held"), self.job("002-stalled")])
+            self.assertEqual(sorted(c.args[2]["id"] for c in resume.call_args_list), ["001-held", "002-stalled"])
+
+    def test_resume_click_queues(self):
+        self.put({"id": "001-heavy", "stage": "needs-human", "reason": self.STALLED})
+        self.high()
+        code, out = self.route("/jobs/001-heavy/resume", {"manual": True})
+        self.assertEqual((code, out["queued"]), (202, True))
+        self.assertTrue(self.job("001-heavy").get("play_queued"))
+        self.assertEqual(self.spawn.call_args_list, [])
+
+    def test_play_queue_skips_heavy(self):
+        s = self.serve
+        self.put({"id": "001-heavy", "stage": "needs-human", "reason": self.STALLED, "play_queued": "2026-01-01T00:00:00"},
+                 {"id": "002-fast", "stage": "needs-human", "reason": self.STALLED, "lane": "fast",
+                  "play_queued": "2026-01-01T00:00:01"})
+        self.high()
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.object(s, "resume_job") as resume:
+            self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
+        self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["002-fast"])
+        self.assertTrue(self.job("001-heavy").get("play_queued"), "the heavy job stays queued")
+        self.assertFalse(self.job("002-fast").get("play_queued"))
+
+    def test_direct_starts_refused(self):
+        q = [{"key": "a", "label": "Approve", "command": "approve 001-heavy"},
+             {"key": "r", "label": "Rework", "command": 'rework 001-heavy "do it again"'}]
+        self.put({"id": "001-heavy", "stage": "needs-human", "reason": "approver says ok", "options": q},
+                 {"id": "002-fast", "stage": "needs-human", "reason": "approver says ok", "lane": "fast"},
+                 {"id": "003-old", "stage": "done", "pr": "https://x/pull/1"})
+        (self.root / "jobs" / "003-old").mkdir()
+        self.high()
+        log = self.root / "questions.log"
+        for rest, body in (("/backlog/run", {}), ("/backlog/run", {"askme": 1}), ("/jobs/003-old/reopen", {}),
+                           ("/jobs/001-heavy/approve", {}), ("/jobs/001-heavy/rework", {"feedback": "again"}),
+                           ("/jobs/001-heavy/answer", {"key": "a"}), ("/jobs/001-heavy/answer", {"key": "r"})):
+            with self.subTest(rest=rest, body=body):
+                code, out = self.route(rest, body)
+                self.assertEqual(code, 409)
+                self.assertTrue(out["error"].startswith("heavy jobs wait: usage 5h 93% used, heavy jobs wait for its "
+                                                        "reset at "), out["error"])
+                self.assertTrue(out["error"].endswith(". Fix: it starts by itself after the reset."), out["error"])
+        self.assertEqual(self.spawn.call_args_list, [])
+        self.assertIn("- [ ] Open item", (self.root / "backlog.md").read_text(), "the backlog line stays open")
+        self.assertEqual([j["id"] for j in json.loads((self.root / "board.json").read_text())["jobs"]],
+                         ["001-heavy", "002-fast", "003-old"], "no new job")
+        self.assertNotIn("\"pick\"", log.read_text() if log.exists() else "", "cmd_answer recorded no pick")
+        self.assertEqual(self.job("001-heavy")["stage"], "needs-human")
+        self.assertEqual(self.route("/jobs/002-fast/approve")[0], 202)
+        self.assertEqual([c.args[2:4] for c in self.spawn.call_args_list], [("002-fast", "approve")])
+
+    def test_auto_continue_skips(self):
+        s = self.serve
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
+        self.put()
+        self.high()
+        with mock.patch.object(self.board, "projects", return_value={"repo": self.root.parent}):
+            s.auto_continue_tick({"repo": False})
+            self.assertEqual(self.spawn.call_args_list, [])
+            self.low()
+            s.auto_continue_tick({"repo": False})
+        self.assertEqual([c.args[2:4] for c in self.spawn.call_args_list], [("run-all", "run-all")])
