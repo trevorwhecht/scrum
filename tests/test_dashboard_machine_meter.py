@@ -2,9 +2,9 @@ import json, re, shutil, subprocess, unittest
 from pathlib import Path
 
 DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum" / "dashboard.html"
-S = {"min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10, "max_cpu_load_pct": 150}
-CPU_NONE = ('<span class="ring none" role="img" style="--pct:0" aria-label="CPU 5-min load — · limit 150%" '
-            'title="CPU 5-min load — · limit 150%">—</span> CPU')
+S = {"min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10, "max_cpu_busy_pct": 90}
+CPU_NONE = ('<span class="ring none" role="img" style="--pct:0" aria-label="CPU busy — · limit 90%" '
+            'title="CPU busy — · limit 90%">—</span> CPU')
 
 
 def fn_body(text, name):
@@ -19,8 +19,11 @@ class MachineMeter(unittest.TestCase):
         meter = re.search(r'<span id="machine"[^>]*>', header)
         self.assertIsNotNone(meter, "the meter sits in <header>")
         self.assertIn(" hidden", meter.group(0), "hidden until the first good fetch")
-        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB[^"]*150%')
-        self.assertIn("5-min", meter.group(0), "the hint names the CPU reading's window")
+        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB[^"]*90%')
+        self.assertIn("averaged over the last 3 watchdog readings", meter.group(0), "the hint names the CPU reading's window")
+        self.assertIn("share of CPU time busy across all cores (0-100%", meter.group(0))
+        for gone in ("5-min", "load average", "150%", "pass 100"):
+            self.assertNotIn(gone, meter.group(0), "the hint no longer describes the load-average ring")
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
         self.assertIn("Trevor's Play and Resume are never tapered", meter.group(0))
         ra = fn_body(text, "renderActions")
@@ -46,7 +49,7 @@ class MachineMeter(unittest.TestCase):
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
         cases = [[14, "ram"], [25, "ram"], [40, "ram"], [30, "swap"], [20, "swap"], [5, "swap"],
                  [5, "disk"], [15, "disk"], [100, "disk"], [None, "ram"],
-                 [190, "cpu"], [145, "cpu"], [40, "cpu"], [None, "cpu"]]
+                 [95, "cpu"], [85, "cpu"], [90, "cpu"], [80, "cpu"], [40, "cpu"], [None, "cpu"]]
         script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
                   f"{fn_body(text, 'renderMachine')}\n"
                   f"const s = {json.dumps(S)};\n"
@@ -71,15 +74,15 @@ class MachineMeter(unittest.TestCase):
                   "const swap = el.innerHTML;\n"
                   "renderMachine({...s, free_ram_pct: 72, swap_pct: 37.1, free_disk_gb: 100, verdict: null});\n"
                   "const stale = el.innerHTML;\n"
-                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 190.4, verdict: 'CPU load 190% of 8 cores, limit 150%'});\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_busy_pct: 95.4, verdict: 'CPU busy 95% (> 90%)'});\n"
                   "const cpu = el.innerHTML;\n"
-                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 144.6, verdict: null});\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_busy_pct: 84.6, verdict: null});\n"
                   "const cpuNear = el.innerHTML;\n"
                   "renderMachine(null);\n"
                   "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap, stale, cpu, cpuNear}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok",
-                                         "danger", "low", "ok", "none"])
+                                         "danger", "low", "low", "ok", "ok", "none"])
         self.assertEqual(out["ok"], [False, '<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free · swap —" title="RAM 34% free · swap —">34%</span> RAM · '
                                             + CPU_NONE + ' · <span class="ok">disk 120 GB</span>'])
         self.assertEqual(out["bad"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 3%" title="RAM 14% free · swap 3%">14%</span> RAM · '
@@ -102,11 +105,11 @@ class MachineMeter(unittest.TestCase):
         self.assertEqual(out["stale"], '<span class="ring low" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span> RAM'
                          + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict turns the ring yellow, not red")
         ring40 = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM'
-        self.assertEqual(out["cpu"], ring40 + ' · <span class="ring danger" role="img" style="--pct:100" aria-label="CPU 5-min load 190% · limit 150%" '
-                         'title="CPU 5-min load 190% · limit 150%">190%</span> CPU · <span class="ok">disk 100 GB</span>',
+        self.assertEqual(out["cpu"], ring40 + ' · <span class="ring danger" role="img" style="--pct:95" aria-label="CPU busy 95% · limit 90%" '
+                         'title="CPU busy 95% · limit 90%">95%</span> CPU · <span class="ok">disk 100 GB</span>',
                          "the red CPU ring already shows the CPU verdict")
-        self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU 5-min load 145% · limit 150%" '
-                         'title="CPU 5-min load 145% · limit 150%">145%</span> CPU · <span class="ok">disk 100 GB</span>')
+        self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:85" aria-label="CPU busy 85% · limit 90%" '
+                         'title="CPU busy 85% · limit 90%">85%</span> CPU · <span class="ok">disk 100 GB</span>')
 
     def test_machine_meter_fable_text(self):
         node = shutil.which("node")

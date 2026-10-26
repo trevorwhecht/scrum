@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # watchdog_tick never runs top or writes the real CPU log
 import serve  # noqa: E402
 
 board = serve.board
