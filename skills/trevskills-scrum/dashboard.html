@@ -16,12 +16,12 @@ body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-ap
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
 #status,#routing,#machine,#cooldownState{color:var(--muted);font-size:12px}
-#cooldown{min-height:44px;min-width:44px}
+#cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 .volwrap{position:relative;display:inline-flex;align-self:center}
 #volume{min-height:44px;min-width:44px;display:inline-grid;place-items:center;padding:0 10px}
 #volume[aria-pressed="true"] .waves{display:none}#volume[aria-pressed="false"] .cross{display:none}
 .volpop{display:none;position:absolute;top:100%;left:0;z-index:5;padding:0 10px;background:var(--card);border:1px solid var(--line);border-radius:6px}
-.volwrap:hover .volpop,.volwrap:focus-within .volpop{display:flex;align-items:center}#volumeLevel{width:140px;min-height:44px;margin:0;accent-color:var(--accent)}#cooldownState{overflow-wrap:anywhere}
+.volwrap:hover .volpop,.volwrap:focus-within .volpop{display:flex;align-items:center}#volumeLevel{width:140px;min-height:44px;margin:0;accent-color:var(--accent)}
 #machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
 #machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:10px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
 #machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
