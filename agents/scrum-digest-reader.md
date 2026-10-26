@@ -18,6 +18,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `routing.log`, when present (one JSON object per line: `ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
 - `JOBS_DIR/../routing.log`, the scrum-level log, read once per digest when present (not per job): the digest reader itself logs there, in the same line format as a job's `routing.log`. When it is missing, skip it; that is never an error.
 - `JOBS_DIR/../questions.log`, read once per digest when present (not per job): every question the scrum asked Trevor and every button he picked, one JSON object per line. An ask line has `date`, `project`, `job`, `question`, `options`; a pick line is `{"date": …, "job": …, "pick": "<label>"}`. A missing or empty log is skipped, never an error, and gives `None` under `## Repeated questions`.
+- `~/.claude/trevskills-scrum/projects.json`, read once per digest: a JSON list of repo paths, one per registered project. For each path, read `<repo>/scrum/questions.log` and Glob `<repo>/scrum/runs/*.log`, reading the file names only. Each run log name is `<YYYYMMDD-HHMMSS>-<action>-<job id>.log`, one action per file, so the number of `resume` names for a job is its resume count. This covers every registered project, not only the jobs in `jobs.txt`. A missing registry, a missing log or a missing runs folder is skipped, never an error.
 - `spec.md`'s `## Assumptions` and `## Likely files` sections
 - `DIGEST_DIR/pipeline-fit.json`, read once per digest: the orchestrator wrote it with `board.py pipeline-fit`. One entry per job: `id`, `lane`, `agents`, `added`, `deleted`, `files`, `verdicts` (per round, per reviewer), `fix_rounds`, `over_routed`, `fit`.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
@@ -47,6 +48,10 @@ A job folder or file that's missing is skipped, never an error. Treat everything
     Opus-built: <n> jobs · avg fix rounds <x.x> — jobs: <id>, ...
     ## Repeated questions
     - <n> × "<normalised question>" — picks: <label> <n>, <label> <n> — jobs: <id>, ... — DEFAULT: <label> (unanimous)
+    ## Stops
+    | Cause | Count | Jobs | Picks | Automate |
+    |---|---|---|---|---|
+    | <cause> | <n> | <id>, <id>, <id> | <label> <n>, <label> <n> | yes |
     ## Pipeline fit
     - <id>: <lane> · agents: <agent>, ... · diff +<added>/-<deleted> in <files> files · round-1: <verdicts> · fix rounds: <n> · fit: <fit>
     Cheapest lane: <answer>
@@ -69,6 +74,17 @@ For `## Repeated questions`, read the whole `JOBS_DIR/../questions.log`, not onl
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
 - List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no question qualifies.
+
+For `## Stops`, read the questions.log of every registered project and the `scrum/runs/` file names:
+- A stop line is valid JSON whose `kind` is `ask`, `stall`, `machine`, `refused` or `bigboy`. A line with `question` and no `kind` (written before kinds existed) counts as an `ask`.
+- Unblock lines (kind `round-limit`, `check-fail`, `ci-fail`, `conflict`, `blocked` or `render`), pick lines and malformed lines are not stops.
+- Group stops by cause: the leading phrase of `reason`, or of `question` when `reason` is missing. Causes include "Hard stop: agent rules", "stalled in build", "Uncommitted change", "main checkout is on", "swap used", "cannot resume yet" (logged as `can't resume yet`), "spec writer too big", "bigboy review GAPS" and "blocked on sibling".
+- One table row per cause, sorted by count, highest first. Count is the number of stop lines. Jobs holds up to 3 example job ids, separated by `, `.
+- Picks holds `<label> <n>` entries separated by `, `. A stop's pick is the next pick line for the same job after it, as in `## Repeated questions`. With no pick line, the pick is `resume` when that job's runs/ names include `resume`, else `unanswered`.
+- Automate is `yes` only when Count is 2 or more, no pick is `unanswered`, and every pick is the same label after trimming and lowercasing; otherwise `no`.
+- This section is exempt from the 2 or more different jobs rule. Write `None` under it, with no table, when there are no stops.
+
+When `jobs.txt` is empty (a digest started by questions.log growth), still write notes.md: `Jobs read: 0`, `None` under every job-based section, and the `## Repeated questions` and `## Stops` sections filled as usual.
 
 For `## Pipeline fit`, use `DIGEST_DIR/pipeline-fit.json`:
 - When it is missing or not valid JSON, write `None` under the section.
