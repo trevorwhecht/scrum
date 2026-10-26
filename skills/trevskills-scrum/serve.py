@@ -2406,17 +2406,23 @@ SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 def valid_proposal(p):
     """The proposal with its status, kind and any stored reason (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
     or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
-    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
+    if isinstance(p, dict) and p.get("kind") == "backlog":  # one queued backlog line: no file, so no target, old or new
+        if not isinstance(p.get("backlog"), str) or not p["backlog"].strip():
+            return None
+        p = {"target": "", "old": "", "new": "", **p}
+    elif isinstance(p, dict) and p.get("old") == p.get("new"):
+        return None
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS):
         return None
     if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
     kind = p.get("kind", "edit")
-    if kind not in ("edit", "skill") or kind == "skill" and (
+    if kind not in ("edit", "skill", "backlog") or kind == "skill" and (
             p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
         return None
     reason = p.get("reason")
     return ({k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "kind": kind}
-            | ({"reason": reason} if isinstance(reason, str) else {}))
+            | ({"backlog": p["backlog"]} if kind == "backlog" else {}) | ({"reason": reason} if isinstance(reason, str) else {}))
 
 
 def read_proposals(path):
@@ -2719,6 +2725,8 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
         return 404, {"error": "no such proposal"}
     if entry["status"] != "applied":
         return 409, {"error": f"proposal is {entry['status']}, not applied"}
+    if entry["kind"] == "backlog":
+        return 409, {"error": "a backlog proposal can't be reverted"}
     if digest_denied(entry["target"]):  # proposals.json is untrusted: never edit a settings or hooks file
         return 409, {"error": "target is not editable"}
     rev = entry | {"old": entry["new"], "new": entry["old"]}
@@ -2761,7 +2769,15 @@ def digest_auto(root, digest_id):
     if not pending:
         return out
     for p in pending:
-        if p["kind"] == "skill":
+        if p["kind"] == "backlog":
+            try:
+                board.cmd_backlog_add(root, [p["backlog"]], priority=3)
+            except (SystemExit, OSError):
+                skip(p, "backlog add failed")
+            else:
+                out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
+                updates[p["id"]] = ("applied", None)
+        elif p["kind"] == "skill":
             if why := digest_queue_skill(root, digest_id, p):
                 skip(p, why)
             else:
