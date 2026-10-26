@@ -28,8 +28,11 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
   - any other target: `digest_write_global` (only an editable AI-Settings item, backed up by `ai_backup`, written in place).
 - `digest_apply(root, digest_id, props, title, feature, mark_applied)`:
   - refuses the whole repo when `digest_apply_ready` gives a reason (not a checkout, detached HEAD, dirty outside scrum/, no tests/test_contracts.py);
-  - per proposal: old text must occur once, write, run `tests.test_contracts` (`digest_contract_ok`), restore the bytes on failure;
-  - commits the passing ones under one lilguy board job, `[scrum <job>] <title>`, never pushed; a commit failure undoes every write and asks.
+  - fetches origin and queues everything when the fetch fails (`fetch failed: ...`) or local `<branch>` is ahead of origin;
+  - applies in a temporary detached worktree at `origin/<branch>`, so the main checkout is never written: per proposal, old text must occur once there, write, run `tests.test_contracts` (`digest_contract_ok(wt)`), restore the bytes on failure;
+  - commits the passing ones in the worktree under one lilguy board job, `[scrum <job>] <title>`, and pushes it to `origin/<branch>`; a commit or push failure queues them all and asks;
+  - then fast-forwards the main checkout after the Merge guard (on `<branch>`, no tracked changes); when that fails the edits stay applied and the job is done with `merged, not live: <why>`;
+  - always removes the temporary worktree.
 - In `digest_auto`, an `old text found N times` result is `skipped`; any other unapplied repo edit becomes a backlog item via `digest_queue_repo_edit` (`queued`).
 - Backlog items carry a pre-written spec from `digest_item_spec`; `queue_digest_item` writes the spec before the backlog line.
 - `digest_skill_check` re-checks a queued skill before its backlog job creates the file.

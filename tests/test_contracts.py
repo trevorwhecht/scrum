@@ -1142,8 +1142,10 @@ class ContractTest(unittest.TestCase):
         for phrase in ("## Stops", "15 lines", "`stall`", "`machine`", "`refused`", "`backlog`"):
             self.assertIn(phrase, digest[:digest.index("\n1. ")], phrase)
         step4 = digest[digest.index("\n4. "):]
-        for phrase in ('"skipped"', "<pid> → <target>: <why>", "queued: <reason>", "skipped: <reason>"):
+        for phrase in ('"skipped"', "<pid> → <target>: <why>", "queued: <reason>", "skipped: <reason>",
+                       "committed and pushed to origin"):
             self.assertIn(phrase, step4, phrase)
+        self.assertNotIn("not pushed", step4)
         for phrase in ("obvious", '"human"', "needs-human card", "last decision trims"):
             self.assertNotIn(phrase, step4, phrase)
             self.assertNotIn(phrase.lower(), digest.lower(), phrase)
