@@ -841,8 +841,8 @@ function renderActions(job) {
   const el = $("actions"), status = $("viewerStatus"), d0 = el.querySelector?.("details.more"), more = d0?.open && d0.dataset?.key === job.key;  // never carry the open menu to another job
   if (status) status.textContent = statusLine(job);
   if (actionError[job.key] && actionError[job.key].stage !== job.stage) delete actionError[job.key];
-  const fail = actionError[job.key], err = fail ? `<p class="error" role="alert">${esc(fail.msg)}</p>`
-    : `<p class="error" role="alert">${job.play_queued ? "queued, starts next" : ""}</p>`;
+  const fail = actionError[job.key], queued = job.play_queued ? '<p class="note" role="status">queued, starts next</p>' : "";  // not an error: muted, no alert
+  const err = queued + (fail ? `<p class="error" role="alert">${esc(fail.msg)}</p>` : '<p class="error" role="alert"></p>');
   el.innerHTML = actionsHtml(job, err);
   if (more) { const d = el.querySelector("details.more"); if (d) d.open = true; }
 }

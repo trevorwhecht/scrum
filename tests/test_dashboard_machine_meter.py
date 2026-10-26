@@ -23,8 +23,11 @@ class MachineMeter(unittest.TestCase):
         self.assertIn("5-min", meter.group(0), "the hint names the CPU reading's window")
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
         self.assertIn("Trevor's Play and Resume are never tapered", meter.group(0))
-        self.assertIn('${job.play_queued ? "queued, starts next" : ""}', fn_body(text, "renderActions"),
-                      "the queued text is drawn from the flag, so a re-render keeps it")
+        ra = fn_body(text, "renderActions")
+        self.assertIn('''job.play_queued ? '<p class="note" role="status">queued, starts next</p>' : ""''', ra,
+                      "the queued text is a neutral note drawn from the flag, so a re-render keeps it")
+        self.assertIn('<p class="error" role="alert"></p>', ra, "the empty error slot stays for failed clicks")
+        self.assertNotRegex(ra, r'role="alert">[^<]*queued')
         poll = fn_body(text, "poll")
         self.assertIn('getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); })', poll)
         self.assertLess(poll.index('api/machine'), poll.index('fetch("api/projects"'),
