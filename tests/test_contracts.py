@@ -789,10 +789,12 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("counts as `standard`", step2)
         self.assertIn("only records the lane", step2)
         step4 = next(l for l in bigboy.splitlines() if l.startswith("4. **Spec refresh**"))
-        for phrase in ("`lane` is `bigboy`", "step 1"):
+        for phrase in ("`lane` is `bigboy`", "step 1", "has no `pr`", "its `done` children's PRs"):
             self.assertIn(phrase, step4, phrase)
+        tracker = (ROOT / "agents" / "scrum-tracker.md").read_text()
+        self.assertIn("A `done` child with no `pr` and a `children` list", tracker)
         step7 = bigboy[bigboy.index("7. **Final BigBoy review.**"):]
-        for phrase in ("When `P` has a `parent` of its own", "run step 5 with `ID=$P`"):
+        for phrase in ("When `P` has a `parent` of its own", "run step 5 with `ID=$P`", "last, after the rest of that branch"):
             self.assertIn(phrase, step7, phrase)
 
     def test_skill_defines_obsolete_stop(self):
