@@ -46,8 +46,10 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
-  board.py digest-due              print {"due","undigested"}: done jobs in no digests/*/jobs.txt; due at 10+
-  board.py digest-start            claim them all as digests/<NNN>/jobs.txt, print {"id","jobs"} (id null = nothing new)
+  board.py digest-due              print {"due","undigested","questionsGrowth"}: done jobs in no digests/*/jobs.txt and
+                                   questions.log lines since the last digest's questions.lines; due at 10+ jobs or 15+ lines
+  board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), print {"id","jobs"}
+                                   (id null = nothing new; starts with no jobs when the questions trigger fired)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
@@ -830,6 +832,7 @@ def diverged(d):
 # --- digests: scrum/digests/<NNN>/jobs.txt lists the done jobs one digest learned from ---
 DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
+QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many lines since the last one
 
 
 def digested_ids(root):
@@ -843,20 +846,42 @@ def undigested(root, board):
     return [j["id"] for j in board["jobs"] if j.get("stage") == "done" and j["id"] not in seen]
 
 
+def questions_lines(root):
+    """Number of newline bytes in <scrum>/questions.log; 0 when it is missing."""
+    path = Path(root) / "questions.log"
+    return path.read_bytes().count(b"\n") if path.is_file() else 0
+
+
+def questions_growth(root):
+    """questions.log lines added since the newest digest with an integer questions.lines and no error.md, floored at 0.
+    With no such digest, the whole line count."""
+    d = Path(root) / "digests"
+    for p in sorted((x for x in d.iterdir() if DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
+        try:
+            if not (p / "error.md").exists() and re.fullmatch(r"\d+", text := (p / "questions.lines").read_text().strip()):
+                return max(questions_lines(root) - int(text), 0)
+        except (OSError, UnicodeDecodeError):
+            pass
+    return questions_lines(root)
+
+
 def cmd_digest_due(root):
     path = Path(root) / "board.json"
     n = len(undigested(root, json.loads(path.read_text()) if path.exists() else {"jobs": []}))
-    return {"due": n >= 10, "undigested": n}
+    growth = questions_growth(root)
+    return {"due": n >= 10 or growth >= QUESTIONS_DIGEST_LINES, "undigested": n, "questionsGrowth": growth}
 
 
 def cmd_digest_start(root):
-    """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job."""
+    """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job. Also starts
+    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES since the last digest; questions.lines records its count."""
     with locked_board(root) as board:
         jobs = undigested(root, board)
-        if not jobs:
+        if not jobs and questions_growth(root) < QUESTIONS_DIGEST_LINES:
             return {"id": None, "jobs": []}
         digest_id = claim_folder(Path(root) / "digests")
         (Path(root) / "digests" / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        (Path(root) / "digests" / digest_id / "questions.lines").write_text(f"{questions_lines(root)}\n")
         return {"id": digest_id, "jobs": jobs}
 
 

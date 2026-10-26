@@ -2439,14 +2439,15 @@ def digests(project, root, brief=False):
         out.append({"id": p.name, "jobs": jobs, "error": error[0] if error else None, "trimmed": (p / "trimmed").exists(),
                     "proposals": [{k: v[k] for k in v if not brief or k not in ("old", "new")}
                                   for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
-    return {"running": running(project, "digest"), "undigested": board.cmd_digest_due(root)["undigested"], "digests": out}
+    due = board.cmd_digest_due(root)
+    return {"running": running(project, "digest"), "undigested": due["undigested"], "due": due["due"], "digests": out}
 
 
 def digest_now(project, root):
     with DIGEST_LOCK:  # two quick clicks must not both pass the running() check
         if running(project, "digest"):
             return 409, {"error": "a digest is already running"}
-        if not board.cmd_digest_due(root)["undigested"]:
+        if not ((due := board.cmd_digest_due(root))["undigested"] or due["due"]):
             return 409, {"error": "nothing new to digest"}
         return 202, {"log": spawn(project, root, "digest", "digest", "/trevskills-scrum digest")}
 
