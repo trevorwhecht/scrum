@@ -97,12 +97,78 @@ class ServeTest(unittest.TestCase):
 
     def test_serves_dashboard_projects_and_project_files_only(self):
         self.assertEqual(self.req("GET", "/dashboard.html")[0], 200)
-        self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo"}]))
+        self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo", "colour": None}]))
         self.serve.board.cmd_new(self.root, "visible")
         self.assertEqual(self.req("GET", "/p/repo/board.json")[0], 200)
         for bad in ("/p/repo/../../calls.jsonl", "/p/repo/%2e%2e/%2e%2e/calls.jsonl", "/p/nope/board.json", "/../../etc/passwd"):
             self.assertEqual(self.req("GET", bad)[0], 404, bad)
         self.assertEqual(self.req("GET", "/api/p/nope/backlog")[0], 404)
+
+    # --- project colour: `- Colour:` in scrum/project.md ---
+    def project_md(self, data):
+        """Write scrum/project.md as these bytes (None removes it); removed again after the test."""
+        path = self.root / "project.md"
+        path.unlink(missing_ok=True)
+        if data is not None:
+            path.write_bytes(data)
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    def test_projects_report_colour(self):
+        self.project_md(None)
+        self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo", "colour": None}]), "no project.md")
+        for line, want in ((b"- Colour: 180", 180), (b"- Colour: #A1B2C3", "#a1b2c3"), (b"- Colour: blue", None),
+                           (b"- Colour: 400", None), (b"- Colour: 18.5", None), (b"- Test: x", None)):
+            self.project_md(b"# Project\n" + line + b"\n")
+            self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo", "colour": want}]), line)
+        self.project_md(b"- Colour: 180\n\xff\xfe\n")
+        self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo", "colour": None}]), "not UTF-8")
+
+    def test_colour_post_sets_and_replaces(self):
+        path = self.project_md(b"# Project\r\n- Test: x\n- Colour: blue\n- Auto continue: 1")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 180}'), (200, {"colour": 180}))
+        self.assertEqual(path.read_bytes(), b"# Project\r\n- Test: x\n- Colour: 180\n- Auto continue: 1")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": "#A1B2C3"}'), (200, {"colour": "#a1b2c3"}))
+        self.assertEqual(path.read_bytes(), b"# Project\r\n- Test: x\n- Colour: #a1b2c3\n- Auto continue: 1")
+        self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "repo", "colour": "#a1b2c3"}]))
+        # No line yet, no trailing newline: one is added first, then the line.
+        path.write_bytes(b"# Project\n- Test: x")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 0}'), (200, {"colour": 0}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Test: x\n- Colour: 0\n")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 359}'), (200, {"colour": 359}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Test: x\n- Colour: 359\n", "posting twice leaves one line")
+        # Two lines (a hand edit): the first is replaced, the second removed.
+        path.write_bytes(b"- Colour: 30\n- Test: x\n- Colour: 60\n")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 90}'), (200, {"colour": 90}))
+        self.assertEqual(path.read_bytes(), b"- Colour: 90\n- Test: x\n")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.name.endswith(".tmp")), [], "no tmp file left")
+
+    def test_colour_post_reset_removes_line(self):
+        path = self.project_md(b"# Project\n- Colour: 180\n- Test: x\n- Colour: #a1b2c3")
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": null}'), (200, {"colour": None}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Test: x\n")
+        ino = path.stat().st_ino
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": null}'), (200, {"colour": None}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Test: x\n")
+        self.assertEqual(path.stat().st_ino, ino, "no line: the file is not rewritten")
+
+    def test_colour_post_rejects_bad_input(self):
+        path = self.project_md(b"# Project\n- Colour: 30\n")
+        bad = (400, {"error": "colour must be a hue 0-359, #rrggbb or null"})
+        for body in (b'{"colour": true}', b'{"colour": 30.0}', b'{"colour": 360}', b'{"colour": -1}', b'{"colour": "#a1b2c"}',
+                     b'{"colour": "blue"}', b'{"colour": "180"}', b'{"colour": "#a1b2c3\\n"}', b'{"colour": [30]}', b'{}'):
+            self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", body), bad, body)
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": '), (400, {"error": "body must be JSON"}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Colour: 30\n")
+        self.assertEqual(self.post_raw_bytes("/api/p/nope/colour", b'{"colour": 30}')[0], 404)
+        with mock.patch.object(self.serve.Path, "read_bytes", side_effect=PermissionError("denied /secret/path")):
+            self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 60}'),
+                             (500, {"error": "could not update scrum/project.md"}))
+        self.assertEqual(path.read_bytes(), b"# Project\n- Colour: 30\n")
+        path.unlink()
+        self.assertEqual(self.post_raw_bytes("/api/p/repo/colour", b'{"colour": 30}'),
+                         (409, {"error": "scrum/project.md is missing. Run /trevskills-scrum in that repo first."}))
+        self.assertFalse(path.exists(), "the endpoint never creates project.md")
 
     # --- Content-Security-Policy on GET /dashboard.html ---
     def headers_of(self, path):
@@ -1340,7 +1406,8 @@ class ServeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
             self.assertEqual(self.raw_post("/api/projects/rank", {"name": "c", "to": 0}),
                              (200, [{"name": "c"}, {"name": "a"}, {"name": "b"}]))
-            self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "c"}, {"name": "a"}, {"name": "b"}]))
+            self.assertEqual(self.req("GET", "/api/projects"), (200, [{"name": "c", "colour": None}, {"name": "a", "colour": None},
+                                                                     {"name": "b", "colour": None}]))
             self.assertEqual([Path(p).name for p in json.loads(reg.read_text())], ["c", "a", "b"])
             ino = reg.stat().st_ino
             self.assertEqual(self.raw_post("/api/projects/rank", {"name": "a", "to": 1}),

@@ -47,8 +47,56 @@ class ProjectHues(unittest.TestCase):
         text = DASHBOARD.read_text()
         poll = text[text.index("async function poll()"):]
         poll = poll[:poll.index("\n}\n")]
-        self.assertLess(poll.index("projects = (await res.json())"), poll.index("projectHue = projectHues(projects)"))
+        self.assertLess(poll.index("const list = await res.json()"), poll.index("projects = list.map(p => p.name)"))
+        self.assertLess(poll.index("projects = list.map(p => p.name)"), poll.index("projectHue = projectHues(projects)"))
+        self.assertIn("projectColour = Object.fromEntries(list.map(p => [p.name, p.colour ?? null]))", poll)
 
+    def test_override_wins_over_auto_hue(self):
+        text = DASHBOARD.read_text()
+        tail = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "let projectColour = ", "const tagStyle = ", "const tag = ")))
+        got = hues(f"(projectHue = projectHues({json.dumps(SIX)}), (() => {{ {tail}\n"
+                   "projectColour = {'trevskills-scrum': 90, onewitharts: '#a1b2c3', boisepartyco: null};"
+                   "return ['trevskills-scrum', 'onewitharts', 'boisepartyco', 'imessageHelper'].map(tag); })())")
+        self.assertEqual(got, ['<span class="tag" data-project="trevskills-scrum" style="--h:90">trevskills-scrum</span>',
+                               '<span class="tag" data-project="onewitharts" style="--h:150;--c:#a1b2c3">onewitharts</span>',
+                               '<span class="tag" data-project="boisepartyco" style="--h:30">boisepartyco</span>',
+                               '<span class="tag" data-project="imessageHelper" style="--h:210">imessageHelper</span>'])
+        self.assertIn("background:var(--c,hsl(var(--h) 50% 42%))", text[text.index(".tag{"):text.index("}", text.index(".tag{"))],
+                      "--c (a stored #rrggbb) beats the hue in the tag's CSS")
+
+
+    def test_stale_colour_reply_leaves_reopened_dialog_alone(self):
+        """Save on project a, close, open project b, then a's POST lands: b's dialog stays open with no error."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        src = text[text.index("function openColour("):text.index('$("colourSwatches").addEventListener')]
+        script = """
+const els = {}, $ = id => els[id] ??= {id, dataset: {}, textContent: "", open: false, showModal() { this.open = true; }, close() { this.open = false; }};
+let projectColour = {}, painted = 0, settle;
+const renderColour = () => {}, paintTags = () => painted++, enc = encodeURIComponent;
+const post = () => new Promise((ok, no) => { settle = {ok, no}; });
+""" + src + """
+(async () => {
+  const out = [];
+  for (const fail of [false, true]) {
+    openColour("a");
+    const saving = saveColour(90);
+    $("colour").close(); openColour("b");
+    fail ? settle.no(new Error("boom")) : settle.ok({colour: 90});
+    await saving;
+    out.push([$("colour").open, $("colour").dataset.project, $("colourError").textContent, projectColour.a ?? null]);
+    $("colour").close();
+  }
+  openColour("a");
+  const saving = saveColour(30); settle.ok({colour: 30}); await saving;
+  out.push([$("colour").open, projectColour.a, painted]);
+  console.log(JSON.stringify(out));
+})();
+"""
+        got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=10).stdout)
+        self.assertEqual(got, [[True, "b", "", 90], [True, "b", "", 90], [False, 30, 2]])
 
 class Header(unittest.TestCase):
     def test_header_has_no_counts(self):

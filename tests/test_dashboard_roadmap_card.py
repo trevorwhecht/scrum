@@ -66,7 +66,7 @@ class RoadmapCard(unittest.TestCase):
         self.assertNotIn('class="card roadmap"', html[html.index('data-col="spec"'):html.index('data-col="needs-human"')])
         card, = run('console.log(JSON.stringify(roadmapCard("p")));', {"p": ACTIVE})
         self.assertTrue(card.startswith('<button class="card roadmap" data-roadmap="p"'), card)
-        for want in ('<span class="tag" style="--h:', '>p</span>', '<span class="lanechip">roadmap</span>',
+        for want in ('<span class="tag" data-project="p" style="--h:', '>p</span>', '<span class="lanechip">roadmap</span>',
                      'Ship &lt;v2&gt;', 'P2/2 Grow · S1/3', 'Build the &lt;grid&gt;', 'next: S2 Polish it',
                      'blocker: <b>002-b review: CHANGES</b>'):
             self.assertIn(want, card)
@@ -151,7 +151,7 @@ class RoadmapCard(unittest.TestCase):
         # A poll re-renders actions only for a board job key (project/id); this key is never one.
         self.assertEqual(got["key"], "p#roadmap")
         text = DASHBOARD.read_text()
-        click = text[text.index('$("board").addEventListener("click", e => {\n  const el = e.target.closest(".card");'):]
+        click = text[text.index('  const el = e.target.closest(".card");\n  if (el?.dataset.roadmap)'):]
         self.assertIn("openRoadmap(", click[:click.index("});")])
 
     def test_render_keeps_focus_on_roadmap_card(self):
