@@ -25,7 +25,7 @@ h1{font-size:16px;margin:0}
 #rank{width:min(480px,94vw);overscroll-behavior:contain}#rank .close,#rankBtn,#rankList .btn{min-height:44px;min-width:44px}
 #rankList{list-style:none;margin:0;padding:0;display:grid;gap:6px}#rankList li{display:flex;align-items:center;gap:8px;min-width:0}
 #colour{width:min(480px,94vw);overscroll-behavior:contain}#colour .close,#colourInput,#colourReset{min-height:44px;min-width:44px}
-#colour article{display:grid;gap:12px;padding-top:14px}@media (max-width:640px){#colour{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#colour article{padding-inline:12px}}#colourSwatches{display:grid;grid-template-columns:repeat(6,minmax(44px,1fr));gap:8px}
+#colour article{display:grid;gap:12px;padding-top:14px}#colourSwatches{display:grid;grid-template-columns:repeat(6,minmax(44px,1fr));gap:8px}
 #colourSwatches button{min-height:44px;min-width:44px;border:2px solid transparent;border-radius:6px;background:hsl(var(--h) 50% 42%);cursor:pointer;touch-action:manipulation}
 #colourSwatches button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 2px var(--card)}
 #colour label{display:flex;align-items:center;gap:8px}#colourInput{padding:2px;border:1px solid var(--line);border-radius:6px;background:var(--card);cursor:pointer}
@@ -212,7 +212,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .prop .id{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-weight:600}
 .prop .chip{background:transparent;color:var(--muted);border:1px solid var(--line)}.prop .chip.applied{color:var(--pass);border-color:var(--pass)}.prop .chip.skipped{color:var(--changes);border-color:var(--changes)}
 .prop .diff div:first-child pre{text-decoration:line-through;color:var(--human)}.prop .diff div:last-child pre{color:var(--pass)}
-@media (max-width:640px){#agents,#aiSettings,#digest,#backlog,#viewer,#usage,#rank{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#viewer{height:100dvh}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article,#usage article,#rank article{padding-inline:12px}
+@media (max-width:640px){#colour,#agents,#aiSettings,#digest,#backlog,#viewer,#usage,#rank{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#viewer{height:100dvh}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article,#usage article,#rank article,#colour article{padding-inline:12px}
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
   header>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}
