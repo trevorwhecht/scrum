@@ -361,6 +361,18 @@ class ContractTest(unittest.TestCase):
         self.assertLess(template.index("## Follow-ups"), template.index("## Dropped"))
         self.assertLess(template.index("## Dropped"), template.index("## Manual checks"))
 
+    def test_spec_writer_requires_prod_run_for_real_data(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("real business data", "never lists its prod run under Out", "test fixtures"):
+            self.assertIn(phrase, text, phrase)
+        self.assertEqual(text.count("real business data"), 1)
+
+    def test_approver_requires_prod_run_for_real_data(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("real business data", "prod run", "backlog-add", "REWORK", "test fixtures"):
+            self.assertIn(phrase, text, phrase)
+        self.assertEqual(text.count("real business data"), 1)
+
     def test_triager_bundles_low_rated(self):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
         for phrase in ("{p:1}", "{p:2}", "even when they are not near-duplicates",
