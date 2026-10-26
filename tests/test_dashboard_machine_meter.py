@@ -2,7 +2,9 @@ import json, re, shutil, subprocess, unittest
 from pathlib import Path
 
 DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum" / "dashboard.html"
-S = {"min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10}
+S = {"min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10, "max_cpu_load_pct": 150}
+CPU_NONE = ('<span class="ring none" role="img" style="--pct:0" aria-label="CPU 5-min load — · limit 150%" '
+            'title="CPU 5-min load — · limit 150%">—</span> CPU')
 
 
 def fn_body(text, name):
@@ -17,7 +19,8 @@ class MachineMeter(unittest.TestCase):
         meter = re.search(r'<span id="machine"[^>]*>', header)
         self.assertIsNotNone(meter, "the meter sits in <header>")
         self.assertIn(" hidden", meter.group(0), "hidden until the first good fetch")
-        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB')
+        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB[^"]*150%')
+        self.assertIn("5-min", meter.group(0), "the hint names the CPU reading's window")
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
         self.assertIn("Trevor's Play and Resume are never tapered", meter.group(0))
         self.assertIn('${job.play_queued ? "queued, starts next" : ""}', fn_body(text, "renderActions"),
@@ -30,6 +33,7 @@ class MachineMeter(unittest.TestCase):
         self.assertIn("el.hidden = !m", render, "a failed or 404 fetch (null) hides the meter")
         self.assertIn("if (!el) return", render, "tolerates a missing element")
         self.assertIn('"—"', render)
+        self.assertEqual(render.count('class="ring '), 1, "RAM and CPU rings share one ring helper")
 
     def test_machine_meter_levels(self):
         node = shutil.which("node")
@@ -38,7 +42,8 @@ class MachineMeter(unittest.TestCase):
         text = DASHBOARD.read_text()
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
         cases = [[14, "ram"], [25, "ram"], [40, "ram"], [30, "swap"], [20, "swap"], [5, "swap"],
-                 [5, "disk"], [15, "disk"], [100, "disk"], [None, "ram"]]
+                 [5, "disk"], [15, "disk"], [100, "disk"], [None, "ram"],
+                 [190, "cpu"], [145, "cpu"], [40, "cpu"], [None, "cpu"]]
         script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
                   f"{fn_body(text, 'renderMachine')}\n"
                   f"const s = {json.dumps(S)};\n"
@@ -63,31 +68,42 @@ class MachineMeter(unittest.TestCase):
                   "const swap = el.innerHTML;\n"
                   "renderMachine({...s, free_ram_pct: 72, swap_pct: 37.1, free_disk_gb: 100, verdict: null});\n"
                   "const stale = el.innerHTML;\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 190.4, verdict: 'CPU load 190% of 8 cores, limit 150%'});\n"
+                  "const cpu = el.innerHTML;\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 144.6, verdict: null});\n"
+                  "const cpuNear = el.innerHTML;\n"
                   "renderMachine(null);\n"
-                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap, stale}));")
+                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap, stale, cpu, cpuNear}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok"])
+        self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok",
+                                         "danger", "low", "ok", "none"])
         self.assertEqual(out["ok"], [False, '<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free · swap —" title="RAM 34% free · swap —">34%</span> RAM · '
-                                            '<span class="ok">disk 120 GB</span>'])
+                                            + CPU_NONE + ' · <span class="ok">disk 120 GB</span>'])
         self.assertEqual(out["bad"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 3%" title="RAM 14% free · swap 3%">14%</span> RAM · '
-                                     '<span class="ok">disk 50 GB</span>', "the red ring already shows the RAM verdict")
+                                     + CPU_NONE + ' · <span class="ok">disk 50 GB</span>', "the red ring already shows the RAM verdict")
         self.assertTrue(out["gone"])
-        base = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · <span class="ok">disk 100 GB</span> · '
+        base = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span> · '
         self.assertEqual(out["use"], [base + '<span class="low">5h 93% · 7d 40% · allowance 1</span>',
                                       base + '<span class="danger">5h 100% · 7d — · allowance 0</span>',
                                       base + '<span class="ok">5h — · 7d 12%</span>',
                                       base + '<span class="ok">usage: unknown</span>'])
         self.assertEqual(out["order"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 1%" title="RAM 14% free · swap 1%">14%</span> RAM · '
-                                       '<span class="ok">disk 100 GB</span> · <span class="ok">usage: unknown</span>')
-        tail = ' · <span class="ok">disk 100 GB</span>'
+                                       + CPU_NONE + ' · <span class="ok">disk 100 GB</span> · <span class="ok">usage: unknown</span>')
+        tail = ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>'
         self.assertEqual(out["rings"], ['<span class="ring low" role="img" style="--pct:75" aria-label="RAM 25% free · swap 1%" title="RAM 25% free · swap 1%">25%</span> RAM' + tail,
                                         '<span class="ring none" role="img" style="--pct:0" aria-label="RAM — · swap 1%" title="RAM — · swap 1%">—</span> RAM' + tail])
         self.assertEqual(out["sessions"], base + '<span class="danger">15 sessions running (ceiling 14)</span>',
                          "a verdict that repeats no shown reading stays, after the usage segment")
         self.assertEqual(out["swap"], '<span class="ring danger" role="img" style="--pct:60" aria-label="RAM 40% free · swap 29%" title="RAM 40% free · swap 29%">40%</span> RAM'
-                         + ' · <span class="ok">disk 100 GB</span>', "swap has no text: it turns the ring red and sits in its tooltip")
+                         + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>', "swap has no text: it turns the ring red and sits in its tooltip")
         self.assertEqual(out["stale"], '<span class="ring low" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span> RAM'
-                         + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict turns the ring yellow, not red")
+                         + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict turns the ring yellow, not red")
+        ring40 = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM'
+        self.assertEqual(out["cpu"], ring40 + ' · <span class="ring danger" role="img" style="--pct:100" aria-label="CPU 5-min load 190% · limit 150%" '
+                         'title="CPU 5-min load 190% · limit 150%">190%</span> CPU · <span class="ok">disk 100 GB</span>',
+                         "the red CPU ring already shows the CPU verdict")
+        self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU 5-min load 145% · limit 150%" '
+                         'title="CPU 5-min load 145% · limit 150%">145%</span> CPU · <span class="ok">disk 100 GB</span>')
 
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()

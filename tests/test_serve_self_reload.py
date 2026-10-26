@@ -12,6 +12,7 @@ os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, w
 os.environ["SCRUM_FREE_RAM"] = "100"
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")
 os.environ["SCRUM_SWAP_PCT"] = "1"
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly idle unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 import serve  # noqa: E402
 

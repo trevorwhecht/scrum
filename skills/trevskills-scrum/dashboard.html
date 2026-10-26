@@ -217,7 +217,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, and free disk, from GET /api/machine on every 2 s poll. RAM is the ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
+  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, CPU load and free disk, from GET /api/machine on every 2 s poll. RAM is the first ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. CPU is a second ring right after RAM: the 5-min load average as a share of all cores (100% = every core busy, a full arc), with the % inside, which can pass 100; new claims, resumes and auto-continue starts also wait above 150%, the ring is yellow within 10 points of that and red past it, grey with — when there is no reading, its tooltip gives the 5-min load and the 150% limit, and Trevor's own Play, Resume and Run skip it. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered."></span>
   <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists cool-down holds only new work: backlog claims (next, Run all, cloud-claim), a Run-all parent's child claims, auto continue and the next roadmap step (board.machine_ok with claim=True). Work already on the board finishes: auto-resumes, queued Plays, orphan respawns, a BigBoy parent's children and final review, and continue.py's Resume POSTs; nothing is stopped. Trevor's own Play, Resume, closed-question answers and Run now still start work. The state text counts the headless sessions still running (board.live_sessions) and reads idle at 0, when serve.py plays one done sound. Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
@@ -559,10 +559,12 @@ function renderSelect(sel, value, withAll) {
   sel.value = value;
 }
 
-// "danger" past board.machine_ok's limit, "low" within 10 points (10 GB) of it, else "ok"; an unknown reading is ok.
+// "danger" past board.machine_ok's limit (above it for swap and CPU, below it for RAM and disk), "low" within 10 points
+// (10 GB) of it, else "ok"; an unknown reading is ok, except CPU's, which is "none" (its grey ring).
 function machineLevel(value, kind, s) {
-  if (value == null) return "ok";
+  if (value == null) return kind === "cpu" ? "none" : "ok";
   const [bad, near] = kind === "swap" ? [value > s.max_swap_pct, value > s.max_swap_pct - 10]
+    : kind === "cpu" ? [value > s.max_cpu_load_pct, value > s.max_cpu_load_pct - 10]
     : kind === "ram" ? [value < s.min_free_ram_pct, value < s.min_free_ram_pct + 10]
     : [value < s.min_free_disk_gb, value < s.min_free_disk_gb + 10];
   return bad ? "danger" : near ? "low" : "ok";
@@ -603,11 +605,18 @@ function renderMachine(m) {
   // and shows in its tooltip, since free RAM and swap are independent.
   const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), /^swap used/.test(m.verdict || "") ? "danger" : m.swap_pct > m.max_swap_pct ? "low" : "ok"];
   const level = ram == null ? "none" : levels.includes("danger") ? "danger" : levels.includes("low") ? "low" : "ok";
-  const tip = `RAM ${ram == null ? "—" : Math.round(ram) + "% free"} · swap ${m.swap_pct == null ? "—" : Math.round(m.swap_pct) + "%"}`;
-  const ring = `<span class="ring ${level}" role="img" style="--pct:${ram == null ? 0 : Math.round(100 - ram)}" aria-label="${tip}" title="${tip}">${ram == null ? "—" : Math.round(ram) + "%"}</span> RAM`;
+  // One ring markup for RAM and CPU: the arc fills pct %, text sits inside, label follows.
+  const ring = (lvl, pct, text, label, tip) =>
+    `<span class="ring ${lvl}" role="img" style="--pct:${pct}" aria-label="${tip}" title="${tip}">${text}</span> ${label}`;
+  const pctText = v => v == null ? "—" : Math.round(v) + "%";
+  const tip = `RAM ${ram == null ? "—" : Math.round(ram) + "% free"} · swap ${pctText(m.swap_pct)}`;
+  // CPU is the 5-min load as a share of all cores; it can pass 100%, so the arc caps there and the number does not.
+  const cpu = m.cpu_load_pct, cpuLevel = machineLevel(cpu, "cpu", m);
   // A red reading already says what the verdict says, so the verdict shows only when it names something else (the session ceiling).
-  const shownRed = level === "danger" || machineLevel(m.free_disk_gb, "disk", m) === "danger";
-  el.innerHTML = [ring,
+  const shownRed = level === "danger" || machineLevel(m.free_disk_gb, "disk", m) === "danger" || cpuLevel === "danger";
+  el.innerHTML = [ring(level, ram == null ? 0 : Math.round(100 - ram), pctText(ram), "RAM", tip),
+    ring(cpuLevel, cpu == null ? 0 : Math.round(Math.min(cpu, 100)), pctText(cpu), "CPU",
+      `CPU 5-min load ${pctText(cpu)} · limit ${esc(m.max_cpu_load_pct)}%`),
     part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }

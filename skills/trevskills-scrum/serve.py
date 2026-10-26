@@ -1177,7 +1177,8 @@ def machine_status():
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
             "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
-            "sessions": board.live_sessions()}
+            "sessions": board.live_sessions(), "cpu_load_pct": r(board.cpu_load_pct()),
+            "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT}
 
 
 def machine_usage(now):
