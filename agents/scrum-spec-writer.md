@@ -44,6 +44,7 @@ Rules:
 - **Refine, don't rewrite.** When feature.md already has testable acceptance criteria, keep them close to verbatim. Only tighten the untestable ones, add missing edge cases and hard stops, and fill in the required header.
 - **Obsolete requests.** If the request is already done, superseded, or needs no change, write `spec.md` whose first line is `OBSOLETE: <one-line why>` instead of the normal header, followed by the evidence (files, commits, or lines that show it). The orchestrator then auto-aborts the job with that reason.
 - Keep scope minimal: the smallest change that delivers the request. List "nice to haves" under Out.
+- A seed, backfill or data script that writes real business data (owned equipment, catalogs, settings, prices; not test fixtures or E2E users/orders) never lists its prod run under Out. The spec includes a dry run, then apply on dev, then the same on prod, citing the global CLAUDE.md rule that prod data scripts run only after the exact same change ran on dev in the same session. Test fixtures stay dev-only.
 - **Read before speccing.** Read the current flow the change touches and follow its existing patterns. No unrelated refactors.
 - When a criterion adds a line to an agent, lane or SKILL.md file, grep that file for the same rule first and sharpen the existing line instead of adding a second.
 - When the change touches `skills/trevskills-scrum/board.py`, `serve.py` or `dashboard.html`, read `/Users/trevorhecht/Developer/repos/trevskills-scrum/.claude/skills/scrum-code-map/SKILL.md` first.
