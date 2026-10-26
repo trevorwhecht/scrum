@@ -65,6 +65,39 @@ class ProjectHues(unittest.TestCase):
                       "--c (a stored #rrggbb) beats the hue in the tag's CSS")
 
 
+    def test_stale_colour_reply_leaves_reopened_dialog_alone(self):
+        """Save on project a, close, open project b, then a's POST lands: b's dialog stays open with no error."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        src = text[text.index("function openColour("):text.index('$("colourSwatches").addEventListener')]
+        script = """
+const els = {}, $ = id => els[id] ??= {id, dataset: {}, textContent: "", open: false, showModal() { this.open = true; }, close() { this.open = false; }};
+let projectColour = {}, painted = 0, settle;
+const renderColour = () => {}, paintTags = () => painted++, enc = encodeURIComponent;
+const post = () => new Promise((ok, no) => { settle = {ok, no}; });
+""" + src + """
+(async () => {
+  const out = [];
+  for (const fail of [false, true]) {
+    openColour("a");
+    const saving = saveColour(90);
+    $("colour").close(); openColour("b");
+    fail ? settle.no(new Error("boom")) : settle.ok({colour: 90});
+    await saving;
+    out.push([$("colour").open, $("colour").dataset.project, $("colourError").textContent, projectColour.a ?? null]);
+    $("colour").close();
+  }
+  openColour("a");
+  const saving = saveColour(30); settle.ok({colour: 30}); await saving;
+  out.push([$("colour").open, projectColour.a, painted]);
+  console.log(JSON.stringify(out));
+})();
+"""
+        got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=10).stdout)
+        self.assertEqual(got, [[True, "b", "", 90], [True, "b", "", 90], [False, 30, 2]])
+
 class Header(unittest.TestCase):
     def test_header_has_no_counts(self):
         got, = run('render(); console.log(JSON.stringify(els.status.textContent));', {"p": None})

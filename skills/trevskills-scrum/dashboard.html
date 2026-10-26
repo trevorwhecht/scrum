@@ -1774,23 +1774,27 @@ function openColour(p) {
   const d = $("colour");
   if (!d) return;
   d.dataset.project = p;
+  colourSeq++;
   $("colourTitle").textContent = `${p} colour`;
   $("colourError").textContent = "";
   renderColour();
   if (!d.open) d.showModal();
 }
-let colouring = false;
+// colourSeq counts opens: a reply that lands after the dialog closed or reopened (maybe on another project) still
+// repaints the tags, but never closes or writes an error into the dialog now showing.
+let colouring = false, colourSeq = 0;
 async function saveColour(colour) {
-  const p = $("colour").dataset.project;
+  const p = $("colour").dataset.project, seq = colourSeq;
   if (colouring || !p) return;
   colouring = true;
+  const same = () => seq === colourSeq && $("colour").open;
   try {
     const out = await post(`api/p/${enc(p)}/colour`, {colour});
     projectColour[p] = out.colour;
     paintTags();
-    $("colour").close();
+    if (same()) $("colour").close();
   } catch (err) {
-    $("colourError").textContent = err.message;
+    if (same()) $("colourError").textContent = err.message;
   } finally {
     colouring = false;
   }
