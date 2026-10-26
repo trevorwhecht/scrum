@@ -16,8 +16,8 @@ Source: `research/skill-standards-gate.md`.
 
 ## Human-only set
 
-A diff touching any of these never merges unattended (rule 8): this file, `B rules-check`'s code (the
-`# --- rules-check:` block in `board.py` and every board.py line naming rules-check),
+A diff touching any of these never merges unattended (rule 8): this doc's own `## Human-only set` section,
+`B rules-check`'s code (the `# --- rules-check:` block in `board.py` and every board.py line naming rules-check),
 `agents/scrum-review-rules.md`, `skills/trevskills-scrum/lanes/rules-gate.md`, the Merge step 1 guard bullets in
 `SKILL.md` (from `1. **Preconditions:**` to step 2), and the never-list at the top of `SKILL.md` (from
 `This skill is a sanctioned exception` to `## Setup`). Why: no unattended diff may loosen the gate, the checker

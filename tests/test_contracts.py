@@ -1988,13 +1988,10 @@ class ContractTest(unittest.TestCase):
         dash = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         stop_prefix = re.compile(re.search(r"const STOP_PREFIX = /(.+)/;", dash).group(1))
         skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        pre = self.section(skill, "1. **Preconditions:**", "\n2. ")
         # Pinned machine prefixes the dashboard regex cannot strip (a placeholder or id follows them).
         fixed = ("bigboy chain lock held by ",)
         checked = 0
         for name, span in self.ask_spans():
-            if name == "rules-gate" or (name == "SKILL" and span in pre):
-                continue
             q = stop_prefix.sub("", self.ask_question(span), count=1)
             q = next((q[len(f):] for f in fixed if q.startswith(f)), q)
             checked += 1
@@ -2045,7 +2042,17 @@ class ContractTest(unittest.TestCase):
         for phrase in ('`B rules-check $ID --worktree "$WT" --base "$BASE"`', "spawn `scrum-review-rules` and wait for it",
                        "HEAD=$HEAD", "its second line is `Reviewed: $HEAD`, reuse it",
                        "is `VERDICT: PASS` and its second line is `Reviewed: $HEAD`, continue Merge without a human",
-                       "`B ask $ID 'Hard stop: agent rules — this change edits scrum rules files, listed in stop.md; <why>'",
+                       "`B ask $ID 'Hard stop: agent rules — This change edits the rules the scrum agents follow, and agents "
+                       "may not merge it on their own because <plain fail>. The code reviews and tests passed. Merge anyway "
+                       "merges it as is; Send back with a note returns it to the builder to fix. The changed files are in "
+                       "the stop.md tab of this job.'",
+                       "--b 'Send back with a note=rework <id> \"<fail>: read rules-review.md, then fix it so B rules-check "
+                       "exits 0 and the rules review is PASS\"' --recommend <key> '<why>'`",
+                       "This file, the `## Human-only set` section of `docs/skill-standards.md`, `B rules-check`'s code, ",
+                       "(only board.py outside the rules-check code, or docs/skill-standards.md outside its Human-only set, "
+                       "changed)", "it changes <part>, which only Trevor may merge",
+                       "the rules reviewer asked for changes, and its notes are in the rules-review.md tab",
+                       "the automatic rules check could not run",
                        "Write the matching files to `$F/jobs/$ID/stop.md`",
                        '--a "Merge anyway=approve $ID"', "--b 'Send back with a note=rework <id>",
                        "a missing or unreadable file, another HEAD) counts as CHANGES"):
@@ -2547,8 +2554,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_merge_gh_missing_fix_installs_first(self):
         text = skill_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
-        self.assertIn("GitHub CLI is not installed or not signed in, so the branch is local only; run brew "
-                      "install gh, then gh auth login, before you retry.\" --a \"Try again=approve $ID\"", merge)
+        self.assertIn("GitHub CLI is not installed or not signed in, so this job cannot push its branch or open a pull "
+                      "request. Run brew install gh, then gh auth login, then press Try again.\" --a \"Try again=approve $ID\"",
+                      merge)
         self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
 
 
@@ -3018,6 +3026,8 @@ class RulesCheckTest(unittest.TestCase):
     CONTRACTS = ('import unittest\nFIRST_LINE = {\n    "scrum-demo": "DEMO: OK",\n}\n\n\n'
                  'class T(unittest.TestCase):\n    def test_ok(self):\n        pass\n')
     BOARD = "x = 1\n# --- rules-check: the script half\ny = 2\n# --- end rules-check\nz = 3\n"
+    STANDARDS = ("# Standards\n\nIntro.\n\n## Human-only set\n\nOnly Trevor merges these.\n\n## Script rules\n\n"
+                 "### 1. Names\n")
     LIKELY = ("## Likely files\n- `agents/scrum-demo.md`\n- `skills/trevskills-scrum/SKILL.md`\n"
               "- `skills/trevskills-scrum/lanes/*.md`\n- `tests/test_contracts.py`\n- `skills/trevskills-scrum/board.py`\n"
               "- `docs/skill-standards.md`\n")
@@ -3040,7 +3050,7 @@ class RulesCheckTest(unittest.TestCase):
         files = {"agents/scrum-demo.md": self.AGENT, "skills/trevskills-scrum/SKILL.md": self.SKILL,
                  "skills/trevskills-scrum/lanes/demo.md": "# Demo lane\n\nStep one.\n",
                  "tests/test_contracts.py": self.CONTRACTS, "skills/trevskills-scrum/board.py": self.BOARD,
-                 "README.md": "readme\n"}
+                 "docs/skill-standards.md": self.STANDARDS, "README.md": "readme\n"}
         for rel, text in files.items():
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / rel).write_text(text)
@@ -3259,16 +3269,35 @@ class RulesCheckTest(unittest.TestCase):
                 self.assert_fails(f"rule 7: {y} is not named")
 
     def test_rule8_human_only_files(self):
-        for rel in ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"):
+        for rel in ("agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"):
             with self.subTest(rel=rel):
                 self.commit(rel, "---\nname: scrum-review-rules\ndescription: Grades rules.\n---\n\nx\n")
-                self.assert_fails(f"rule 8: {rel} is human-only")
+                out = self.assert_fails(f"rule 8: changes {rel}, which only Trevor may merge")
+                self.assertFalse(any("human-only" in f for f in out["failures"]), out)
+
+    def test_rule8_standards_doc_outside_section_passes(self):
+        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Intro.", "Intro, reworded."))
+        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+
+    def test_rule8_standards_doc_human_only_set_fails(self):
+        self.assertEqual(self.board.HUMAN_ONLY_FILES,
+                         ("agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"))
+        self.assertEqual(self.board.HUMAN_ONLY_SECTIONS["docs/skill-standards.md"],
+                         [("the Human-only set", "## Human-only set", "\n## Script rules")])
+        msg = "rule 8: changes the Human-only set in docs/skill-standards.md, which only Trevor may merge"
+        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Only Trevor", "Agents"))
+        self.assert_fails(msg)
+        self.commit("docs/skill-standards.md", self.STANDARDS.replace("## Script rules", "## Rules"))
+        self.assert_fails(msg)
 
     def test_rule8_never_list_and_guard_bullets(self):
         self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("- never push main\n", ""))
-        self.assert_fails("rule 8: skills/trevskills-scrum/SKILL.md: the never-list")
+        self.assert_fails("rule 8: changes the never-list in skills/trevskills-scrum/SKILL.md, which only Trevor may merge")
         self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("stop for Trevor.", "merge."))
-        out = self.assert_fails("rule 8: skills/trevskills-scrum/SKILL.md: the Merge step 1 guard bullets")
+        out = self.assert_fails("rule 8: changes the Merge step 1 guard bullets in skills/trevskills-scrum/SKILL.md, "
+                                "which only Trevor may merge")
         self.assertFalse(any("never-list" in f for f in out["failures"]), out)
 
     def test_rule8_skill_md_outside_human_only_sections_passes(self):
@@ -3282,7 +3311,7 @@ class RulesCheckTest(unittest.TestCase):
         code, out = self.run_cli()
         self.assertEqual((code, out["failures"]), (0, []), out)
         self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("y = 2", "y = 0"))
-        self.assert_fails("rule 8: skills/trevskills-scrum/board.py: the rules-check code")
+        self.assert_fails("rule 8: changes the rules-check code in skills/trevskills-scrum/board.py, which only Trevor may merge")
 
     def test_board_py_only_edit_outside_rules_check_passes(self):
         """The Merge guard also routes board.py diffs here; one that leaves the rules-check code alone passes."""

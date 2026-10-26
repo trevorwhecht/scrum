@@ -1548,7 +1548,7 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
     """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
     and every cited proposal's file changed; else {"ok": False, "error"}. worktree/base, when not None, replace the
     board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails. Any human-only
-    path (HUMAN_ONLY_FILES or board.py) in the diff always fails."""
+    path (HUMAN_ONLY_FILES or board.py) in the diff, or a changed HUMAN_ONLY_SECTIONS section, always fails."""
     try:
         job = find(read_board(root), check_id(job_id))
         feature = Path(root) / "jobs" / job_id / "feature.md"
@@ -1569,6 +1569,19 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
         diff = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
         if bad := next((f for f in diff if f in HUMAN_ONLY_FILES or f == "skills/trevskills-scrum/board.py"), None):
             raise ValueError(f"{bad} is human-only; digest-verify never clears it")
+        mb = _git(wt, "merge-base", base, "HEAD").decode().strip()
+
+        def show(rev, f):
+            try:
+                return _git(wt, "show", f"{rev}:{f}").decode()
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        for f in diff:
+            if f in HUMAN_ONLY_SECTIONS:
+                before, after = _human_only_parts(f, show(mb, f)), _human_only_parts(f, show("HEAD", f))
+                if label := next((k for k in before if before[k] != after[k] or after[k] is None), None):
+                    raise ValueError(f"{f}: {label} changed; it is human-only and digest-verify never clears it")
         changed = [f for f in diff if RULES_RE.search(f)]
         if not changed:
             raise ValueError("the diff changes no rules file")
@@ -1576,12 +1589,9 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
             raise ValueError(f"{extra} changed but no cited proposal targets it")
         if missing := next((f for f in by_file if f not in changed), None):
             raise ValueError(f"{missing} is a cited proposal's target but is not changed")
-        mb = _git(wt, "merge-base", base, "HEAD").decode().strip()
         for f in changed:
-            try:
-                before = _git(wt, "show", f"{mb}:{f}").decode()
-                after = _git(wt, "show", f"HEAD:{f}").decode()
-            except (ValueError, UnicodeDecodeError):
+            before, after = show(mb, f), show("HEAD", f)
+            if before is None or after is None:
                 raise ValueError(f"{f}: missing or unreadable at the merge-base or HEAD")
             if not _applies(before, by_file[f], after):
                 raise ValueError(f"{f}: HEAD is not exactly the merge-base with its cited proposals applied")
@@ -1600,12 +1610,13 @@ OTHER_LANE_RE = re.compile(r"lanes/([\w-]+)\.md")
 NAME_MAX, DESC_MAX, AGENT_DESCS_MAX_TOKENS = 64, 1024, 15000  # the skill spec's limits; sub-agents warn past 15k tokens
 BODY_MAX_LINES, BODY_MAX_TOKENS = 500, 5000  # skill best practices: under 500 lines; agentskills.io: 5k-token body
 REF_TOC_LINES, TOC_WITHIN = 100, 10  # best practices: a reference over 100 lines starts with a contents list
-HUMAN_ONLY_FILES = ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md")
+HUMAN_ONLY_FILES = ("agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md")
 HUMAN_ONLY_SECTIONS = {
     "skills/trevskills-scrum/SKILL.md": [
         ("the never-list", "This skill is a sanctioned exception", "\n## Setup"),
         ("the Merge step 1 guard bullets", "1. **Preconditions:**", "\n2. Run `B set $ID stage=merging`")],
     "skills/trevskills-scrum/board.py": [("the rules-check code", "# --- rules-check:", "# --- end rules-check")],
+    "docs/skill-standards.md": [("the Human-only set", "## Human-only set", "\n## Script rules")],
 }
 
 
@@ -1749,9 +1760,9 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
                   and not _moved_text_ok(f, decision, (feature, likely), lambda p: show(mb, p))]
         for f in diff:
             if f in HUMAN_ONLY_FILES:
-                fails.append(f"rule 8: {f} is human-only")
+                fails.append(f"rule 8: changes {f}, which only Trevor may merge")
             before, after = _human_only_parts(f, show(mb, f)), _human_only_parts(f, show("HEAD", f))
-            fails += [f"rule 8: {f}: {label} changed; it is human-only" for label in before
+            fails += [f"rule 8: changes {label} in {f}, which only Trevor may merge" for label in before
                       if before[label] != after.get(label) or after.get(label) is None]
         return {"ok": not fails, "files": rules, "failures": fails}
     except (ValueError, OSError, SystemExit, subprocess.SubprocessError) as e:
