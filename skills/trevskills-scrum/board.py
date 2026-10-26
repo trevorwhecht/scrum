@@ -1173,6 +1173,23 @@ def _named(rel, texts):
     return False
 
 
+MOVED_TEXT_RE = re.compile(r"^Rules case: moved-text — `?(\S+?)`? holds the .+ the ticket names in `?(\S+?)`?\.?$", re.M)
+
+
+def _moved_text_ok(y: str, decision: str, ticket: tuple[str, str], base_text) -> bool:
+    """Rule 7's one known safe case: the approver's decision.md line says lane file y holds text the ticket named in
+    rules file X, X is named in the ticket and is no scrum agent, and X already pointed to y at the merge-base."""
+    if not re.search(r"(^|/)trevskills-scrum/lanes/[^/]*\.md$", y):
+        return False
+    for line_y, x in MOVED_TEXT_RE.findall(decision):
+        if line_y != y or not RULES_RE.search(x) or re.search(r"(^|/)agents/scrum-[^/]*\.md$", x) or not _named(x, ticket):
+            continue
+        text = base_text(x)
+        if text and re.search(rf"{re.escape(y)}(?![\w/-]|\.\w)", text):
+            return True
+    return False
+
+
 def _first_line_pins(text):
     block = re.search(r"^FIRST_LINE = \{(.*?)^\}", text or "", re.M | re.S)
     return set(re.findall(r'"([\w-]+)": "([^"]*)"', block.group(1))) if block else set()
@@ -1228,8 +1245,10 @@ def cmd_rules_check(root: Path, job_id: str, worktree: str | None = None, base: 
         jd = Path(root) / "jobs" / job_id
         feature, spec = (p.read_text(errors="replace") if p.is_file() else "" for p in (jd / "feature.md", jd / "spec.md"))
         likely = md_section(spec, "Likely files") or ""
+        decision = (jd / "decision.md").read_text(errors="replace") if (jd / "decision.md").is_file() else ""
         fails += [f"rule 7: {f} is not named in feature.md or spec.md ## Likely files" for f in diff
-                  if not _named(f, (feature, likely))]
+                  if not _named(f, (feature, likely))
+                  and not _moved_text_ok(f, decision, (feature, likely), lambda p: show(mb, p))]
         for f in diff:
             if f in HUMAN_ONLY_FILES:
                 fails.append(f"rule 8: {f} is human-only")

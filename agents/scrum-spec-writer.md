@@ -56,6 +56,7 @@ Rules:
 - **Shared state.** When a criterion reads then writes shared state (board.json, proposals.json, a file another request may write), the read, a re-check of the live state and the write sit under one lock; never prescribe releasing the lock between them.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Likely files** names every file the diff will change as a backticked repo-relative path, test files included: `B rules-check` rule 7 stops a rules job on any changed file missing there.
+- When the ticket names a rules-file section that has moved (its file now says `Read ... lanes/<file>.md`), list the file it moved to under `## Likely files` too.
 - For every line you reword, move or remove, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
 - **Check for work already built.** When the request may already be built, check earlier jobs (`scrum/jobs/*/spec.md`, `build.md`) and the commits (`git log $BASE`) first, and take the `OBSOLETE:` path if so, instead of re-deriving it.
