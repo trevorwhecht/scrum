@@ -2147,8 +2147,8 @@ def swap_grew(swap):
 def machine_ok(path, manual=False, claim=False):
     """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
     skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU load (also skipped for manual
-    clicks), then the session ceiling. Gates new
-    claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
+    clicks), then the session ceiling. Gates new claims, resumes and auto-continue starts only; a running job is never
+    touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
     ram = free_ram_pct()
