@@ -174,8 +174,8 @@ def resume_job(project, root, job, jobs, manual=False):
     paused parent resumes its paused children that resume_refusal lets through and starts whatever is ready instead. A
     refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
     child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
-    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). manual (Trevor's click) lets
-    the children past cool-down; the new claims after them stay automatic, so they wait while cooling down."""
+    claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). Cool-down never holds the
+    paused children (work in flight); a Run-all parent's new claims after them wait while cooling down."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -263,7 +263,7 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok, whose cool-down check a manual click skips); a Run-all/BigBoy child also waits for the overlap
+    (board.machine_ok; cool-down holds only new claims, never a resume); a Run-all/BigBoy child also waits for the overlap
     rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
@@ -271,8 +271,6 @@ def resume_refusal(project, root, job, manual=False):
     machine = board.machine_ok(root, manual=manual)
     if machine and RESUME_ROOM is not None:
         RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
-    if machine == board.COOLING:
-        return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume work in the header."
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
@@ -800,7 +798,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
     job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
     first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
-    (RAM, disk, the session ceiling) and board.usage_allowance are checked before each start; the first failure stops
+    (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     global LAST_BUSY
@@ -822,7 +820,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             continue
         try:
             if not running(project, "run-all") and claimable(root):
-                refused = board.machine_ok(root)
+                refused = board.machine_ok(root, claim=True)
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
                     continue
                 if refused:  # no room on this machine; retry next tick
@@ -926,7 +924,7 @@ def updated_at(job) -> float:
 def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
     """With no session running anywhere, Play the oldest paused job (updatedAt) that resume_refusal lets through: a
     pause Trevor left during an overload is no longer needed. A candidate refused for another reason (a sibling, a
-    lilguy job) is skipped; a machine refusal (cool-down included) stops here. True when it Played one."""
+    lilguy job) is skipped; a machine refusal stops here (cool-down holds no Play). True when it Played one."""
     for project, root, job, jobs in sorted(candidates, key=lambda c: updated_at(c[2])):
         refusal = resume_refusal(project, root, job)
         if refusal and refusal.startswith(board.MACHINE_WAIT):
@@ -1178,7 +1176,7 @@ def machine_status():
     return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
+            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
             "sessions": board.live_sessions()}
 
 
@@ -2406,17 +2404,23 @@ SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 def valid_proposal(p):
     """The proposal with its status, kind and any stored reason (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
     or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
-    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS) or p["old"] == p["new"]:
+    if isinstance(p, dict) and p.get("kind") == "backlog":  # one queued backlog line: no file, so no target, old or new
+        if not isinstance(p.get("backlog"), str) or not p["backlog"].strip():
+            return None
+        p = {"target": "", "old": "", "new": "", **p}
+    elif isinstance(p, dict) and p.get("old") == p.get("new"):
+        return None
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) for k in PROPOSAL_KEYS):
         return None
     if not PROPOSAL_ID_RE.fullmatch(p["id"]) or p.get("status", "pending") not in PROPOSAL_STATUSES:
         return None
     kind = p.get("kind", "edit")
-    if kind not in ("edit", "skill") or kind == "skill" and (
+    if kind not in ("edit", "skill", "backlog") or kind == "skill" and (
             p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
         return None
     reason = p.get("reason")
     return ({k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "kind": kind}
-            | ({"reason": reason} if isinstance(reason, str) else {}))
+            | ({"backlog": p["backlog"]} if kind == "backlog" else {}) | ({"reason": reason} if isinstance(reason, str) else {}))
 
 
 def read_proposals(path):
@@ -2719,6 +2723,8 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
         return 404, {"error": "no such proposal"}
     if entry["status"] != "applied":
         return 409, {"error": f"proposal is {entry['status']}, not applied"}
+    if entry["kind"] == "backlog":
+        return 409, {"error": "a backlog proposal can't be reverted"}
     if digest_denied(entry["target"]):  # proposals.json is untrusted: never edit a settings or hooks file
         return 409, {"error": "target is not editable"}
     rev = entry | {"old": entry["new"], "new": entry["old"]}
@@ -2761,7 +2767,15 @@ def digest_auto(root, digest_id):
     if not pending:
         return out
     for p in pending:
-        if p["kind"] == "skill":
+        if p["kind"] == "backlog":
+            try:
+                board.cmd_backlog_add(root, [p["backlog"]], priority=3)
+            except (SystemExit, OSError):
+                skip(p, "backlog add failed")
+            else:
+                out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
+                updates[p["id"]] = ("applied", None)
+        elif p["kind"] == "skill":
             if why := digest_queue_skill(root, digest_id, p):
                 skip(p, why)
             else:
@@ -3043,8 +3057,6 @@ class Handler(BaseHTTPRequestHandler):
             if not job or running(project, job_id) or not resumable(job) and not limit_held(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
-            if not manual and board.cooling_down():
-                return 409, {"error": "cooling down: automatic resumes are off. Fix: click Resume work in the header."}
             if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
                 if refusal := resume_refusal(project, root, job, manual=manual):
                     return refused(root, job_id, refusal)

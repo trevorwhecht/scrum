@@ -1506,22 +1506,26 @@ class BoardTest(unittest.TestCase):
         return mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag))
 
     def test_machine_ok_cooling_down(self):
-        """Job 305: the cool-down flag refuses every automatic start first; Trevor's manual click skips it."""
+        """Job 421: the cool-down flag refuses only new claims (claim=True), checked first; Trevor's manual click and
+        in-flight work (resumes, BigBoy children) skip it."""
         with self.cooling():
-            self.assertEqual(board.machine_ok(self.tmp.name), "cooling down")
-            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True))
-            with self.machine("14", "6.2"):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before RAM and disk")
-                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "free RAM 14% (< 20%)")
-            with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before swap")
-            with self.sessions(14):
-                self.assertEqual(board.machine_ok(self.tmp.name), "cooling down", "checked before the ceiling")
-                self.assertEqual(board.machine_ok(self.tmp.name, manual=True), "14 sessions running (ceiling 14)")
-        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(Path(self.tmp.name) / "absent")):
             self.assertIsNone(board.machine_ok(self.tmp.name))
-            with self.machine("14", "1000"):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=False))
+            self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down")
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True, claim=True))
+            with self.machine("14", "6.2"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before RAM and disk")
                 self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)")
+                self.assertEqual(board.machine_ok(self.tmp.name, manual=True, claim=True), "free RAM 14% (< 20%)")
+            with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="30"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before swap")
+            with self.sessions(14):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "cooling down", "checked before the ceiling")
+                self.assertEqual(board.machine_ok(self.tmp.name), "14 sessions running (ceiling 14)")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(Path(self.tmp.name) / "absent")):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True))
+            with self.machine("14", "1000"):
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "free RAM 14% (< 20%)")
 
     def test_cooldown_path_default(self):
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):
@@ -1540,6 +1544,58 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(p["reason"].startswith("waiting: cooling down"), p["reason"])
         play.assert_not_called()
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b], "claims again once the flag is gone")
+
+    def test_ready_cooling_down_bigboy_claims_and_finishes(self):
+        """Job 421: a BigBoy parent's children already exist, so cool-down lets it claim them and reach its final review."""
+        parent, a, b = (board.cmd_new(self.root, t) for t in ("big", "a", "b"))
+        self.edit_jobs(**{parent: {"lane": "bigboy", "stage": "running", "reason": None, "children": [a, b]},
+                          a: {"parent": parent, "stage": "done"}, b: {"parent": parent, "stage": "done"}})
+        with self.cooling(), mock.patch.object(board, "play"):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["all_merged"], out["ready"]), (True, []))
+        self.assertEqual((self.child(parent)["stage"], self.child(parent)["reason"]), ("running", None))
+        c, d = board.cmd_new(self.root, "c"), board.cmd_new(self.root, "d")
+        self.edit_jobs(**{parent: {"children": [a, b, c, d]},
+                          c: {"parent": parent, "stage": "waiting", "depends_on": [a], "parallel": True},
+                          d: {"parent": parent, "stage": "waiting", "depends_on": [a, b], "parallel": True}})
+        self.spec(c, "src/c.py")
+        self.spec(d, "src/d.py")
+        with self.cooling(), mock.patch.object(board, "play"):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [c, d])
+        self.assertEqual((self.child(c)["stage"], self.child(d)["stage"]), ("spec", "spec"))
+        self.assertEqual(self.child(parent)["reason"], None)
+
+    def test_cooldown_refuses_new_backlog_claims(self):
+        """Job 421: cool-down refuses the automatic backlog claims; Trevor's Run now (an explicit index) still claims."""
+        msg = "cooling down: no new backlog claim. Fix: click Resume work in the header."
+        self.root.mkdir(parents=True, exist_ok=True)
+        backlog = "# Backlog\n- [ ] Alpha\n- [ ] Beta\n"
+        (self.root / "backlog.md").write_text(backlog)
+        (self.root / "backlog-specs").mkdir()
+        self.spec_file("Alpha").write_text("# Alpha\n\n## Likely files\n- `a.py`: edit\n")
+        board_before = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
+        with self.cooling():
+            for call in (lambda: board.cmd_next(self.root), lambda: board.cmd_runall_start(self.root)):
+                with self.assertRaises(SystemExit) as e:
+                    call()
+                self.assertEqual(str(e.exception), msg)
+            self.assertEqual(board.cmd_cloud_claim(self.root, 2), {"claimed": []})
+            self.assertEqual((self.root / "backlog.md").read_text(), backlog)
+            after = (self.root / "board.json").read_text() if (self.root / "board.json").exists() else None
+            self.assertEqual(after, board_before, "no job created")
+            self.assertEqual(board.cmd_next(self.root, 1), {"id": "001-beta", "feature": "Beta"}, "Run now still claims")
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Alpha\n- [x] Beta → 001-beta\n")
+
+    def test_roadmap_next_cooling_down_holds_next_step(self):
+        """Job 421: cool-down leaves the finished step running (Roadmap resume marks it done later) and starts nothing."""
+        self.roadmap()
+        with self.cooling():
+            self.assertIsNone(board.cmd_roadmap_next(self.root, self.J2))
+        self.assertEqual(self.rm_text(), self.ROADMAP)
+        self.assertEqual(board.cmd_roadmap_next(self.root, self.J2),
+                         {"p": 1, "s": 3, "kind": "bigboy", "request": "Quote builder part 3, <request>"})
+        self.assertIn(f"- [x] S2 bigboy {self.J2}:", self.rm_text())
 
     def test_session_ages_reads_ps_etime(self):
         ps = Path(self.tmp.name) / "ps.txt"
