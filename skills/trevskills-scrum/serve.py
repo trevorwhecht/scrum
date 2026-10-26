@@ -2856,14 +2856,23 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
         feature = f"{title}:\n\n- digest {digest_id} {pid} → {repo[1]}: {board.clean(entry['why'])}\n"
         applied, not_applied, _ = digest_apply(root, digest_id, [rev], title=title, feature=feature, mark_applied=False)
         why = None if applied else not_applied[0]["reason"]
+        if not why:
+            with DIGEST_LOCK:
+                digest_set_statuses(root, digest_id, {pid: ("reverted", None)}, from_status="applied")
     else:
-        why = digest_write_global(rev)
+        with DIGEST_LOCK:  # one hold from re-check to status write: a concurrent revert of the same file can't lose this one
+            raw = read_proposals(root / "digests" / digest_id / "proposals.json")[1]
+            live = next((v for p in raw if (v := valid_proposal(p)) and v["id"] == pid), None)
+            if live is None:
+                return 404, {"error": "no such proposal"}
+            if live["status"] != "applied":
+                return 409, {"error": f"proposal is {live['status']}, not applied"}
+            if not (why := digest_write_global(rev)):
+                digest_set_statuses(root, digest_id, {pid: ("reverted", None)}, from_status="applied")
     if why and why.startswith("write failed"):  # an OSError names local paths: log it, never send it
         return server_error("couldn't write the file", why)
     if why:
         return 409, {"error": why}
-    with DIGEST_LOCK:
-        digest_set_statuses(root, digest_id, {pid: ("reverted", None)}, from_status="applied")
     return 200, entry | {"status": "reverted"}
 
 

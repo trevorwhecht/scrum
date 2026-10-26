@@ -4784,6 +4784,47 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.statuses(), ["pending", "reverted", "applied"])
         self.assertEqual(list(self.backups()), [])
 
+    def test_digest_revert_concurrent_global_reverts_keep_both(self):
+        self.assertTrue(self.serve.DIGEST_LOCK.acquire(blocking=False))  # no earlier revert left it held
+        self.serve.DIGEST_LOCK.release()
+        real_backup = self.serve.ai_backup
+
+        def slow_backup(path):  # widen the window between digest_write_global's read and its write
+            n = real_backup(path)
+            time.sleep(0.2)
+            return n
+
+        def race(*pids):
+            out = [None] * len(pids)
+            ts = [threading.Thread(target=lambda i=i, p=p: out.__setitem__(i, self.serve.digest_revert(self.scrum, "001", p)))
+                  for i, p in enumerate(pids)]
+            with mock.patch.object(self.serve, "ai_backup", slow_backup):
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+            return out
+
+        rule = self.rule("keep A\nnew line\nkept B\n")
+        self.digest([self.prop("p1", rule, status="applied"),
+                     self.prop("p2", rule, old="keep B", new="kept B", status="applied")])
+        self.assertEqual([code for code, _ in race("p1", "p2")], [200, 200])
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["reverted", "reverted"])
+        for b in self.backups():
+            b.unlink()
+
+        rule.write_text("keep A\nnew line\nkeep B\n")
+        self.digest([self.prop("p1", rule, status="applied")])
+        results = sorted(race("p1", "p1"), key=lambda r: r[0])
+        self.assertEqual([code for code, _ in results], [200, 409], results)
+        self.assertEqual(results[1], (409, {"error": "proposal is reverted, not applied"}))
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual([b.read_bytes() for b in self.backups()], [b"keep A\nnew line\nkeep B\n"])
+        self.assertEqual(self.statuses(), ["reverted"])
+        self.assertTrue(self.serve.DIGEST_LOCK.acquire(blocking=False))
+        self.serve.DIGEST_LOCK.release()
+
     def skill(self, pid, target, old="", new="---\nname: k\ndescription: Load when k.\n---\nFacts.\n", kind="skill", **extra):
         return self.prop(pid, target, old=old, new=new, kind=kind, **extra)
 
