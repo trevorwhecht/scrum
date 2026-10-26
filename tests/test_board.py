@@ -2531,12 +2531,12 @@ class BoardTest(unittest.TestCase):
         self.done_jobs(2, "aborted")
         self.done_jobs(1, "review")
         self.done_jobs(1, "needs-human")
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 9})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 9, "questionsGrowth": 0})
         done += self.done_jobs(1)
-        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 10})
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 10, "questionsGrowth": 0})
         (self.root / "digests" / "001").mkdir(parents=True)
         (self.root / "digests" / "001" / "jobs.txt").write_text("\n".join(done[:4]) + "\n")
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 6, "questionsGrowth": 0})
         self.assertEqual(board.digested_ids(self.root), set(done[:4]))
 
     def test_failed_digest_releases_its_jobs(self):
@@ -2545,10 +2545,10 @@ class BoardTest(unittest.TestCase):
         d.mkdir(parents=True)
         (d / "jobs.txt").write_text(f"{a}\n{b}\n")
         self.assertEqual(board.digested_ids(self.root), {a, b})  # no error.md: still claimed
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
         (d / "error.md").write_text("digester produced no valid proposals\n")
         self.assertEqual(board.digested_ids(self.root), set())
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2, "questionsGrowth": 0})
         self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b]})
         self.assertEqual(board.digested_ids(self.root), {a, b})
         self.assertTrue((d / "jobs.txt").exists())  # the failed digest stays as it was
@@ -2565,7 +2565,56 @@ class BoardTest(unittest.TestCase):
         more = self.done_jobs(1)
         self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more})
         self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
-        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0})
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
+
+    def write_questions_log(self, n):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "questions.log").write_text("".join(f'{{"n": {i}}}\n' for i in range(n)))
+
+    def marker(self, digest_id, text, error=False):
+        d = self.root / "digests" / digest_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("")
+        (d / "questions.lines").write_text(text)
+        if error:
+            (d / "error.md").write_text("failed\n")
+
+    def test_digest_start_writes_questions_marker(self):
+        self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start")["id"], "001")
+        self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "0\n")
+        self.write_questions_log(7)
+        self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start")["id"], "002")
+        self.assertEqual((self.root / "digests" / "002" / "questions.lines").read_text(), "7\n")
+
+    def test_digest_due_on_questions_growth(self):
+        self.write_questions_log(20)
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 20})  # no marker yet
+        self.marker("001", "5\n")
+        self.assertEqual(self.cli("digest-due"), {"due": True, "undigested": 0, "questionsGrowth": 15})
+        self.write_questions_log(19)
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14})
+        self.marker("002", "30\n")  # the log shrank below the marker
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
+        self.marker("003", "junk\n")  # not an integer: ignored, 002 counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
+        self.marker("004", "2\n", error=True)  # failed digest: skipped, 002 still counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
+        (self.root / "digests" / "002" / "error.md").write_text("failed\n")  # now 001 counts
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 14})
+
+    def test_digest_start_on_questions_growth_only(self):
+        self.write_questions_log(14)
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertFalse((self.root / "digests").exists())
+        self.write_questions_log(15)
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": []})
+        self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "")
+        self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "15\n")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
 
     def fill(self, job_id):
         for rel in ("feature.md", "spec.md", "decision.md", "build.md", "round-1/check.md", "round-1/review-ui.md",

@@ -1168,7 +1168,7 @@ function renderDigests() {
   $("dgNow").hidden = !projects.length;
   if (!projects.length) return $("dgList").innerHTML = '<p class="note">No projects</p>';
   const d = digestData;
-  $("dgNow").disabled = !d || d.running || !d.undigested;
+  $("dgNow").disabled = !d || d.running || !(d.undigested || d.due);
   $("dgNow").textContent = d?.running ? "Digesting…" : "Digest now";
   if (!d) return $("dgList").innerHTML = '<p class="empty">loading…</p>';
   $("dgList").innerHTML = d.digests.map(g => `<section class="dg"><h3>Digest ${esc(g.id)} · ${g.jobs.length} job${g.jobs.length === 1 ? "" : "s"}</h3>

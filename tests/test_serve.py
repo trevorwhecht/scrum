@@ -3754,7 +3754,7 @@ class DigestTest(unittest.TestCase):
         return f
 
     def test_digests_list_skips_malformed_proposals(self):
-        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "digests": []}))
+        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "due": False, "digests": []}))
         a = self.done_job()
         self.done_job("two")
         rule = self.rule()
@@ -3799,6 +3799,18 @@ class DigestTest(unittest.TestCase):
         popen.return_value.poll.return_value = 0  # finished
         self.board.cmd_digest_start(self.scrum)
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
+
+    def test_digest_now_spawns_on_questions_growth(self):
+        (self.scrum / "questions.log").write_text("{}\n" * 14)
+        self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
+        self.assertFalse(self.get("/api/p/reg/digests")[1]["due"])
+        (self.scrum / "questions.log").write_text("{}\n" * 15)
+        self.assertTrue(self.get("/api/p/reg/digests")[1]["due"])
+        with mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
+            code, out = self.post("/api/p/reg/digest", {})
+            self.assertEqual(code, 202, out)
+            popen.assert_called_once()
 
     def test_digest_now_retries_after_failed_digest(self):
         a = self.done_job()
