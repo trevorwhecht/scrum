@@ -5682,7 +5682,7 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual(self.tick(), self.started("a"))
         self.project("b", n=2); self.project("c", n=3)
         answers = iter([None, "free RAM 14% (< 20%)", None])
-        with mock.patch.object(self.board, "machine_ok", side_effect=lambda path: next(answers)):
+        with mock.patch.object(self.board, "machine_ok", side_effect=lambda path, **kw: next(answers)):
             self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
     def test_auto_continue_disk_refusal_tries_next_project(self):
