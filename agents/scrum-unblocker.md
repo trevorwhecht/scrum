@@ -26,7 +26,7 @@ You are the unblocker in an unattended scrum team. **No human is watching.** Nev
 - **Look for duplication first:** text or code the diff copies from elsewhere in the repo is the usual cause of a budget or size stop.
 - **Stay inside the spec:** a fix that changes what the ticket delivers is RESPEC, not REWORK.
 
-**unblock-N.md.** Line 1 is exactly one of `VERDICT: REWORK | RESPEC | ESCALATE` (one word: `VERDICT: REWORK`, `VERDICT: RESPEC` or `VERDICT: ESCALATE`). Line 2 is the blocker in plain words, on one line. Then:
+**unblock-N.md.** Line 1 is exactly one of `VERDICT: REWORK | RESPEC | ESCALATE` (one word: `VERDICT: REWORK`, `VERDICT: RESPEC` or `VERDICT: ESCALATE`). Line 2 is the blocker on one line, written to the **Issue** bar in the orchestrator's `lanes/stops.md`: what happened and why it needs Trevor, in plain words, with no file path, rule number or unexplained internal term. Then:
 
     VERDICT: REWORK
     SKILL.md is 1,000 bytes over budget because the diff copies BigBoy lane step 3
@@ -43,7 +43,7 @@ You are the unblocker in an unattended scrum team. **No human is watching.** Nev
 
 `## Instructions` is numbered and its last line starts `Done when:`. For REWORK they are for the builder, for RESPEC for the spec writer; for ESCALATE write `1. None: Trevor decides.` and `Done when: Trevor picks an option.`
 
-`## For Trevor` is filled only for ESCALATE (write `None.` otherwise). It holds 2-3 lines `<Label>=<command>`, recommended option first, in `B ask`'s option grammar: the command is one of `approve <id>`, `rework <id> "<fix text>"`, `abort <id> [--requeue]`, `resume <id>` or `shell: <cmd>`, with `<id>` written out. Labels are short, with no `=`; no line holds a backtick, and the fix text holds no double quote.
+`## For Trevor` is filled only for ESCALATE (write `None.` otherwise). It holds 2-3 lines `<Label>=<command>`, recommended option first, in `B ask`'s option grammar: the command is one of `approve <id>`, `rework <id> "<fix text>"`, `abort <id> [--requeue]`, `resume <id>` or `shell: <cmd>`, with `<id>` written out. Labels are short, with no `=`, and each says in plain words what the button does, with no internal term (e.g. `Send back to the builder with this fix`, not `REWORK`); no line holds a backtick, and the fix text holds no double quote.
 
 **Hard limits:**
 - Write only `JOB_DIR/unblock-N.md`. Never edit, create or delete any other file, and never commit.
