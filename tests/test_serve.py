@@ -5354,6 +5354,50 @@ class CloudPollTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in cs.call_args_list], [projects["bad"] / "scrum", projects["good"] / "scrum"])
         self.assertEqual(e.getvalue(), "cloud-sync: bad: gh exploded\n")
 
+    def window_projects(self):
+        base = Path(tempfile.mkdtemp())
+        projects = {}
+        for name in ("bad", "good"):
+            (base / name / "scrum").mkdir(parents=True)
+            (base / name / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+            projects[name] = base / name
+        return projects
+
+    def test_watchdog_tick_window_report_per_project_isolates_failures(self):
+        s = self.serve
+        projects = self.window_projects()
+        def report(root):
+            if root.parent.name == "bad":
+                raise RuntimeError("usage exploded")
+            return []
+        with mock.patch.object(s.board, "projects", return_value=projects), \
+                mock.patch.object(s.board, "cmd_window_report", side_effect=report) as wr, \
+                mock.patch("sys.stderr", new=io.StringIO()) as e:
+            s.watchdog_tick()
+        self.assertEqual([c.args for c in wr.call_args_list], [(projects["bad"] / "scrum",), (projects["good"] / "scrum",)])
+        self.assertEqual(e.getvalue(), "watchdog: bad: window report: usage exploded\n")
+
+    def test_watchdog_tick_bad_window_starts_digest(self):
+        s = self.serve
+        projects = {"good": self.window_projects()["good"]}
+        root = projects["good"] / "scrum"
+        def tick(written, reason, busy=False):
+            due = {"due": reason is not None, "undigested": 3, "questionsGrowth": 0, "reason": reason}
+            with mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.object(s.board, "cmd_window_report", return_value=written), \
+                    mock.patch.object(s.board, "cmd_digest_due", return_value=due), \
+                    mock.patch.object(s, "running", side_effect=lambda p, j: busy and j == "digest"), \
+                    mock.patch.object(s, "spawn", return_value="runs/d.log") as sp:
+                s.watchdog_tick()
+            return [c.args for c in sp.call_args_list]
+        card = [{"window": "five_hour"}]
+        self.assertEqual(tick(card, "bad window five_hour-1.json"),
+                         [("good", root, "digest", "digest", "/trevskills-scrum digest")])
+        self.assertEqual(tick([], "bad window five_hour-1.json"), [])
+        for reason in ("10 done", "questions", None):
+            self.assertEqual(tick(card, reason), [], reason)
+        self.assertEqual(tick(card, "bad window five_hour-1.json", busy=True), [])
+
 
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
