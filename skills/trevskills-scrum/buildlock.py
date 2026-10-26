@@ -18,6 +18,11 @@ def lock_path() -> Path:
     return Path(os.environ.get("SCRUM_BUILD_LOCK") or Path.home() / ".claude" / "trevskills-scrum" / "build.lock")
 
 
+def waiting_dir(lock: Path) -> Path:
+    """Where a waiting buildlock.py leaves `<pid>` holding its cwd; serve.py reads it."""
+    return lock.with_name(lock.name + ".waiting")
+
+
 def timeout_s() -> float:
     try:
         value = float(os.environ.get("SCRUM_BUILD_LOCK_TIMEOUT", ""))
@@ -58,16 +63,25 @@ def main(argv: list[str]) -> int:
             print(f"buildlock: waiting for the build lock ({path})", file=sys.stderr, flush=True)
             limit = timeout_s()
             deadline = time.monotonic() + limit
-            while True:  # flock has no timeout, so poll LOCK_NB
-                time.sleep(0.5)
-                try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        print(f"buildlock: timed out after {limit:g} s waiting for the build lock ({path})",
-                              file=sys.stderr)
-                        return 124
+            marker = waiting_dir(path) / str(os.getpid())  # the dashboard reads this to show the Check is queued
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(os.getcwd())
+            except OSError:
+                pass  # the marker is only a hint; never fail the build over it
+            try:
+                while True:  # flock has no timeout, so poll LOCK_NB
+                    time.sleep(0.5)
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            print(f"buildlock: timed out after {limit:g} s waiting for the build lock ({path})",
+                                  file=sys.stderr)
+                            return 124
+            finally:
+                marker.unlink(missing_ok=True)
         cmd = ["sh", "-c", argv[0]] if len(argv) == 1 else argv
         try:
             # the child inherits the lock fd, so the lock outlives a SIGKILLed wrapper until the build exits

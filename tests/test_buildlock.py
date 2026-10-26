@@ -179,6 +179,32 @@ class BuildLockTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def marker_dir(self):
+        return self.lock.with_name("build.lock.waiting")
+
+    def test_waiting_marker_created_and_removed(self):
+        holder = self.hold()
+        waiter = self.start_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="20")
+        marker = self.marker_dir() / str(waiter.pid)
+        for _ in range(50):
+            if marker.exists() and marker.read_text():
+                break
+            time.sleep(0.1)
+        self.assertEqual(marker.read_text(), os.getcwd())
+        holder.kill()
+        self.assertEqual(waiter.wait(timeout=10), 0)
+        self.assertFalse(marker.exists())
+
+    def test_no_marker_when_lock_free(self):
+        self.assertEqual(self.run_wrap(sys.executable, "-c", "pass").returncode, 0)
+        self.assertEqual(list(self.marker_dir().glob("*")) if self.marker_dir().exists() else [], [])
+
+    def test_marker_removed_on_timeout(self):
+        self.hold()
+        r = self.run_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual(r.returncode, 124)
+        self.assertEqual(list(self.marker_dir().glob("*")), [])
+
     def project(self, build):
         f = self.dir / "project.md"
         f.write_text(f"# p\n- Test: x\n- Build: {build}\n- Other: y\n")
