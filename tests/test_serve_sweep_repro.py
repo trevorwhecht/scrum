@@ -26,7 +26,7 @@ class SweepReproTest(unittest.TestCase):
         (self.root / "jobs").mkdir(parents=True); (self.root / "runs").mkdir()
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json"))
         env.start(); self.addCleanup(env.stop)
-        for s in (serve.LAST_BUSY, serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
+        for s in (serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
             s.clear(); self.addCleanup(s.clear)
 
     def write(self, jobs):

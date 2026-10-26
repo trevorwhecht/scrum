@@ -2550,13 +2550,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_skill_md_size_budget(self):
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 83000)
 
-    def test_focus_is_priority_not_lock(self):
+    def test_rank_orders_auto_continue(self):
         setup = self.section((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text(), "## Setup", "## Commands")
-        self.assertIn("serve.py starts one headless run-all per idle opted-in project, Focus projects first", setup)
+        self.assertIn("serve.py starts one headless run-all per idle opted-in project in dashboard rank order "
+                      "(the Rank dialog, stored as `projects.json` order", setup)
+        self.assertIn("only `board.machine_ok` and `MAX_SESSIONS` gate new work", setup)
         self.assertIn("no new work while free RAM or disk is low", setup)
-        self.assertIn("`- Focus: yes` (optional): ordering only, never holds another project.", setup)
-        self.assertNotIn("sole auto-continue target", setup)
-        self.assertNotIn("hold every other project", setup)
+        self.assertNotIn("Focus: yes", setup)
 
     def test_skill_documents_roadmap_lane(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
