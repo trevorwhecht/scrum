@@ -2650,6 +2650,26 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLess(clean.index("**Mark done"), start)
         self.assertLess(start, clean.index("**Roadmap chaining.**"))
 
+    def test_builder_build_md_has_scrum_map_section(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertLess(text.index("    ## Diverged"), text.index("    ## Scrum map"))
+        for phrase in ('- Scrum map: add "<line>" under <map heading>',
+                       '- Scrum map: replace "<old line>" with "<new line>"', "never edit the map"):
+            self.assertIn(phrase, text, phrase)
+
+    def test_skill_merge_applies_scrum_map(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
+        clean = merge[merge.index("7. **Clean up:**"):]
+        start = clean.index("**Scrum map.**")
+        bullet = clean[start:clean.index("\n", start)]
+        for phrase in ("- Scrum map:", "~/.claude/scrum-map.md", "no other file outside `$REPO`",
+                       "never stops the job; name it in the final report only", "already in the map",
+                       "Scrum map not applied: <line>"):
+            self.assertIn(phrase, bullet, phrase)
+        self.assertLess(clean.index("**Mark done"), start)
+        self.assertLess(start, clean.index("**Spec follow-ups.**"))
+
     def test_skill_merge_roadmap_done_starts_run_all(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         merge = self.h2(text, "## Merge (APPROVE, or /trevskills-scrum approve)")
