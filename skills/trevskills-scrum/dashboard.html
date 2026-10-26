@@ -1906,6 +1906,11 @@ $("cooldown").addEventListener("click", async e => {
   }
 });
 
+poll();
+setInterval(single(poll), 2000);
+loadRouting();
+setInterval(single(loadRouting), 60000);
+
 // Scrum sounds are afplay runs in board.py/serve.py, so the setting lives server-side too: POST /api/volume.
 let level = 100, muted = false;
 function readVolume() {
@@ -1943,11 +1948,6 @@ $("volumeLevel").addEventListener("change", () => {
 readVolume();
 renderVolume();
 if (store.get("scrum.volume") || store.get("scrum.muted")) sendVolume();
-
-poll();
-setInterval(single(poll), 2000);
-loadRouting();
-setInterval(single(loadRouting), 60000);
 </script>
 </body>
 </html>
