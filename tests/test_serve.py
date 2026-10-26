@@ -2278,6 +2278,64 @@ class ServeTest(unittest.TestCase):
 SECRET = "sk-planted-secret-123"
 
 
+class LatestWindowsTest(unittest.TestCase):
+    """serve.latest_windows and GET /api/p/<project>/windows, on ServeTest's registered "repo" and live server."""
+    setUpClass = classmethod(ServeTest.setUpClass.__func__)
+    tearDownClass = classmethod(ServeTest.tearDownClass.__func__)
+    req = ServeTest.req
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def card(self, name, body):
+        (self.dir / "windows").mkdir(exist_ok=True)
+        (self.dir / "windows" / name).write_text(body if isinstance(body, str) else json.dumps(body))
+
+    def test_newest_per_window_trimmed(self):
+        self.card("five_hour-99999.json", {"headline": 1.0, "points_done": 1, "resets_at": 99999})
+        self.card("five_hour-100000.json", {"headline": 0.146, "points_done": 6, "budget": {"used_pct": 41, "hit_90_at": 5},
+                                            "first_pass_rate": 0.8, "wasted_pct": 12, "escapes": 0, "resets_at": 100000,
+                                            "tokens": {"total": 9}, "label": "5h"})
+        self.card("seven_day-500.json", {"points_done": 20, "resets_at": 500})
+        self.assertEqual(self.serve.latest_windows(self.dir), {
+            "five_hour": {"headline": 0.146, "points_done": 6, "budget": {"used_pct": 41}, "first_pass_rate": 0.8,
+                          "wasted_pct": 12, "escapes": 0, "resets_at": 100000},
+            "seven_day": {"headline": None, "points_done": 20, "budget": {"used_pct": None}, "first_pass_rate": None,
+                          "wasted_pct": None, "escapes": None, "resets_at": 500}})
+
+    def test_missing_dir_and_only_open_json(self):
+        self.assertEqual(self.serve.latest_windows(self.dir), {"five_hour": None, "seven_day": None})
+        self.card("open.json", {"five_hour": {"resets_at": 1}})
+        self.card(".lock", "")
+        self.assertEqual(self.serve.latest_windows(self.dir), {"five_hour": None, "seven_day": None})
+
+    def test_malformed_newest_falls_back(self):
+        self.card("five_hour-200.json", "{not json")
+        self.card("five_hour-150.json", "[1, 2]")
+        self.card("five_hour-100.json", {"points_done": 3, "resets_at": 100})
+        self.card("seven_day-900.json", "\"just a string\"")
+        out = self.serve.latest_windows(self.dir)
+        self.assertEqual(out["five_hour"]["points_done"], 3)
+        self.assertIsNone(out["seven_day"])
+
+    def test_endpoint(self):
+        self.card("seven_day-700.json", {"points_done": 4, "resets_at": 700})
+        windows = self.root / "windows"
+        shutil.rmtree(windows, ignore_errors=True)
+        shutil.copytree(self.dir / "windows", windows)
+        self.addCleanup(shutil.rmtree, windows, True)
+        self.assertEqual(self.req("GET", "/api/p/repo/windows"), (200, {"five_hour": None, "seven_day": {
+            "headline": None, "points_done": 4, "budget": {"used_pct": None}, "first_pass_rate": None, "wasted_pct": None,
+            "escapes": None, "resets_at": 700}}))
+        with self.assertRaises(urllib.error.HTTPError) as e:  # req drops an error's body
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/p/nope/windows")
+        with e.exception as res:
+            self.assertEqual((res.code, json.loads(res.read())), (404, {"error": "no such project"}))
+        self.assertEqual(self.req("GET", "/api/p/repo/windows", headers={"Host": "evil.example"})[0], 403)
+
+
 class AiSettingsTest(unittest.TestCase):
     """A fake home: CLAUDE_HOME, ~/.claude.json, one registered project, one listed only in ~/.claude.json, one found by
     the walk, plus .claude dirs under node_modules and Library that the walk must skip."""
