@@ -772,6 +772,31 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, line, phrase)
         self.assertNotIn("all up front", text)
 
+    def test_too_big_child_converts_to_bigboy(self):
+        text = self.rules()
+        line = next(l for l in text.splitlines() if l.lstrip().startswith("3c. **Lane:**"))
+        for phrase in ("`parent` has no `parent`", "lane=bigboy", "**BigBoy lane**", "never with `B ask`", "--requeue"):
+            self.assertIn(phrase, line, phrase)
+        self.assertNotIn("never gets `bigboy`", line)
+        self.assertIn("counts as `standard`", line[line.index("`parent` has a `parent`"):])
+        for f in ["SKILL.md", *(f"lanes/{p.name}" for p in (SKILL_DIR / "lanes").glob("*.md"))]:
+            body = (SKILL_DIR / f).read_text()
+            for label in ("Requeue as bigboy", "Build as one job"):
+                self.assertNotIn(label, body, f"{label} in {f}")
+        bigboy = self.lane("bigboy")
+        step2 = next(l for l in bigboy.splitlines() if l.startswith("2. **Child specs, startable children only.**"))
+        step2 = self.section(bigboy, step2, "\n3. **Start.**")
+        self.assertNotIn("counts as `standard`", step2)
+        self.assertIn("only records the lane", step2)
+        step4 = next(l for l in bigboy.splitlines() if l.startswith("4. **Spec refresh**"))
+        for phrase in ("`lane` is `bigboy`", "step 1", "has no `pr`", "its `done` children's PRs"):
+            self.assertIn(phrase, step4, phrase)
+        tracker = (ROOT / "agents" / "scrum-tracker.md").read_text()
+        self.assertIn("A `done` child with no `pr` and a `children` list", tracker)
+        step7 = bigboy[bigboy.index("7. **Final BigBoy review.**"):]
+        for phrase in ("When `P` has a `parent` of its own", "run step 5 with `ID=$P`", "last, after the rest of that branch"):
+            self.assertIn(phrase, step7, phrase)
+
     def test_skill_defines_obsolete_stop(self):
         text = skill_text()
         self.assertIn("OBSOLETE:", text)
