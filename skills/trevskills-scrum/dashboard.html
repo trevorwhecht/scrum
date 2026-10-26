@@ -281,7 +281,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <script>
 const STAGES = ["spec", "build", "check", "review", "approve", "merging", "cloud", "needs-human", "done"];
 // Aborted jobs are finished too: they sit, dimmed, in the done column rather than a ninth column.
-const colOf = job => job.stage === "aborted" ? "done" : job.stage;
+const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const PTS = [null, 1, 2, 3, 5, 8, 13];
@@ -412,8 +412,10 @@ const paused = job => !!job.waiting && ["spec", "build", "check", "review", "app
 const setupWait = job => job.stage === "waiting" && job.setup === "pending";
 // A job Trevor paused (board.py cmd_pause): it keeps its stage column until he clicks Play in its panel.
 const heldByTrevor = job => !!job.paused;
+// A stalled job whose Resume the machine guard queued (serve.py play_queued): nothing left for Trevor to do.
+const playQueued = job => job.stage === "needs-human" && !!job.play_queued;
 const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
-const needsYou = kid => !!kid && (kid.stage === "needs-human" || heldByTrevor(kid) || setupWait(kid));
+const needsYou = kid => !!kid && ((kid.stage === "needs-human" && !playQueued(kid)) || heldByTrevor(kid) || setupWait(kid));
 // board.py WAITING_ON: a running parent whose children wait on Trevor. Only ids still waiting on him are kept.
 const WAITING_ON = "waiting on you in: ";
 const waitingOn = job => job.stage === "running" && (job.reason || "").startsWith(WAITING_ON)
@@ -503,7 +505,7 @@ function roadmapCol(p) {
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
 function card(job) {
-  const human = job.stage === "needs-human" || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  const human = (job.stage === "needs-human" && !playQueued(job)) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
   // A job held in its stage until the usage limit resets (serve.py's limitResetAt) waits on the clock, so it is not stale.
   const held = !human && job.limitResetAt, hold = heldByTrevor(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
@@ -690,6 +692,14 @@ async function show(job, file) {
   const url = `${job.docBase ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
   try {
     const res = await fetch(url, {cache: "no-store"});
+    // board.json files is a snapshot: a job file missing on disk drops its tab instead of showing the 404.
+    if (res.status === 404 && !job.base) {
+      [...$("tabs").querySelectorAll("button[data-file]")].find(b => b.dataset.file === file)?.remove();
+      const next = $("tabs").querySelector("button[data-file]");
+      if (next) return show(job, next.dataset.file);
+      $("doc").innerHTML = '<p class="empty">No files yet.</p>';
+      return;
+    }
     if (!res.ok) throw new Error(`${res.status}`);
     const md = await res.text();
     $("doc").innerHTML = window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
@@ -806,6 +816,7 @@ const statusLine = job => noPaths(job.stage === "done" ? "Done" : job.stage === 
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).join(", ")} (${job.waitingOn.why})`
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
+  : playQueued(job) ? "Queued, starts next"
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
   : setupWait(job) ? "Waiting on you: setup"
@@ -829,7 +840,7 @@ function stopBox(job) {
   if (paused(job)) return `<div class="stop" role="status"
     data-agent-hint="This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for.">
     <b>Waiting on you</b><p>${esc(job.waiting)}</p><p>Answer it in the job's terminal.</p></div>`;
-  if (job.stage !== "needs-human") return "";
+  if (job.stage !== "needs-human" || playQueued(job)) return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const rec = job.recommend, dis = off ? " disabled" : "";
   const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
