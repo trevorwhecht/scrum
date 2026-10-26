@@ -4196,6 +4196,41 @@ class DigestVerifyTest(unittest.TestCase):
         self.commit("agents/scrum-planner.md", "# Planner\n\nPlan it well.\n")
         self.assert_fails("agents/scrum-planner.md")
 
+    def exact_builder_edit(self):
+        self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."})
+        self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
+        self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
+
+    def test_digest_verify_fails_with_standards_doc_edit(self):
+        self.exact_builder_edit()
+        (self.wt / "docs").mkdir()
+        self.commit("docs/skill-standards.md", "# Standards\n\nLoosened.\n")
+        out = self.assert_fails("docs/skill-standards.md")
+        self.assertIn("human-only", out["error"])
+
+    def test_digest_verify_fails_with_board_py_edit(self):
+        self.exact_builder_edit()
+        (self.wt / "skills" / "trevskills-scrum").mkdir(parents=True)
+        self.commit("skills/trevskills-scrum/board.py", "print('edited')\n")
+        out = self.assert_fails("skills/trevskills-scrum/board.py")
+        self.assertIn("human-only", out["error"])
+
+    def test_digest_verify_fails_human_only_target(self):
+        for rel in ("skills/trevskills-scrum/lanes/rules-gate.md", "agents/scrum-review-rules.md"):
+            with self.subTest(rel=rel):
+                (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+                self.commit(rel, "# Gate\n\nCheck it.\n")
+                self.git(self.wt, "tag", "-f", "has-gate")
+                d = self.root / "digests" / "007"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "proposals.json").write_text(json.dumps({"proposals": [
+                    {"id": "p1", "target": str(self.repo / rel), "why": "w", "status": "queued",
+                     "old": "Check it.", "new": "Skip it."}]}))
+                self.feature(f"Apply digest 007 p1 to {rel}\n")
+                self.commit(rel, "# Gate\n\nSkip it.\n")
+                out = self.assert_fails(rel, "--base", "has-gate")
+                self.assertIn("human-only", out["error"])
+
     def test_digest_verify_fails_when_target_unchanged(self):
         self.proposals("006", {"id": "p1", "old": "Rule one.", "new": "Rule one, sharper."},
                        {"id": "p2", "old": "Plan it.", "new": "Plan it well.",
