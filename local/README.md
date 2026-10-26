@@ -8,7 +8,9 @@ Codex step runs or is skipped, and logs what ran.
 `python3 local/route.py <role> [--job JOB_DIR] [--scrum DIR]` prints `{"runner", "model", "why"}`:
 
 - **`codex-review`** answers `skip` when the `codex` binary is not installed (`PATH` plus
-  `/opt/homebrew/bin`), or when the newest `~/.codex/sessions/**/rollout-*.jsonl` reports the
+  `/opt/homebrew/bin`), when the top-level `openai_base_url` in `~/.codex/config.toml` (or the
+  file `SCRUM_CODEX_CONFIG` names) points at a local server on `127.0.0.1`, `localhost` or `[::1]`,
+  or when the newest `~/.codex/sessions/**/rollout-*.jsonl` reports the
   5h window at `codex_5h` (85) % used or more, or the weekly window at `codex_weekly` (90) % or
   more. Otherwise it answers `cloud`.
 - **Every other role** answers `cloud`.

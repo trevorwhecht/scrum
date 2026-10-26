@@ -29,7 +29,8 @@ class RouteTests(unittest.TestCase):
         self.sessions = self.root / 'sessions'
         self.sessions.mkdir()
         self.jobs = []
-        env = patch.dict(os.environ, {'SCRUM_CODEX_SESSIONS': str(self.sessions)})
+        env = patch.dict(os.environ, {'SCRUM_CODEX_SESSIONS': str(self.sessions),
+                                      'SCRUM_CODEX_CONFIG': str(self.root / 'codex-config.toml')})
         env.start()
         self.addCleanup(env.stop)
         codex = patch.object(route_mod, '_codex_installed', lambda: True)
@@ -74,8 +75,29 @@ class RouteTests(unittest.TestCase):
     def test_no_local_model_left(self):
         text = ROUTE_PY.read_text()
         self.assertNotIn('oll' + 'ama', text.lower())
-        for word in ('urllib', 'chat(', 'loaded' + '_models', 'KEEP_ALIVE', 'SCRUM_ROUTE'):
+        for word in ('urllib.request', 'chat(', 'loaded' + '_models', 'KEEP_ALIVE', 'SCRUM_ROUTE'):
             self.assertNotIn(word, text)
+
+    def test_codex_review_config_check_edge_cases(self):
+        config = self.root / 'codex-config.toml'
+        low = {'runner': 'cloud', 'model': None, 'why': 'codex quota below thresholds'}
+        for url in ('http://localhost:11434/v1', 'http://[::1]:11434/v1'):
+            config.write_text(f'openai_base_url = "{url}"\n')
+            self.assertEqual(route_mod.route('codex-review'), {
+                'runner': 'skip', 'model': None, 'why': f'codex config points at a local server ({url})'}, url)
+        cases = {'no key': 'model = "gpt-6.1-sol"\n',
+                 'remote': 'openai_base_url = "https://api.openai.com/v1"\n',
+                 'invalid toml': 'openai_base_url = "http://127.0.0.1:11434\n[[[',
+                 'table only': '[profiles.x]\nopenai_base_url = "http://127.0.0.1:11434/v1"\n'}
+        for name, body in cases.items():
+            config.write_text(body)
+            self.assertEqual(route_mod.route('codex-review'), low, name)
+        config.unlink()
+        self.assertEqual(route_mod.route('codex-review'), low, 'missing file')
+        config.write_text('openai_base_url = "http://127.0.0.1:11434/v1"\n')
+        with patch.object(route_mod, '_codex_installed', lambda: False):
+            self.assertEqual(route_mod.route('codex-review'),
+                             {'runner': 'skip', 'model': None, 'why': 'codex not installed'})
 
     def test_other_roles_cloud(self):
         fast = self.job('001-x', lane='fast')
