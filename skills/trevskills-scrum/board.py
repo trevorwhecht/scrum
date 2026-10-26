@@ -1459,7 +1459,8 @@ def _applies(base_text, props, head_text):
 def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base: str | None = None) -> dict:
     """{"ok": True, "files", "proposals"} when every rules file the job changed is exactly its cited queued digest edits,
     and every cited proposal's file changed; else {"ok": False, "error"}. worktree/base, when not None, replace the
-    board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails."""
+    board's values (Merge passes its own $WT/$BASE so the verified range is the merged one); empty fails. Any human-only
+    path (HUMAN_ONLY_FILES or board.py) in the diff always fails."""
     try:
         job = find(read_board(root), check_id(job_id))
         feature = Path(root) / "jobs" / job_id / "feature.md"
@@ -1477,7 +1478,10 @@ def cmd_digest_verify(root: Path, job_id: str, worktree: str | None = None, base
             rel, p = _cited_proposal(root, scrum, digest_id, pid)
             by_file.setdefault(rel, []).append(p)
             labels.append(f"{Path(scrum).resolve().parent.name} digest {digest_id} {pid}")
-        changed = [f for f in _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines() if RULES_RE.search(f)]
+        diff = _git(wt, "diff", "--name-only", f"{base}...HEAD", "--").decode().splitlines()
+        if bad := next((f for f in diff if f in HUMAN_ONLY_FILES or f == "skills/trevskills-scrum/board.py"), None):
+            raise ValueError(f"{bad} is human-only; digest-verify never clears it")
+        changed = [f for f in diff if RULES_RE.search(f)]
         if not changed:
             raise ValueError("the diff changes no rules file")
         if extra := next((f for f in changed if f not in by_file), None):
