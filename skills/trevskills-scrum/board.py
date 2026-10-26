@@ -939,6 +939,7 @@ def diverged(d):
 # --- digests: scrum/digests/<NNN>/jobs.txt lists the done jobs one digest learned from ---
 DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md"}
+ROUND_KEEP = {"review-code.md", "check.md"}  # kept inside each round-<N>/ of a trimmed job
 QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many lines since the last one
 BAD_WASTED_PCT = 20  # a window scorecard is bad above this wasted_pct
 BAD_FIRST_PASS = 0.5  # ... or below this first_pass_rate, once it has BAD_MIN_JOBS done jobs
@@ -1075,7 +1076,8 @@ def claim_folder(parent):
 
 
 def cmd_digest_trim(root, digest_id):
-    """Slim each listed done job's folder to feature.md, spec.md and decision.md; returns the trimmed ids. Idempotent."""
+    """Slim each listed done job's folder to feature.md, spec.md and decision.md, plus review-code.md and check.md in each
+    round-<N>/ dir (a round dir with neither is removed); returns the trimmed ids. Idempotent."""
     d = Path(root) / "digests" / str(digest_id)
     if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
         raise SystemExit(f"no digest {digest_id!r}")
@@ -1088,6 +1090,13 @@ def cmd_digest_trim(root, digest_id):
                 continue
             for p in folder.iterdir():
                 if p.name in TRIM_KEEP and p.is_file():
+                    continue
+                if re.fullmatch(r"round-\d+", p.name) and p.is_dir() and not p.is_symlink():
+                    for q in p.iterdir():
+                        if not (q.name in ROUND_KEEP and q.is_file() and not q.is_symlink()):
+                            shutil.rmtree(q) if q.is_dir() and not q.is_symlink() else q.unlink()
+                    if not any(p.iterdir()):
+                        p.rmdir()
                     continue
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p)
