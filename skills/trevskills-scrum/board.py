@@ -605,11 +605,15 @@ def abort_job(root, job, requeue, reason):
     the requeue reopens the claimed backlog line in place, points, id, needs and pre-written spec kept."""
     folder = Path(root) / "jobs" / job["id"]
     feature = folder / "feature.md"
-    job.update(stage="aborted", reason=reason, updatedAt=now(), files=job_files(folder))
+    job.update(stage="aborted", reason=reason, updatedAt=now())
     job.pop("paused", None)  # an aborted job is never played
     job.pop("play_queued", None)  # nor started by serve.py's Play queue
-    if not requeue:
-        return
+    if requeue:
+        requeue_job(root, job, folder, feature)
+    job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
+
+
+def requeue_job(root, job, folder, feature):
     lines, items = read_backlog(root)
     claimed = next((i for i in items if i["job"] == job["id"]), None)
     if claimed and not feature.exists():
