@@ -1,4 +1,4 @@
-import fcntl, importlib.util, os, signal, subprocess, sys, tempfile, time, unittest
+import fcntl, importlib.util, os, re, signal, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -178,6 +178,42 @@ class BuildLockTest(unittest.TestCase):
                     os.kill(int(first[1]), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def project(self, build):
+        f = self.dir / "project.md"
+        f.write_text(f"# p\n- Test: x\n- Build: {build}\n- Other: y\n")
+        return str(f)
+
+    def test_project_flag_runs_build_line(self):
+        self.assertEqual(self.run_wrap("--project", self.project("  exit 3  ")).returncode, 3)
+        r = self.run_wrap("--project", self.project("echo one && echo two | tr a-z A-Z"))
+        self.assertEqual((r.returncode, r.stdout), (0, "one\nTWO\n"))
+
+    def test_project_flag_build_with_single_quote(self):
+        r = self.run_wrap("--project", self.project("""printf '%s\\n' 'it'"'"'s ok'"""))
+        self.assertEqual((r.returncode, r.stdout), (0, "it's ok\n"))
+
+    def test_project_flag_missing_or_none_build(self):
+        marker = self.dir / "ran"
+        nobuild = self.dir / "nobuild.md"
+        nobuild.write_text("- Test: x\n")
+        cases = [str(self.dir / "missing.md"), str(nobuild), self.project("none"), self.project("NONE"), self.project("")]
+        for path in cases:
+            r = self.run_wrap("--project", path)
+            self.assertEqual(r.returncode, 2, path)
+            self.assertRegex(r.stderr, r"\Abuildlock:[^\n]*" + re.escape(path) + r"[^\n]*\n\Z")
+        r = self.run_wrap("--project")
+        self.assertEqual(r.returncode, 2)
+        self.assertRegex(r.stderr, r"\Abuildlock:[^\n]*\n\Z")
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.lock.exists())
+
+    def test_project_flag_bad_path_fails_without_waiting(self):
+        self.hold()
+        start = time.monotonic()
+        r = self.run_wrap("--project", str(self.dir / "missing.md"), SCRUM_BUILD_LOCK_TIMEOUT="20")
+        self.assertEqual(r.returncode, 2)
+        self.assertLess(time.monotonic() - start, 2)
 
     def test_missing_command_returns_127(self):
         self.assertEqual(self.run_wrap("no-such-cmd-buildlock-xyz", "arg").returncode, 127)

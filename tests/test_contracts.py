@@ -2541,10 +2541,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_build_runs_under_machine_wide_lock(self):
         skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         check = self.section(skill, "## Check gate", "## Review (WAIT FOR ALL)")
-        self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<Build>\'`', check)
+        self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
+        self.assertNotIn("'<Build>'", check)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the project's test", "5. Commit on your branch")
-        self.assertIn("buildlock.py", step4)
+        self.assertIn('`python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$PROJECT"`', step4)
+        self.assertNotIn("'<Build>'", step4)
 
     def test_unblocker_has_no_edit(self):
         path = ROOT / "agents" / "scrum-unblocker.md"

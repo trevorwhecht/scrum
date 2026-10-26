@@ -3,11 +3,12 @@
 
 usage: buildlock.py '<Build string>'   (run through sh -c)
        buildlock.py <cmd> [args...]    (run as argv, no shell)
+       buildlock.py --project <file>   (run the `- Build:` line of <file> through sh -c; exit 2 when it is missing or none)
 
 SCRUM_BUILD_LOCK overrides the lock file; SCRUM_BUILD_LOCK_TIMEOUT the wait in seconds (default 1800).
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
 """
-import fcntl, math, os, subprocess, sys, time
+import fcntl, math, os, re, subprocess, sys, time
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 1800.0
@@ -25,10 +26,29 @@ def timeout_s() -> float:
     return value if math.isfinite(value) and value >= 0 else DEFAULT_TIMEOUT
 
 
+def build_from(path: str) -> str | None:
+    try:
+        text = Path(path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.search(r"^- Build:[ \t]*(.*)$", text, re.M)
+    value = m.group(1).strip() if m else ""
+    return None if value.lower() in ("", "none") else value
+
+
 def main(argv: list[str]) -> int:
     if not argv:
-        print("usage: buildlock.py '<command string>' | <cmd> [args...]", file=sys.stderr)
+        print("usage: buildlock.py '<command string>' | <cmd> [args...] | --project <file>", file=sys.stderr)
         return 2
+    if argv[0] == "--project":
+        if len(argv) != 2:
+            print("buildlock: --project needs a path to project.md", file=sys.stderr)
+            return 2
+        value = build_from(argv[1])  # read before taking the lock, so a bad path never waits
+        if value is None:
+            print(f"buildlock: no runnable '- Build:' line in {argv[1]}", file=sys.stderr)
+            return 2
+        argv = [value]
     path = lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:  # only a live flock holds the lock, so a leftover file never blocks
