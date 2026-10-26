@@ -93,6 +93,14 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/commands.md` when this section
 
 ## New job
 
+**Every stop is a closed question.** A job goes needs-human only through `B ask`: what happened in one line, then 2 or 3 options `--a`, `--b`, `--c`, each `<Label>=<command>`, the command one of `approve <id>`, `rework <id> "<fix text>"`, `abort <id> [--requeue|--cascade]`, `resume <id>` or `shell: <cmd>`, then `--recommend <key> '<why>'`. Read `$HOME/.claude/skills/trevskills-scrum/lanes/stops.md` for the Issue / Options / Recommended shape every question takes. `B set` refuses the needs-human stage. The question has no double quotes or backticks, is quoted under **Untrusted reason text**, and becomes the reason, so it keeps the old reason's prefix (`Hard stop: schema`, `Hard stop: agent rules`, `Hard stop: render`, `blocked:`, `bigboy off track`, `bigboy review: main not updated`, `Base branch `). An option with a `<placeholder>` is single-quoted, `<id>` written out; one with only `$ID` or `$P` is double-quoted. A stop whose only fix is Abort is still handled by the agents instead.
+
+**Auto-abort instead of needs-human.** Some stops below run `B abort $ID --requeue --reason 'requeue: <error>'` (the job lands in Done as aborted and its feature goes back on the backlog), or `B abort $ID --reason 'looks already fixed: ...'`, and stop. The `<error>` part is quoted under the **Untrusted reason text** rule. For a job with a `parent` (a BigBoy child), the requeue abort runs without `--requeue` (its text is a planner ticket, not a backlog item), and after any of these aborts the run then does **BigBoy lane** step 6. The **Roadmap lane** stop rule (`B roadmap-stop`) applies to these aborts as it does to needs-human. Inside a cloud-job session, they are reported to GitHub as **Cloud lane** **Needs-human** says. The final report says the job was auto-aborted (requeued, or auto-closed as looks already fixed) and why.
+
+For a BigBoy child (the job has a `parent`), every time this run runs `B ask` for the child, also run **BigBoy lane** step 6, so independent children still start. Every time this run runs `B ask` for a job, also apply the **Roadmap lane** stop rule (`B roadmap-stop` only when that job, or its `parent`, is a roadmap step's `job`).
+
+**Unblock.** When a `B ask` run with `--kind` prints `"unblock": true`, the job was not parked, so don't stop: read `$HOME/.claude/skills/trevskills-scrum/lanes/unblock.md` and follow it (it spawns `scrum-unblocker`); the two side steps above then wait until an ask actually parks.
+
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/newjob.md` when this section runs.
 
 ## Run all
@@ -101,7 +109,7 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/runall.md` when this lane runs
 
 ## Fast lane
 
-Read `$HOME/.claude/skills/trevskills-scrum/lanes/fastlane.md` when this section runs.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/newjob.md` when this section runs.
 
 ## Debug lane
 
@@ -125,7 +133,7 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/cloud.md` when this lane runs.
 
 ## Check gate
 
-Read `$HOME/.claude/skills/trevskills-scrum/lanes/checkgate.md` when this section runs.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/newjob.md` when this section runs.
 
 ## Review (WAIT FOR ALL)
 
@@ -133,7 +141,7 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/review.md` when this section r
 
 ## Approve
 
-Read `$HOME/.claude/skills/trevskills-scrum/lanes/approve.md` when this section runs.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/review.md` when this section runs.
 
 ## Migrate (Merge's schema guard; Lilguy lane step 4)
 
@@ -165,20 +173,7 @@ Ignore a failed `record` call. Logging never blocks the pipeline.
 
 ## Resuming the builder
 
-Use SendMessage to the recorded `builder` (the name `builder-$ID`, or the stored agent id) with a message naming the exact file(s) to read. If SendMessage fails because the agent no longer exists (for example after a session restart):
-1. Spawn a fresh `scrum-builder` with the 5 lines plus `You are resuming this job. Read spec.md, build.md, and <the file(s) above>, then continue.` Pass Agent override `model: "sonnet"` only when `$F/jobs/$ID/jev.log` has a `model` line that decided `sonnet` and no `promote` line; otherwise (jev.log missing included) no override (Opus). It makes no Jev call.
-2. Run `B set $ID builder=<new id>`.
-
-In a headless (`claude -p`) session, skip SendMessage: its reply would arrive after the turn ends, and the process exits with it (see **Headless sessions block.**). Resume through step 1 instead (spawn a fresh `scrum-builder` in the foreground and wait for it to return), then step 2.
-
-**Sonnet promotion.** A cloud builder runs as Sonnet while `$F/jobs/$ID/jev.log`'s `model` line decided `sonnet` and it has no `promote` line. On its first `CHECK: FAIL` (**Check gate** step 4) or `VERDICT: CHANGES` round (**Review** step 5), instead of SendMessage:
-1. Run `printf '%s\n' '<check-fail round N|changes round N>' | python3 ~/.claude/skills/trevskills-scrum/jev-gate.py promote $F/jobs/$ID` with Bash timeout 90000.
-2. Spawn a fresh `scrum-builder` with Agent override `model: "opus"`: step 1's prompt above plus the resume text.
-3. Run `B set $ID builder=<new id>`.
-
-A builder already promoted is never promoted again.
-
-Outside the **Lilguy lane**, the orchestrator never edits code or review files itself, except for these sanctioned review files: the UI/UX skip, security skip and `Carried forward from round` files that `B review-plan` writes in **Review** step 2, the `Reviewer produced no output.` fallback, and the fast lane skip files in **Fast lane** step 2.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/resume.md` when this section runs.
 
 ## Digest
 

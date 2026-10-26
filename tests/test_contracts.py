@@ -1,8 +1,5 @@
 import json, re, shutil, subprocess, unittest
 from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent))
-from skilltext import MOVED, skill_text
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = {
@@ -24,6 +21,23 @@ FIRST_LINE = {
     "scrum-review-e2e": "VERDICT: PASS", "scrum-review-rules": "VERDICT: PASS",
     "scrum-unblocker": "VERDICT: REWORK | RESPEC | ESCALATE",
 }
+
+SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "trevskills-scrum"
+MOVED = ("setup", "commands", "newjob", "review", "merge", "resume")  # lanes/ files holding sections moved out of SKILL.md
+POINTER = re.compile(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", re.M)
+
+
+def skill_text():
+    text = (SKILL_DIR / "SKILL.md").read_text()
+
+    def body(m):
+        heading = re.findall(r"^#{2,3} .*$", text[:m.start()], re.M)[-1]
+        parts = re.split(r"\n(?=## )", (SKILL_DIR / "lanes" / f"{m.group(1)}.md").read_text())
+        part = next((p for p in parts[1:] if p.startswith(heading)), parts[0])
+        return part.split("\n\n", 1)[1].rstrip("\n")
+    # Merge keeps steps 1-2 in SKILL.md; its lane file continues at step 3 on the next line
+    text = text.replace("\n\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", "\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`")
+    return POINTER.sub(body, text)
 
 
 def frontmatter(path):
@@ -2545,7 +2559,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_moved_sections_have_lane_files(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         pointers = re.findall(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", text, re.M)
-        self.assertEqual(sorted(pointers), sorted(MOVED))
+        self.assertEqual(set(pointers), set(MOVED))
         for name in pointers:
             path = ROOT / "skills" / "trevskills-scrum" / "lanes" / f"{name}.md"
             self.assertTrue(path.is_file(), path)

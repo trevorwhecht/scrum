@@ -1,24 +1,21 @@
 import unittest
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
-from skilltext import skill_text
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "trevskills-scrum" / "SKILL.md"
+MERGE = ROOT / "skills" / "trevskills-scrum" / "lanes" / "merge.md"
 APPROVER = ROOT / "agents" / "scrum-approver.md"
 
 
 def cleanup_section(text):
     start = text.index("7. **Clean up:**")
-    return text[start:text.index("## Resuming the builder", start)]
+    return text[start:]
 
 
 class VerifyFollowsRedirectTest(unittest.TestCase):
     """serve.py answers / with 302 -> /dashboard.html; curl -sf without -L sees an empty body."""
 
     def test_skill_verify_uses_curl_sfL(self):
-        cleanup = cleanup_section(skill_text())
+        cleanup = cleanup_section(MERGE.read_text())
         restart = cleanup[cleanup.index("**Restart.**"):]
         self.assertIn("run only `curl -sfL localhost:<port>/<path>`", restart)
         self.assertIn('curl -sfL localhost:<port>/<path> | grep -F -- "$VERIFY"', restart)
