@@ -2549,23 +2549,55 @@ class BoardTest(unittest.TestCase):
         (d / "error.md").write_text("digester produced no valid proposals\n")
         self.assertEqual(board.digested_ids(self.root), set())
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 2, "questionsGrowth": 0, "reason": None})
-        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b]})
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": [a, b], "windows": []})
         self.assertEqual(board.digested_ids(self.root), {a, b})
         self.assertTrue((d / "jobs.txt").exists())  # the failed digest stays as it was
 
     def test_digest_start_claims_jobs_once(self):
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertFalse((self.root / "digests").exists())
         done = self.done_jobs(3)
         aborted = self.done_jobs(1, "aborted")
-        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": done})
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": done, "windows": []})
         self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "\n".join(done) + "\n")
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
         more = self.done_jobs(1)
-        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more})
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more, "windows": []})
         self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+
+    def test_digest_start_claims_windows_once(self):
+        a = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": a, "windows": []})  # no windows/ folder
+        d1 = self.root / "digests" / "001"
+        self.assertEqual((d1 / "windows.txt").read_text(), "")
+        self.assertEqual(json.loads((d1 / "windows.json").read_text()), [])
+        w = self.root / "windows"
+        w.mkdir()
+        (w / "five_hour-200.json").write_text(json.dumps({"window": "five_hour", "resets_at": 200, "headline": "ok"}))
+        (w / "five_hour-100.json").write_text(json.dumps({"window": "five_hour", "resets_at": 100, "wasted_pct": 30}))
+        (w / "open.json").write_text(json.dumps({"window": "five_hour"}))
+        (w / ".lock").write_text("")
+        (w / "five_hour-9.json").write_text("{bad")
+        (w / "seven_day-5.json").write_text("[1, 2]")
+        b = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": b,
+                                                    "windows": ["five_hour-100.json", "five_hour-200.json"]})
+        d2 = self.root / "digests" / "002"
+        self.assertEqual((d2 / "windows.txt").read_text(), "five_hour-100.json\nfive_hour-200.json\n")
+        self.assertEqual(json.loads((d2 / "windows.json").read_text()),
+                         [{"window": "five_hour", "resets_at": 100, "wasted_pct": 30},
+                          {"window": "five_hour", "resets_at": 200, "headline": "ok"}])
+        c = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "003", "jobs": c, "windows": []})
+        (w / "seven_day-300.json").write_text(json.dumps({"window": "seven_day", "resets_at": 300}))
+        e = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "004", "jobs": e, "windows": ["seven_day-300.json"]})
+        (d2 / "error.md").write_text("failed\n")  # failed digest: its windows are claimed again
+        f = self.done_jobs(1)
+        self.assertEqual(self.cli("digest-start"), {"id": "005", "jobs": b + f,
+                                                    "windows": ["five_hour-100.json", "five_hour-200.json"]})
 
     def write_questions_log(self, n):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -2606,14 +2638,14 @@ class BoardTest(unittest.TestCase):
 
     def test_digest_start_on_questions_growth_only(self):
         self.write_questions_log(14)
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertFalse((self.root / "digests").exists())
         self.write_questions_log(15)
-        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": [], "windows": []})
         self.assertEqual((self.root / "digests" / "001" / "jobs.txt").read_text(), "")
         self.assertEqual((self.root / "digests" / "001" / "questions.lines").read_text(), "15\n")
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
-        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": []})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
 
     def test_bad_window_thresholds(self):

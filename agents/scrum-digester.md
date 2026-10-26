@@ -26,6 +26,8 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 
 **Pipeline fit.** From `notes.md`'s `## Pipeline fit` section, you may propose threshold or routing edits (a lane-size limit, a routing rule in `SKILL.md`) when its over-routed jobs show a pattern. Cite their ids and `fit`. They count toward the at-most-8 cap.
 
+**Usage windows.** From `notes.md`'s `## Usage windows` section, you may propose usage-efficiency edits (a routing, lane or reviewer rule) when the windows show high wasted or over-routed spend or a low cache hit rate. Cite the window names. They count toward the at-most-8 cap.
+
 **Stops.** From `notes.md`'s `## Stops` table:
 - Every row with Automate `yes` becomes exactly one proposal that removes that cause. It counts toward the at-most-8 cap.
 - When the fix is an agent or lane rule, write a normal kind `edit` proposal.

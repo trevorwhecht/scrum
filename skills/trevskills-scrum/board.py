@@ -53,7 +53,8 @@
                                    done"), 15+ lines ("questions"), or 3+ jobs and a bad windows/ scorecard (wasted >20%,
                                    or first pass <0.5 over 3+ jobs) no digests/*/windows.txt lists, written after the
                                    newest digest folder ("bad window <file>"); reason null when not due
-  board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), print {"id","jobs"}
+  board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
+                                   scorecard no live digest lists as windows.txt + windows.json, print {"id","jobs","windows"}
                                    (id null = nothing new; starts with no jobs when the questions trigger fired)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
@@ -932,6 +933,12 @@ def digested_ids(root):
             for line in f.read_text().splitlines() if line.strip()}
 
 
+def claimed_windows(root):
+    """Every scorecard name listed in any digest's windows.txt, except a failed digest's (error.md), like digested_ids."""
+    return {line.strip() for f in (Path(root) / "digests").glob("*/windows.txt") if not f.with_name("error.md").exists()
+            for line in f.read_text().splitlines() if line.strip()}
+
+
 def undigested(root, board):
     seen = digested_ids(root)
     return [j["id"] for j in board["jobs"] if j.get("stage") == "done" and j["id"] not in seen]
@@ -1008,15 +1015,30 @@ def cmd_digest_due(root):
 
 def cmd_digest_start(root):
     """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job. Also starts
-    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES since the last digest; questions.lines records its count."""
+    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES since the last digest; questions.lines records its count.
+    Also claims every valid windows/ scorecard no live digest lists: names to windows.txt, contents to windows.json."""
     with locked_board(root) as board:
         jobs = undigested(root, board)
         if not jobs and questions_growth(root) < QUESTIONS_DIGEST_LINES:
-            return {"id": None, "jobs": []}
+            return {"id": None, "jobs": [], "windows": []}
         digest_id = claim_folder(Path(root) / "digests")
-        (Path(root) / "digests" / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
-        (Path(root) / "digests" / digest_id / "questions.lines").write_text(f"{questions_lines(root)}\n")
-        return {"id": digest_id, "jobs": jobs}
+        d = Path(root) / "digests" / digest_id
+        d.joinpath("jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        d.joinpath("questions.lines").write_text(f"{questions_lines(root)}\n")
+        names, cards, seen, w = [], [], claimed_windows(root), Path(root) / "windows"
+        for p in sorted(w.iterdir()) if w.is_dir() else []:
+            if not WINDOW_FILE_RE.fullmatch(p.name) or p.name in seen:
+                continue
+            try:
+                card = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(card, dict):
+                names.append(p.name)
+                cards.append(card)
+        d.joinpath("windows.txt").write_text("".join(f"{n}\n" for n in names))
+        d.joinpath("windows.json").write_text(json.dumps(cards, indent=2) + "\n")
+        return {"id": digest_id, "jobs": jobs, "windows": names}
 
 
 def claim_folder(parent):

@@ -4,7 +4,7 @@ Learns from finished jobs. It runs from the main checkout (Setup applies, but no
 
 Each registered project's questions.log holds stop lines: kind `ask`, `stall`, `machine`, `refused` or `bigboy`, each with `date`, `project`, `job`, `kind` and `reason`. A digest is also due once questions.log grows 15 lines since the last digest, so `B digest-start` can claim zero jobs. The reader writes a `## Stops` section from those lines, and a `backlog` proposal is queued by `--digest-auto` and reported under `applied`.
 
-1. Run `B digest-start`. Under the board lock it claims every `done` job that's in no earlier digest and prints `{"id", "jobs"}`. If `id` is null, say there is nothing to digest and stop. Otherwise `D=$F/digests/<id>`; run `B pipeline-fit <id> > $D/pipeline-fit.json`.
+1. Run `B digest-start`. Under the board lock it claims every `done` job that's in no earlier digest, and every usage-window scorecard no earlier digest lists, and prints `{"id", "jobs", "windows"}`. If `id` is null, say there is nothing to digest and stop. Otherwise `D=$F/digests/<id>`; run `B pipeline-fit <id> > $D/pipeline-fit.json`. `$D/windows.json` (the claimed usage-window scorecards) already sits in DIGEST_DIR beside `pipeline-fit.json` for the reader.
 2. Spawn `scrum-digest-reader` (see **Routing**) and wait for it. Prompt:
    ```
    DIGEST_DIR=$D

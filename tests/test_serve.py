@@ -3873,7 +3873,7 @@ class DigestTest(unittest.TestCase):
 
     def test_digest_now_retries_after_failed_digest(self):
         a = self.done_job()
-        self.assertEqual(self.board.cmd_digest_start(self.scrum), {"id": "001", "jobs": [a]})
+        self.assertEqual(self.board.cmd_digest_start(self.scrum), {"id": "001", "jobs": [a], "windows": []})
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
         (self.scrum / "digests" / "001" / "error.md").write_text("digester produced no valid proposals\nmore\n")
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:

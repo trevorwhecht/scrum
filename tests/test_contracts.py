@@ -1114,13 +1114,19 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, reader, phrase)
         for phrase in ("## Local routing", "insights/<id>.md", "(fallback: <n>)", "local background worker"):
             self.assertNotIn(phrase, reader, phrase)
+        self.assertIn("DIGEST_DIR/windows.json", reader)
+        self.assertIn("## Usage windows", reader)
+        template = reader[reader.index("    ## Pipeline fit"):]
+        self.assertIn("    ## Usage windows\n", template)
+        self.assertIn("over-routed <over_routed_pct>%", reader)
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
                        "never removes or loosens", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/",
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "## Pipeline fit",
                        "count toward the at-most-8 cap", "threshold or routing edits", "skipped, and so is one whose `old` text is stale",
-                       "## Stops", '"kind": "backlog"', '"backlog":', "--priority 3"):
+                       "## Stops", '"kind": "backlog"', '"backlog":', "--priority 3", "**Usage windows.**",
+                       "## Usage windows"):
             self.assertIn(phrase, digester, phrase)
         for phrase in ('"obvious"', '"obvious_reason"', '"obvious": false', "obvious_reason", "(unanimous)", "pick not unanimous",
                        "auto-approves", "Trevor decides", "Trevor approves", "**Obvious.**"):
@@ -1137,7 +1143,7 @@ class ContractTest(unittest.TestCase):
         digest = self.lane("digest")
         for phrase in ("B digest-start", "scrum-digest-reader", "DIGEST NOTES", "scrum-digester", "python3 -m json.tool",
                        "error.md", "B digest-trim", "no remote", "--digest-auto",
-                       "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
+                       "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit", "$D/windows.json", '{"id", "jobs", "windows"}'):
             self.assertIn(phrase, digest, phrase)
         for phrase in ("## Stops", "15 lines", "`stall`", "`machine`", "`refused`", "`backlog`"):
             self.assertIn(phrase, digest[:digest.index("\n1. ")], phrase)
