@@ -6122,6 +6122,24 @@ class AutoContinueTest(unittest.TestCase):
         self.assertTrue(e.getvalue().startswith("watchdog: bad: "), e.getvalue())
 
 
+class MainFocusMigrationTest(unittest.TestCase):
+    def test_main_migrates_focus_before_watchdog(self):
+        import serve
+        calls = []
+        thread = mock.Mock(start=lambda: calls.append("watchdog"))
+        server = mock.Mock(serve_forever=lambda: calls.append("serve"))
+        with mock.patch.object(sys, "argv", ["serve.py", "--port", "0"]), \
+                mock.patch.object(serve, "make_server", return_value=server), \
+                mock.patch.object(serve, "tailnet_host", return_value=""), \
+                mock.patch.object(serve.threading, "Thread", side_effect=lambda **kw: thread
+                                  if kw.get("target") is serve.watchdog_loop else mock.Mock()), \
+                mock.patch.object(serve.board, "projects", return_value={}), \
+                mock.patch.object(serve.board, "migrate_focus", side_effect=lambda: calls.append("migrate")), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            serve.main()
+        self.assertEqual(calls, ["migrate", "watchdog", "serve"])
+
+
 class ParkedParentTest(unittest.TestCase):
     """A running Run-all/BigBoy parent whose idle children wait only on Trevor (needs-human, not stalled) is parked:
     not busy for auto continue, marked once with the WAITING_ON reason, and closed once its children finish."""
