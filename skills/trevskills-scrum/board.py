@@ -55,6 +55,9 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
+  board.py window-report           remember each open usage window in windows/open.json; for each one that has closed,
+                                   write windows/<window>-<resets_at>.json once (points, tokens, waste, lane fit, idle)
+                                   and print the scorecards written as a JSON list
   board.py digest-verify <id> [--worktree PATH] [--base REF]
                                    exit 0 and print {"ok","files","proposals"} when the job worktree's rules-file diff
                                    (agents/scrum-*.md, SKILL.md, skills/trevskills-scrum/lanes/*.md) is exactly its feature.md's
@@ -1043,6 +1046,30 @@ def _fit_diff(root, job):
     return *out, ((rows, names) if ok else None)
 
 
+def _fit_job(root, job_id: str, job: dict, globs) -> dict:
+    """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
+    verdicts per round, fix rounds, over_routed and the cheapest lane that would have done."""
+    folder = Path(root) / "jobs" / job_id
+    lane = job.get("lane") or "standard"
+    rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
+                    if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+    agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
+    agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
+                                                       for n in rounds)]
+    agents += ["approver"] if (folder / "decision.md").is_file() else []
+    verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
+                         for r in REVIEWERS} for n in rounds}
+    added, deleted, files, paths = _fit_diff(root, job)
+    size = None if added is None else added + deleted
+    over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+            and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
+            and paths is not None and _promote_trigger(*paths) is None
+            and not (globs and any(glob_match(n, globs) for n in paths[1])))
+    fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+    return {"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
+            "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit}
+
+
 def cmd_pipeline_fit(root, digest_id: str) -> dict:
     """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
     round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed: never
@@ -1052,29 +1079,230 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
         raise SystemExit(f"no digest {digest_id!r}")
     listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
-    globs, out = ui_globs(root), []
-    for job_id in listed:
-        job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
-        lane = job.get("lane") or "standard"
-        rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
-                        if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
-        agents = [a for a, f in (("spec", "spec.md"), ("builder", "build.md")) if (folder / f).is_file()]
-        agents += [f"review-{r}" for r in REVIEWERS if any(_real_review(folder / f"round-{n}" / f"review-{r}.md")
-                                                           for n in rounds)]
-        agents += ["approver"] if (folder / "decision.md").is_file() else []
-        verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
-                             for r in REVIEWERS} for n in rounds}
-        added, deleted, files, paths = _fit_diff(root, job)
-        size = None if added is None else added + deleted
-        over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
-                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
-                and paths is not None and _promote_trigger(*paths) is None
-                and not (globs and any(glob_match(n, globs) for n in paths[1])))
-        fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
-        out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
-                    "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
-                    "fit": fit})
-    return {"digest": str(digest_id), "jobs": out}
+    globs = ui_globs(root)
+    return {"digest": str(digest_id), "jobs": [_fit_job(root, job_id, jobs.get(job_id, {}), globs) for job_id in listed]}
+
+
+# --- window-report: remembers each open usage window in windows/open.json (merge_limits drops closed ones) and, once
+# one has closed, writes a zero-LLM scorecard windows/<window>-<resets_at>.json. Every timestamp in it is epoch seconds.
+WINDOW_SECS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+HIT_PCT = 90  # budget.hit_90_at: the first sighting at or above this used %
+IDLE_SAMPLE_MAX_SECS = 300  # a gap between two runs longer than this is no idle sample
+
+
+def _epoch(s):
+    """An ISO timestamp as epoch seconds, None when it is not one."""
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_lines(path):
+    """The dict lines of a JSON-lines file; bad lines and an unreadable file are skipped."""
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict):
+                    out.append(d)
+    except OSError:
+        pass
+    return out
+
+
+def _project_idle(root, board) -> bool:
+    """True when no board job is in an ACTIVE stage and some open backlog item could be claimed now (cmd_next's test)."""
+    if any(j.get("stage") in ACTIVE for j in board["jobs"]):
+        return False
+    _, items = read_backlog(root)
+    return any(not i["done"] and not i["setup"] and not waiting_on(i, items, board) for i in items)
+
+
+def _scorecard(root, e, t, board, questions):
+    """The scorecard dict for one remembered window entry `e` (resets_at <= t)."""
+    root = Path(root)
+    end = e["resets_at"]
+    start = end - WINDOW_SECS[e["window"]]
+    within = lambda ts: ts is not None and start <= ts < end
+    jobs = {j["id"]: j for j in board["jobs"] if isinstance(j, dict) and isinstance(j.get("id"), str)}
+    # budget
+    used = e.get("used_pct")
+    if is_num(used):
+        budget = {"used_pct": used, "hit_90_at": e.get("hit_90_at"), "left_at_reset_pct": 100 - used,
+                  "cap_idle_secs": end - e["hit_cap_at"] if is_num(e.get("hit_cap_at")) else 0}
+    else:
+        budget = dict.fromkeys(("used_pct", "hit_90_at", "left_at_reset_pct", "cap_idle_secs"))
+    # done jobs and points
+    _, items = read_backlog(root)
+    done = sorted(i for i, j in jobs.items() if j.get("stage") == "done" and within(_epoch(j.get("updatedAt"))))
+    done_jobs = []
+    for i in done:
+        pts = [it["points"] for it in items if it["job"] == i and it["points"] is not None]
+        done_jobs.append({"id": i, "points": sum(pts) if pts else None})
+    points_done = sum(d["points"] or 0 for d in done_jobs)
+    globs = ui_globs(root)
+    fits = [_fit_job(root, i, jobs[i], globs) for i in done if jobs[i].get("lane") not in ("bigboy", "runall")]
+    # tokens: only this project's rows
+    me = root.resolve().parent
+    name = next((n for n, p in projects().items() if p.resolve() == me), None)
+    rows = [r for r in transcript_tokens(start, end) if r["project"] == name] \
+        if name is not None and transcripts_dir().is_dir() else None
+    tok = lambda r: sum(r[k] for k in TOKEN_KEYS)
+    tokens = model_mix = None
+    if rows is not None:
+        by_job, model_mix = {}, {}
+        for r in rows:
+            if r["job"]:
+                by_job[r["job"]] = by_job.get(r["job"], 0) + tok(r)
+            mix = model_mix.setdefault(r["agent"], {})
+            mix[r["model"] or "unknown"] = mix.get(r["model"] or "unknown", 0) + tok(r)
+        tokens = {"total": sum(tok(r) for r in rows), "by_job": by_job}
+    total = tokens and tokens["total"]
+    share = lambda ids: None if tokens is None else sum(tokens["by_job"].get(i, 0) for i in ids)
+    pct = lambda n: round(100 * n / total, 1) if n is not None and total else None
+    cache_read = rows and sum(r["cache_read_input_tokens"] for r in rows)
+    fresh = rows and sum(r["input_tokens"] for r in rows)
+    # wasted spend: aborted, stalled or unblocked in the window
+    wasted = {i for i, j in jobs.items() if j.get("stage") == "aborted" and within(_epoch(j.get("updatedAt")))}
+    for q in questions:
+        if q.get("job") in jobs and within(q["_ts"]) and (
+                q.get("kind") == "stall" or "unblock" in q
+                or ("options" in q and str(q.get("reason") or "").startswith(STALLED))):
+            wasted.add(q["job"])
+    wasted = sorted(wasted)
+    over = [f["id"] for f in fits if f["over_routed"]]
+    # reviewer yield
+    findings = 0
+    for p in root.glob("jobs/*/round-*/review-*.md"):
+        try:
+            if not within(p.stat().st_mtime) or not _real_review(p):
+                continue
+            body = md_section(p.read_text(encoding="utf-8"), "Findings") or ""
+        except (OSError, ValueError):
+            continue
+        findings += len(re.findall(r"^\d+\. \[", body, re.M))
+    review_tokens = rows and sum(tok(r) for r in rows if str(r["agent"]).startswith("scrum-review"))
+    # local routing
+    routed = [d for p in root.glob("jobs/*/routing.log") for d in _json_lines(p) if within(_epoch(d.get("ts")))]
+    # escapes: merged-with-gaps bigboy parents, and done jobs a later debug-lane job names
+    escaped, escapes = set(), 0
+    for q in questions:
+        if q.get("kind") == "bigboy" and within(q["_ts"]) and str(q.get("reason") or "").startswith("merged + gaps"):
+            escapes += 1
+            escaped.add(q.get("job"))
+    all_done = {i: _epoch(j.get("updatedAt")) for i, j in jobs.items() if j.get("stage") == "done"}
+    for i, j in jobs.items():
+        f = root / "jobs" / i / "feature.md"
+        try:
+            if j.get("lane") != "debug" or not within(mtime := f.stat().st_mtime):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        nums = set(re.findall(r"\bjob (\d{3,})\b", text))
+        named = [d for d, at in all_done.items() if d != i and at is not None and at < mtime
+                 and (re.search(rf"(?<![\w-]){re.escape(d)}(?![\w-])", text) or d.split("-", 1)[0] in nums)]
+        if named:
+            escapes += 1
+            escaped.update(named)
+    # needs-human time: each ask line's span until the job's next questions.log line, clipped to the window
+    needs_human = 0
+    for n, q in enumerate(questions):
+        if "options" not in q or q["_ts"] is None:
+            continue
+        nxt = next((x["_ts"] for x in questions[n + 1:] if x.get("job") == q.get("job") and x["_ts"] is not None),
+                   None)
+        if nxt is None:
+            if jobs.get(q.get("job"), {}).get("stage") != "needs-human":
+                continue
+            nxt = end
+        needs_human += max(0, min(nxt, end) - max(q["_ts"], start))
+    label = dict(WINDOWS)[e["window"]]
+    return {
+        "window": e["window"], "label": label, "resets_at": end, "start": start, "end": end,
+        "written_at": datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds"),
+        "budget": budget, "headline": round(points_done / used, 3) if is_num(used) and used else None,
+        "points_done": points_done, "done_jobs": done_jobs, "tokens": tokens,
+        "tokens_per_point": round(total / points_done, 3) if tokens is not None and points_done else None,
+        "first_pass_rate": round(sum(f["fix_rounds"] == 0 for f in fits) / len(fits), 3) if fits else None,
+        "cache_hit_rate": round(cache_read / (fresh + cache_read), 3) if rows and fresh + cache_read else None,
+        "model_mix": model_mix,
+        "wasted_jobs": wasted, "wasted_tokens": share(wasted), "wasted_pct": pct(share(wasted)),
+        "lane_fit": {"over_routed": over, "over_routed_tokens": share(over), "over_routed_pct": pct(share(over))},
+        "reviewer_yield": round(findings / (review_tokens / 1000), 3) if tokens is not None and review_tokens else None,
+        "local_routing": round(sum(d.get("runner") != "skip" and d.get("outcome") == "ok" for d in routed)
+                               / len(routed), 3) if routed else None,
+        "escapes": escapes, "escaped_jobs": sorted(x for x in escaped if isinstance(x, str)),
+        "idle": {"ready_idle_secs": e.get("idle_secs") or 0, "needs_human_secs": round(needs_human)},
+    }
+
+
+def _write_json(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_window_report(root, now=None) -> list[dict]:
+    """Record every usage.json window into windows/open.json, then score each remembered window whose resets_at has
+    passed into windows/<window>-<resets_at>.json (once: an existing scorecard is never rewritten) and drop it from
+    open.json. Returns the scorecards written this run. The whole run holds windows/.lock."""
+    t = time.time() if now is None else now
+    wdir = Path(root) / "windows"
+    wdir.mkdir(parents=True, exist_ok=True)
+    with open(wdir / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            raw = json.loads((wdir / "open.json").read_text())
+        except (OSError, ValueError):
+            raw = {}
+        opened = {k: v for k, v in raw.items() if isinstance(v, dict) and v.get("window") in WINDOW_SECS
+                  and type(v.get("resets_at")) is int} if isinstance(raw, dict) else {}
+        usage = read_usage() or {}
+        limits = usage.get("rate_limits") if isinstance(usage.get("rate_limits"), dict) else {}
+        at = usage["written_at"] if is_num(usage.get("written_at")) else t
+        board, idle = read_board(root), None
+        for key, _ in WINDOWS:
+            w = limits.get(key)
+            if not isinstance(w, dict) or not is_num(w.get("resets_at")):
+                continue
+            r = int(w["resets_at"])
+            e = opened.setdefault(f"{key}-{r}", {"window": key, "resets_at": r, "used_pct": None, "hit_90_at": None,
+                                                 "hit_cap_at": None, "idle_secs": 0, "last_tick": None})
+            used = w.get("used_percentage")
+            if is_num(used):
+                e["used_pct"] = used
+                if used >= HIT_PCT and e.get("hit_90_at") is None:
+                    e["hit_90_at"] = at
+                if 100 - used < USAGE_STOP_PCT and e.get("hit_cap_at") is None:
+                    e["hit_cap_at"] = at
+            if r > t:
+                gap = t - e["last_tick"] if is_num(e.get("last_tick")) else None
+                if gap is not None and 0 < gap <= IDLE_SAMPLE_MAX_SECS:
+                    if idle is None:
+                        idle = _project_idle(root, board)
+                    if idle:
+                        e["idle_secs"] = (e.get("idle_secs") or 0) + gap
+                e["last_tick"] = t
+        written, questions = [], None
+        for name, e in sorted(opened.items()):
+            if e["resets_at"] > t:
+                continue
+            path = wdir / f"{name}.json"
+            if not path.exists():
+                if questions is None:
+                    questions = [{**q, "_ts": _epoch(q.get("date"))} for q in _json_lines(Path(root) / "questions.log")]
+                card = _scorecard(root, e, t, board, questions)
+                _write_json(path, card)
+                written.append(card)
+            del opened[name]
+        _write_json(wdir / "open.json", opened)
+    return written
 
 
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
@@ -3695,6 +3923,7 @@ def main(argv=None):
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("pipeline-fit").add_argument("digest")
+    sub.add_parser("window-report")
     dv = sub.add_parser("digest-verify")
     dv.add_argument("id")
     dv.add_argument("--worktree", default=None)
@@ -3798,6 +4027,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "pipeline-fit":
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
+    elif a.cmd == "window-report":
+        print(json.dumps(cmd_window_report(a.dir)))
     elif a.cmd == "digest-verify":
         out = cmd_digest_verify(a.dir, a.id, a.worktree, a.base)
         print(json.dumps(out))

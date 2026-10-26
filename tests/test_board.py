@@ -5870,6 +5870,340 @@ class PipelineFitTest(unittest.TestCase):
             self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
 
 
+class WindowReportTest(unittest.TestCase):
+    """board.py window-report: remembers open usage windows and writes one scorecard per closed window."""
+
+    R = 1_700_000_000  # five_hour resets_at; the window is [R - 18000, R)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.repo = (self.base / "repo").resolve()
+        self.root = self.repo / "scrum"
+        self.root.mkdir(parents=True)
+        self.other = (self.base / "other").resolve()
+        (self.other / "scrum").mkdir(parents=True)
+        self.reg = self.base / "projects.json"
+        self.reg.write_text(json.dumps([str(self.repo), str(self.other)]))
+        self.tx = self.base / "projects"
+        self.tx.mkdir()
+        self.usage_file = self.base / "usage.json"
+        self.env = {"SCRUM_REGISTRY": str(self.reg), "SCRUM_TRANSCRIPTS": str(self.tx),
+                    "SCRUM_USAGE": str(self.usage_file)}
+        env = mock.patch.dict(os.environ, self.env)
+        env.start()
+        self.addCleanup(env.stop)
+        no_claude_pid(self)
+
+    @staticmethod
+    def at(t):
+        return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+
+    def usage(self, limits, written_at=None):
+        self.usage_file.write_text(json.dumps({"rate_limits": limits, **({"written_at": written_at}
+                                                                         if written_at is not None else {})}))
+
+    def five(self, used=50, written_at=None):
+        w = {"resets_at": self.R} if used is None else {"used_percentage": used, "resets_at": self.R}
+        self.usage({"five_hour": w}, written_at)
+
+    def board(self, *jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": i, "stage": stage, **({"updatedAt": self.at(t)} if t is not None else {}), **extra}
+            for i, stage, t, extra in ((*j, {}) if len(j) == 3 else j for j in jobs)]}))
+
+    def backlog(self, *lines):
+        (self.root / "backlog.md").write_text("# Backlog\n" + "".join(f"{l}\n" for l in lines))
+
+    def questions(self, *entries):
+        (self.root / "questions.log").write_text("".join(
+            (e if isinstance(e, str) else json.dumps(e)) + "\n" for e in entries))
+
+    def put(self, rel, text, mtime=None):
+        p = self.root / "jobs" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        if mtime is not None:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def transcript(self, rel, lines, agent=None):
+        p = self.tx / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(x) + "\n" for x in lines))
+        if agent:
+            p.with_name(p.stem + ".meta.json").write_text(json.dumps({"agentType": agent}))
+
+    def card(self, t=None):
+        out = board.cmd_window_report(self.root, self.R + 60 if t is None else t)
+        self.assertEqual(len(out), 1, out)
+        return out[0]
+
+    def open_json(self):
+        return json.loads((self.root / "windows" / "open.json").read_text())
+
+    def test_window_report_writes_once(self):
+        self.five(used=50, written_at=self.R - 1000)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [])
+        self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()), [".lock", "open.json"])
+        out = board.cmd_window_report(self.root, self.R)
+        path = self.root / "windows" / f"five_hour-{self.R}.json"
+        self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()),
+                         [".lock", f"five_hour-{self.R}.json", "open.json"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(json.loads(path.read_text()), out[0])
+        self.assertEqual((out[0]["window"], out[0]["label"], out[0]["resets_at"], out[0]["start"], out[0]["end"]),
+                         ("five_hour", "5h", 1_700_000_000, 1_699_982_000, 1_700_000_000))
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        self.assertEqual(board.cmd_window_report(self.root, self.R), [])
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(self.open_json(), {})
+
+    def test_window_report_cli_prints_list(self):
+        self.five(used=50)
+        argv = [sys.executable, str(BOARD_PY), "--dir", str(self.root), "window-report"]
+        env = {**os.environ, **self.env}
+        first = subprocess.run(argv, capture_output=True, text=True, env=env)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        cards = json.loads(first.stdout)  # the real clock is long past R
+        self.assertEqual([(c["window"], c["resets_at"]) for c in cards], [("five_hour", 1_700_000_000)])
+        second = subprocess.run(argv, capture_output=True, text=True, env=env)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout), [])
+
+    def test_window_report_remembers_dropped_window(self):
+        self.five(used=40, written_at=self.R - 1000)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 1000), [])
+        self.assertEqual(self.open_json(), {f"five_hour-{self.R}": {
+            "window": "five_hour", "resets_at": 1_700_000_000, "used_pct": 40, "hit_90_at": None, "hit_cap_at": None,
+            "idle_secs": 0, "last_tick": 1_699_999_000}})
+        self.five(used=93, written_at=1_699_999_480)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 500), [])
+        self.usage({})
+        c = self.card(self.R + 10)
+        self.assertEqual((c["budget"]["used_pct"], c["budget"]["hit_90_at"]), (93, 1_699_999_480))
+        self.assertNotIn(f"five_hour-{self.R}", self.open_json())
+
+    def test_window_report_bad_open_json(self):
+        (self.root / "windows").mkdir()
+        for bad in ("not json", "[1, 2]", '"x"', '{"five_hour-1": 7, "x": {"window": "nope", "resets_at": 1}}'):
+            (self.root / "windows" / "open.json").write_text(bad)
+            self.usage({})
+            self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [], bad)
+        self.five(used=10)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 100), [])
+        self.assertEqual(list(self.open_json()), [f"five_hour-{self.R}"])
+        (self.root / "windows" / "open.json").unlink()
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 50), [])
+
+    def test_window_report_budget_fields(self):
+        self.board(("101-a", "done", self.R - 100))
+        self.backlog("- [x] [5] Thing → 101-a")
+        for t, used in ((self.R - 4000, 50), (self.R - 3000, 91), (self.R - 2000, 99), (self.R - 1000, 99.5)):
+            self.five(used=used, written_at=t)
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        c = self.card()
+        self.assertEqual(c["budget"], {"used_pct": 99.5, "hit_90_at": 1_699_997_000, "left_at_reset_pct": 0.5,
+                                       "cap_idle_secs": 2000})
+        self.assertEqual(c["points_done"], 5)
+        self.assertEqual(c["headline"], 0.05)
+
+    def test_window_report_null_budget(self):
+        self.board(("101-a", "done", self.R - 100))
+        self.backlog("- [x] [2] Thing → 101-a")
+        self.five(used=None)
+        c = self.card()
+        self.assertEqual(c["budget"], {"used_pct": None, "hit_90_at": None, "left_at_reset_pct": None,
+                                       "cap_idle_secs": None})
+        self.assertIsNone(c["headline"])
+        self.assertEqual(c["points_done"], 2)
+        self.R += 3600
+        self.five(used=0)
+        c = self.card()
+        self.assertEqual(c["budget"]["used_pct"], 0)
+        self.assertIsNone(c["headline"])
+
+    def scoring_fixture(self):
+        R = self.R
+        self.board(("101-a", "done", R - 100), ("102-b", "done", R - 200, {"lane": "fast"}), ("103-c", "done", R - 300),
+                   ("104-d", "done", R - 20000), ("105-e", "done", R - 50, {"lane": "bigboy"}),
+                   ("106-f", "build", R - 10))
+        self.backlog("- [x] [3] A → 101-a", "- [x] [?] B → 102-b", "- [x] [5] D → 104-d", "- [x] [2] E → 105-e",
+                     "- [ ] [8] F")
+        (self.root / "jobs" / "101-a" / "round-1").mkdir(parents=True)
+        for n in (1, 2):
+            (self.root / "jobs" / "102-b" / f"round-{n}").mkdir(parents=True)
+        self.transcript("p/s1.jsonl", [
+            prompt("JOB_DIR=/x/scrum/jobs/101-a"),
+            reply(R - 1000, "m1", cwd=str(self.repo), model="claude-opus", input_tokens=100, output_tokens=50,
+                  cache_read_input_tokens=300, cache_creation_input_tokens=50),
+            reply(R + 10, "m9", cwd=str(self.repo), input_tokens=7777)])
+        self.transcript("p/s2.jsonl", [
+            prompt("JOB_DIR=/x/scrum/jobs/102-b"),
+            reply(R - 900, "m2", cwd=str(self.repo / "src"), model="claude-sonnet", input_tokens=10, output_tokens=20,
+                  cache_read_input_tokens=60, cache_creation_input_tokens=10),
+            reply(R - 800, "m3", cwd=str(self.other), input_tokens=9999)])
+        self.transcript("p/s1/subagents/agent-x.jsonl", [
+            reply(R - 700, "m4", cwd=str(self.repo), model="claude-opus", input_tokens=40, output_tokens=60)],
+            agent="scrum-review-code")
+        self.five(used=50)
+
+    def test_window_report_scoring_math(self):
+        self.scoring_fixture()
+        c = self.card()
+        self.assertEqual(c["points_done"], 5)
+        self.assertEqual(c["done_jobs"], [{"id": "101-a", "points": 3}, {"id": "102-b", "points": None},
+                                          {"id": "103-c", "points": None}, {"id": "105-e", "points": 2}])
+        self.assertEqual(c["tokens"], {"total": 700, "by_job": {"101-a": 600, "102-b": 100}})
+        self.assertEqual(c["tokens_per_point"], 140.0)
+        self.assertEqual(c["first_pass_rate"], 0.667)
+        self.assertEqual(c["cache_hit_rate"], 0.706)
+        self.assertEqual(c["model_mix"], {"main": {"claude-opus": 500, "claude-sonnet": 100},
+                                          "scrum-review-code": {"claude-opus": 100}})
+
+    def test_window_report_wasted(self):
+        R = self.R
+        self.board(("201-x", "aborted", R - 100), ("202-y", "done", R - 100), ("203-z", "running", R - 100),
+                   ("204-w", "review", R - 100), ("205-v", "aborted", R - 20000), ("206-u", "done", R - 100),
+                   ("207-t", "needs-human", R - 100), ("208-s", "done", R - 100))
+        ask = [{"key": "a", "label": "Resume", "command": "resume 203-z"}, {"key": "b", "label": "Abort",
+                                                                             "command": "abort 203-z"}]
+        self.questions(
+            {"date": self.at(R - 500), "job": "202-y", "kind": "stall", "reason": "no progress"},
+            {"date": self.at(R - 450), "job": "202-y", "kind": "check-fail", "unblock": 1, "question": "q"},
+            {"date": self.at(R - 400), "job": "203-z", "kind": "ask", "options": ask, "reason": "stalled in build: x"},
+            {"date": self.at(R - 300), "job": "204-w", "kind": "check-fail", "unblock": 1, "question": "q"},
+            {"date": self.at(R - 20000), "job": "206-u", "kind": "stall", "reason": "old"},
+            {"date": self.at(R - 200), "job": "207-t", "kind": "ask", "options": ask, "reason": "pick one"},
+            {"date": self.at(R - 150), "job": "999-gone", "kind": "stall", "reason": "not this board"},
+            "garbage")
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/201-x"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=100)])
+        self.transcript("p/t.jsonl", [prompt("JOB_DIR=/x/jobs/202-y"),
+                                      reply(R - 900, "b", cwd=str(self.repo), input_tokens=150),
+                                      reply(R - 800, "c", cwd=str(self.repo), output_tokens=50)])
+        self.transcript("p/u.jsonl", [prompt("JOB_DIR=/x/jobs/204-w"),
+                                      reply(R - 900, "d", cwd=str(self.repo), input_tokens=50)])
+        self.transcript("p/v.jsonl", [prompt("JOB_DIR=/x/jobs/208-s"),
+                                      reply(R - 900, "e", cwd=str(self.repo), input_tokens=650)])
+        self.five(used=50)
+        c = self.card()
+        self.assertEqual(c["wasted_jobs"], ["201-x", "202-y", "203-z", "204-w"])
+        self.assertEqual(c["wasted_tokens"], 350)
+        self.assertEqual(c["wasted_pct"], 35.0)
+
+    def test_window_report_lane_fit(self):
+        wt = self.base / "wt"
+        wt.mkdir()
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                           capture_output=True)
+        (wt / "README.md").write_text("readme\n")
+        git("init", "-q", "-b", "main")
+        git("add", "README.md")
+        git("commit", "-q", "-m", "base")
+        git("checkout", "-q", "-b", "work")
+        (wt / "src").mkdir()
+        (wt / "src" / "f.py").write_text("x\n" * 20)
+        git("add", "-A")
+        git("commit", "-q", "-m", "change")
+        R = self.R
+        self.board(("301-a", "done", R - 100, {"worktree": str(wt), "base": "main", "lane": "standard"}),
+                   ("302-b", "done", R - 100), ("303-c", "done", R - 100, {"worktree": str(wt), "base": "main",
+                                                                          "lane": "bigboy"}))
+        for job in ("301-a", "302-b", "303-c"):
+            for r in ("security", "ux", "ui", "code"):
+                self.put(f"{job}/round-1/review-{r}.md", "VERDICT: PASS\nok\n")
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/301-a"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=300)])
+        self.transcript("p/t.jsonl", [prompt("JOB_DIR=/x/jobs/302-b"),
+                                      reply(R - 900, "b", cwd=str(self.repo), input_tokens=700)])
+        self.five(used=50)
+        self.assertEqual(self.card()["lane_fit"], {"over_routed": ["301-a"], "over_routed_tokens": 300,
+                                                   "over_routed_pct": 30.0})
+
+    def test_window_report_yield_routing_escapes(self):
+        R = self.R
+        self.board(("401-r", "done", R - 100), ("402-p", "done", R - 100, {"lane": "bigboy"}),
+                   ("403-d", "running", R - 100, {"lane": "debug"}), ("404-q", "done", R - 5000),
+                   ("405-d", "done", R - 100, {"lane": "debug"}), ("406-s", "done", R - 50),
+                   ("407-d", "done", R - 100, {"lane": "debug"}))
+        self.put("401-r/round-1/review-code.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] a\n2. [minor] b\n"
+                 "not a finding\n## Notes\n3. [minor] not counted\n", mtime=R - 100)
+        self.put("401-r/round-1/review-ux.md", "VERDICT: PASS\nSkipped by orchestrator: fast lane.\n## Findings\n"
+                 "1. [blocking] stub\n", mtime=R - 100)
+        self.put("401-r/round-1/review-security.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] old\n",
+                 mtime=R - 20000)
+        rl = lambda t, runner, outcome: json.dumps({"ts": self.at(t), "role": "r", "runner": runner, "model": "m",
+                                                    "duration_s": 1.0, "outcome": outcome})
+        self.put("401-r/routing.log", "\n".join([rl(R - 900, "local", "ok"), rl(R - 800, "cloud", "ok"),
+                                                 rl(R - 700, "skip", "ok"), rl(R - 600, "local", "fail"),
+                                                 rl(R - 20000, "local", "ok"), "bad line"]) + "\n")
+        self.questions(
+            {"date": self.at(R - 300), "job": "402-p", "kind": "bigboy", "reason": "merged + gaps: two gaps"},
+            {"date": self.at(R - 250), "job": "401-r", "kind": "bigboy", "reason": "bigboy review: main not updated"},
+            {"date": self.at(R - 20000), "job": "401-r", "kind": "bigboy", "reason": "merged + gaps: old"})
+        self.put("403-d/feature.md", "Regression from job 404 in the header\n", mtime=R - 100)
+        self.put("405-d/feature.md", "405-d broke after 406-s\n", mtime=R - 100)
+        self.put("407-d/feature.md", "404-q again\n", mtime=R - 20000)
+        self.transcript("p/s.jsonl", [prompt("JOB_DIR=/x/jobs/401-r"),
+                                      reply(R - 900, "a", cwd=str(self.repo), input_tokens=500)])
+        self.transcript("p/s/subagents/agent-r.jsonl", [reply(R - 800, "b", cwd=str(self.repo), output_tokens=500)],
+                        agent="scrum-review-code")
+        self.five(used=50)
+        c = self.card()
+        self.assertEqual(c["reviewer_yield"], 4.0)
+        self.assertEqual(c["local_routing"], 0.5)
+        self.assertEqual(c["escapes"], 2)
+        self.assertEqual(c["escaped_jobs"], ["402-p", "404-q"])
+
+    def test_window_report_idle(self):
+        R = self.R
+        self.backlog("- [ ] [2] Do thing", "- [ ] [1] Later {setup: buy a key}")
+        jobs = [("502-a", "done", None), ("503-b", "done", None), ("504-c", "needs-human", R - 600),
+                ("505-d", "done", None)]
+        self.board(*jobs)
+        self.five(used=10)
+        for t in (R - 1000, R - 900):  # first tick, then +100 idle
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        self.board(*jobs, ("506-e", "build", None))
+        self.assertEqual(board.cmd_window_report(self.root, R - 800), [])  # an active job: not idle
+        self.board(*jobs)
+        for t in (R - 200, R - 100):  # a 600 s gap is no sample; then +100
+            self.assertEqual(board.cmd_window_report(self.root, t), [])
+        ask = [{"key": "a", "label": "Resume", "command": "resume 502-a"}, {"key": "b", "label": "Abort",
+                                                                             "command": "abort 502-a"}]
+        self.questions(
+            {"date": self.at(R - 3000), "job": "502-a", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 2500), "job": "504-c", "kind": "stall", "reason": "other job"},
+            {"date": self.at(R - 2000), "job": "502-a", "kind": "check-fail", "unblock": 1},
+            {"date": self.at(R - 20000), "job": "503-b", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 17000), "job": "503-b", "kind": "stall", "reason": "s"},
+            {"date": self.at(R - 600), "job": "504-c", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 500), "job": "505-d", "kind": "ask", "options": ask, "reason": "q"})
+        c = self.card(R + 50)
+        self.assertEqual(c["idle"], {"ready_idle_secs": 200, "needs_human_secs": 2600})
+
+    def test_window_report_missing_tokens_null(self):
+        self.assertIn("window-report", board.__doc__)
+        self.scoring_fixture()
+        for env in ({"SCRUM_REGISTRY": str(self.base / "empty.json")},
+                    {"SCRUM_TRANSCRIPTS": str(self.base / "missing")}):
+            with mock.patch.dict(os.environ, env), self.subTest(env=env):
+                self.R += 3600
+                self.board(("101-a", "done", self.R - 100), ("102-b", "done", self.R - 200))
+                self.five(used=50)
+                c = self.card()
+                for k in ("tokens", "tokens_per_point", "wasted_tokens", "wasted_pct", "cache_hit_rate",
+                          "reviewer_yield", "model_mix"):
+                    self.assertIsNone(c[k], k)
+                self.assertEqual(c["lane_fit"], {"over_routed": [], "over_routed_tokens": None,
+                                                 "over_routed_pct": None})
+                self.assertEqual((c["points_done"], c["first_pass_rate"], c["escapes"]), (3, 0.5, 0))
+
+
 USAGE_NOW = 1_000_000
 
 
