@@ -4249,7 +4249,8 @@ class DigestTest(unittest.TestCase):
         return r.stdout
 
     def git_repo(self, files=("agents/scrum-x.md",), text="keep A\nold line\nkeep B\n"):
-        """self.reg as a clean git checkout on branch main, with tests/test_contracts.py and `files` committed."""
+        """self.reg as a clean git checkout on branch main, with tests/test_contracts.py and `files` committed and pushed to
+        a bare `origin` at self.origin."""
         for rel in files:
             self.repo_file(rel, text)
         self.repo_file("tests/test_contracts.py", "import unittest\n")
@@ -4261,6 +4262,30 @@ class DigestTest(unittest.TestCase):
             self.git("config", key, value)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "init")
+        self.origin = Path(self.tmp.name) / "origin.git"
+        shutil.rmtree(self.origin, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True, capture_output=True)
+        self.git("remote", "add", "origin", str(self.origin))
+        self.git("push", "-q", "-u", "origin", "main")
+
+    def origin_head(self):
+        """main's SHA in the bare origin itself, not the checkout's remote-tracking ref."""
+        return subprocess.run(["git", "--git-dir", str(self.origin), "rev-parse", "refs/heads/main"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def assert_landed(self, heads):
+        """Local main, origin/main and the bare origin's main are one commit, `heads` deep, and no temp worktree is left."""
+        self.assertEqual(self.head_count(), heads)
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.git("rev-parse", "origin/main").strip())
+        self.assertEqual(self.git("rev-parse", "main").strip(), self.origin_head())
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
+    def assert_worktree_runs(self, runs, n):
+        """n contract-test runs, each in a temp worktree: never self.reg, and gone afterwards."""
+        self.assertEqual(len(runs), n)
+        for cwd in runs:
+            self.assertNotEqual(os.path.realpath(cwd), os.path.realpath(self.reg))
+            self.assertFalse(os.path.exists(cwd), cwd)
 
     def contract_tests(self, fail_on=()):
         """Patch DIGEST_CONTRACT_TESTS to a command that logs each run's cwd and exits 1 on the runs numbered in fail_on."""
@@ -4288,8 +4313,8 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [{"id": "p1", "target": str(claude_md), "why": "Seen in 001-a and 002-b (p1)."}],
                                "queued": [], "skipped": [], "job": job["id"]})
         self.assertEqual(claude_md.read_text(), "keep A\nnew line\nkeep B\n")
-        self.assertEqual(runs(), [str(self.reg)])
-        self.assertEqual(self.head_count(), 2)
+        self.assert_worktree_runs(runs(), 1)
+        self.assert_landed(2)
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["CLAUDE.md"])
         self.assertTrue((self.scrum / "jobs" / job["id"] / "feature.md").read_text().startswith("Apply digest 001 proposals:"))
         self.assertEqual(self.statuses(), ["applied"])
@@ -4308,11 +4333,11 @@ class DigestTest(unittest.TestCase):
                                "queued": [], "skipped": [], "job": job["id"]})
         self.assertTrue(link.is_symlink())
         self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
-        self.assertEqual(runs(), [str(self.reg)])
+        self.assert_worktree_runs(runs(), 1)
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
         self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
                          "Apply digest 001 proposals:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
-        self.assertEqual(self.head_count(), 2)
+        self.assert_landed(2)
         self.assertTrue(self.git("log", "-1", "--format=%s").startswith(f"[scrum {job['id']}] Apply digest 001"))
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
@@ -4326,6 +4351,7 @@ class DigestTest(unittest.TestCase):
         twice = self.reg / "agents" / "scrum-y.md"
         twice.write_text("old line\nold line\n")
         self.git("commit", "-q", "-am", "twice")
+        self.git("push", "-q")
         runs = self.contract_tests()
         agent = self.reg / "agents" / "scrum-x.md"
         self.digest([self.prop("p1", agent, old="not there"), self.prop("p2", twice)])
@@ -4353,10 +4379,10 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}], "skipped": [],
                                "job": job["id"], "queued": [{"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).",
                                                              "reason": "contract tests failed"}]})
-        self.assertEqual(len(runs()), 2)
+        self.assert_worktree_runs(runs(), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n", "keep A\nold line\nkeep B\n"))
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
-        self.assertEqual(self.head_count(), 2)
+        self.assert_landed(2)
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(self.statuses(), ["applied", "queued"])
@@ -4411,7 +4437,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [], "skipped": [], "job": job["id"],
                                "queued": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1).", "reason": why},
                                           {"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).", "reason": why}]})
-        self.assertEqual(len(runs()), 2)
+        self.assert_worktree_runs(runs(), 2)
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
         self.assertEqual(job["stage"], "needs-human")
         self.assertTrue(job["reason"].startswith("digest apply: git commit failed: hook says no"), job["reason"])
@@ -4420,10 +4446,131 @@ class DigestTest(unittest.TestCase):
                          [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
         [line] = (self.scrum / "questions.log").read_text().splitlines()
         self.assertEqual(json.loads(line)["job"], job["id"])
-        self.assertEqual(self.head_count(), 1)
+        self.assert_landed(1)
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
         self.assertEqual(self.statuses(), ["queued", "queued"])
         self.assertEqual(len(self.board.backlog_items(self.scrum)), 2)
+
+    def test_digest_apply_never_dirties_main_checkout(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        seen = []
+
+        def contract_ok(cwd):
+            seen.append((str(cwd), self.git("status", "--porcelain"), x.read_bytes(), y.read_bytes()))
+            return True
+
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        with mock.patch.object(self.serve, "digest_contract_ok", side_effect=contract_ok):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([a["id"] for a in out["applied"]], ["p1", "p2"])
+        self.assertEqual(len(seen), 2)
+        for cwd, status, xb, yb in seen:
+            self.assertNotEqual(os.path.realpath(cwd), os.path.realpath(self.reg))
+            self.assertEqual((status, xb, yb), ("", b"keep A\nold line\nkeep B\n", b"keep A\nold line\nkeep B\n"))
+        self.assertEqual(seen[0][0], seen[1][0])  # one worktree for the repo's proposals, so the tests are cumulative
+
+    def test_digest_apply_pushes_and_fast_forwards(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        runs = self.contract_tests()
+        before = self.origin_head()
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        self.assertEqual(out["job"], job["id"])
+        self.assertNotEqual(self.origin_head(), before)
+        self.assert_landed(2)
+        self.assert_worktree_runs(runs(), 2)
+        self.assertEqual(self.git("log", "-1", "--format=%s").strip(), f"[scrum {job['id']}] Apply digest 001 p1, p2")
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md", "agents/scrum-y.md"])
+        self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n",) * 2)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((job["lane"], job["stage"], job.get("reason") or ""), ("lilguy", "done", ""))
+        self.assertEqual(self.statuses(), ["applied", "applied"])
+
+    def test_digest_auto_queues_when_push_fails(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'origin says no' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        runs = self.contract_tests()
+        local, tracking, remote = self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"), self.origin_head()
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        [job] = self.jobs()
+        why = "push failed: remote: origin says no"
+        self.assertEqual(out, {"applied": [], "skipped": [], "job": job["id"],
+                               "queued": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1).", "reason": why},
+                                          {"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).", "reason": why}]})
+        self.assert_worktree_runs(runs(), 2)
+        self.assertEqual((self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"), self.origin_head()),
+                         (local, tracking, remote))
+        self.assert_landed(1)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertTrue(job["reason"].startswith("digest apply: git push failed: remote: origin says no"), job["reason"])
+        self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
+                         [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
+        self.assertEqual(self.statuses(), ["queued", "queued"])
+        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
+                         ["Apply digest 001 p1 to agents/scrum-x.md: Seen in 001-a and 002-b (p1).",
+                          "Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
+
+    def test_digest_apply_refuses_when_ahead_or_no_origin(self):
+        agent = self.reg / "agents" / "scrum-x.md"
+        other = self.reg / "agents" / "scrum-z.md"
+        cases = [("local main is ahead of origin", "001",
+                  lambda: (self.repo_file("agents/scrum-z.md", "z\n"), self.git("add", "-A"), self.git("commit", "-q", "-m", "stranded"))),
+                 ("fetch failed: fatal: 'origin' does not appear to be a git repository", "002",
+                  lambda: self.git("remote", "remove", "origin"))]
+        runs = self.contract_tests()
+        for why, digest_id, setup in cases:
+            with self.subTest(why):
+                shutil.rmtree(self.reg / ".git", ignore_errors=True)
+                other.unlink(missing_ok=True)
+                self.git_repo()
+                setup()
+                heads = self.head_count()
+                self.digest([self.prop("p1", agent)], digest_id)
+                out = self.serve.digest_apply(self.scrum, digest_id, [self.prop("p1", agent)])
+                self.assertEqual(out, ([], [{"id": "p1", "target": str(agent), "why": "Seen in 001-a and 002-b (p1).", "reason": why}], None))
+                self.assertEqual(agent.read_text(), "keep A\nold line\nkeep B\n")
+                self.assertEqual(self.head_count(), heads)
+                self.assertEqual(self.git("status", "--porcelain"), "")
+                self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+                self.assertEqual(self.jobs(), [])
+                self.assertEqual(self.statuses(digest_id), ["pending"])
+        self.assertEqual(runs(), [])
+
+    def test_digest_apply_fast_forward_blocked_after_push(self):
+        y = self.reg / "agents" / "scrum-y.md"
+        cases = [("uncommitted changes", "001", lambda cwd: y.write_text("edited during the tests\n")),
+                 ("not on main", "002", lambda cwd: self.git("checkout", "-q", "-b", "other"))]
+        for why, digest_id, during in cases:
+            with self.subTest(why):
+                shutil.rmtree(self.reg / ".git", ignore_errors=True)
+                self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+                x = self.reg / "agents" / "scrum-x.md"
+                local = self.git("rev-parse", "main").strip()
+                self.digest([self.prop("p1", x)], digest_id)
+                with mock.patch.object(self.serve, "digest_contract_ok", side_effect=lambda cwd: during(cwd) or True):
+                    out = self.serve.digest_auto(self.scrum, digest_id)
+                job = next(j for j in self.jobs() if j["id"] == out["job"])
+                self.assertEqual(out["applied"], [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}])
+                self.assertEqual(self.statuses(digest_id), ["applied"])
+                self.assertEqual((job["stage"], job["reason"]), ("done", f"merged, not live: {why}"))
+                self.assertEqual(self.git("rev-parse", "main").strip(), local)
+                self.assertEqual(self.git("rev-parse", "origin/main").strip(), self.origin_head())
+                self.assertEqual(self.git("rev-list", "--count", "main..origin/main").strip(), "1")
+                self.assertEqual(self.git("log", "-1", "--format=%s", "origin/main").strip(), f"[scrum {job['id']}] Apply digest {digest_id} p1")
+                self.assertEqual(x.read_text(), "keep A\nold line\nkeep B\n")
+                if why == "uncommitted changes":
+                    self.assertEqual(y.read_text(), "edited during the tests\n")
+                    self.assertEqual(self.git("stash", "list"), "")
+                self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
 
     def test_digest_revert_repo_edit_commits_under_lilguy_job(self):
         self.git_repo(text="keep A\nnew line\nkeep B\n")
@@ -4438,8 +4585,9 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((job["lane"], job["stage"], job["title"]), ("lilguy", "done", "Revert digest 001 p1"))
         self.assertEqual((self.scrum / "jobs" / job["id"] / "feature.md").read_text(),
                          "Revert digest 001 p1:\n\n- digest 001 p1 → agents/scrum-x.md: Seen in 001-a and 002-b (p1).\n")
-        self.assertEqual(runs(), [str(self.reg)])
-        self.assertEqual(self.head_count(), 2)
+        self.assert_worktree_runs(runs(), 1)
+        self.assert_landed(2)
+        self.assertEqual(self.git("rev-parse", "main"), self.git("rev-parse", "origin/main"))
         self.assertEqual(self.git("log", "-1", "--format=%s").strip(), f"[scrum {job['id']}] Revert digest 001 p1")
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md"])
         self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)scrum"), "")
@@ -4465,6 +4613,7 @@ class DigestTest(unittest.TestCase):
         twice = self.reg / "agents" / "scrum-y.md"
         twice.write_text("new line\nnew line\n")
         self.git("commit", "-q", "-am", "twice")
+        self.git("push", "-q")
         agent = self.reg / "agents" / "scrum-x.md"
         rule = self.rule("edited since\n")
         self.digest([self.prop("p1", agent, old="old line", new="not there", status="applied"),

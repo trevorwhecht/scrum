@@ -29,7 +29,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, threading, time
+import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2659,69 +2659,92 @@ def digest_mark_applied(root, digest_id, pids):
 
 def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
                  mark_applied: bool = True) -> tuple[list[dict], list[dict], str | None]:
-    """Apply one repo's edit proposals in place, running the contract tests after each, then commit the ones that
-    passed under one lilguy board job in that repo's scrum/ (never pushed). Returns (applied, to queue, job id): each
-    to-queue entry carries the reason it wasn't applied, and nothing of it is left written. title (the job and commit
-    subject) and feature (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
+    """Apply one repo's edit proposals in a temporary detached worktree at origin/<branch>, running the contract tests
+    there after each, commit the ones that passed under one lilguy board job in that repo's scrum/, push that commit to
+    origin/<branch> and fast-forward the main checkout, which is never written to directly. Refuses (queues everything)
+    when the fetch fails or local <branch> is ahead of origin. Returns (applied, to queue, job id): each to-queue entry
+    carries the reason it wasn't applied, and nothing of it is landed. A blocked fast-forward after the push still counts
+    as applied, with the job done as `merged, not live: <why>`. title (the job and commit subject) and feature
+    (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
     repo = repo_of(props[0]["target"])[0]
     entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
+    first = lambda r: next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
     if why := digest_apply_ready(repo):
         return [], [entry(p, why) for p in props], None
-    done, queued = [], []  # done: (proposal, path relative to repo, original bytes)
-    for p in props:
-        target = Path(p["target"])
-        try:
-            orig = target.read_bytes()
-            text = orig.decode()
-        except (OSError, UnicodeDecodeError):
-            orig, text = b"", ""
-        if (n := text.count(p["old"])) != 1:
-            queued.append(entry(p, f"old text found {n} times"))
-            continue
-        try:
-            target.write_bytes(text.replace(p["old"], p["new"], 1).encode())  # in place: keeps a symlink
-        except OSError as e:
-            queued.append(entry(p, f"write failed: {e}"))
-            continue
-        if not digest_contract_ok(repo):
-            target.write_bytes(orig)
-            queued.append(entry(p, "contract tests failed"))
-            continue
-        done.append((p, repo_of(p["target"])[1], orig))
-    order = {p["id"]: i for i, p in enumerate(props)}
-    if not done:
-        return [], queued, None
-    scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel, _ in done))
-    pids = ", ".join(p["id"] for p, _, _ in done)
-    lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel, _ in done)
-    title = title or f"Apply digest {digest_id} {pids}"
-    feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
-
-    def undo(why):
-        for p, _, orig in reversed(done):  # reversed: two proposals on one file restore to its first bytes
-            Path(p["target"]).write_bytes(orig)
-        git_run(repo, "restore", "--staged", "--", *files)
-        return [], sorted(queued + [entry(p, why) for p, _, _ in done], key=lambda q: order[q["id"]])
-
+    branch = git_run(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    if (r := git_run(repo, "fetch", "-q", "origin", branch)).returncode:
+        return [], [entry(p, f"fetch failed: {first(r)}") for p in props], None
+    ahead = git_run(repo, "rev-list", "--count", f"origin/{branch}..{branch}")
+    if ahead.returncode or ahead.stdout.strip() != "0":
+        return [], [entry(p, f"local {branch} is ahead of origin") for p in props], None
+    wt = tempfile.mkdtemp(prefix="digest-apply-")
     try:
-        job_id = board.cmd_new(scrum, title)
-        (scrum / "jobs" / job_id / "feature.md").write_text(feature)
-        board.cmd_set(scrum, job_id, ["lane=lilguy"])
-    except (OSError, SystemExit) as e:
-        return (*undo(f"board job failed: {e}"), None)
-    r = git_run(repo, "add", "--", *files)
-    if not r.returncode:
-        r = git_run(repo, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
-    if r.returncode:
-        first = next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
-        applied, queued = undo(f"commit failed: {first}")
-        board.cmd_ask(scrum, job_id, f"digest apply: git commit failed: {first}",
-                      [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
-        return applied, queued, job_id
-    if mark_applied:
-        digest_mark_applied(root, digest_id, {p["id"] for p, _, _ in done})
-    board.cmd_set(scrum, job_id, ["stage=done"])
-    return [entry(p) for p, _, _ in done], queued, job_id
+        if (r := git_run(repo, "worktree", "add", "-q", "--detach", wt, f"origin/{branch}")).returncode:
+            return [], [entry(p, f"worktree failed: {first(r)}") for p in props], None
+        done, queued = [], []  # done: (proposal, path relative to repo)
+        for p in props:
+            rel = repo_of(p["target"])[1]
+            target = Path(wt) / rel
+            try:
+                orig = target.read_bytes()
+                text = orig.decode()
+            except (OSError, UnicodeDecodeError):
+                orig, text = b"", ""
+            if (n := text.count(p["old"])) != 1:
+                queued.append(entry(p, f"old text found {n} times"))
+                continue
+            try:
+                target.write_bytes(text.replace(p["old"], p["new"], 1).encode())
+            except OSError as e:
+                queued.append(entry(p, f"write failed: {e}"))
+                continue
+            if not digest_contract_ok(wt):
+                target.write_bytes(orig)  # restored, so the proposals after it are tested without it
+                queued.append(entry(p, "contract tests failed"))
+                continue
+            done.append((p, rel))
+        order = {p["id"]: i for i, p in enumerate(props)}
+        if not done:
+            return [], queued, None
+        scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel in done))
+        pids = ", ".join(p["id"] for p, _ in done)
+        lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel in done)
+        title = title or f"Apply digest {digest_id} {pids}"
+        feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
+        # every write is in wt, so removing it (finally) is the undo
+        undo = lambda why: ([], sorted(queued + [entry(p, why) for p, _ in done], key=lambda q: order[q["id"]]))
+        try:
+            job_id = board.cmd_new(scrum, title)
+            (scrum / "jobs" / job_id / "feature.md").write_text(feature)
+            board.cmd_set(scrum, job_id, ["lane=lilguy"])
+        except (OSError, SystemExit) as e:
+            return (*undo(f"board job failed: {e}"), None)
+        r = git_run(wt, "add", "--", *files)
+        if not r.returncode:
+            r = git_run(wt, "commit", "-q", "-m", f"[scrum {job_id}] {title}\n\n{lines}", "--", *files)
+        step = "commit"
+        if not r.returncode:
+            r, step = git_run(wt, "push", "-q", "origin", f"HEAD:refs/heads/{branch}"), "push"
+        if r.returncode:
+            applied, queued = undo(f"{step} failed: {first(r)}")
+            board.cmd_ask(scrum, job_id, f"digest apply: git {step} failed: {first(r)}",
+                          [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
+            return applied, queued, job_id
+        # the commit is on origin: re-check the Merge guard on the live checkout, then fast-forward it; never stash or reset
+        not_live = None
+        if git_run(repo, "symbolic-ref", "--short", "HEAD").stdout.strip() != branch:
+            not_live = f"not on {branch}"
+        elif (st := git_run(repo, "status", "--porcelain", "--untracked-files=no")).returncode or st.stdout.strip():
+            not_live = "uncommitted changes"
+        elif git_run(repo, "merge", "-q", "--ff-only", f"origin/{branch}").returncode:
+            not_live = "fast-forward failed"
+        if mark_applied:
+            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done})
+        board.cmd_set(scrum, job_id, ["stage=done"] + ([f"reason=merged, not live: {not_live}"] if not_live else []))
+        return [entry(p) for p, _ in done], queued, job_id
+    finally:
+        git_run(repo, "worktree", "remove", "--force", wt)
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
