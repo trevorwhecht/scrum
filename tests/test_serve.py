@@ -4434,6 +4434,54 @@ class DigestTest(unittest.TestCase):
         props = self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"]
         self.assertEqual([(p["id"], p["kind"]) for p in props], [("p1", "skill"), ("p6", "edit"), ("p7", "skill")])
 
+    def bl(self, pid="b1", **extra):
+        return {"id": pid, "why": "w", "kind": "backlog", "backlog": "Auto-answer watchdog stalls (4 stops)", **extra}
+
+    def test_backlog_proposal_shape_validated(self):
+        self.assertEqual(self.serve.valid_proposal(self.bl("p1")),
+                         {"id": "p1", "why": "w", "target": "", "old": "", "new": "", "status": "pending", "kind": "backlog",
+                          "backlog": "Auto-answer watchdog stalls (4 stops)"})
+
+    def test_backlog_proposal_empty_backlog_rejected(self):
+        for bad in ("", "  \n", None, 5):
+            self.assertIsNone(self.serve.valid_proposal(self.bl("p1", backlog=bad)))
+        p = self.bl("p1")
+        del p["backlog"]
+        self.assertIsNone(self.serve.valid_proposal(p))
+        self.digest([self.bl("p1", backlog=" ")])
+        self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_digest_auto_applies_backlog_proposal_at_priority_3(self):
+        job_id = self.done_job()
+        self.digest([self.bl("b1")], jobs=[job_id])
+        out = self.serve.digest_auto(self.scrum, "001")
+        items = self.board.backlog_items(self.scrum)
+        self.assertEqual([(i["text"], i["priority"], i["done"]) for i in items], [("Auto-answer watchdog stalls (4 stops)", 3, False)])
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual([e["id"] for e in out["applied"]], ["b1"])
+        self.assertIsNone(out["job"])
+        self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(len(self.board.backlog_items(self.scrum)), 1)
+
+    def test_digest_auto_skips_backlog_proposal_when_add_fails(self):
+        rule = self.rule()
+        self.digest([self.bl("b1"), self.prop("p2", rule)])
+        with mock.patch.object(self.board, "cmd_backlog_add", side_effect=SystemExit("boom")):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["skipped", "applied"])
+        self.assertEqual([(e["id"], e["reason"]) for e in out["skipped"]], [("b1", "backlog add failed")])
+
+    def test_digest_revert_backlog_proposal_returns_409(self):
+        self.digest([self.bl("b1", status="applied")])
+        self.board.cmd_backlog_add(self.scrum, ["x"])
+        before = ((self.scrum / "digests" / "001" / "proposals.json").read_text(), (self.scrum / "backlog.md").read_text())
+        self.assertEqual(self.revert("b1")[0], 409)
+        self.assertEqual(self.serve.digest_revert(self.scrum, "001", "b1"), (409, {"error": "a backlog proposal can't be reverted"}))
+        self.assertEqual(before, ((self.scrum / "digests" / "001" / "proposals.json").read_text(), (self.scrum / "backlog.md").read_text()))
+
     def test_digest_route_accepts_only_revert(self):
         rule = self.rule("keep A\nold line\nkept B\n")
         self.digest([self.prop("p1", rule, old="keep A", new="kept A"), self.prop("p2", rule, old="keep B", new="kept B", status="applied")])

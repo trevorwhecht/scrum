@@ -1136,10 +1136,11 @@ const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</s
 // One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
 const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
     <span class="id">${esc(p.id)} <span class="chip ${esc(p.status)}">${esc(p.status)}</span></span>
-    <span class="path">${esc(p.target)}</span><span>${esc(p.why)}</span>
+    ${p.kind === "backlog" ? "" : `<span class="path">${esc(p.target)}</span>`}<span>${esc(p.why)}</span>
+    ${p.kind === "backlog" ? `<span>${esc(p.backlog)}</span>` : ""}
     ${["skipped", "queued"].includes(p.status) && p.reason ? `<span class="note">${esc(p.reason)}</span>` : ""}
-    ${diffHtml(p.old, p.new)}
-    ${p.status === "applied" ? `<div class="acts"><button class="btn" type="button" data-revert data-agent-hint="Puts the old text back through the path that applied it: a repo file gets its own commit after the contract tests, any other file is restored after a backup. It stays applied when the file has changed since.">Revert</button></div>` : ""}
+    ${p.kind === "backlog" ? "" : diffHtml(p.old ?? "", p.new ?? "")}
+    ${p.status === "applied" && p.kind !== "backlog" ? `<div class="acts"><button class="btn" type="button" data-revert data-agent-hint="Puts the old text back through the path that applied it: a repo file gets its own commit after the contract tests, any other file is restored after a backup. It stays applied when the file has changed since.">Revert</button></div>` : ""}
     <p class="error" role="alert"></p></div>`;
 
 function renderDigests() {
