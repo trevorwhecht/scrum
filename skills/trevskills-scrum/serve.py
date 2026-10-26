@@ -30,6 +30,7 @@ docs and replies with suggested edits. Its log lands in the scrum/runs/ of the r
 nothing is applied except by hand in the editor.
 """
 import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2582,17 +2583,25 @@ def fence(text: str) -> str:
     return f"{tick}\n{text}\n{tick}"
 
 
-def digest_item_spec(digest_id: str, prop: dict, rel: str) -> str:
-    """The pre-written spec.md for a queued proposal: self-contained (no local path), so a cloud session can build it."""
+def digest_item_spec(digest_id: str, prop: dict, rel: str, edits: Sequence[tuple[dict, str]] = ()) -> str:
+    """The pre-written spec.md for a queued proposal: self-contained (no local path), so a cloud session can build it.
+    edits: (edit proposal, repo-relative path) pairs folded into a skill's spec (skill branch only)."""
     why = prop["why"].strip()
     if prop["kind"] == "skill":
+        scope = "".join(f"- `{erel}`: swap the old text under `### {e['id']} {erel}` for its new text, once.\n" for e, erel in edits)
+        pairs = "".join(f"### {e['id']} {erel}\nWhy: {e['why'].strip()}\n\nOld text:\n{fence(e['old'])}\n\n"
+                        f"New text:\n{fence(e['new'])}\n\n" for e, erel in edits)
+        crit = "".join(f"{i}. replace the one occurrence of the old text of {e['id']} in `{erel}` with its new text (the fenced blocks "
+                       f"above, byte for byte); if the old text does not occur exactly once, that edit is obsolete: skip it and say "
+                       f"so in build.md. (verify: diff `{erel}`)\n" for i, (e, erel) in enumerate(edits, 2))
+        files = "".join(f"- `{erel}`\n" for _, erel in edits)
         return (f"# Create digest {digest_id} {prop['id']} skill at {rel}\nUI surface: no\nHard stops: none\nLane: standard\n\n"
                 f"## Problem\nDigest {digest_id} proposal {prop['id']} adds a new skill at `{rel}`. Why:\n\n"
-                f"{why}\n\n## Scope\nIn:\n- Create `{rel}` with the new content below.\n\nOut:\n- Any other file.\n\n"
-                f"New content:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
+                f"{why}\n\n## Scope\nIn:\n- Create `{rel}` with the new content below.\n{scope}\nOut:\n- Any other file.\n\n"
+                f"New content:\n{fence(prop['new'])}\n\n{pairs}## Acceptance criteria\n"
                 f"1. create `{rel}` with exactly the new content (the fenced block above, byte for byte); "
                 f"if `{rel}` already exists, the job is obsolete: change nothing and say so in build.md. "
-                f"(verify: compare the file to the fenced block)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
+                f"(verify: compare the file to the fenced block)\n{crit}\n## Likely files\n- `{rel}`\n{files}\n## Assumptions\n"
                 f"- The content is the digest proposal; do not reword it.\n")
     return (f"# Apply digest {digest_id} {prop['id']} to {rel}\nUI surface: no\nHard stops: none\nLane: fast\n\n"
             f"## Problem\nDigest {digest_id} proposal {prop['id']} changes `{rel}`. Why:\n\n{why}\n\n"
@@ -2612,14 +2621,20 @@ def queue_digest_item(scrum, text, spec):
     board.backlog_op(scrum, "add", text=text)
 
 
-def digest_queue_skill(root: Path, digest_id: str, prop: dict) -> str | None:
-    """Queue a skill proposal as a backlog item with its pre-written spec: None when queued, else why it can't be."""
+def digest_queue_skill(root: Path, digest_id: str, prop: dict, edits: Sequence[dict] = ()) -> str | None:
+    """Queue a skill proposal as a backlog item with its pre-written spec: None when queued, else why it can't be.
+    edits: paired edit proposals (same repo as the skill) folded into the item."""
     if not (rel := digest_skill_target(prop["target"])):
         return "target is not editable"
     if os.path.lexists(prop["target"]):
         return "skill already exists"
-    queue_digest_item(repo_of(prop["target"])[0] / "scrum", f"Create digest {digest_id} {prop['id']} skill at {rel}: {prop['why']}",
-                      digest_item_spec(digest_id, prop, rel))
+    pairs = [(e, repo_of(e["target"])[1]) for e in edits]
+    text = f"Create digest {digest_id} {prop['id']} skill at {rel}: {prop['why']}"
+    if pairs:
+        text = (f"Create digest {digest_id} {prop['id']} skill at {rel} and apply "
+                + ", ".join(f"digest {digest_id} {e['id']}" for e, _ in pairs)
+                + f" to {', '.join(erel for _, erel in pairs)}: {prop['why']}")
+    queue_digest_item(repo_of(prop["target"])[0] / "scrum", text, digest_item_spec(digest_id, prop, rel, pairs))
     return None
 
 
@@ -2874,8 +2889,27 @@ def digest_auto(root, digest_id):
                if (v := valid_proposal(x)) and v["status"] == "pending"]
     if not pending:
         return out
+    held, folds = {}, {}  # edit id -> (skill pid, folded into it); skill pid -> its folded edits
+    absent = [x for x in pending if x["kind"] == "skill" and not os.path.lexists(x["target"])]
     for p in pending:
-        if p["kind"] == "backlog":
+        if p["kind"] in ("backlog", "skill") or digest_denied(p["target"]):
+            continue
+        refs = [x for x in absent if x["target"] in p["new"] and x["target"] not in p["old"]]
+        if not refs:
+            continue
+        repo = repo_of(p["target"])
+        into = next((x for x in refs if repo and digest_skill_target(x["target"]) and repo_of(x["target"])[0] == repo[0]), None)
+        held[p["id"]] = (into or refs[0])["id"], bool(into)
+        if into:
+            folds.setdefault(into["id"], []).append(p)
+    for p in pending:
+        if p["id"] in held:
+            skill_pid, folded = held[p["id"]]
+            if folded:
+                queue(p, f"queued with skill {skill_pid}")
+            else:
+                skip(p, f"references skill {skill_pid}, which does not exist yet")
+        elif p["kind"] == "backlog":
             try:
                 board.cmd_backlog_add(root, [p["backlog"]], priority=3)
             except (SystemExit, OSError):
@@ -2884,7 +2918,7 @@ def digest_auto(root, digest_id):
                 out["applied"].append({"id": p["id"], "target": p["target"], "why": p["why"]})
                 updates[p["id"]] = ("applied", None)
         elif p["kind"] == "skill":
-            if why := digest_queue_skill(root, digest_id, p):
+            if why := digest_queue_skill(root, digest_id, p, folds.get(p["id"], ())):
                 skip(p, why)
             else:
                 queue(p, "new skill")
