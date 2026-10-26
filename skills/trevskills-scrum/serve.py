@@ -772,8 +772,6 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
 
 
 AUTO_CONTINUE_RE = re.compile(r"^- Auto continue: *(\d+)\s*$", re.M)
-FOCUS_RE = re.compile(r"^- Focus: *yes\s*$", re.M | re.I)
-LAST_BUSY: set[str] = set()  # projects with in-flight work on the previous tick: the one that just finished goes first
 
 
 def auto_continue(root: Path) -> int | None:
@@ -783,24 +781,6 @@ def auto_continue(root: Path) -> int | None:
     except (OSError, ValueError):  # missing, or not UTF-8
         return None
     return int(m.group(1)) if m else None
-
-
-def focus(root: Path) -> bool:
-    """True when scrum/project.md has a `- Focus: yes` line (False when missing, malformed, or unreadable). Focus is
-    ordering only: auto continue starts Focus projects first, and never holds any other project."""
-    try:
-        return bool(FOCUS_RE.search((root / "project.md").read_text()))
-    except (OSError, ValueError):
-        return False
-
-
-def last_active(root: Path) -> float:
-    """Epoch of the newest job updatedAt on board.json, 0 when there is none or it can't be read."""
-    try:
-        jobs = json.loads((root / "board.json").read_text()).get("jobs", [])
-        return max((datetime.fromisoformat(j["updatedAt"]).timestamp() for j in jobs if j.get("updatedAt")), default=0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return 0
 
 
 def claimable(root: Path) -> bool:
@@ -816,22 +796,15 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
-    Start one headless run-all in every opted-in project with no work in flight, no paused or resumable stalled
-    job (board.resume_first), no auto-started run-all still running and a claimable backlog line. Focus projects go
-    first, then the project that just finished, then the most recent board activity, then lowest n. board.machine_ok
+    Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no work in
+    flight, no paused or resumable stalled job (board.resume_first), no auto-started run-all still running and a
+    claimable backlog line, in rank order: board.projects() order, which the dashboard's Rank dialog sets. board.machine_ok
     (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
-    global LAST_BUSY
-    last, LAST_BUSY = LAST_BUSY, {p for p, b in busy.items() if b}
-    opted = []
     for project, repo in board.projects().items():
-        n = auto_continue(repo / "scrum")
-        if n is not None:
-            opted.append((project, repo / "scrum", n, last_active(repo / "scrum"), focus(repo / "scrum")))
-    # stable: ties keep projects() order
-    for project, root, *_ in sorted(opted, key=lambda o: (not o[4], o[0] not in last, -o[3], o[2])):
-        if busy.get(project, True):
+        root = repo / "scrum"
+        if auto_continue(root) is None or busy.get(project, True):
             continue
         try:
             jobs = json.loads((root / "board.json").read_text())["jobs"]
@@ -2996,6 +2969,11 @@ class Handler(BaseHTTPRequestHandler):
                 code, obj = ai_research(body.get("id"))
             elif path == "/api/cooldown":
                 code, obj = set_cooldown(body.get("on"))
+            elif path == "/api/projects/rank":
+                to = body.get("to")
+                if type(to) is not int:
+                    raise SystemExit("to must be a whole number")
+                code, obj = 200, [{"name": name} for name in board.move_project(body.get("name"), to)]
             else:
                 m = re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/attachments|/manual-checks|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/(?:approve|rework|discuss|abort|pause|terminal|reopen|setup-done|resume|ask|answer))", path)
                 root = m and scrum_dir(unquote(m.group(1)))
@@ -3154,6 +3132,10 @@ def main():
     tn = tailnet_host(a.tailnet_host)
     TAILNET = {tn} if tn else set()
     server = make_server(a.port)
+    try:
+        board.migrate_focus()  # one-time: `- Focus: yes` projects become the top of the rank
+    except (OSError, SystemExit) as e:
+        print(f"focus migration: {e}", file=sys.stderr, flush=True)
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)

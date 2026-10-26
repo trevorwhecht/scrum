@@ -651,28 +651,105 @@ def read_registry():
         return []
 
 
-def cmd_register(repo):
-    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+@contextmanager
+def registry_lock():
+    """projects.lock: every read-modify-write of projects.json runs inside it."""
     path = registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_name("projects.lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def write_registry(paths):
+    """Replace projects.json atomically (tmp + os.replace). Call it under registry_lock()."""
+    path = registry_path()
+    tmp = path.with_name("projects.json.tmp")
+    tmp.write_text(json.dumps(paths, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def cmd_register(repo):
+    """Add a repo to the dashboard's project list. Idempotent; /trevskills-scrum calls it on every run."""
+    with registry_lock():
         paths = read_registry()
         repo = str(Path(repo).resolve())
         if repo not in paths:
-            tmp = path.with_name("projects.json.tmp")
-            tmp.write_text(json.dumps(paths + [repo], indent=2) + "\n")
-            os.replace(tmp, path)
+            write_registry(paths + [repo])
+
+
+def ranked(paths):
+    """{display name: index in paths} for the registry entries that have a scrum/ folder, in registry order. Names
+    are the folder name, or parent/folder when two repos share one."""
+    repos = [(i, Path(p)) for i, p in enumerate(paths) if (Path(p) / "scrum").is_dir()]
+    counts = {}
+    for _, r in repos:
+        counts[r.name] = counts.get(r.name, 0) + 1
+    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): i for i, r in repos}
 
 
 def projects():
-    """{display name: repo path} for registered repos that still have a scrum/ folder. Names are the folder
-    name, or parent/folder when two repos share one."""
-    repos = [Path(p) for p in read_registry() if (Path(p) / "scrum").is_dir()]
-    counts = {}
-    for r in repos:
-        counts[r.name] = counts.get(r.name, 0) + 1
-    return {(r.name if counts[r.name] == 1 else f"{r.parent.name}/{r.name}"): r for r in repos}
+    """{display name: repo path} for registered repos that still have a scrum/ folder, in rank (registry) order."""
+    paths = read_registry()
+    return {name: Path(paths[i]) for name, i in ranked(paths).items()}
+
+
+def rerank(paths, slots, names):
+    """Write the registry with the projects in `names` order. Entries without a scrum/ folder keep their places;
+    an unchanged order writes nothing."""
+    if names != list(slots):
+        new = list(paths)
+        for slot, name in zip(slots.values(), names):  # slots.values() is ascending: registry order
+            new[slot] = paths[slots[name]]
+        write_registry(new)
+
+
+def move_project(name, to):
+    """Put project `name` at rank `to` (0-based) of projects(); returns the names in the new order. The lookup, the
+    bounds check and the write all run under projects.lock, so a stale caller gets a SystemExit, not a wrong move."""
+    with registry_lock():
+        paths = read_registry()
+        slots = ranked(paths)
+        if not slots:
+            raise SystemExit("no projects registered")
+        if not isinstance(name, str) or name not in slots:
+            raise SystemExit("no such project")
+        if type(to) is not int or not 0 <= to < len(slots):
+            raise SystemExit(f"to must be a whole number from 0 to {len(slots) - 1}")
+        names = [n for n in slots if n != name]
+        names.insert(to, name)
+        rerank(paths, slots, names)
+        return names
+
+
+FOCUS_RE = re.compile(r"^- Focus: *yes\s*$", re.M | re.I)
+
+
+def migrate_focus():
+    """One-time move from `- Focus: yes` to rank: every project whose scrum/project.md has the line goes to the top,
+    keeping its relative order, and the line is deleted. Returns the names moved; a second call finds none. A
+    missing, unreadable or non-UTF-8 project.md is skipped."""
+    with registry_lock():
+        paths = read_registry()
+        slots = ranked(paths)
+        focused = {}
+        for name, i in slots.items():
+            md = Path(paths[i]) / "scrum" / "project.md"
+            try:
+                text = md.read_text()
+            except (OSError, ValueError):
+                continue
+            if FOCUS_RE.search(text):
+                focused[name] = (md, text)
+        if not focused:
+            return []
+        rerank(paths, slots, list(focused) + [n for n in slots if n not in focused])
+        for md, text in focused.values():  # after the registry write: a failed strip only leaves a no-op line
+            try:
+                md.write_text("".join(line for line in text.splitlines(True) if not FOCUS_RE.match(line)))
+            except OSError:
+                pass
+        return list(focused)
 
 
 def cmd_backlog_add(root, items, setup=None, priority=None):

@@ -22,14 +22,14 @@ class ParkedParentReproTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp())
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.base / "no-usage.json"))
         env.start(); self.addCleanup(env.stop)
-        for s in (serve.LAST_BUSY, serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
+        for s in (serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
             s.clear(); self.addCleanup(s.clear)
         self.projects = {}
 
-    def project(self, name, jobs=(), focus=False):
+    def project(self, name, jobs=()):
         root = self.base / name / "scrum"
         (root / "jobs").mkdir(parents=True)
-        (root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n" + ("- Focus: yes\n" if focus else ""))
+        (root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
         (root / "backlog.md").write_text("# Backlog\n- [x] 074 shipped item\n- [x] 080 shipped item\n- [ ] Open item\n")
         (root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), "reason": None, **j}
                                                               for j in jobs]}))
@@ -51,16 +51,15 @@ class ParkedParentReproTest(unittest.TestCase):
         return [c.args for c in spawn.call_args_list if c.args[2] == "run-all"]
 
     def test_parked_runall_parent_does_not_block_auto_continue(self):
-        for focus in (False, True):
-            with self.subTest(focus=focus):
-                self.projects.clear(); self.serve.LAST_BUSY.clear()
-                root = self.project(f"p{int(focus)}", jobs=self.parked(), focus=focus)
-                if focus:
-                    self.project(f"other{int(focus)}")  # a second opted-in, idle project
-                self.assertEqual(self.run_alls()[:1],  # Focus goes first; an idle second project starts after it
-                                 [(f"p{int(focus)}", root, "run-all", "run-all", "/trevskills-scrum run-all")],
+        for second in (False, True):
+            with self.subTest(second=second):
+                self.projects.clear()
+                root = self.project(f"p{int(second)}", jobs=self.parked())
+                if second:
+                    self.project(f"other{int(second)}")  # a second opted-in, idle project, ranked below
+                self.assertEqual(self.run_alls()[:1],  # rank 1 goes first; the second project starts after it
+                                 [(f"p{int(second)}", root, "run-all", "run-all", "/trevskills-scrum run-all")],
                                  "a parent parked on Trevor must not count busy")
-
 
 if __name__ == "__main__":
     unittest.main()
