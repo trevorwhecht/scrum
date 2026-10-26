@@ -2531,8 +2531,14 @@ def cmd_statusline(text):
 
 
 def likely_files(spec_text):
-    """The backtick-quoted paths in a spec's `## Likely files` section."""
-    return {p for p in re.findall(r"`([^`\s]+)`", md_section(spec_text, "Likely files") or "") if PATH_RE.match(p)}
+    """The backtick-quoted paths in a spec's `## Likely files` section, plus the first token of each bullet that has no backticks."""
+    found = set()
+    for line in (md_section(spec_text, "Likely files") or "").splitlines():
+        if "`" in line:
+            found.update(re.findall(r"`([^`\s]+)`", line))
+        elif line.startswith("- ") and line[2:].split():
+            found.add(re.sub(r"[:,]$", "", line[2:].split()[0]))
+    return {p for p in found if PATH_RE.match(p)}
 
 
 def parse_plan(text):
