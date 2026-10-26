@@ -1933,6 +1933,15 @@ class ContractTest(unittest.TestCase):
                        "`VERDICT: PASS` only when all six rules 9-14 are quoted", "a rule left out, is `VERDICT: CHANGES`"):
             self.assertIn(phrase, text, phrase)
 
+    def test_rules_known_safe_case_moved_text(self):
+        line = "Rules case: moved-text — <Y> holds the <section> the ticket names in <X>"
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("**Known safe cases**", line, "Never write the line for `agents/scrum-*.md`"):
+            self.assertIn(phrase, approver, phrase)
+        rule7 = self.section((ROOT / "docs" / "skill-standards.md").read_text(), "### 7. ", "### 8. ")
+        self.assertIn("Known safe\n  case moved-text", rule7)
+        self.assertIn("has moved", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
+
     def test_skill_standards_doc_tags_every_rule(self):
         text = (ROOT / "docs" / "skill-standards.md").read_text()
         heads = re.findall(r"^### (\d+)\. .* `(script|judge)`$", text, re.M)
@@ -2987,6 +2996,66 @@ class RulesCheckTest(unittest.TestCase):
         self.assertEqual((code, out["failures"]), (0, []), out)
         (self.root / "jobs" / self.job / "feature.md").write_text("Sharpen xagents/scrum-demo.md.bak rule two.\n")
         self.assert_fails("rule 7: agents/scrum-demo.md")
+
+    CLOUD = "skills/trevskills-scrum/lanes/cloud.md"
+    MOVED = ("Rules case: moved-text — skills/trevskills-scrum/lanes/cloud.md holds the Cloud lane steps the ticket "
+             "names in skills/trevskills-scrum/SKILL.md\n")
+
+    def moved_base(self, pointer=True):
+        """Job 205's shape at the merge-base: SKILL.md points to lanes/cloud.md (when pointer), and the ticket names
+        only SKILL.md."""
+        skill = self.SKILL + ("\n## Cloud lane\n\nRead $HOME/.claude/skills/trevskills-scrum/lanes/cloud.md when this "
+                              "lane runs. See agents/scrum-demo.md.\n" if pointer else "")
+        for rel, text in (("skills/trevskills-scrum/SKILL.md", skill), (self.CLOUD, "# Cloud lane\n\nStep one.\n"),
+                          ("agents/scrum-demo.md", self.AGENT + "See skills/trevskills-scrum/lanes/cloud.md.\n")):
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text(text)
+        self.git(self.repo, "add", "-A", "--", "skills", "agents")
+        self.git(self.repo, "commit", "-q", "-m", "cloud lane")
+        self.git(self.wt, "merge", "-q", "main")
+        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
+        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n")
+        return skill
+
+    def ticket(self, likely, decision=None):
+        jd = self.root / "jobs" / self.job
+        (jd / "spec.md").write_text("# Rules edit\n\n## Likely files\n" + likely)
+        if decision is not None:
+            (jd / "decision.md").write_text("# Decision\n\nVERDICT: APPROVE\n" + decision)
+
+    def test_rule7_moved_text_case_passes(self):
+        self.moved_base()
+        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED)
+        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
+        code, out = self.run_cli()
+        self.assertEqual((code, out["failures"]), (0, []), out)
+
+    def test_rule7_moved_text_needs_approver_line(self):
+        self.moved_base()
+        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
+        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
+        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED.replace("lanes/cloud.md", "lanes/demo.md"))
+        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
+
+    def test_rule7_moved_text_needs_pointer_in_x(self):
+        skill = self.moved_base(pointer=False)
+        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED)
+        self.commit("skills/trevskills-scrum/SKILL.md", skill + "\nRead skills/trevskills-scrum/lanes/cloud.md.\n")
+        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
+        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
+
+    def test_rule7_moved_text_refuses_agents_and_unnamed_x(self):
+        self.moved_base()
+        agent_y = self.MOVED.replace("skills/trevskills-scrum/lanes/cloud.md", "agents/scrum-demo.md")
+        agent_x = self.MOVED.replace("skills/trevskills-scrum/SKILL.md", "agents/scrum-demo.md")
+        cases = (("X not in the ticket", "- `README.md`\n", self.MOVED, self.CLOUD),
+                 ("Y is a scrum agent", "- `skills/trevskills-scrum/SKILL.md`\n", agent_y, "agents/scrum-demo.md"),
+                 ("X is a scrum agent", "- `agents/scrum-demo.md`\n", agent_x, self.CLOUD))
+        for n, (case, likely, line, y) in enumerate(cases):
+            with self.subTest(case=case):
+                self.ticket(likely, line)
+                self.commit(y, (self.repo / y).read_text() + f"Edit {n}.\n")
+                self.assert_fails(f"rule 7: {y} is not named")
 
     def test_rule8_human_only_files(self):
         for rel in ("docs/skill-standards.md", "agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"):

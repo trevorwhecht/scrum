@@ -70,7 +70,10 @@ or the standard (harness tampering, arXiv 2609.00069).
 ### 7. In the ticket `script`
 - Why: an unattended rules edit may change only what the ticket asked for (job 180's in-ticket rule).
 - Check: every file the diff changes is named in the job's `feature.md` or in spec.md's `## Likely files`, as the
-  repo-relative path verbatim; a `<dir>/*.md` mention covers every `.md` file directly in that directory.
+  repo-relative path verbatim; a `<dir>/*.md` mention covers every `.md` file directly in that directory. Known safe
+  case moved-text: a `skills/trevskills-scrum/lanes/*.md` file Y also counts when the job's `decision.md` has the line
+  `Rules case: moved-text — <Y> holds the <section> the ticket names in <X>`, X is a named `SKILL.md` or lane file
+  (never `agents/scrum-*.md`), and X already contains Y's path at the merge-base.
 - Fix: revert the extra file, or name it in the spec's `## Likely files`.
 
 ### 8. Human-only set untouched `script`
