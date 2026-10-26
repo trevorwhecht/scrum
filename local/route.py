@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Decide whether the code reviewer's Codex step runs on cloud or is skipped, and log what ran.
 
-codex-review answers skip when the codex binary is missing or either Codex quota window (5h, weekly) is at or past
-its threshold in routing.json, and cloud otherwise. Every other role answers cloud.
+codex-review answers skip when the codex binary is missing, when the Codex config's top-level openai_base_url points at
+a local server (127.0.0.1, localhost or ::1), or when either Codex quota window (5h, weekly) is at or past its threshold
+in routing.json, and cloud otherwise. Every other role answers cloud.
 
   route.py <role> [--job JOB_DIR] [--scrum DIR]   -> {"runner", "model", "why"}
   route.py record JOB_DIR <role> <runner> <model> <seconds> <outcome>   appends one JSON line to JOB_DIR/routing.log
@@ -17,6 +18,8 @@ import re
 import shutil
 import sys
 import time
+import tomllib
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 CONFIG = str(Path(__file__).resolve().parent / 'routing.json')
@@ -28,6 +31,23 @@ RESET = re.compile(r'resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)', r
 def _codex_installed():
     """Cloud sessions have no codex binary; Homebrew's bin is often missing from a headless PATH."""
     return shutil.which('codex', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin') is not None
+
+
+def _codex_local_base_url():
+    """The top-level openai_base_url of the Codex config when it points at a loopback host, else None."""
+    path = os.environ.get('SCRUM_CODEX_CONFIG') or Path.home() / '.codex' / 'config.toml'
+    try:
+        with open(path, 'rb') as f:
+            url = tomllib.load(f).get('openai_base_url')
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return url if host in ('127.0.0.1', 'localhost', '::1') else None
 
 
 def codex_quota():
@@ -110,6 +130,9 @@ def route(role, job_dir=None, scrum_dir=None):
         return {'runner': 'cloud', 'model': None, 'why': f'{role} always runs on cloud'}
     if not _codex_installed():
         return {'runner': 'skip', 'model': None, 'why': 'codex not installed'}
+    url = _codex_local_base_url()
+    if url:
+        return {'runner': 'skip', 'model': None, 'why': f'codex config points at a local server ({url})'}
     return _route_codex(json.loads(Path(CONFIG).read_text())['thresholds'])
 
 

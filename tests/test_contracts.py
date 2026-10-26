@@ -274,8 +274,9 @@ class ContractTest(unittest.TestCase):
                        "its 10-minute timeout.",
                        "Finishing your own review first is never a skip reason",
                        'and "still running" is never a skip reason',
-                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol", "codex: skipped — fast lane"):
+                       "ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol"):
             self.assertIn(phrase, text, phrase)
+        self.assertNotIn("Skip the Codex step entirely", text)
         for phrase in ("never blocking", "so it adds no wait", 'RUNNER="python3', "ROUTE_RUNNER=local"):
             self.assertNotIn(phrase, text, phrase)
         self.assertEqual(text.count("wait for the background"), 1)
@@ -1102,8 +1103,8 @@ class ContractTest(unittest.TestCase):
 
     def test_code_reviewer_fast_lane_is_diff_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
-        for phrase in ("LANE=fast", "codex: skipped — fast lane"):
-            self.assertIn(phrase, text, phrase)
+        self.assertIn("LANE=fast", text)
+        self.assertNotIn("Skip the Codex step entirely", text)
 
     def test_digest_agents_contract(self):
         for name in ("scrum-digest-reader", "scrum-digester"):
