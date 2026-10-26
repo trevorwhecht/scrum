@@ -1932,6 +1932,122 @@ def read_usage():
     return u if isinstance(u, dict) else None
 
 
+WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))  # usage.json's rate-limit windows and their short labels
+TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def token_count(v):
+    """A usage count as an int; anything else (a string, None, a bool, NaN, Infinity) is 0."""
+    try:
+        return int(v) if is_num(v) else 0
+    except (OverflowError, ValueError):
+        return 0
+
+
+def transcripts_dir():
+    return Path(os.environ.get("SCRUM_TRANSCRIPTS") or Path.home() / ".claude" / "projects")
+
+
+def first_prompt_tags(text):
+    """(job, skill) from a transcript's first prompt: JOB_DIR=<path>/jobs/<id>, else a <command-args> whose second
+    word starts with a digit; skill is the /trevskills-… in <command-name>, without the slash."""
+    m = re.search(r"JOB_DIR=\S*/jobs/([^/\s]+)", text)
+    job = m and m.group(1)
+    if not job and (m := re.search(r"<command-args>(.*?)</command-args>", text, re.S)):
+        words = m.group(1).split()
+        job = words[1] if len(words) > 1 and words[1][0].isdigit() else None
+    m = re.search(r"<command-name>/?(trevskills-[\w-]*)</command-name>", text)
+    return job or None, m and m.group(1)
+
+
+def read_transcript(path):
+    """({message.id: row} for the file's assistant messages, last line per id winning, first prompt text). Bad
+    lines are skipped; an unreadable file gives ({}, "")."""
+    rows, first = {}, None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if first is not None and '"usage"' not in line:
+                    continue  # most lines are tool output; skip parsing what cannot hold a usage dict
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(d, dict) or not isinstance(msg := d.get("message"), dict):
+                    continue
+                if d.get("type") == "user" and first is None and not d.get("isMeta"):
+                    c = msg.get("content")
+                    first = c if isinstance(c, str) else "\n".join(
+                        b["text"] for b in c if isinstance(b, dict) and isinstance(b.get("text"), str)
+                    ) if isinstance(c, list) else ""
+                if d.get("type") != "assistant" or not isinstance(u := msg.get("usage"), dict):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(d["timestamp"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                row = {"ts": ts, **{k: token_count(u.get(k)) for k in TOKEN_KEYS},
+                       "model": msg.get("model"),
+                       "cwd": d.get("cwd") if isinstance(d.get("cwd"), str) else None}
+                mid = msg.get("id")
+                rows[mid if isinstance(mid, str) and mid else object()] = row  # no id: a key of its own
+    except OSError:
+        return {}, ""
+    return rows, first or ""
+
+
+def transcript_tokens(start, end, projects_dir=None):
+    """One row per Claude Code assistant message stamped in [start, end) (epoch seconds), sorted by ts: token counts,
+    model, and the project, job, agent and skill it is attributed to. Reads <dir>/*/*.jsonl (main sessions) and
+    <dir>/*/<session>/subagents/agent-*.jsonl; files last written before start are never opened. Read-only."""
+    root = Path(projects_dir) if projects_dir else transcripts_dir()
+    repos = sorted(((n, p.resolve()) for n, p in projects().items()), key=lambda r: -len(r[1].parts))
+    tags, out, where = {}, [], {}
+
+    def place(cwd):  # (project, worktree job) for a cwd; the longest (deepest) repo path wins
+        if cwd not in where:
+            where[cwd] = None, None
+            try:
+                c = Path(cwd).resolve() if isinstance(cwd, str) and cwd else None
+            except (OSError, ValueError):  # a NUL byte, a symlink loop
+                c = None
+            if c:
+                for name, repo in repos:
+                    if c.is_relative_to(repo):
+                        rel = c.relative_to(repo).parts
+                        wt = rel[2].removeprefix("scrum-") if len(rel) > 2 and rel[:2] == (".claude", "worktrees") \
+                            else None
+                        where[cwd] = name, wt or None
+                        break
+        return where[cwd]
+
+    files = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/agent-*.jsonl"))
+    for path in files:  # main sessions first, so a subagent finds its parent's tags
+        try:
+            if path.stat().st_mtime < start:
+                continue
+        except OSError:
+            continue
+        rows, first = read_transcript(path)
+        job, skill = first_prompt_tags(first)
+        if path.parent.name == "subagents":
+            pjob, skill = tags.get(path.parent.parent.with_suffix(".jsonl"), (None, None))
+            job = job or pjob
+            try:
+                meta = json.loads(path.with_name(path.stem + ".meta.json").read_text())
+                agent = meta["agentType"] if isinstance(meta.get("agentType"), str) else "subagent"
+            except (OSError, ValueError, AttributeError, KeyError):
+                agent = "subagent"
+        else:
+            tags[path] = job, skill
+            agent = "main"
+        for row in rows.values():
+            if start <= row["ts"] < end:
+                project, wt = place(row.pop("cwd"))
+                out.append({**row, "project": project, "job": wt or job, "agent": agent, "skill": skill})
+    return sorted(out, key=lambda r: r["ts"])
+
+
 def is_num(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
@@ -1966,7 +2082,7 @@ def usage_allowance(usage, now, live):
         return None
     rungs = (None,) + USAGE_STEPS
     best = None
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+    for key, label in WINDOWS:
         w = usage["rate_limits"].get(key)
         if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
             continue
@@ -2001,7 +2117,7 @@ def merge_limits(old, new, now):
     def ok(w):
         return isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
     merged = dict(new)
-    for key in ("five_hour", "seven_day"):
+    for key, _ in WINDOWS:
         o = old.get(key) if isinstance(old, dict) else None
         if not ok(o) or o["resets_at"] <= now:
             continue
@@ -2034,7 +2150,7 @@ def cmd_statusline(text):
         os.replace(tmp, path)
         # ponytail: unlinking under the lock can let a racing session lock a new inode; the worst case is one lost merge
         lock.unlink(missing_ok=True)
-    return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
+    return " · ".join(f"{label} {round(w['used_percentage'])}%" for key, label in WINDOWS
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
 
