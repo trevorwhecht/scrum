@@ -1,4 +1,4 @@
-import hashlib, io, json, os, subprocess, sys, tempfile, time, unittest
+import hashlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -2629,6 +2629,124 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": more, "windows": []})
         self.assertNotIn(aborted[0], (self.root / "digests" / "002" / "jobs.txt").read_text())
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
+
+    def codex_line(self, job_id, outcome="invalid-artifact", runner="codex", secs=600):
+        d = self.root / "jobs" / job_id
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "routing.log", "a") as f:
+            f.write(json.dumps({"role": "codex-review", "runner": runner, "duration_s": secs, "outcome": outcome}) + "\n")
+
+    def round_file(self, job_id, n, name, text):
+        d = self.root / "jobs" / job_id / f"round-{n}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(text)
+
+    def health_jobs(self):
+        return [j for j in board.read_board(self.root)["jobs"] if j["title"].startswith("Pipeline health: ")]
+
+    def test_pipeline_health_detects_each_tool(self):
+        ids = self.done_jobs(4)
+        a, b, c, d = ids
+        self.codex_line(a)
+        self.codex_line(a)  # a second failed round still counts once
+        self.codex_line(b, outcome="skipped", runner="skip")
+        self.codex_line(c, outcome="ok")
+        with open(self.root / "jobs" / c / "routing.log", "a") as f:
+            f.write('{not json\n["role", "codex-review"]\n')
+        self.codex_line(d, outcome="invalid-artifact", runner="codex")
+        (self.root / "jobs" / d / "routing.log").write_text(
+            json.dumps({"role": "review-code", "runner": "claude", "outcome": "invalid-artifact"}) + "\n")
+        self.round_file(a, 1, "review-e2e.md", "Reviewer produced no output.\n")
+        self.round_file(a, 2, "review-e2e.md", "Reviewer produced no output.\n")
+        self.round_file(b, 1, "review-e2e.md", "PASS\n")
+        self.round_file(c, 1, "review-e2e.md", "Reviewer produced no output.\n")
+        self.round_file(b, 1, "check.md", "FAIL\nnpm test Timed Out after 600s\n")
+        self.round_file(c, 1, "check.md", "PASS\ntimedout_helper ok\n")
+        self.assertEqual(board.pipeline_health_counts(self.root, ids),
+                         {"codex-review": [a, b], "review-e2e": [a, c], "check": [b]})
+
+    def test_pipeline_health_threshold(self):
+        ids = self.done_jobs(10)
+        for j in ids[:4]:
+            self.codex_line(j)
+        self.assertEqual(board.pipeline_health(self.root, "001", ids), [])
+        self.assertEqual(self.health_jobs(), [])
+        self.codex_line(ids[4])
+        created = board.pipeline_health(self.root, "001", ids)
+        self.assertEqual(len(created), 1)
+        self.assertEqual([j["title"] for j in self.health_jobs()], ["Pipeline health: codex-review"])
+        one = self.done_jobs(1)  # a single failing job never flags, even at 1 of 1
+        self.round_file(one[0], 1, "check.md", "timed out\n")
+        self.assertEqual(board.pipeline_health(self.root, "002", one), [])
+
+    def test_pipeline_health_raises_needs_human(self):
+        ids = self.done_jobs(10)
+        for j in ids[:6]:
+            self.codex_line(j)
+        (created,) = board.pipeline_health(self.root, "001", ids)
+        job = board.find(board.read_board(self.root), created)
+        self.assertEqual(job["title"], "Pipeline health: codex-review")
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertEqual(job["question"], "pipeline health: codex-review failed in 6 of 10 jobs in digest 001, 60 min lost")
+        self.assertEqual(job["options"], [
+            {"key": "a", "label": "Got it", "command": f"abort {created}"},
+            {"key": "b", "label": "Add a fix to the backlog", "command": f"abort {created} --requeue"}])
+        feature = (self.root / "jobs" / created / "feature.md").read_text()
+        self.assertIn("digest 001", feature)
+        for j in ids[:6]:
+            self.assertIn(j, feature)
+        for j in ids[6:]:
+            self.assertNotIn(j, feature)
+        e2e = self.done_jobs(2)
+        for j in e2e:
+            self.round_file(j, 1, "review-e2e.md", "Reviewer produced no output.\n")
+        (other,) = board.pipeline_health(self.root, "002", e2e)
+        self.assertEqual(board.find(board.read_board(self.root), other)["question"],
+                         "pipeline health: review-e2e failed in 2 of 2 jobs in digest 002, time lost not logged")
+
+    def test_pipeline_health_runs_from_digest_start(self):
+        ids = self.done_jobs(2)
+        for j in ids:
+            self.codex_line(j)
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": ids, "windows": []})
+        (job,) = self.health_jobs()
+        self.assertEqual((job["title"], job["stage"]), ("Pipeline health: codex-review", "needs-human"))
+        healthy = self.done_jobs(2)
+        self.assertEqual(self.cli("digest-start"), {"id": "002", "jobs": healthy, "windows": []})
+        self.assertEqual(len(self.health_jobs()), 1)
+
+    def test_pipeline_health_no_duplicate_while_open(self):
+        ids = self.done_jobs(2)
+        for j in ids:
+            self.codex_line(j)
+        (first,) = board.pipeline_health(self.root, "001", ids)
+        self.assertEqual(board.pipeline_health(self.root, "002", ids), [])  # re-claimed after a failed digest
+        self.assertEqual(len(self.health_jobs()), 1)
+        board.cmd_abort(self.root, first, requeue=False)
+        (second,) = board.pipeline_health(self.root, "003", ids)
+        self.assertNotEqual(second, first)
+        self.assertEqual(board.find(board.read_board(self.root), second)["stage"], "needs-human")
+
+    def test_pipeline_health_missing_files_and_errors(self):
+        ids = self.done_jobs(3)
+        shutil.rmtree(self.root / "jobs" / ids[0])  # no folder
+        (self.root / "jobs" / ids[1] / "spec.md").write_text("trimmed\n")  # no routing.log, no round-*
+        self.assertEqual(board.pipeline_health(self.root, "001", ids + ["999-never-existed"]), [])
+        self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": ids, "windows": []})
+        self.assertEqual(self.health_jobs(), [])
+        for target in ("cmd_new", "cmd_ask"):
+            for err in (SystemExit("board says no"), OSError("disk says no")):
+                more = self.done_jobs(2)  # fresh done jobs each pass, so digest-start claims something
+                for j in more:
+                    self.codex_line(j)
+                with self.subTest(target=target, err=err), mock.patch.object(board, target, side_effect=err), \
+                        redirect_stdout(io.StringIO()) as out, mock.patch.object(sys, "stderr", io.StringIO()) as errout:
+                    board.main(["--dir", str(self.root), "digest-start"])  # no SystemExit: exit status 0
+                    self.assertEqual(json.loads(out.getvalue())["jobs"], more)
+                    self.assertIn(str(err), errout.getvalue())
+                for j in self.health_jobs():  # a job cmd_ask failed on is left behind; clear it for the next pass
+                    if j["stage"] != "aborted":
+                        board.cmd_abort(self.root, j["id"], requeue=False)
 
     def test_digest_start_claims_windows_once(self):
         a = self.done_jobs(1)

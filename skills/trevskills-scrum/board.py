@@ -58,7 +58,9 @@
                                    newest digest folder ("bad window <file>"); reason null when not due
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
                                    scorecard no live digest lists as windows.txt + windows.json, print {"id","jobs","windows"}
-                                   (id null = nothing new; starts with no jobs when the questions trigger fired)
+                                   (id null = nothing new; starts with no jobs when the questions trigger fired); then a
+                                   pipeline health check parks one "Pipeline health: <tool>" job at needs-human per tool
+                                   (codex-review, review-e2e, check) that failed in half the claimed jobs (2+)
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
@@ -278,8 +280,11 @@ def add_job(root, board, title, job_id=None):
     return job_id
 
 
-def cmd_new(root, title, job_id=None):
+def cmd_new(root, title, job_id=None, unique=False):
+    """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted."""
     with locked_board(root) as board:
+        if unique and any(j["title"] == title and j["stage"] not in ("done", "aborted") for j in board["jobs"]):
+            return None
         return add_job(root, board, title, job_id)
 
 
@@ -1049,7 +1054,12 @@ def cmd_digest_start(root):
                 cards.append(card)
         d.joinpath("windows.txt").write_text("".join(f"{n}\n" for n in names))
         d.joinpath("windows.json").write_text(json.dumps(cards, indent=2) + "\n")
-        return {"id": digest_id, "jobs": jobs, "windows": names}
+        out = {"id": digest_id, "jobs": jobs, "windows": names}
+    try:  # after the lock: pipeline_health takes it itself
+        pipeline_health(root, digest_id, jobs)
+    except (SystemExit, OSError) as e:
+        print(f"digest-start: pipeline health: {e}", file=sys.stderr)
+    return out
 
 
 def claim_folder(parent):
@@ -1165,6 +1175,71 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     globs = ui_globs(root)
     return {"digest": str(digest_id), "jobs": [_fit_job(root, job_id, jobs.get(job_id, {}), globs) for job_id in listed]}
+
+
+# --- pipeline health: digest-start raises one needs-human job per tool that failed in half its claimed jobs. ---
+HEALTH_TITLE = "Pipeline health: "
+CHECK_TIMEOUT_RE = re.compile(r"(?i)\btimed out\b")
+
+
+def _codex_failures(folder):
+    """The codex-review routing.log lines that are an invalid artifact or a skip; bad lines and a missing file: none."""
+    return [d for d in _json_lines(folder / "routing.log") if d.get("role") == "codex-review"
+            and (d.get("outcome") == "invalid-artifact" or d.get("runner") == "skip")]
+
+
+def _round_text(folder, name):
+    """Each round-*/<name> under folder that reads, as text; a trimmed or unreadable one is skipped."""
+    out = []
+    for p in sorted(folder.glob(f"round-*/{name}")):
+        try:
+            out.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return out
+
+
+def pipeline_health_counts(root, jobs: list[str]) -> dict:
+    """{tool: [failing job ids]} for codex-review, review-e2e and check; a job counts once per tool."""
+    out = {"codex-review": [], "review-e2e": [], "check": []}
+    for job_id in jobs:
+        folder = Path(root) / "jobs" / job_id
+        if _codex_failures(folder):
+            out["codex-review"].append(job_id)
+        if any("Reviewer produced no output." in t for t in _round_text(folder, "review-e2e.md")):
+            out["review-e2e"].append(job_id)
+        if any(CHECK_TIMEOUT_RE.search(t) for t in _round_text(folder, "check.md")):
+            out["check"].append(job_id)
+    return out
+
+
+def pipeline_health(root, digest_id: str, jobs: list[str]) -> list[str]:
+    """For each tool that failed in at least half of jobs (and 2+), create one board job parked at needs-human with a
+    closed question, unless a live job of that title is already open. Returns the created ids. cmd_new and cmd_ask
+    errors (SystemExit, OSError) propagate."""
+    created = []
+    for tool, failed in pipeline_health_counts(root, jobs).items():
+        if len(failed) < 2 or len(failed) * 2 < len(jobs):
+            continue
+        title = HEALTH_TITLE + tool
+        if tool == "codex-review":
+            secs = sum(d["duration_s"] for j in failed for d in _codex_failures(Path(root) / "jobs" / j)
+                       if type(d.get("duration_s")) in (int, float))
+            lost = f"{round(secs / 60)} min lost"
+        else:
+            lost = "time lost not logged"
+        # unique re-checks the live board under the lock: an open job of this title (needs-human, or one cmd_ask failed
+        # to park) means no second one
+        if (job_id := cmd_new(root, title, unique=True)) is None:
+            continue
+        (Path(root) / "jobs" / job_id / "feature.md").write_text(
+            f"{title} failed in {len(failed)} of {len(jobs)} jobs in digest {digest_id}, {lost}.\n\n"
+            f"Find and fix why {tool} fails across jobs. Failing jobs:\n\n" + "".join(f"- {j}\n" for j in failed))
+        cmd_ask(root, job_id, f"pipeline health: {tool} failed in {len(failed)} of {len(jobs)} jobs in digest "
+                              f"{digest_id}, {lost}",
+                [f"Got it=abort {job_id}", f"Add a fix to the backlog=abort {job_id} --requeue"])
+        created.append(job_id)
+    return created
 
 
 # --- window-report: remembers each open usage window in windows/open.json (merge_limits drops closed ones) and, once
