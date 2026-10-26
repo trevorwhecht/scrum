@@ -5949,6 +5949,158 @@ class UsageAllowanceTest(unittest.TestCase):
         a = board.usage_allowance(usage(five=(92, 3600), seven=(93, 3600)), USAGE_NOW, 0)
         self.assertEqual(a.reason, f"usage 5h 92% used, resets {seven_at} (allowance 3, 0 live)", "tie: five_hour")
 
+    def test_windows_constant_drives_allowance(self):
+        self.assertEqual(board.WINDOWS, (("five_hour", "5h"), ("seven_day", "7d")))
+        a = board.usage_allowance(usage(seven=(96, 3600)), USAGE_NOW, 0)
+        self.assertTrue(a.reason.startswith("usage 7d "), a.reason)
+
+
+T0 = 1_700_000_000  # 2023-11-14; fixture files written now are newer than every window start
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def prompt(text, **extra):
+    return {"type": "user", "message": {"role": "user", "content": text}, **extra}
+
+
+def reply(t, mid, cwd="/nowhere", model="claude-x", **usage_counts):
+    return {"type": "assistant", "timestamp": iso(t), "cwd": cwd,
+            "message": {"id": mid, "model": model, "usage": usage_counts}}
+
+
+class TranscriptTokensTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.dir = self.base / "projects"
+        self.repo = (self.base / "repo").resolve()
+        (self.repo / "scrum").mkdir(parents=True)
+        reg = self.base / "projects.json"
+        reg.write_text(json.dumps([str(self.repo)]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, rel, lines):
+        p = self.dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join((x if isinstance(x, str) else json.dumps(x)) + "\n" for x in lines))
+        return p
+
+    def rows(self, start=T0 - 100, end=T0 + 100):
+        return board.transcript_tokens(start, end, self.dir)
+
+    def test_transcript_tokens_rows_and_dedupe(self):
+        self.write("p/s1.jsonl", [prompt("hi"),
+                                  reply(T0 + 2, "m2", input_tokens=7),
+                                  reply(T0, "m1", input_tokens=1, output_tokens=2),
+                                  reply(T0 + 1, "m1", model="claude-y", input_tokens=3, output_tokens=40,
+                                        cache_read_input_tokens=500, cache_creation_input_tokens=60)])
+        self.assertEqual(self.rows(), [
+            {"ts": T0 + 1.0, "input_tokens": 3, "output_tokens": 40, "cache_read_input_tokens": 500,
+             "cache_creation_input_tokens": 60, "model": "claude-y", "project": None, "job": None,
+             "agent": "main", "skill": None},
+            {"ts": T0 + 2.0, "input_tokens": 7, "output_tokens": 0, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0, "model": "claude-x", "project": None, "job": None,
+             "agent": "main", "skill": None}])
+
+    def test_transcript_tokens_window_bounds(self):
+        self.write("p/s1.jsonl", [reply(T0 - 1, "a", input_tokens=1), reply(T0, "b", input_tokens=2),
+                                  reply(T0 + 9, "c", input_tokens=3), reply(T0 + 10, "d", input_tokens=4)])
+        old = self.write("p/old.jsonl", [reply(T0 + 5, "e", input_tokens=5)])
+        os.utime(old, (T0 - 50, T0 - 50))
+        real_open, opened = open, []
+
+        def spy(path, *a, **k):
+            opened.append(Path(path).name)
+            return real_open(path, *a, **k)
+        with mock.patch("builtins.open", side_effect=spy):
+            got = board.transcript_tokens(T0, T0 + 10, self.dir)
+        self.assertEqual([r["input_tokens"] for r in got], [2, 3])
+        self.assertIn("s1.jsonl", opened)
+        self.assertNotIn("old.jsonl", opened)
+        self.assertEqual(board.transcript_tokens(T0, T0 + 10, self.base / "missing"), [])
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.dir)}):
+            self.assertEqual([r["input_tokens"] for r in board.transcript_tokens(T0, T0 + 10)], [2, 3])
+
+    def test_transcript_tokens_attribution(self):
+        nested = self.repo / "sub"
+        (nested / "scrum").mkdir(parents=True)
+        reg = self.base / "projects.json"
+        reg.write_text(json.dumps([str(self.repo), str(nested)]))
+        wt = self.repo / ".claude" / "worktrees" / "scrum-123-x"
+        self.write("p/a.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"),
+                                 reply(T0, "a", cwd=str(wt / "src"), input_tokens=1)])
+        self.write("p/b.jsonl", [prompt("ignored meta JOB_DIR=/x/jobs/999-no", isMeta=True),
+                                 prompt("JOB_DIR=/r/scrum/jobs/124-y\nWORKTREE=none"),
+                                 reply(T0 + 1, "b", cwd=str(nested / "deep"), input_tokens=2)])
+        self.write("p/c.jsonl", [{"type": "user", "message": {"content": [
+                                     {"type": "text", "text": "<command-name>/trevskills-scrum</command-name>"},
+                                     {"type": "text", "text": "<command-args>start 125-z</command-args>"}]}},
+                                 reply(T0 + 2, "c", cwd="/elsewhere", input_tokens=3)])
+        self.write("p/d.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"
+                                        "<command-args>status all</command-args>"),
+                                 reply(T0 + 3, "d", cwd=str(self.repo), input_tokens=4)])
+        got = [(r["input_tokens"], r["project"], r["job"], r["skill"]) for r in self.rows()]
+        self.assertEqual(got, [(1, "repo", "123-x", "trevskills-scrum"), (2, "sub", "124-y", None),
+                               (3, None, "125-z", "trevskills-scrum"), (4, "repo", None, "trevskills-scrum")])
+
+    def test_transcript_tokens_subagent(self):
+        self.write("p/s1.jsonl", [prompt("<command-name>/trevskills-scrum</command-name>"
+                                         "<command-args>start 125-z</command-args>"),
+                                  reply(T0, "m", input_tokens=1)])
+        sub = self.dir / "p" / "s1" / "subagents"
+        self.write("p/s1/subagents/agent-aa.jsonl", [prompt("JOB_DIR=/r/scrum/jobs/200-own"),
+                                                     reply(T0 + 1, "x", input_tokens=2)])
+        (sub / "agent-aa.meta.json").write_text(json.dumps({"agentType": "scrum-builder"}))
+        self.write("p/s1/subagents/agent-bb.jsonl", [prompt("no job here"), reply(T0 + 2, "y", input_tokens=3)])
+        (sub / "agent-bb.meta.json").write_text("{not json")
+        self.write("p/s1/subagents/agent-cc.jsonl", [reply(T0 + 3, "z", input_tokens=4)])
+        self.write("p/s1/subagents/agent-dd.jsonl", [reply(T0 + 4, "w", input_tokens=5)])
+        (sub / "agent-dd.meta.json").write_text(json.dumps(["scrum-builder"]))
+        self.write("q/orphan/subagents/agent-ee.jsonl", [reply(T0 + 5, "v", input_tokens=6)])
+        got = [(r["input_tokens"], r["agent"], r["job"], r["skill"]) for r in self.rows()]
+        self.assertEqual(got, [(1, "main", "125-z", "trevskills-scrum"),
+                               (2, "scrum-builder", "200-own", "trevskills-scrum"),
+                               (3, "subagent", "125-z", "trevskills-scrum"),
+                               (4, "subagent", "125-z", "trevskills-scrum"),
+                               (5, "subagent", "125-z", "trevskills-scrum"),
+                               (6, "subagent", None, None)])
+
+    def test_transcript_tokens_malformed_lines(self):
+        good = reply(T0, "ok", input_tokens=9, output_tokens="lots", cache_read_input_tokens=None,
+                     cache_creation_input_tokens=True)
+        self.write("p/s1.jsonl", ["not json", "[1, 2]", "42", '"str"', "",
+                                  {"type": "assistant", "timestamp": iso(T0), "message": "x"},
+                                  {"type": "assistant", "timestamp": iso(T0), "message": {"id": "u", "usage": [1]}},
+                                  {"type": "assistant", "message": {"id": "n", "usage": {"input_tokens": 1}}},
+                                  {"type": "assistant", "timestamp": "yesterday", "message": {"usage": {}}},
+                                  {"type": "assistant", "timestamp": 5, "message": {"usage": {}}},
+                                  {"type": "user", "timestamp": iso(T0), "message": {"usage": {"input_tokens": 1}}},
+                                  {"type": "user", "message": "not a dict"},
+                                  good])
+        with open(self.dir / "p" / "s1.jsonl", "ab") as f:
+            f.write(b"\xff\xfe broken utf8\n")
+        (self.dir / "p" / "dir.jsonl").mkdir()  # open() raises IsADirectoryError, an OSError
+        got = self.rows()
+        self.assertEqual([(r["input_tokens"], r["output_tokens"], r["cache_read_input_tokens"],
+                           r["cache_creation_input_tokens"]) for r in got], [(9, 0, 0, 0)])
+        self.write("q/odd.jsonl", ['{"type": "assistant", "timestamp": "%s", "cwd": "/a\\u0000b", "message": '
+                                   '{"id": ["list"], "usage": {"input_tokens": Infinity, "output_tokens": NaN}}}'
+                                   % iso(T0 + 1), reply(T0 + 2, "L", cwd=["a"])])  # unhashable id and cwd,
+        # non-finite counts, a NUL in cwd
+        self.assertEqual([(r["input_tokens"], r["output_tokens"], r["project"]) for r in self.rows()],
+                         [(9, 0, None), (0, 0, None), (0, 0, None)])
+        src = BOARD_PY.read_text()
+        body = src[src.index("def read_transcript("):src.index("def transcript_tokens(")]
+        self.assertNotIn(".read()", body)
+        self.assertNotIn("readlines(", body)
+        self.assertIn("for line in f", body)
+
 
 class ReadyUsageTest(unittest.TestCase):
     def setUp(self):
