@@ -914,10 +914,35 @@ class ContractTest(unittest.TestCase):
         for line in (b1, b2, b3, b4, b5, b6, b8, b9, code_map, step2, must_fail, handoff):
             self.assertEqual(text.count(line + "\n"), 1, line)
         self.assertIn(step2 + "\n" + code_map + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
-        self.assertIn(bad_json + "\n" + b8 + "\n" + b9 + "\n" + step3, text)
+        self.assertIn(bad_json + "\n" + b8 + "\n" + b9 + "\n", text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
         self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
         self.assertIn("\n" + running_app, text)
+
+    def test_builder_rules_digest_011_015_026(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        step3 = "3. For each acceptance criterion:"
+        running_app = "   - A criterion that needs the running app"
+        b4 = ("   - A phrase assert on prose uses a phrase found only in the new rule, never a word that "
+              "already appears elsewhere in the asserted section.")
+        b9 = ("   - An update matches an existing row by its id, never by a display field such as a "
+              "description or a name.")
+        rmw = ("   - A read-modify-write of shared state (board.json, proposals.json, a file another request "
+               "may write) re-reads and re-checks the live state under the lock right before the write, "
+               "never trusting a snapshot taken earlier.")
+        e2e = ("   - An e2e test whose record is missing from the dev DB creates that record in its own setup; "
+               "never skip it, mark it fixme or leave it out, so it cannot pass without running.")
+        manual = ("   - A criterion whose verify step says manual check, browser or DevTools is never human-only: "
+                  "verify it yourself as the next bullet says, and the reviewers and approver cover it after "
+                  "you; never leave it for Trevor.")
+        for line in (rmw, e2e, manual):
+            self.assertEqual(text.count(line), 1, line)
+        self.assertIn(b9 + "\n" + rmw + "\n" + step3, text)
+        self.assertIn(b4 + "\n" + e2e + "\n", text)
+        self.assertIn(manual + "\n" + running_app, text)
+        rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
+                    "stack, even on lines already there")
+        self.assertEqual(text.count(rule_500), 1)
 
     def test_builder_rules_digest_005_006(self):
         text = (ROOT / "agents" / "scrum-builder.md").read_text()
