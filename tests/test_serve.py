@@ -5351,13 +5351,26 @@ class CloudPollTest(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp()) / "scrum"
         self.cloud = [{"id": "001-a", "stage": "cloud"}, {"id": "002-b", "stage": "build"}]
 
-    def tick(self, jobs, now, result=None, error=None):
+    def tick(self, jobs, now, result=None, error=None, cooling=False):
         s = self.serve
         sync = mock.patch.object(s.board, "cmd_cloud_sync", return_value=result or {"moved": [], "error": None},
                                  side_effect=error)
-        with sync as cs, mock.patch.object(s, "spawn") as sp, mock.patch.object(s, "running", return_value=False):
+        with sync as cs, mock.patch.object(s, "spawn") as sp, mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s.board, "cooling_down", return_value=cooling):
             s.cloud_tick("p", self.root, jobs, now=now)
         return cs, sp
+
+    def test_cloud_poll_held_during_cooldown(self):
+        moved = [{"id": "001-art", "state": "MERGED", "pr": "u", "reason": None, "worktree": None, "artifacts": True}]
+        result = {"moved": moved, "error": None}
+        cs, sp = self.tick(self.cloud, now=10_000, result=result, cooling=True)
+        cs.assert_not_called()
+        sp.assert_not_called()
+        self.assertNotIn("p", self.serve.CLOUD_LAST)
+        cs, sp = self.tick(self.cloud, now=10_000, result=result)
+        self.assertEqual(cs.call_count, 1)
+        self.assertEqual([c.args for c in sp.call_args_list], [
+            ("p", self.root, "001-art", "cloud-home", "/trevskills-scrum cloud-home 001-art")])
 
     def test_cloud_poll_runs_only_when_cloud_job_exists(self):
         cs, _ = self.tick([{"id": "002-b", "stage": "build"}, {"id": "003-c", "stage": "done"}], now=10_000)
