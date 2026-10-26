@@ -546,8 +546,8 @@ class ContractTest(unittest.TestCase):
         lilguy = self.lane("lilguy")
         for phrase in ("Hard stop: agent rules", "agent rules guard"):
             self.assertNotIn(phrase, lilguy, phrase)
-        check = self.section(lilguy, "4. **Check.**", "5. **Land.**")
-        for phrase in ("the **Merge** schema guard regex", "**Check gate** `.env` check"):
+        check = self.section(lilguy, "3. **Check.**", "4. **Route.**")
+        for phrase in ("**Merge**'s schema guard", "**Check gate** step 2 commands and its `.env` check"):
             self.assertIn(phrase, check, phrase)
         skill = ROOT / "skills" / "trevskills-scrum"
         files = [skill / "SKILL.md", *sorted(f for f in (skill / "lanes").glob("*.md") if f.name != "rules-gate.md")]
@@ -891,15 +891,29 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**Lilguy lane**", entry)
         self.assertLess(text.index("## BigBoy lane"), text.index("## Lilguy lane"))
         lilguy = self.lane("lilguy")
-        for phrase in ("lane=lilguy", "Skill tool", "trevskills-commitpush-nextjs", "trevskills-commitpush", '"next"',
-                       "detached HEAD", "git add -A", "3", "**Merge**", "schema guard", "**Check gate**", ".env",
-                       "no agent", ":(exclude)scrum", "symbolic-ref", "main checkout guard", "check.md",
-                       "**Migrate**", "rev-list", "pr=", "Path B", "stage=merging", "stage=done", "stage=build",
-                       "stage=check", "was aborted"):
+        for phrase in ("lane=lilguy", "3", "**Merge**", "schema guard", "**Check gate**", ".env", "check.md",
+                       "stage=build", "stage=check", "1. **Worktree.**", "2. **Build.**", "3. **Check.**",
+                       "4. **Route.**", "5. **Merge.**", "6. End with the **Final report**"):
             self.assertIn(phrase, lilguy, phrase)
+        for phrase in ("commitpush", "Path A", "Path B", "git add -A", "detached HEAD", ":(exclude)scrum",
+                       "Steps 1-6 apply only", "## Worktree mode", "lilguy: ", "Hard stop: agent rules"):
+            self.assertNotIn(phrase, lilguy, phrase)
         for line in lilguy.splitlines():
             for banned in ("git push", "gh pr create", "gh pr merge"):
                 self.assertNotIn(banned, line, line)
+        skill_md = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        for phrase in ("Lilguy lane step", "Worktree mode", "commitpush invoked"):
+            self.assertNotIn(phrase, skill_md, phrase)
+        self.assertIn("- never push `main`/`master`\n", skill_md)
+        self.assertIn("\n## Migrate (Merge's schema guard)\n", skill_md)
+        self.assertNotIn("In the Lilguy lane skip both", skill_md)
+        description = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"]
+        self.assertIn("in the job's own worktree", description)
+        self.assertNotIn("main checkout", description)
+        self.assertNotIn("commitpush", description)
+        readme_row = next(l for l in (ROOT / "README.md").read_text().splitlines() if "/trevskills-scrum lilguy" in l)
+        self.assertIn("own worktree", readme_row)
+        self.assertNotIn("commitpush", readme_row)
         prereq = next(l for l in text.splitlines() if l.startswith("**Prerequisites"))
         record = next(l for l in text.splitlines() if l.startswith("**Record your terminal**"))
         self.assertIn("lilguy", prereq)
@@ -908,33 +922,21 @@ class ContractTest(unittest.TestCase):
 
     def test_lilguy_worktree_mode_contract(self):
         lilguy = self.lane("lilguy")
-        self.assertIn("Steps 1-6 apply only to `/trevskills-scrum lilguy <feature text>`", lilguy)
-        self.assertLess(lilguy.index("6. End with the **Final report**"), lilguy.index("\n## Worktree mode\n"))
-        mode = lilguy[lilguy.index("\n## Worktree mode\n"):]
+        manual = next(l for l in lilguy.splitlines() if "/trevskills-scrum lilguy <feature text>" in l)
+        self.assertIn("New job** steps 1, 1b and 2", manual)
+        self.assertIn("never runs `B lilguy-fit $ID`", manual)
+        route = next(l for l in lilguy.splitlines() if "**Lilguy route**" in l)
+        self.assertIn("B lilguy-fit $ID", route)
+        heads = ["1. **Worktree.**", "2. **Build.**", "3. **Check.**", "4. **Route.**", "5. **Merge.**", "**Promotion.**",
+                 "**Resume.**", "6. End with the **Final report**"]
+        self.assertEqual([lilguy.index(h) for h in heads], sorted(lilguy.index(h) for h in heads))
         for phrase in ("lilguy-fit", "scrum/<id>", "**Merge**", "B route-check $ID", "lane=fast", "Promoted to fast:",
-                       "promoted.md", "30", "spawns no subagents"):
-            self.assertIn(phrase, mode, phrase)
-
-    def test_lilguy_land_refuses_when_main_behind_origin(self):
-        land = self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**")
-        invoke = land.index("Invoke commitpush only through the Skill tool")
-        fetch = land.find('git -C "$REPO" fetch')
-        self.assertNotEqual(fetch, -1, "no fetch before commitpush")
-        self.assertLess(fetch, invoke)
-        behind = land.find('git -C "$REPO" rev-list HEAD..@{u}')
-        self.assertNotEqual(behind, -1, "no behind check")
-        self.assertLess(fetch, behind)
-        self.assertLess(behind, invoke)
-        sentence = land[land.rfind(". ", 0, fetch) + 1:land.find(". ", fetch)]
-        self.assertIn("$DEFAULT", sentence)
-        ask = ("`B ask $ID 'lilguy: main is behind origin, so the push would be rejected; pull it first, then land "
-               "the change yourself or throw it away.' --a \"Land it myself=abort $ID\" --b 'Throw away the "
-               "changes=shell: git checkout -- <changed tracked files>' --recommend <key> '<why>'`")
-        self.assertIn(ask, land)
-        path_a = next(l for l in land.splitlines() if l.startswith("   - **Path A"))
-        for phrase in ("status --porcelain -- . ':(exclude)scrum'", "rev-list @{u}..HEAD", "commitpush did not finish",
-                       "never"):
-            self.assertIn(phrase, path_a, phrase)
+                       "promoted.md", "30", "spawns no subagents", "lane=lilguy", "stage=build", "stage=check",
+                       "check.md", "**Check gate**"):
+            self.assertIn(phrase, lilguy, phrase)
+        check = self.section(lilguy, "3. **Check.**", "4. **Route.**")
+        self.assertIn("**Check gate** step 3 format", check)
+        self.assertNotIn("step 4 above", check)
 
     def test_new_job_routes_tiny_jobs_to_lilguy(self):
         text = skill_text()
@@ -942,8 +944,12 @@ class ContractTest(unittest.TestCase):
         for phrase in ("B lilguy-fit $ID", "**Lilguy lane**", "**Lilguy route:**"):
             self.assertIn(phrase, step3, phrase)
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
-        self.assertIn("(a lilguy job with a worktree: **Lilguy lane** Worktree mode)", resume)
+        self.assertIn("(a lilguy job with a worktree: **Lilguy lane**)", resume)
+        self.assertNotIn("A lilguy job re-runs its", resume)
+        self.assertIn("run the **Lilguy lane** instead", step3)
+        self.assertNotIn("Worktree mode", step3)
         self.assertIn("lilguy-fit", self.lane("runall"))
+        self.assertNotIn("Worktree mode", self.lane("runall"))
 
     def test_skill_bigboy_lane_handles_runall_parent(self):
         text = skill_text()
@@ -1490,11 +1496,6 @@ class ContractTest(unittest.TestCase):
                        "[A-Za-z0-9._/-]", "Base branch line in the project profile is malformed",
                        "rev-parse --verify", "not found on origin"):
             self.assertIn(phrase, step2, phrase)
-        lilguy = self.lane("lilguy")
-        refuse = self.section(lilguy, "1. **Refuse", "2. **Job.**")
-        self.assertIn("Base branch", refuse)
-        self.assertIn("Fix: switch to <base branch>, then run lilguy again.", refuse)
-        self.assertIn("same rule as **New job** step 2", self.section(lilguy, "5. **Land.**", "6. End"))
         rules = text[:text.index("## Setup")]
         self.assertIn("Base branch:", rules)
         self.assertIn("never squash", rules)
@@ -1833,9 +1834,6 @@ class ContractTest(unittest.TestCase):
                 "before you retry.' --a ")
         self.assertIn(line + '"Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> \'<why>\'` and stop.',
                       self.section(text, "7. **Clean up:**", "## Resuming the builder"))
-        self.assertIn(line + "'Try again=shell: gh pr view <pr url> --json state' --b \"Remove this job=abort $ID --cascade\" "
-                      "--recommend <key> '<why>'` and stop.",
-                      self.section(self.lane("lilguy"), "5. **Land.**", "6. End with the **Final report**"))
 
     def test_done_only_when_live(self):
         text = skill_text()
@@ -1901,7 +1899,7 @@ class ContractTest(unittest.TestCase):
         for f in files:
             self.assertNotIn("stage=needs-human", f.read_text(), f.name)
         spans = re.findall(r"`(B ask [^`]+)`", self.rules())
-        self.assertGreaterEqual(len(spans), 30)  # every former free-text park, now a closed question
+        self.assertGreaterEqual(len(spans), 28)  # every former free-text park, now a closed question
         for span in spans:
             commands = self.ask_options(span)
             self.assertIn(len(commands), (2, 3), span)
@@ -1931,7 +1929,7 @@ class ContractTest(unittest.TestCase):
     def test_ask_prefixes_unchanged(self):
         questions = [self.ask_question(sp) for _, sp in self.ask_spans()]
         for prefix in ("Hard stop: schema — ", "Hard stop: agent rules — ", "blocked: ", "bigboy off track: ",
-                       "bigboy review: main not updated", "Base branch line", "Base branch <BB>", "debug: ", "lilguy: ",
+                       "bigboy review: main not updated", "Base branch line", "Base branch <BB>", "debug: ",
                        "migrate needs your OK: ", "migrate stopped: ", "merge refused: ", "merge conflicts with ",
                        "approver ", "CI still fails", "Uncommitted change in ", "Uncommitted files in the job worktree",
                        "bigboy chain lock held by "):
@@ -1961,7 +1959,7 @@ class ContractTest(unittest.TestCase):
                 self.assertNotIn(bad, q, span)
             self.assertIsNone(re.search(r"/[\w<>.-]*\.[A-Za-z]", q), span)
         text = self.rules()
-        self.assertEqual(text.count("`$F/jobs/$ID/stop.md`"), 5)  # stops.md, schema, worktree files, main checkout, rules gate
+        self.assertEqual(text.count("`$F/jobs/$ID/stop.md`"), 5)  # stops.md, schema, worktree files, main checkout, agent rules
 
     def test_ask_labels_plain(self):
         import shlex
@@ -2153,7 +2151,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Carry on=resume <id>\" "
                       "--b \"Remove this job=abort <id> --cascade\" --recommend <key> '<why>'`", resume)
         self.assertEqual(resume.count("same question, options and --recommend"), 2)
-        self.assertIn("after Trevor picks Throw away the changes", resume)
+        self.assertNotIn("after Trevor picks Throw away the changes", resume)
         for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",
                        "find the step whose `B ask` wrote the question"):
             self.assertIn(phrase, resume, phrase)
@@ -2575,7 +2573,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_lane_files_hold_moved_sections(self):
         steps = {
             "roadmap": ("Roadmap", ("1. **Draft**", "2. **Status**", "3. **Starting a step**", "4. **Stop rule.**", "5. **Resume.**")),
-            "lilguy": ("Lilguy", ("1. **Refuse", "2. **Job.**", "3. **Build.**", "4. **Check.**", "5. **Land.**", "6. End")),
+            "lilguy": ("Lilguy", ("1. **Worktree.**", "2. **Build.**", "3. **Check.**", "4. **Route.**", "5. **Merge.**")),
             "cloud": ("Cloud", ("1. **Dispatch**", "2. **Cloud job**", "3. **Sync**")),
             "runall": ("Run all", ("2. Spawn", "3. Run")),
             "debug": ("Debug lane", ("1. **Diagnose.**", "5. **Build.**")),
