@@ -1232,6 +1232,30 @@ def claude_usage(now):
     return out
 
 
+WINDOW_CARD_KEYS = ("headline", "points_done", "first_pass_rate", "wasted_pct", "escapes", "resets_at")
+
+
+def latest_windows(root):
+    """{"five_hour": card|None, "seven_day": card|None}: per key, the windows/<key>-<resets_at>.json with the highest
+    resets_at (as an int) that is a JSON object, trimmed to the fields the Usage dialog shows. Junk files are skipped."""
+    out = dict.fromkeys(("five_hour", "seven_day"))
+    w = Path(root) / "windows"
+    names = [p.name for p in w.iterdir() if board.WINDOW_FILE_RE.fullmatch(p.name)] if w.is_dir() else []
+    for name in sorted(names, key=lambda n: int(n[n.index("-") + 1:-5]), reverse=True):
+        key = name.split("-", 1)[0]
+        if out[key] is not None:
+            continue
+        try:
+            card = json.loads((w / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(card, dict):
+            budget = card.get("budget")
+            out[key] = {**{k: card.get(k) for k in WINDOW_CARD_KEYS},
+                        "budget": {"used_pct": budget.get("used_pct") if isinstance(budget, dict) else None}}
+    return out
+
+
 def jev_usage(repos, now):
     """Jev calls logged today (local date) across every repo's scrum/jobs/*/jev.log, and the newest call's timestamp.
     A file last written before local midnight holds no call from today, so only its lines' timestamps are read."""
@@ -2948,6 +2972,9 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/windows", path):
+            root = scrum_dir(unquote(m.group(1)))
+            return self.send_json(200, latest_windows(root)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/api/p/(.+)/manual-checks", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, board.manual_items(root)) if root else self.send_json(404, {"error": "no such project"})

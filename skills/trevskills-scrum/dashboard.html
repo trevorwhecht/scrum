@@ -27,6 +27,7 @@ h1{font-size:16px;margin:0}
 #rankList .rnum{color:var(--muted);min-width:2ch;text-align:right}#rankList .rname{flex:1;min-width:0;overflow-wrap:anywhere}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
 .usage td:nth-child(2),.usage td:nth-child(3),.usage thead th:nth-child(2),.usage thead th:nth-child(3){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.usage.windows{margin-top:16px}.usage.windows th,.usage.windows td{overflow-wrap:anywhere}.usage.windows td:nth-child(2),.usage.windows thead th:nth-child(2){text-align:left;white-space:normal}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .col h2 span{white-space:nowrap}
 .col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
@@ -269,7 +270,10 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div class="tabs"><b>Usage</b><button class="close" type="button" aria-label="Close">✕</button></div>
   <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
     <thead><tr><th scope="col">AI</th><th scope="col">5h</th><th scope="col">Week</th><th scope="col">Latest</th></tr></thead>
-    <tbody id="usageRows"></tbody></table></article>
+    <tbody id="usageRows"></tbody></table>
+  <table class="usage windows" data-agent-hint="The newest 5h and 7d window scorecard per project (the #filter project, or every project), from scrum/windows/ via GET /api/p/&lt;project&gt;/windows, fetched each time this dialog opens. Points done, budget used, the headline (points per % of budget), first-pass rate, wasted spend % and escapes; hover a row for when the window ended.">
+    <thead><tr><th scope="col">Project</th><th scope="col">Last window</th></tr></thead>
+    <tbody id="windowRows"></tbody></table></article>
 </dialog>
 <dialog id="aiSettings" aria-label="AI-Settings">
   <div class="tabs"><button id="aiBack" type="button" hidden>← Back</button><b>AI-Settings</b>
@@ -1731,6 +1735,18 @@ function usageRows(s) {
     + row("Codex", cell(pct(x["5h"])), cell(pct(x.weekly)), "—")
     + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`);
 }
+// The Usage dialog's window scorecard rows: one per project per window, 5h then 7d. Pinned by test_dashboard_routing.
+function windowRows(list) {
+  const num = v => typeof v === "number" && isFinite(v), n = (v, one) => `${num(v) ? v : "—"} ${one}${v === 1 ? "" : "s"}`;
+  return list.map(({project, windows}) => [["five_hour", "5h"], ["seven_day", "7d"]].map(([key, label]) => {
+    const c = windows?.[key], head = `<tr><th scope="row">${esc(project)}</th>`;
+    if (!c) return `${head}<td>${esc(`Last ${label} window: No scorecard yet`)}</td></tr>`;
+    const text = `Last ${label} window: ${n(c.points_done, "point")}, ${pct(c.budget?.used_pct)} budget, `
+      + `${num(c.headline) ? `${Math.round(c.headline * 100) / 100}/%` : "—"}. First pass `
+      + `${pct(num(c.first_pass_rate) ? c.first_pass_rate * 100 : null)}, waste ${pct(c.wasted_pct)}, ${n(c.escapes, "escape")}`;
+    return `${head}<td title="ended ${esc(when(c.resets_at))}">${esc(text)}</td></tr>`;
+  }).join("")).join("");
+}
 // Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. A 404 (older
 // serve.py) or an error hides the button; an open Usage dialog keeps its last rows until a status arrives.
 let usage = null;
@@ -1742,7 +1758,17 @@ async function loadRouting() {
   $("routing").textContent = routingText(s);
   $("usageRows").innerHTML = usageRows(s);
 }
-$("routing").addEventListener("click", () => { if (usage) $("usage").showModal(); });
+// Scorecards change once per window, so they are fetched only when the dialog opens. A reply that lands after the
+// dialog closed, the filter changed or a newer open started is dropped.
+let windowsSeq = 0;
+async function loadWindows() {
+  const seq = ++windowsSeq, f = filter, list = f ? [f] : projects;
+  const res = await Promise.all(list.map(p => getJson(`api/p/${enc(p)}/windows`, null)));
+  const body = $("windowRows");
+  if (!body || seq !== windowsSeq || filter !== f || !$("usage").open) return;
+  body.innerHTML = windowRows(list.map((project, i) => ({project, windows: res[i]})));
+}
+$("routing").addEventListener("click", () => { if (usage) { $("usage").showModal(); loadWindows(); } });
 // The Rank dialog: one row per project in projects (rank) order. A poll re-renders it only when the order changed, and
 // keeps keyboard focus on the same project's button.
 function renderRank(keep) {

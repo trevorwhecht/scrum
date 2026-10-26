@@ -64,6 +64,40 @@ class RoutingText(unittest.TestCase):
         self.assertNotIn(OLL, DASHBOARD.read_text().lower())
 
 
+class WindowRows(unittest.TestCase):
+    def rows(self, lists):
+        with mock.patch.dict(os.environ, TZ="UTC"):  # node renders local time; pin it
+            return node_eval("windowRows", lists)
+
+    def test_full_scorecard(self):
+        five = {"headline": 0.146, "points_done": 6, "budget": {"used_pct": 41.2}, "first_pass_rate": 0.8,
+                "wasted_pct": 12, "escapes": 0, "resets_at": 100000}
+        seven = {"headline": 2.4, "points_done": 1, "budget": {"used_pct": 50}, "first_pass_rate": 1,
+                 "wasted_pct": 0, "escapes": 1, "resets_at": 200000}
+        self.assertEqual(self.rows([[{"project": "app", "windows": {"five_hour": five, "seven_day": seven}}]]), [
+            '<tr><th scope="row">app</th><td title="ended 1970-01-02 03:46">Last 5h window: 6 points, 41% budget, 0.15/%. '
+            'First pass 80%, waste 12%, 0 escapes</td></tr>'
+            '<tr><th scope="row">app</th><td title="ended 1970-01-03 07:33">Last 7d window: 1 point, 50% budget, 2.4/%. '
+            'First pass 100%, waste 0%, 1 escape</td></tr>'])
+
+    def test_no_scorecard_and_null_metrics(self):
+        nulls = {"headline": None, "points_done": 0, "budget": {"used_pct": None}, "first_pass_rate": None,
+                 "wasted_pct": None, "escapes": None, "resets_at": 100000}
+        out = self.rows([[{"project": "<script>x</script>", "windows": None},
+                          {"project": "b"},
+                          {"project": "c", "windows": {"five_hour": nulls, "seven_day": None}}]])[0]
+        self.assertEqual(out,
+            '<tr><th scope="row">&lt;script&gt;x&lt;/script&gt;</th><td>Last 5h window: No scorecard yet</td></tr>'
+            '<tr><th scope="row">&lt;script&gt;x&lt;/script&gt;</th><td>Last 7d window: No scorecard yet</td></tr>'
+            '<tr><th scope="row">b</th><td>Last 5h window: No scorecard yet</td></tr>'
+            '<tr><th scope="row">b</th><td>Last 7d window: No scorecard yet</td></tr>'
+            '<tr><th scope="row">c</th><td title="ended 1970-01-02 03:46">Last 5h window: 0 points, — budget, —. '
+            'First pass —, waste —, — escapes</td></tr>'
+            '<tr><th scope="row">c</th><td>Last 7d window: No scorecard yet</td></tr>')
+        for word in ("undefined", "null", "NaN", "<script>"):
+            self.assertNotIn(word, out)
+
+
 class UsageRows(unittest.TestCase):
     def rows(self, statuses):
         with mock.patch.dict(os.environ, TZ="UTC"):  # node renders local time; pin it
