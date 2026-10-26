@@ -101,14 +101,14 @@ class VolumeMarkup(unittest.TestCase):
     def test_header_markup(self):
         header = self.text[self.text.index("<header>"):self.text.index("</header>")]
         self.assertRegex(header, r'<span class="volwrap"><button class="btn" id="volume" type="button"[^>]*>\s*<svg[^>]*>.*</svg>'
-                         r'</button><input type="range" id="volumeLevel" min="0" max="100" step="1" aria-label="Sound volume"></span>'
+                         r'</button><span class="volpop"><input type="range" id="volumeLevel" min="0" max="100" step="1" aria-label="Sound volume"></span></span>'
                          r'\s*<button class="btn" id="backlogBtn"')
 
     def test_css(self):
-        css = " ".join(re.findall(r"(?:#volume|\.volwrap)[^{]*\{[^}]*\}", self.text))
+        css = " ".join(re.findall(r"(?:#volume|\.vol)[^{]*\{[^}]*\}", self.text))
         self.assertIn("#volume{min-height:44px;min-width:44px", css)
-        self.assertIn(".volwrap:focus-within #volumeLevel", css)
-        self.assertIn(".volwrap:hover #volumeLevel", css)
+        self.assertIn(".volwrap:focus-within .volpop", css)
+        self.assertIn(".volwrap:hover .volpop", css)
         self.assertIn('#volume[aria-pressed="true"] .waves{display:none}', css, "muted hides the waves")
         self.assertIn('#volume[aria-pressed="false"] .cross{display:none}', css, "unmuted hides the cross")
         self.assertNotRegex(css, r"#[0-9a-fA-F]{3,6}\b|\bwhite\b")
