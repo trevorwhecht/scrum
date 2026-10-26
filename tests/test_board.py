@@ -5764,6 +5764,70 @@ class PipelineFitTest(unittest.TestCase):
         self.assertEqual(j["agents"], ["spec", "builder", "review-ux", "review-ui", "review-code", "approver"])
         self.assertEqual((j["over_routed"], j["fit"]), (True, "lilguy"))
 
+    def test_pipeline_fit_sensitive_path_not_over_routed(self):
+        (self.root / "project.md").parent.mkdir(parents=True, exist_ok=True)
+        (self.root / "project.md").write_text("- UI globs: *.html\n")
+        for path in ("src/auth/login.py", "prisma/schema.prisma", ".env.local", "web/page.html"):
+            with self.subTest(path=path):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard(lines=10, files=1)
+                self.commit({path: "y\n" * 10})
+                self.digest(job)
+                before = self.snapshot()
+                j = self.fit()["jobs"][0]
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual((j["added"], j["deleted"], j["files"]), (20, 0, 2))
+                self.assertEqual((j["over_routed"], j["fit"]), (False, "standard"))
+                board.cmd_set(self.root, job, ["lane=debug"])
+                j = self.fit()["jobs"][0]
+                self.assertEqual((j["over_routed"], j["fit"]), (False, "debug"))
+
+    def test_pipeline_fit_pr_files_block_over_routing(self):
+        b = board.cmd_new(self.root, "Has PR")
+        board.cmd_set(self.root, b, ["pr=https://github.com/acme/app/pull/42"])
+        self.reviews(b, 1)
+        self.digest(b)
+        before = self.snapshot()
+        small = '{"additions": 20, "deletions": 5, "changed_files": 2}'
+        plain = '[{"filename": "src/a.py", "additions": 10, "deletions": 5}, ' \
+                '{"filename": "src/b.py", "additions": 10, "deletions": 0}]'
+        renamed = '[{"filename": "src/a.py", "additions": 10, "deletions": 5}, ' \
+                  '{"filename": "src/b.py", "previous_filename": "src/session.py", "additions": 10, "deletions": 0}]'
+
+        def run_with(totals, files):
+            calls = []
+
+            def fake_run(argv, *a, **kw):
+                calls.append(argv)
+                if isinstance(files, BaseException) and len(calls) == 2:
+                    raise files
+                out = totals if len(calls) == 1 else files
+                return subprocess.CompletedProcess(argv, 0 if out is not None else 1, out or "", "HTTP 500\n")
+
+            with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+                return self.fit()["jobs"][0], calls
+
+        j, calls = run_with(small, plain)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("repos/acme/app/pulls/42/files", calls[1])
+        self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"], j["fit"]),
+                         (20, 5, 2, True, "lilguy"))
+        j, calls = run_with(small, renamed)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((j["added"], j["over_routed"], j["fit"]), (20, False, "standard"))
+        j, calls = run_with('{"additions": 200, "deletions": 5, "changed_files": 2}', plain)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((j["added"], j["over_routed"], j["fit"]), (200, False, "standard"))
+        for bad in (None, subprocess.TimeoutExpired("gh", 30), '{"filename": "src/a.py"}', '[{"filename": 3}]',
+                    '[{"additions": 1, "deletions": 0}]'):
+            with self.subTest(bad=bad):
+                j, calls = run_with(small, bad)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual((j["added"], j["deleted"], j["files"], j["over_routed"], j["fit"]),
+                                 (20, 5, 2, False, "standard"))
+        self.assertEqual(self.snapshot(), before)
+
     def test_pipeline_fit_flags_mid_size_job_as_fast(self):
         job = self.small_standard(lines=60, files=2)
         board.cmd_set(self.root, job, ["lane=debug"])

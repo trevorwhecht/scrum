@@ -1012,33 +1012,47 @@ def _real_review(p):
 
 
 def _fit_diff(root, job):
-    """(added, deleted, files) from the worktree, else the PR's REST totals; (None, None, None) when unreadable."""
+    """(added, deleted, files, paths) from the worktree, else the PR's REST totals; paths is the (rows, names) pair
+    _promote_trigger takes, None when unreadable. (None, None, None, None) when the diff is unreadable."""
     if job.get("worktree") and Path(job["worktree"]).is_dir():
         diff = _route_diff(job)
         if diff is None or any(a is None for a, _, _ in diff[0]):
-            return None, None, None
+            return None, None, None, None
         rows, names = diff
-        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names)
+        return sum(a for a, _, _ in rows), sum(d for _, d, _ in rows), len(names), diff
     m = re.fullmatch(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", job.get("pr") or "")
     if not m:
-        return None, None, None
+        return None, None, None, None
     try:
         pr = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}")
         out = tuple(pr[k] for k in ("additions", "deletions", "changed_files"))
     except (GhError, TypeError, KeyError):
-        return None, None, None
-    return out if all(type(v) is int for v in out) else (None, None, None)
+        return None, None, None, None
+    if not all(type(v) is int for v in out):
+        return None, None, None, None
+    if out[0] + out[1] > FAST_MAX_LINES or out[2] > FAST_MAX_FILES:
+        return *out, None  # too big to be over-routed: no files call
+    try:  # one page is enough: at most FAST_MAX_FILES files
+        listed = gh_api(Path(root), f"repos/{m[1]}/{m[2]}/pulls/{m[3]}/files")
+        rows = [(f["additions"], f["deletions"], f["filename"]) for f in listed]
+        names = [n for f in listed for n in (f["filename"], f.get("previous_filename")) if n is not None]
+    except (GhError, TypeError, KeyError, AttributeError):
+        return *out, None
+    ok = all(type(a) is int and type(d) is int and type(p) is str for a, d, p in rows) \
+        and all(type(n) is str for n in names)
+    return *out, ((rows, names) if ok else None)
 
 
 def cmd_pipeline_fit(root, digest_id: str) -> dict:
     """{"digest", "jobs"}: for each job in digests/<NNN>/jobs.txt, its lane, agents spawned, diff size, verdicts per
-    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed."""
+    round, fix rounds, and whether a standard/debug job that passed round 1 on a fast-sized diff was over-routed: never
+    when its paths are unreadable, _promote_trigger would have promoted it, or a path matches UI globs."""
     d = Path(root) / "digests" / str(digest_id)
     if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
         raise SystemExit(f"no digest {digest_id!r}")
     listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
-    out = []
+    globs, out = ui_globs(root), []
     for job_id in listed:
         job, folder = jobs.get(job_id, {}), Path(root) / "jobs" / job_id
         lane = job.get("lane") or "standard"
@@ -1050,10 +1064,12 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
         agents += ["approver"] if (folder / "decision.md").is_file() else []
         verdicts = {str(n): {r: first_word(folder / f"round-{n}" / f"review-{r}.md", ("PASS", "CHANGES"))
                              for r in REVIEWERS} for n in rounds}
-        added, deleted, files = _fit_diff(root, job)
+        added, deleted, files, paths = _fit_diff(root, job)
         size = None if added is None else added + deleted
         over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
-                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES)
+                and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
+                and paths is not None and _promote_trigger(*paths) is None
+                and not (globs and any(glob_match(n, globs) for n in paths[1])))
         fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
         out.append({"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
                     "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over,
