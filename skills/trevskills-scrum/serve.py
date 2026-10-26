@@ -587,7 +587,10 @@ def cloud_tick(project, root, jobs, now=None):
     each moved job with an artifacts branch or a schema / agent-rules hard stop, and each job whose artifacts arrived
     late. Once spawn returns for an id whose artifacts branch exists (arrived, or moved with artifacts), clear its
     artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
-    spawn keeps the mark, so a later poll reports the id again. Errors are printed, never raised."""
+    spawn keeps the mark, so a later poll reports the id again. Held during cool-down (no sync, no spawn, CLOUD_LAST
+    unstamped, so the first tick after it polls at once). Errors are printed, never raised."""
+    if board.cooling_down():
+        return
     now = time.time() if now is None else now
     if not any(j.get("stage") == "cloud" or j.get("artifactsPending") for j in jobs) \
             or now - CLOUD_LAST.get(project, 0) < CLOUD_EVERY:
