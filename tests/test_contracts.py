@@ -124,7 +124,7 @@ class ContractTest(unittest.TestCase):
             r"prisma/(schema\.prisma|migrations/)",  # deterministic schema guard before merge
             "human-approval.md",
             '"reworks"',                         # REWORK-once enforced by the orchestrator
-            "second rework",
+            "second round of fixes",
             "Uncommitted files in the job worktree",  # no dead ends
             "merge refused",
             "UNKNOWN",
@@ -978,7 +978,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, debug, phrase)
         check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
         self.assertTrue("lane=debug" in check or "`lane` is `debug`" in check)
-        for phrase in ("outside allowed files", "repro test changed", "3 failed fixes"):
+        for phrase in ("outside allowed files", "repro test changed", "three fixes in a row did not make the failing test"):
             self.assertIn(phrase, check, phrase)
         self.assertIn("see **Debug lane**", self.section(text, "5. **Build:**", "6. Continue"))
 
@@ -1077,7 +1077,7 @@ class ContractTest(unittest.TestCase):
 
     def test_approver_debug_repro_never_preexisting(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("assessment.md", "repro still fails"):
+        for phrase in ("assessment.md", "the test that shows the bug still fails after the fix"):
             self.assertIn(phrase, text, phrase)
 
     def test_skill_fast_lane_promotes(self):
@@ -1745,27 +1745,28 @@ class ContractTest(unittest.TestCase):
 
     def test_approver_requires_rendered_ui(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("Rendered: yes", "UI not rendered"):
+        for phrase in ("Rendered: yes", "no reviewer saw the changed screens on a running copy of the app"):
             self.assertIn(phrase, text, phrase)
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
         self.assertIn("visible", rule)
         for phrase in ("absent", "expected change", "Rendered: blocked", "never REWORK or ESCALATE for the render"):
             self.assertIn(phrase, rule, phrase)
         for phrase in ("Rendered: n/a — no rendered change", "git -C WORKTREE diff", "claim is false",
-                       "Hard stop: render — UI not rendered: <which screens changed, in plain words>"):
+                       "Hard stop: render — no reviewer saw the changed screens on a running copy of the app: <which screens changed, in plain words>"):
             self.assertIn(phrase, rule, phrase)
         self.assertNotIn("<which UI-glob files changed>", text)
-        self.assertEqual(text.count("Hard stop: blocked — UI not rendered"), 1)
-        self.assertIn("`Hard stop: blocked — UI not rendered` is only for a UI diff", text)
+        self.assertEqual(text.count("Hard stop: blocked — the changed screens were never shown on a running copy of the app"), 1)
+        self.assertIn("`Hard stop: blocked — the changed screens were never shown on a running copy of the app` is only for a UI diff", text)
         stop = next(l for l in text.splitlines() if l.startswith("**ESCALATE only for a hard stop**"))
         for phrase in ("Hard stop: render — <evidence>", "Hard stop: blocked — <evidence>",
-                       "with no file paths, double quotes or backticks", "go in decision.md's body"):
+                       "with no file paths, double quotes or backticks", "go in decision.md's body",
+                       "to the stops.md bar", "why Trevor must decide", "with no internal term"):
             self.assertIn(phrase, stop, phrase)
 
     def test_approver_retro_p1_blocked_render_never_hard_stop(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
-        phrase = ("`Hard stop: blocked — UI not rendered` is only for a UI diff with no `Rendered: yes` and no "
+        phrase = ("`Hard stop: blocked — the changed screens were never shown on a running copy of the app` is only for a UI diff with no `Rendered: yes` and no "
                   "`Rendered: blocked`; never write it, with or without an `(environment)` note, when a "
                   "latest-round review says `Rendered: blocked` and none says `Rendered: no`.")
         self.assertEqual(text.count(phrase), 1)
@@ -1830,9 +1831,9 @@ class ContractTest(unittest.TestCase):
 
     def test_done_refusal_fallback_in_skill(self):
         text = skill_text()
-        line = ("If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the PR on GitHub "
-                "before you retry.' --a ")
-        self.assertIn(line + '"Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> \'<why>\'` and stop.',
+        line = ("If `B set ... stage=done` refuses, run `B ask $ID '<its error, quotes stripped>; merge the pull request on "
+                "GitHub, then pick Try again.' --a ")
+        self.assertIn(line + '"Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> \'<why>\'` (`<its error>` rewritten to the **Issue** bar in `lanes/stops.md` with its prefix kept) and stop.',
                       self.section(text, "7. **Clean up:**", "## Resuming the builder"))
 
     def test_done_only_when_live(self):
@@ -1941,7 +1942,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn(wait, migrate)
         self.assertIn('git -C "$REPO" ls-tree -r --name-only "scrum/<id>"', migrate)
         self.assertLess(migrate.index(wait), migrate.index("On any other stop"))
-        self.assertIn("`B ask $ID 'migrate stopped: we should <what to change> because <why>.' --a \"Try again=approve $ID\" "
+        self.assertIn("`B ask $ID 'migrate stopped: the database update stopped; we should <what to change> because <why>.' "
+                      "--a \"Try again=approve $ID\" "
                       "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'`", migrate)
 
     def test_migrate_duplicate_column_auto_reworks(self):
@@ -1981,10 +1983,38 @@ class ContractTest(unittest.TestCase):
                 if command.startswith("rework "):
                     self.assertEqual(label, "Send back with a note", span)
 
+    def test_ask_questions_plain_english(self):
+        """After its machine prefix, every in-scope ask question meets the stops.md bar."""
+        dash = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
+        stop_prefix = re.compile(re.search(r"const STOP_PREFIX = /(.+)/;", dash).group(1))
+        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        pre = self.section(skill, "1. **Preconditions:**", "\n2. ")
+        # Pinned machine prefixes the dashboard regex cannot strip (a placeholder or id follows them).
+        fixed = ("bigboy chain lock held by ",)
+        checked = 0
+        for name, span in self.ask_spans():
+            if name == "rules-gate" or (name == "SKILL" and span in pre):
+                continue
+            q = stop_prefix.sub("", self.ask_question(span), count=1)
+            q = next((q[len(f):] for f in fixed if q.startswith(f)), q)
+            checked += 1
+            for bad in ("see decision.md", "see ci.md", "listed in stop.md"):
+                self.assertNotIn(bad, q, span)
+            self.assertIsNone(re.search(r"\brule \d", q, re.I), span)
+            for word in ("human-only", "lane", "rework", "hard stop", "bigboy"):
+                self.assertIsNone(re.search(rf"\b{word}\b", q, re.I), f"{word!r} in {span}")
+        self.assertGreaterEqual(checked, 20)
+
     def test_stops_lane_shape(self):
         stops = self.lane("stops")
         self.assertLessEqual(len(stops.splitlines()), 15)
-        for phrase in ("then one plain sentence with no file paths", "`jobs/<id>/stop.md`",
+        for phrase in ("say what happened and why it needs Trevor", "say what each button does",
+                       "must read on its own", "a rule number or an internal term",
+                       "rewrites any templated or passed-through text", "before calling `B ask`, keeping its prefix",
+                       "decision.md line 2", "rules-check failure string", "`## For Trevor` line",
+                       "`This change edits the scrum standards doc (skill-standards.md), which agents aren't allowed "
+                       "to merge on their own. Reviews and tests passed. Merge it?`",
+                       "says in words what the detail holds and where it is shown", "`jobs/<id>/stop.md`",
                        "`Remove this job=abort <id> --cascade`", "`Send back with a note`",
                        "`--recommend <key> '<why>'`", "by your own judgement", "every `'` removed",
                        "A re-ask passes the same question, options and --recommend"):
@@ -2053,7 +2083,8 @@ class ContractTest(unittest.TestCase):
         text = skill_text()
         step5 = self.section(text, "5. **Conflicts.**", "6. **Merge:**")
         self.assertIn("Allow at most **2** attempts; only after both fail, run `B ask $ID \"merge conflicts with "
-                      "$DEFAULT after 2 tries.\" --kind conflict --a \"Put back on the backlog=abort $ID --requeue\" "
+                      "$DEFAULT after 2 tries: newer changes on $DEFAULT edit the same lines as this job, and two automatic attempts to "
+                      "combine them failed.\" --kind conflict --a \"Put back on the backlog=abort $ID --requeue\" "
                       "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'` and stop.", step5)
         for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
             self.assertIn(phrase, step5, phrase)
@@ -2507,10 +2538,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_merge_reruns_debug_checks_after_ci_fix(self):
         text = skill_text()
         step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
-        for phrase in ("`lane` is `debug`", "after CI fix", "Repro test untouched",
-                       "B ask $ID 'debug: checks fail after CI fix — <first failing check>' --a \"Send back with a note=rework $ID"):
+        for phrase in ("`lane` is `debug`", "after the fix for the GitHub test failure", "Repro test untouched",
+                       "B ask $ID 'debug: after the fix for the GitHub test failure, the bug fix no longer passes its own checks: "
+                       "<first failing check, in plain words>.' --a \"Send back with a note=rework $ID"):
             self.assertIn(phrase, step6, phrase)
-        self.assertLess(step6.index("after CI fix"), step6.index("gh pr merge"))
+        self.assertLess(step6.index("after the fix for the GitHub test failure"), step6.index("gh pr merge"))
 
     def test_merge_gh_missing_fix_installs_first(self):
         text = skill_text()
@@ -2659,14 +2691,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         step5 = self.section(text, "5. **Build:**", "## Fast lane")
         self.assertIn("--kind blocked", step5)
         check = self.section(text, "## Check gate", "## Review (WAIT FOR ALL)")
-        self.assertIn('B ask $ID "debug: 3 failed fixes — question the design." --kind check-fail', check)
+        self.assertIn('B ask $ID "debug: three fixes in a row did not make the failing test for this bug pass, so the diagnosis '
+                      'may be wrong." --kind check-fail', check)
         approve = self.section(text, "## Approve", "## Migrate")
-        self.assertIn('B ask $ID "approver requested second rework; see decision.md." --kind round-limit', approve)
+        self.assertIn('B ask $ID "approver asked for a second round of fixes, but a job only gets one; its notes are in the '
+                      'decision.md tab of this job." --kind round-limit', approve)
         self.assertIn("If it starts `Hard stop: blocked`, run `B ask $ID '<second line of decision.md>' --kind blocked", approve)
         self.assertIn("If it starts `Hard stop: render`, run `B ask $ID '<second line of decision.md>' --kind render", approve)
         merge = self.section(text, "## Merge", "## Routing")
-        self.assertIn('B ask $ID "CI still fails after 2 fix attempts; see ci.md." --kind ci-fail', merge)
-        self.assertIn('B ask $ID "merge conflicts with $DEFAULT after 2 tries." --kind conflict', merge)
+        self.assertIn('B ask $ID "CI still fails after 2 fix attempts: the automated tests on GitHub kept failing after two '
+                      'automatic fixes, and the failure log is in the ci.md tab of this job." --kind ci-fail', merge)
+        self.assertIn('B ask $ID "merge conflicts with $DEFAULT after 2 tries: newer changes on $DEFAULT edit the same lines '
+                      'as this job, and two automatic attempts to combine them failed." --kind conflict', merge)
         self.assertEqual(text.count("--kind "), 7)
         for line in text.splitlines():
             if any(p in line for p in ("Hard stop: schema", "migrate stopped", "Hard stop: agent rules")):
@@ -2876,7 +2912,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
         for phrase in ("lacks the **Artifacts** step", "before New job",
-                       "cloud skill copy is stale. Fix: rerun cloud setup.", "reports to GitHub as **Needs-human** does",
+                       "this cloud session is running an old copy of the scrum instructions; rerunning cloud setup refreshes it.",
+                       "reports to GitHub as **Needs-human** does",
                        "`git -C ~/scrum rev-parse HEAD`", "`git -C ~/scrum ls-remote origin refs/heads/main`",
                        "`grep -q scrum-artifacts/ ~/.claude/skills/trevskills-scrum/lanes/cloud.md`"):
             self.assertIn(phrase, setup, phrase)
