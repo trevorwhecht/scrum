@@ -29,6 +29,22 @@ def frontmatter(path):
     return dict(line.split(": ", 1) for line in m.group(1).splitlines() if ": " in line)
 
 
+def parse_stops(notes: str) -> list[tuple[str, int, list[str], dict[str, int], bool]]:
+    """The rows of notes.md's `## Stops` table as (cause, count, ids, picks, automate); `None` gives []."""
+    m = re.search(r"^## Stops\n(.*?)(?=^## |\Z)", notes, re.S | re.M)
+    lines = [l.strip() for l in (m.group(1) if m else "").splitlines() if l.strip().startswith("|")]
+    if not lines:
+        return []
+    assert [c.strip() for c in lines[0].strip("|").split("|")] == ["Cause", "Count", "Jobs", "Picks", "Automate"], lines[0]
+    rows = []
+    for line in lines[2:]:
+        cause, count, ids, picks, automate = (c.strip() for c in line.strip("|").split("|"))
+        assert automate in ("yes", "no"), automate
+        rows.append((cause, int(count), ids.split(", "),
+                     {label: int(n) for label, n in (p.rsplit(" ", 1) for p in picks.split(", "))}, automate == "yes"))
+    return rows
+
+
 class ContractTest(unittest.TestCase):
     def test_exactly_the_expected_agents_exist(self):
         self.assertEqual({p.stem for p in (ROOT / "agents").glob("*.md")}, set(AGENTS))
@@ -1091,7 +1107,10 @@ class ContractTest(unittest.TestCase):
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
                        "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
-                       "Cheapest lane:"):
+                       "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "## Stops",
+                       "`ask`", "`stall`", "`machine`", "`refused`", "`bigboy`", "Hard stop: agent rules", "stalled in build",
+                       "swap used", "blocked on sibling", "| Cause | Count | Jobs | Picks | Automate |", "Automate",
+                       "Jobs read: 0"):
             self.assertIn(phrase, reader, phrase)
         for phrase in ("## Local routing", "insights/<id>.md", "(fallback: <n>)", "local background worker"):
             self.assertNotIn(phrase, reader, phrase)
@@ -1100,7 +1119,8 @@ class ContractTest(unittest.TestCase):
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
                        "never removes or loosens", '"kind": "skill"', "## Rediscovery", "150 lines", ".claude/skills/",
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "## Pipeline fit",
-                       "count toward the at-most-8 cap", "threshold or routing edits", "skipped, and so is one whose `old` text is stale"):
+                       "count toward the at-most-8 cap", "threshold or routing edits", "skipped, and so is one whose `old` text is stale",
+                       "## Stops", '"kind": "backlog"', '"backlog":', "--priority 3"):
             self.assertIn(phrase, digester, phrase)
         for phrase in ('"obvious"', '"obvious_reason"', '"obvious": false', "obvious_reason", "(unanimous)", "pick not unanimous",
                        "auto-approves", "Trevor decides", "Trevor approves", "**Obvious.**"):
@@ -1119,6 +1139,8 @@ class ContractTest(unittest.TestCase):
                        "error.md", "B digest-trim", "no remote", "--digest-auto",
                        "   DIGEST_DIR=$D\n   PROJECT=$F/project.md\n   Write proposals.json for this digest.\n", '"applied"', '"queued"', "queued: <reason>", "B pipeline-fit"):
             self.assertIn(phrase, digest, phrase)
+        for phrase in ("## Stops", "15 lines", "`stall`", "`machine`", "`refused`", "`backlog`"):
+            self.assertIn(phrase, digest[:digest.index("\n1. ")], phrase)
         step4 = digest[digest.index("\n4. "):]
         for phrase in ('"skipped"', "<pid> → <target>: <why>", "queued: <reason>", "skipped: <reason>"):
             self.assertIn(phrase, step4, phrase)
@@ -1134,6 +1156,21 @@ class ContractTest(unittest.TestCase):
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
         self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
+
+    def test_digest_stops_table_parses(self):
+        sample = ("DIGEST NOTES\nJobs read: 0\n## Repeated questions\nNone\n## Stops\n"
+                  "| Cause | Count | Jobs | Picks | Automate |\n|---|---|---|---|---|\n"
+                  "| stalled in build | 3 | 101-a, 102-b | resume 3 | yes |\n"
+                  "| swap used | 2 | 103-c | resume 1, unanswered 1 | no |\n## Pipeline fit\nNone\n")
+        self.assertEqual(parse_stops(sample), [("stalled in build", 3, ["101-a", "102-b"], {"resume": 3}, True),
+                                               ("swap used", 2, ["103-c"], {"resume": 1, "unanswered": 1}, False)])
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        template = reader[reader.index("    ## Stops\n"):]
+        header = next(l.strip() for l in template.splitlines() if l.strip().startswith("|"))
+        self.assertEqual([c.strip() for c in header.strip("|").split("|")], ["Cause", "Count", "Jobs", "Picks", "Automate"])
+        self.assertEqual(parse_stops("DIGEST NOTES\n## Stops\n" + header + "\n|---|---|---|---|---|\n"
+                                     "| a | 1 | j | resume 1 | no |\n"), [("a", 1, ["j"], {"resume": 1}, False)])
+        self.assertEqual(parse_stops("DIGEST NOTES\n## Stops\nNone\n## Pipeline fit\nNone\n"), [])
 
     def test_dashboard_has_digest_dialog(self):
         text = DASHBOARD.read_text()
