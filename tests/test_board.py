@@ -834,6 +834,13 @@ class BoardTest(unittest.TestCase):
         nextjs = "## Likely files\n- `src/app/(app)/page.tsx`\n- `src/app/api/orders/[id]/route.ts`\n"
         self.assertEqual(board.likely_files(nextjs), {"src/app/(app)/page.tsx", "src/app/api/orders/[id]/route.ts"})
 
+    def test_likely_files_reads_bare_bullet_paths(self):
+        self.assertEqual(board.likely_files("## Likely files\n- src/app/api/users/route.test.ts\n"), {"src/app/api/users/route.test.ts"})
+        self.assertEqual(board.likely_files("## Likely files\n- src/a.py: why\n- src/b.py, edit\n"), {"src/a.py", "src/b.py"})
+        self.assertEqual(board.likely_files("## Likely files\n- cmd_ready(root): the scheduler\n- Edit the scheduler\nsrc/c.py\n## Assumptions\n- src/d.py\n"), set())
+        mixed = "## Likely files\n- `x/a.py`: see y/b.py\n- src/app/(app)/page.tsx\n"
+        self.assertEqual(board.likely_files(mixed), {"x/a.py", "src/app/(app)/page.tsx"})
+
     def five(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
