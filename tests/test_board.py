@@ -3864,6 +3864,23 @@ print("stub err", file=sys.stderr)
         self.assertEqual(board.orchestrator_model(self.root, "002-pts"), "opus")
         self.assertEqual(board.orchestrator_model(self.root, "003-small"), "sonnet")
 
+    def test_big_ticket_unreadable_backlog(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-big", "stage": "plan", "lane": "bigboy"}, {"id": "002-pts", "stage": "spec"},
+            {"id": "004-road", "stage": "running", "lane": "roadmap"}]}))
+        (self.root / "project.md").write_text("- Orchestrator model: sonnet\n- Big ticket model: claude-fable-5-1\n")
+        backlog = self.root / "backlog.md"
+        for kind in ("dir", "bytes"):
+            if kind == "dir":
+                backlog.mkdir()
+            else:
+                backlog.rmdir()
+                backlog.write_bytes(b"- [x] [8] Big \xff\xfe \xe2 \u2192 002-pts\n")
+            for job_id, model in (("001-big", "claude-fable-5-1"), ("004-road", "claude-fable-5-1"),
+                                  ("002-pts", "sonnet")):
+                self.assertEqual(board.orchestrator_model(self.root, job_id), model, (kind, job_id))
+            self.assertFalse(board.big_ticket(self.root, "002-pts"), kind)
+
     def test_spawn_model_selection(self):
         project = self.root / "project.md"
         plain = ["-p", "/p", "--permission-mode", "acceptEdits"]

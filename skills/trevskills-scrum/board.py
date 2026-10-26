@@ -4339,7 +4339,11 @@ def big_ticket(root: Path, job_id: str) -> bool:
         job = {}
     if job.get("lane") in BIG_LANES:
         return True
-    return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in read_backlog(root)[1])
+    try:
+        items = read_backlog(root)[1]
+    except (OSError, ValueError):  # unreadable or non-UTF-8 backlog.md: not big by points
+        return False
+    return any(i.get("job") == job_id and (i.get("points") or 0) >= BIG_POINTS for i in items)
 
 
 def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
