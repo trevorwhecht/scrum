@@ -1996,6 +1996,9 @@ class ContractTest(unittest.TestCase):
                       "--b \"Remove this job=abort $ID --cascade\" --recommend <key> '<why>'` and stop.", step5)
         for phrase in ("git -C \"$WT\" merge \"origin/$DEFAULT\" --no-edit", "go to **Check gate**"):
             self.assertIn(phrase, step5, phrase)
+        for phrase in ("git -C \"$WT\" rev-parse HEAD", "diff --name-only <pre-merge HEAD> HEAD -- package-lock.json",
+                       "run `Install` from `project.md` in `$WT`", "never symlink `node_modules`"):
+            self.assertLess(step5.index(phrase), step5.index("go to **Check gate**"), phrase)
 
     def test_stop_rules_trigger_on_ask(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
