@@ -1903,7 +1903,8 @@ def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
     Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
-    waiting job with a dependency not yet done or aborted ("not merged yet")."""
+    waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
+    board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip)."""
     data = json.loads((root / "board.json").read_text())
     stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
     title = {j.get("id"): j.get("title") or "" for j in data.get("jobs", [])}
@@ -1911,6 +1912,8 @@ def board_with_activity(root, project):
         job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
         if job.get("stage") not in ("done", "aborted"):
             job["activity"] = activity(root, job)
+            if "fable" in (board.orchestrator_model(root, job.get("id")) or "").lower():
+                job["fable"] = True  # the card's Fable chip
         if resumable(job) and not running(project, job.get("id")):
             # ponytail: machine_ok runs per resumable job each poll; compute it once per board if many sit paused
             # manual: as the dashboard's click sends it; a queued Play is gated as play_queue_tick gates it, CPU included
