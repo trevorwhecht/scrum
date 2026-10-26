@@ -10,6 +10,7 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 ## board.py (`skills/trevskills-scrum/board.py`)
 - Subcommands are `cmd_<name>` functions (`cmd_ask`, `cmd_abort`, `cmd_hook`, `cmd_register`, `cmd_backlog_add`, ...).
 - `cmd_hook(event, tty, pid=None)`: the `board.py hook` entry the SKILL.md frontmatter hooks call. `waiting_text(event)` picks the text; the job is matched by its recorded claude pid, else by tty.
+- `pace_cap(...)` always returns None (job 282) and is kept only for continue.py; `usage_allowance(usage, now, live)` is the usage gate for automated claims.
 - `machine_ok(path, manual=False)`: None when there is room, else the reason. Order: cool-down (`COOLING`, skipped when `manual`), free RAM, swap, free disk, session ceiling. Gates new claims, resumes and auto-continue starts only.
 - `resume_blocker(root, job_id, live=())`: a `Blocker` (a str with `.ids`) when a sibling child holds overlapping files.
 - `session_alive_fn()`: the live-session check; tests mock it.
