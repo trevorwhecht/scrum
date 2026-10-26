@@ -828,6 +828,7 @@ const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && jo
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
   : setupWait(job) ? "Waiting on you: setup"
+  : job.buildLockWait ? "Waiting for the build lock"
   : `${VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
 
 // A needs-human job's closed question (board.py ask): armed/pending/note-open state per job key, outside the DOM so a

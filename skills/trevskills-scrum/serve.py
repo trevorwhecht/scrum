@@ -40,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent / "local"))  # HERE is resolved, so this is the real repo's local/
 import board  # noqa: E402
+import buildlock  # noqa: E402
 import route  # noqa: E402
 
 CLAUDE = board.CLAUDE  # the cloud estimate and terminal launches; board.spawn reads board.CLAUDE
@@ -1878,6 +1879,26 @@ def activity(root, job):
     return {"text": text, "at": at}
 
 
+def build_lock_waiting(worktree):
+    """True when a live buildlock.py waiter (a `.waiting/<pid>` marker whose pid is alive) has its cwd in `worktree`."""
+    try:
+        wt = os.path.realpath(worktree)
+        for m in buildlock.waiting_dir(buildlock.lock_path()).iterdir():
+            try:
+                cwd = os.path.realpath(m.read_text().strip())
+                try:
+                    os.kill(int(m.name), 0)
+                except PermissionError:
+                    pass  # alive, owned by another user
+            except (OSError, ValueError):
+                continue
+            if cwd == wt or cwd.startswith(wt + os.sep):
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
@@ -1899,6 +1920,8 @@ def board_with_activity(root, project):
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        if job.get("stage") == "check" and job.get("worktree") and build_lock_waiting(job["worktree"]):
+            job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"]["titles"] = [title.get(i, "") for i in job["waitingOn"]["ids"]]
     return data
