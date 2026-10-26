@@ -13,6 +13,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 **First run:**
 1. `cd WORKTREE`. Run the project's install command from `PROJECT` if dependencies are missing.
 2. Implement the spec. Follow the repo's conventions exactly; reuse existing components and helpers before writing new ones.
+   - When the change touches `skills/trevskills-scrum/board.py`, `serve.py` or `dashboard.html`, read `/Users/trevorhecht/Developer/repos/trevskills-scrum/.claude/skills/scrum-code-map/SKILL.md` first.
    - UI that can change while shown (an open modal, a polled list, a field being edited) refreshes on every re-render, never overwrites what the user is typing, and tolerates a missing element.
    - Never cut user text silently to fit a length cap: match the cap to the input's own limit, or reject with an error.
    - A value passed to a CLI (`git`, `gh`, a subprocess argv) that could start with `-` goes after `--`, or is rejected when it starts with `-`.
