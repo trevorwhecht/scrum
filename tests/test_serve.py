@@ -5478,6 +5478,90 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.serve.STALL_RESUMED, set())
 
 
+class MainFfTickTest(unittest.TestCase):
+    """A BigBoy parent waiting on the main checkout's fast-forward is resumed once main is clean, on its default
+    branch and `git pull --ff-only` succeeds; never otherwise, and once per updatedAt."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.MAIN_FF_TRIED.clear()
+        self.root = Path(tempfile.mkdtemp()) / "scrum"; self.root.mkdir()
+        self.repo = self.root.parent
+        self.job = {"id": "308-big", "lane": "bigboy", "stage": "running", "base": "origin/main",
+                    "reason": "waiting: main fast-forward", "updatedAt": "2026-10-25T10:00:00Z", "children": ["309-a"]}
+        self.write()
+
+    def write(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [self.job]}))
+
+    def git(self, branch="main", status="", pull=0):
+        def run(argv, **kw):
+            sub = argv[3]
+            out = {"symbolic-ref": branch + "\n", "status": status, "pull": ""}[sub]
+            return subprocess.CompletedProcess(argv, pull if sub == "pull" else 0, out, "")
+        return run
+
+    def tick(self, run=None, alive=False):
+        s = self.serve
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.object(s.subprocess, "run", side_effect=run or self.git()) as git, \
+                mock.patch.object(s, "spawn") as spawn, mock.patch.object(s, "running", return_value=alive), \
+                mock.patch.object(s, "resume_refusal", return_value=None), \
+                mock.patch.object(s.board, "play") as play:
+            result = s.main_ff_tick("p", self.repo, self.root, jobs)
+        return result, [c.args[2:] for c in spawn.call_args_list], git, play
+
+    def test_main_ff_tick_resumes_when_pull_succeeds(self):
+        result, spawns, git, _ = self.tick()
+        self.assertTrue(result)
+        self.assertEqual(spawns, [("308-big", "resume", "/trevskills-scrum resume 308-big")])
+        argvs = [c.args[0] for c in git.call_args_list]
+        self.assertEqual(argvs, [["git", "-C", str(self.repo), "symbolic-ref", "--short", "HEAD"],
+                                 ["git", "-C", str(self.repo), "status", "--porcelain", "--untracked-files=no"],
+                                 ["git", "-C", str(self.repo), "pull", "--ff-only"]])
+        self.assertEqual(git.call_args_list[2].kwargs["timeout"], 60)
+        self.assertIn("resumed = auto_resume(project, root, jobs) or resumed\n"
+                      "                resumed = main_ff_tick(project, repo, root, jobs) or resumed",
+                      inspect.getsource(self.serve.watchdog_tick))
+
+    def test_main_ff_tick_waits_when_dirty_or_ff_fails(self):
+        def timeout(argv, **kw):
+            if argv[3] == "pull":
+                raise subprocess.TimeoutExpired(argv, 60)
+            return self.git()(argv, **kw)
+        before = dict(self.job)
+        cases = {"dirty": (self.git(status=" M serve.py\n"), {}, False),
+                 "wrong branch": (self.git(branch="scrum/1-x"), {}, False),
+                 "pull fails": (self.git(pull=1), {}, False),
+                 "pull times out": (timeout, {}, False),
+                 "paused": (None, {"paused": True}, False),
+                 "tracked run": (None, {}, True),
+                 "other wait": (None, {"reason": "waiting: free RAM 14% (< 20%)"}, False),
+                 "not bigboy": (None, {"lane": "runall"}, False),
+                 "not running": (None, {"stage": "review"}, False)}
+        for name, (run, extra, alive) in cases.items():
+            with self.subTest(name):
+                self.job = {**before, **extra}
+                self.write()
+                result, spawns, _, play = self.tick(run, alive)
+                self.assertFalse(result)
+                self.assertEqual(spawns, [])
+                play.assert_not_called()
+                live = json.loads((self.root / "board.json").read_text())["jobs"][0]
+                self.assertEqual((live["stage"], live["reason"], live["updatedAt"]),
+                                 (self.job["stage"], self.job["reason"], "2026-10-25T10:00:00Z"))
+        self.job = before; self.write()
+        self.assertEqual(self.tick()[1], [("308-big", "resume", "/trevskills-scrum resume 308-big")],
+                         "a failed check never spends the try")
+
+    def test_main_ff_tick_once_per_update(self):
+        self.assertEqual(len(self.tick()[1]), 1)
+        self.assertEqual(self.tick()[1], [], "same updatedAt: the resume already ran")
+        self.job["updatedAt"] = "2026-10-25T10:05:00Z"
+        self.write()
+        self.assertEqual(len(self.tick()[1]), 1)
+
 
 class ResumeFirstTest(unittest.TestCase):
     """Paused jobs and resumable stalled jobs hold every new claim in their project (board.resume_first)."""

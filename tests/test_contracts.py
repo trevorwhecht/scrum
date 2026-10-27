@@ -1924,7 +1924,7 @@ class ContractTest(unittest.TestCase):
         for f in files:
             self.assertNotIn("stage=needs-human", f.read_text(), f.name)
         spans = re.findall(r"`(B ask [^`]+)`", self.rules())
-        self.assertGreaterEqual(len(spans), 28)  # every former free-text park, now a closed question
+        self.assertGreaterEqual(len(spans), 27)  # every former free-text park, now a closed question
         for span in spans:
             commands = self.ask_options(span)
             self.assertIn(len(commands), (2, 3), span)
@@ -1938,7 +1938,7 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("Every needs-human reason is", text)
         # Prefix-dependent readers (board.RESUMABLE, serve.py CLOUD_HOME, cloud.md) still match the asked questions.
         for prefix in ("'Hard stop: schema — ", "'Hard stop: agent rules — ", "'bigboy off track: ",
-                       '"bigboy review: main not updated', '"Base branch line', "'Base branch <BB>", "'blocked: "):
+                       '"Base branch line', "'Base branch <BB>", "'blocked: "):
             self.assertTrue(any(prefix in sp for sp in spans), prefix)
 
     def ask_spans(self):
@@ -1954,7 +1954,7 @@ class ContractTest(unittest.TestCase):
     def test_ask_prefixes_unchanged(self):
         questions = [self.ask_question(sp) for _, sp in self.ask_spans()]
         for prefix in ("Hard stop: schema — ", "Hard stop: agent rules — ", "blocked: ", "bigboy off track: ",
-                       "bigboy review: main not updated", "Base branch line", "Base branch <BB>", "debug: ",
+                       "Base branch line", "Base branch <BB>", "debug: ",
                        "migrate needs your OK: ", "migrate stopped: ", "merge refused: ", "merge conflicts with ",
                        "approver ", "CI still fails", "Uncommitted change in ", "Uncommitted files in the job worktree",
                        "bigboy chain lock held by "):
@@ -2168,6 +2168,27 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("stops the BigBoy for Trevor", reviewer)
         self.assertIn("each gap line is filed as its own backlog item, so write each one self-contained", reviewer)
 
+    def test_bigboy_reviewer_data_gap_is_pass(self):
+        reviewer = (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text()
+        for phrase in ("— data gap —", "A failing test is never a data gap", "no code change would close it",
+                       "every Done-when item is met or is a data gap, and the tests pass",
+                       "<item> — data gap — <what differs and where>"):
+            self.assertIn(phrase, reviewer, phrase)
+        bigboy = self.lane("bigboy")
+        step7 = bigboy[bigboy.index("7. **Final BigBoy review.**"):]
+        passed = next(l for l in step7.splitlines() if l.startswith("   - `BIGBOY: PASS`"))
+        self.assertIn("— data gap —", passed)
+        self.assertIn("are not filed", passed)
+
+    def test_bigboy_main_not_updated_waits(self):
+        bigboy = self.lane("bigboy")
+        step7 = next(l for l in bigboy.splitlines() if l.startswith("7. **Final BigBoy review.**"))
+        wait = "B set $P reason='waiting: main fast-forward'"
+        self.assertIn(wait, step7)
+        self.assertNotIn('B ask $P "bigboy review: main not updated', step7)
+        self.assertLess(step7.index("main not updated"), step7.index("B set $P stage=review"))
+        self.assertLess(step7.index(wait), step7.index("B set $P stage=review"))
+
     def test_bigboy_unreadable_review_files_rerun(self):
         bigboy = self.lane("bigboy")
         step7 = bigboy[bigboy.index("7. **Final BigBoy review.**"):]
@@ -2197,7 +2218,10 @@ class ContractTest(unittest.TestCase):
                        "`bigboy blocked`", "`Base branch `"):
             self.assertIn(prefix, resume, prefix)
         for phrase in ("BigBoy lane** step 5 sub-steps 2-3", "merge-base --is-ancestor HEAD origin/$DEFAULT",
-                       "without its `main not updated` check", "B abort <c> --reason 'skipped: depends on aborted <ids>'",
+                       "without its `main not updated` check", "`waiting: main fast-forward`",
+                       "B set <id> reason='waiting: main fast-forward'",
+                       "or be a `running` BigBoy parent with reason `waiting: main fast-forward` (serve.py starts it once "
+                       "main fast-forwards)", "B abort <c> --reason 'skipped: depends on aborted <ids>'",
                        "B set <id> stage=spec reason=", "**New job** from step 2"):
             self.assertIn(phrase, resume, phrase)
         # an older `bigboy blocked` fallback names no aborted child: Resume must not discard its waiting children
