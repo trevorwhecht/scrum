@@ -221,7 +221,8 @@ class StopBox(unittest.TestCase):
         self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled"'
                       ' : playQueued(job) ? "waiting" : job.stage;', text)
         card = text[text.index("function card(job)"):text.index("function render(")]
-        self.assertIn('human = (job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job))', card)
+        self.assertIn('const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);', card)
+        self.assertIn("const human = asked || paused(job)", card)
 
     def test_stalled_status_line(self):
         j = {"key": "p/040-s", "project": "p", "id": "040-s", "stage": "build", "updatedAt": "2026-01-01T00:00:00Z"}

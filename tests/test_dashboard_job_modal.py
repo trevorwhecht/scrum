@@ -244,6 +244,33 @@ class JobModal(unittest.TestCase):
         no_question = self.actions_html({**self.ASKED, "tty": "ttys001", "options": self.OPTIONS})
         self.assertIn('<b>Waiting on you</b><p>CHANGES after 3 rounds.</p><div class="acts">', no_question)  # no question: the issue
 
+    def test_stop_box_shows_stop_title(self):
+        asked = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}
+        html = self.actions_html({**asked, "stopTitle": "MERGE_CONFLICT"})
+        self.assertIn('<b>MERGE CONFLICT</b><p>Which way?</p>', html)
+        self.assertNotIn("Waiting on you", html)
+        self.assertIn('<b>&lt;X&gt; Y</b><p>Which way?</p>', self.actions_html({**asked, "stopTitle": "<X>_Y"}))
+        for extra in ({}, {"stopTitle": ""}, {"stopTitle": None}):  # old jobs and cloud-sync parks
+            with self.subTest(extra=extra):
+                self.assertIn('<b>Waiting on you</b><p>Which way?</p>', self.actions_html({**asked, **extra}))
+        prompt = self.actions_html({**self.ASKED, "stage": "build", "waiting": "Allow Bash?", "stopTitle": "MERGE_CONFLICT"})
+        self.assertIn("<b>Waiting on you</b><p>Allow Bash?</p><p>Answer it in the job's terminal.</p>", prompt)
+
+    def test_card_shows_stop_title_badge(self):
+        job = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}
+        cases = [{"stopTitle": "MERGE_CONFLICT"}, {}, {"stopTitle": "MERGE_CONFLICT", "play_queued": True},
+                 {"stopTitle": "MERGE_CONFLICT", "reason": "stalled in build: died"},
+                 {"stopTitle": "MERGE_CONFLICT", "stage": "build"}, {"stopTitle": "<b>_X"}]
+        htmls = self.card_js(f"for (const extra of {json.dumps(cases)})"
+                             f" console.log(JSON.stringify(card({{...{json.dumps(job)}, ...extra}})));"
+                             f" runs['p/020-q'] = {{alive: true, action: 'approve'}};"
+                             f" console.log(JSON.stringify(card({{...{json.dumps(job)}, stopTitle: 'MERGE_CONFLICT'}})));")
+        titled, plain, queued, stalled, building, hostile, answering = htmls
+        self.assertIn('<span class="title">Asked</span><span class="badge">MERGE CONFLICT</span>', titled)
+        for html in (plain, queued, stalled, building, answering):
+            self.assertNotIn("MERGE CONFLICT", html)
+        self.assertIn('<span class="badge">&lt;b&gt; X</span>', hostile)
+
     def test_card_has_status_not_option_buttons(self):
         job = {**self.ASKED, "question": "Which way?", "options": self.OPTIONS}
         [html] = self.card_js(f"console.log(JSON.stringify(card({json.dumps(job)})));")
