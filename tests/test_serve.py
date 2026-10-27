@@ -1004,7 +1004,7 @@ class ServeTest(unittest.TestCase):
         scrum.mkdir(parents=True)
         (scrum / "backlog.md").write_text("# Backlog\n")
         r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "board.py"), "--dir", str(scrum),
-                            "backlog-add", "Cli item A", "Cli item B"], capture_output=True, text=True, timeout=5)
+                            "backlog-add", "Cli item A", "Cli item B"], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([i["text"] for i in self.serve.board.backlog_items(scrum)], ["Cli item A", "Cli item B"])
         self.assertTrue(self.wait_for(lambda: [i["points"] for i in self.serve.board.backlog_items(scrum)] == [5, 5], 10),
@@ -4738,12 +4738,16 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.board.backlog_items(self.scrum), [])
 
     def test_digest_auto_cli_output(self):
-        def cli(digest_id):
+        def cli(digest_id):  # the one real process: the --digest-auto entry point prints one JSON line, exit 0
             env = {**os.environ, "CLAUDE_HOME": str(self.user), "SCRUM_REGISTRY": os.environ["SCRUM_REGISTRY"]}
             r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"), "--digest-auto", digest_id,
                                 "--dir", str(self.scrum)], capture_output=True, text=True, timeout=10, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             return json.loads(r.stdout)
+
+        def auto(digest_id):  # in-process: a new python per call costs seconds under load
+            with mock.patch.dict(os.environ, {"CLAUDE_HOME": str(self.user)}):
+                return json.loads(json.dumps(self.serve.digest_auto(self.scrum.resolve(), digest_id)))
         job_id = self.done_job()
         (self.scrum / "jobs" / job_id / "build.md").write_text("x")
         agent, claude_md = self.repo_file("agents/scrum-x.md"), self.repo_file("CLAUDE.md")
@@ -4759,12 +4763,12 @@ class DigestTest(unittest.TestCase):
         self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
         self.assertFalse((self.scrum / "jobs" / job_id / "build.md").exists())
         before = (self.scrum / "digests" / "001" / "proposals.json").read_bytes()
-        self.assertEqual(cli("001"), {"applied": [], "queued": [], "skipped": [], "job": None})  # a re-run changes nothing
+        self.assertEqual(auto("001"), {"applied": [], "queued": [], "skipped": [], "job": None})  # a re-run changes nothing
         self.assertEqual((self.scrum / "digests" / "001" / "proposals.json").read_bytes(), before)
         self.digest([], "003")
-        self.assertEqual(cli("003"), {"applied": [], "queued": [], "skipped": [], "job": None})
-        self.assertEqual(cli("009"), {"applied": [], "queued": [], "skipped": [], "job": None})
-        self.assertEqual(cli("x9"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertEqual(auto("003"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertEqual(auto("009"), {"applied": [], "queued": [], "skipped": [], "job": None})
+        self.assertEqual(auto("x9"), {"applied": [], "queued": [], "skipped": [], "job": None})
         self.assertFalse((self.scrum / "digests" / "009").exists())
 
     def test_digest_auto_trims_after_run(self):
@@ -5507,18 +5511,23 @@ class DigestTest(unittest.TestCase):
         self.assertFalse(dot.exists())
 
     def test_digest_skill_check_revalidates_target(self):
-        def check(digest_id, pid):
+        def cli(digest_id, pid):  # the one real process: the --digest-skill-check entry point prints one JSON line
             env = {**os.environ, "CLAUDE_HOME": str(self.user), "SCRUM_REGISTRY": os.environ["SCRUM_REGISTRY"]}
             r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"), "--digest-skill-check",
                                 digest_id, pid, "--dir", str(self.scrum)], capture_output=True, text=True, timeout=10, env=env)
             self.assertEqual(r.stdout.count("\n"), 1, r.stdout + r.stderr)
             return r.returncode, json.loads(r.stdout)
+
+        def check(digest_id, pid):  # in-process, shaped like cli(): a new python per case costs seconds under load
+            with mock.patch.dict(os.environ, {"CLAUDE_HOME": str(self.user)}):
+                res = json.loads(json.dumps(self.serve.digest_skill_check(self.scrum.resolve(), digest_id, pid)))
+            return (0 if res["ok"] else 1), res
         target, hooks = self.reg / "skills" / "k" / "SKILL.md", self.reg / ".claude" / "skills" / "h" / "SKILL.md"
         other = self.reg / "skills" / "o" / "SKILL.md"
         self.digest([self.skill("p1", target, status="queued"), self.skill("p2", other, status="queued"),
                      self.skill("p3", hooks, status="queued"), self.skill("p4", target),
                      self.prop("p5", self.repo_file("agents/scrum-x.md"), status="queued"), self.skill("p6", target, status="rejected")])
-        self.assertEqual(check("001", "p1"), (0, {"ok": True, "target": "skills/k/SKILL.md"}))
+        self.assertEqual(cli("001", "p1"), (0, {"ok": True, "target": "skills/k/SKILL.md"}))
         self.assertEqual(check("001", "p3"), (0, {"ok": True, "target": ".claude/skills/h/SKILL.md"}))
         target.parent.mkdir(parents=True)
         target.write_text("someone made it\n")

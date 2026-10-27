@@ -3288,6 +3288,24 @@ class RulesCheckTest(unittest.TestCase):
               "- `skills/trevskills-scrum/lanes/*.md`\n- `tests/test_contracts.py`\n- `skills/trevskills-scrum/board.py`\n"
               "- `docs/skill-standards.md`\n")
 
+    @classmethod
+    def setUpClass(cls):
+        """The committed base repo, built once: each setUp copies it (git init + commit per test cost seconds under load)."""
+        import tempfile
+        cls.base_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.base_tmp.cleanup)
+        cls.base_repo = Path(cls.base_tmp.name) / "repo"
+        files = {"agents/scrum-demo.md": cls.AGENT, "skills/trevskills-scrum/SKILL.md": cls.SKILL,
+                 "skills/trevskills-scrum/lanes/demo.md": "# Demo lane\n\nStep one.\n",
+                 "tests/test_contracts.py": cls.CONTRACTS, "skills/trevskills-scrum/board.py": cls.BOARD,
+                 "docs/skill-standards.md": cls.STANDARDS, "README.md": "readme\n"}
+        for rel, text in files.items():
+            (cls.base_repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (cls.base_repo / rel).write_text(text)
+        cls.git(cls.base_repo, "init", "-q", "-b", "main")
+        cls.git(cls.base_repo, "add", *files)
+        cls.git(cls.base_repo, "commit", "-q", "-m", "base")
+
     def setUp(self):
         import os, sys, tempfile
         from unittest import mock
@@ -3303,22 +3321,14 @@ class RulesCheckTest(unittest.TestCase):
                                            "SCRUM_USAGE": str(base / "no-usage.json")})
         env.start()
         self.addCleanup(env.stop)
-        files = {"agents/scrum-demo.md": self.AGENT, "skills/trevskills-scrum/SKILL.md": self.SKILL,
-                 "skills/trevskills-scrum/lanes/demo.md": "# Demo lane\n\nStep one.\n",
-                 "tests/test_contracts.py": self.CONTRACTS, "skills/trevskills-scrum/board.py": self.BOARD,
-                 "docs/skill-standards.md": self.STANDARDS, "README.md": "readme\n"}
-        for rel, text in files.items():
-            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.repo / rel).write_text(text)
-        self.git(self.repo, "init", "-q", "-b", "main")
-        self.git(self.repo, "add", *files)
-        self.git(self.repo, "commit", "-q", "-m", "base")
+        shutil.copytree(self.base_repo, self.repo, symlinks=True)
         self.job = board.cmd_new(self.root, "Rules edit")
         self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
         board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
         (self.root / "jobs" / self.job / "spec.md").write_text("# Rules edit\n\n" + self.LIKELY)
 
-    def git(self, cwd, *args):
+    @staticmethod
+    def git(cwd, *args):
         subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
                        capture_output=True)
 
