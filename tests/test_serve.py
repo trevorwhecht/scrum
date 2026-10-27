@@ -1872,7 +1872,7 @@ class ServeTest(unittest.TestCase):
             jobs = self.board_jobs()
         self.assertEqual(jobs[queued]["resumeRefusal"],
                          "waiting: CPU busy 95% (> 90%). Fix: click Resume once memory or disk frees up.")
-        self.assertEqual(jobs[queued]["activity"]["text"], "waiting for CPU/RAM")
+        self.assertEqual(jobs[queued]["activity"]["text"], "queued, starts next")
         self.assertIsNone(jobs[unqueued]["resumeRefusal"], "Trevor's click skips the CPU check")
         self.assertEqual(jobs[unqueued]["activity"]["text"], "waiting on you")
 
