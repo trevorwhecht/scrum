@@ -81,7 +81,10 @@ def main(argv: list[str]) -> int:
                                   file=sys.stderr)
                             return 124
             finally:
-                marker.unlink(missing_ok=True)
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    pass  # the marker is only a hint; never let cleanup replace the build's exit code
         cmd = ["sh", "-c", argv[0]] if len(argv) == 1 else argv
         try:
             # the child inherits the lock fd, so the lock outlives a SIGKILLed wrapper until the build exits
