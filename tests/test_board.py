@@ -5565,8 +5565,17 @@ class RouteCheckTest(unittest.TestCase):
     def test_route_check_promotes_on_over_100_lines(self):
         self.assertEqual(self.promote({"src/a.py": "x\n" * 60, "src/b.py": "y\n" * 41}), "diff over 100 lines (101)")
 
-    def test_route_check_promotes_on_more_than_3_files(self):
-        self.assertEqual(self.promote({f"src/f{i}.py": "x\n" for i in range(4)}), "more than 3 files (4)")
+    def test_route_check_promotes_on_more_than_10_files(self):
+        self.assertEqual(self.promote({f"src/f{i}.py": "x\n" for i in range(11)}), "more than 10 files (11)")
+
+    def test_route_check_5_files_20_lines_stays_fast_and_lilguy(self):
+        self.assertIsNone(self.promote({f"src/f{i}.py": "x\n" * 4 for i in range(5)}))
+        self.git("reset", "-q", "--hard", "main")
+        self.assertIsNone(self.lilguy({f"src/f{i}.py": "x\n" * 4 for i in range(5)}))
+        self.git("reset", "-q", "--hard", "main")
+        self.assertIsNone(self.lilguy({f"src/f{i}.py": "x\n" for i in range(10)}))
+        self.git("reset", "-q", "--hard", "main")
+        self.assertIsNone(self.promote({f"src/f{i}.py": "x\n" for i in range(10)}))
 
     def test_route_check_boundaries_stay_fast(self):
         self.assertIsNone(self.promote({"src/a.py": "x\n" * 50, "src/b.py": "y\n" * 25, "src/c.py": "z\n" * 25}))
@@ -5611,8 +5620,9 @@ class RouteCheckTest(unittest.TestCase):
         self.commit({**{f"f{i}.py": "x\n" for i in range(5)}, "big.py": "x\n" * 200})
         self.assertEqual(self.route()["promote"], "diff over 100 lines (205)")
         self.git("reset", "-q", "--hard", "main")
-        self.commit({"x/auth.py": "x\n", "x.html": "x\n", ".env": "A=1\n", "m.sql": "s\n"})
-        self.assertEqual(self.route()["promote"], "more than 3 files (4)")
+        self.commit({"x/auth.py": "x\n", "x.html": "x\n", ".env": "A=1\n", "m.sql": "s\n",
+                     **{f"g{i}.py": "x\n" for i in range(7)}})
+        self.assertEqual(self.route()["promote"], "more than 10 files (11)")
         self.git("reset", "-q", "--hard", "main")
         self.commit({"x/auth.py": "x\n", "x.html": "x\n", "m.sql": "s\n"})
         self.assertEqual(self.route()["promote"], "schema path m.sql")
@@ -5823,8 +5833,9 @@ class RouteCheckTest(unittest.TestCase):
     def test_route_check_lilguy_31_lines_promotes(self):
         self.assertEqual(self.lilguy({"src/a.py": "x\n" * 31}), "diff over 30 added lines (31)")
 
-    def test_route_check_lilguy_4_files_promotes(self):
-        self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(4)}), "more than 3 files with added lines (4)")
+    def test_route_check_lilguy_11_files_promotes(self):
+        self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(11)}),
+                         "more than 10 files with added lines (11)")
 
     def test_route_check_lilguy_deletions_dont_count(self):
         self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(5)})
@@ -5978,6 +5989,37 @@ class LilguyFitTest(unittest.TestCase):
             with self.subTest(text):
                 (self.jd / "feature.md").write_text(text + "\n")
                 self.assertIs(self.fit()["fit"], False)
+
+    def test_lilguy_fit_feature_lane_lilguy_overrides(self):
+        self.points(2)
+        (self.jd / "feature.md").write_text("# Show the payment total\n\nLane: lilguy — one label\n\nShow the Payment total\n")
+        self.assertEqual(self.fit(), {"fit": True, "why": "feature.md Lane: lilguy"})
+        board.cmd_set(self.root, self.job, ["lane=lilguy"])
+        self.assertEqual(self.fit(), {"fit": True, "why": "feature.md Lane: lilguy"})
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+
+    def test_lilguy_fit_feature_lane_other_skips_fit(self):
+        self.points(1)
+        for lane in ("fast", "standard", "debug", "bigboy"):
+            with self.subTest(lane):
+                (self.jd / "feature.md").write_text(f"# Tweak\nLane: {lane} — orchestrator pick\n\nTweak the label\n")
+                self.assertEqual(self.fit(), {"fit": False, "why": f"feature.md Lane: {lane}"})
+        (self.root / "backlog.md").unlink()
+        self.jev('{"type":"score","score":0.5,"confidence":0.95}')
+        (self.jd / "feature.md").write_text("# Tweak\nlane: STANDARD — case does not matter\n")
+        self.assertEqual(self.fit(), {"fit": False, "why": "feature.md Lane: standard"})
+
+    def test_lilguy_fit_feature_lane_ignored_when_malformed_or_below_heading(self):
+        self.points(1)
+        for text in ("# Tweak\nLane: weird — not a lane\n", "# Tweak\n\n## Q&A\nLane: standard — quoted\n",
+                     "# Tweak\nSee Lane: standard below\n"):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(text)
+                self.assertEqual(self.fit(), {"fit": True, "why": "backlog item is 1 point"})
+        (self.jd / "feature.md").write_text("# Tweak\n\n## Q&A\nLane: lilguy — quoted\nShow the Payment total\n")
+        self.points(2)
+        self.assertIs(self.fit()["fit"], False)
 
     def test_lilguy_fit_author_is_not_auth(self):
         self.points(1)
@@ -6987,7 +7029,7 @@ class ReadyHighUsageTest(unittest.TestCase):
 
 
 class FableTest(unittest.TestCase):
-    """board.fable_state / fable_ok / fable-ok: Fable for the planner and big standard-ticket spec-writers."""
+    """board.fable_state / fable_ok / fable-ok: Fable for the planner and standard spec-writers of complex jobs, ok band only."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -7048,14 +7090,23 @@ class FableTest(unittest.TestCase):
     def setup_jobs(self):
         lanes = {"001-std": None, "002-empty": "", "003-standard": "standard", "004-fast": "fast", "005-debug": "debug",
                  "006-lil": "lilguy", "007-cloud": "cloud", "008-bigboy": "bigboy", "009-road": "roadmap",
-                 "010-small": None, "011-unlinked": None}
+                 "010-small": None, "011-unlinked": None, "012-simple": None, "013-noline": None,
+                 "014-speconly": None, "015-below": None, "016-featureno": None, "017-weird": None}
+        headers = {"012-simple": ("Complex: no — rule change\n", None), "013-noline": ("", None),
+                   "014-speconly": ("", "Complex: yes\n"), "015-below": ("\n## Q&A\nComplex: yes\n", None),
+                   "016-featureno": ("Complex: no\n", "Complex: yes\n"), "017-weird": ("Complex: maybe\n", None)}
         jobs = []
         for job_id, lane in lanes.items():
             job = {"id": job_id, "stage": "spec"}
             if lane is not None:
                 job["lane"] = lane
             jobs.append(job)
-            (self.root / "jobs" / job_id).mkdir(parents=True)
+            d = self.root / "jobs" / job_id
+            d.mkdir(parents=True)
+            feature, spec = headers.get(job_id, ("complex: YES — new subsystem\n", None))
+            (d / "feature.md").write_text(f"# Item {job_id}\n\n{feature}\n## Body\nText\n")
+            if spec:
+                (d / "spec.md").write_text(f"# Spec\nUI surface: no\nLane: standard\n{spec}\n## Problem\nx\n")
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         linked = [j for j in lanes if j not in ("010-small", "011-unlinked")] + ["099-gone"]
         (self.root / "backlog.md").write_text("# Backlog\n\n" + "".join(f"- [x] [8] Item {j} → {j}\n" for j in linked)
@@ -7067,23 +7118,33 @@ class FableTest(unittest.TestCase):
     def test_fable_ok_cli_gating(self):
         self.setup_jobs()
         self.write_usage(10, 10)
-        spec_fable = ("001-std", "002-empty", "003-standard")
-        spec_none = ("004-fast", "005-debug", "006-lil", "007-cloud", "008-bigboy", "009-road", "010-small",
-                     "011-unlinked", "099-gone")
+        spec_fable = ("001-std", "002-empty", "003-standard", "010-small", "011-unlinked", "014-speconly")
+        spec_none = ("004-fast", "005-debug", "006-lil", "007-cloud", "008-bigboy", "009-road", "012-simple",
+                     "013-noline", "015-below", "016-featureno", "017-weird", "099-gone")
         for job_id in spec_fable:
             out = self.cli(job_id, "spec-writer")
             self.assertEqual((out.returncode, out.stdout), (0, "claude-fable-5-1\n"), (job_id, out.stderr))
         for job_id in spec_none:
             out = self.cli(job_id, "spec-writer")
             self.assertEqual((out.returncode, out.stdout), (0, "none\n"), (job_id, out.stderr))
-        for job_id in ("008-bigboy", "011-unlinked", "099-gone"):
+        for job_id in ("008-bigboy", "011-unlinked", "014-speconly", "004-fast"):
             self.assertEqual(self.cli(job_id, "planner").stdout, "claude-fable-5-1\n", job_id)
+        for job_id in ("012-simple", "013-noline", "015-below", "016-featureno", "017-weird", "099-gone"):
+            self.assertEqual(self.cli(job_id, "planner").stdout, "none\n", job_id)
+        for job_id in ("012-simple", "013-noline", "099-gone"):
+            self.assertFalse((self.root / "jobs" / job_id / "fable.log").exists(), f"not complex: no log ({job_id})")
+        (self.root / "jobs" / "018-offboard").mkdir()
+        (self.root / "jobs" / "018-offboard" / "feature.md").write_text("# Off\nComplex: yes\n")
+        self.assertEqual(self.cli("018-offboard", "planner").stdout, "none\n", "not on the board")
         for bad in ("builder", "approver", "", "Planner"):
             out = self.cli("001-std", bad)
             self.assertNotEqual(out.returncode, 0, bad)
             self.assertEqual(out.stdout, "", bad)
         self.write_usage(70, 10)
-        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n", "warn still gets Fable")
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n", "warn: Opus")
+        self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n", "warn: Opus")
+        self.write_usage(10, 75)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n", "7d warn: Opus")
         self.write_usage(80, 10)
         self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
         self.assertEqual(self.cli("001-std", "spec-writer").stdout, "none\n")
@@ -7098,14 +7159,17 @@ class FableTest(unittest.TestCase):
         log.write_text("earlier line\n")
         self.write_usage(10.4, 20)
         self.assertEqual(self.cli("008-bigboy", "planner").stdout, "claude-fable-5-1\n")
+        self.write_usage(70, 20)
+        self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
         self.write_usage(81, 20)
         self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n")
         lines = log.read_text().splitlines()
         self.assertEqual(lines[0], "earlier line")
-        self.assertEqual(len(lines), 3)
-        first, second = (l.split("\t") for l in lines[1:])
+        self.assertEqual(len(lines), 4)
+        first, warn, second = (l.split("\t") for l in lines[1:])
         self.assertRegex(first[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
         self.assertEqual(first[1:], ["planner", "fable", "5h 10%", "7d 20%", "ok"])
+        self.assertEqual(warn[1:], ["planner", "opus", "5h 70%", "7d 20%", "warn"])
         self.assertEqual(second[1:], ["planner", "opus", "5h 81%", "7d 20%", "paused"])
         now = time.time()
         self.usage_file.write_text(json.dumps({"written_at": now, "rate_limits": {
@@ -7119,10 +7183,10 @@ class FableTest(unittest.TestCase):
                          ["spec-writer", "opus", "5h —", "7d —", "unknown\n"])
         self.write_usage(10, 10)
         self.assertEqual(self.cli("004-fast", "spec-writer").stdout, "none\n")
-        self.assertEqual(self.cli("010-small", "spec-writer").stdout, "none\n")
+        self.assertEqual(self.cli("012-simple", "spec-writer").stdout, "none\n")
         self.assertFalse((self.root / "jobs" / "004-fast" / "fable.log").exists(), "ineligible: no log")
-        self.assertFalse((self.root / "jobs" / "010-small" / "fable.log").exists(), "ineligible: no log")
-        self.assertEqual(self.cli("099-gone", "planner").stdout, "claude-fable-5-1\n", "no job dir: still answers")
+        self.assertFalse((self.root / "jobs" / "012-simple" / "fable.log").exists(), "ineligible: no log")
+        self.assertEqual(self.cli("099-gone", "planner").stdout, "none\n", "no job dir: not complex")
         self.assertFalse((self.root / "jobs" / "099-gone").exists())
         for name in ("jev.log", "routing.log"):
             self.assertFalse((self.root / "jobs" / "008-bigboy" / name).exists(), name)

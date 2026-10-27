@@ -950,7 +950,7 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_lane_line(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
-        for phrase in ("Lane: fast|standard|debug|bigboy", "100", "3 files", "30 files", "1,500",
+        for phrase in ("Lane: fast|standard|debug|bigboy", "100", "10 files", "30 files", "1,500",
                        "however many items it has", "Size: about <n> files, <m> lines"):
             self.assertIn(phrase, text, phrase)
         self.assertNotIn("8 files", text)
@@ -1237,7 +1237,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_fast_lane_promotes(self):
         text = skill_text()
         fast = self.section(text, "## Fast lane", "## Check gate")
-        for phrase in ("--numstat", "100", "3 files", "UI globs", "promoted.md", "lane=standard",
+        for phrase in ("--numstat", "100", "10 files", "UI globs", "promoted.md", "lane=standard",
                        "Skipped by orchestrator: fast lane.", "LANE=fast"):
             self.assertIn(phrase, fast, phrase)
         self.assertRegex(fast, r"never[^\n]*fast")
@@ -1300,8 +1300,19 @@ class ContractTest(unittest.TestCase):
         rule = next(l for l in text.splitlines() if l.startswith("- `Lane` picks the pipeline."))
         for phrase in ("`UI surface: no`", "UI globs"):
             self.assertNotIn(phrase, rule, phrase)
-        for phrase in ("100", "3 files", "Hard stops: none"):
+        for phrase in ("100", "10 files", "Hard stops: none"):
             self.assertIn(phrase, rule, phrase)
+        self.assertNotIn("3 files", rule)
+
+    def test_spec_writer_honours_orchestrator_lane_and_complex(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        for phrase in ("Lane override:", "Complex: yes|no", "five header lines"):
+            self.assertIn(phrase, text, phrase)
+        self.assertLess(text.index("Lane: fast|standard|debug|bigboy"), text.index("Complex: yes|no"))
+        newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
+        step = newjob[newjob.index("   1b. "):newjob.index("\n2. ")]
+        for phrase in ("Lane: <lane> — <reason>", "Complex: yes|no — <reason>"):
+            self.assertIn(phrase, step, phrase)
 
     def test_skill_new_job_fast_ignores_ui_surface(self):
         text = skill_text()
