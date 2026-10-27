@@ -70,7 +70,7 @@ The first run writes `scrum/project.md` (stack, test/lint/build commands, conven
 - E2E flow: `skills/trevskills-e2e/SKILL.md`, also runnable directly as `/trevskills-e2e`
 - The loop: `skills/trevskills-scrum/SKILL.md`
 - Review rules shared by Claude and Codex: `codex/AGENTS.md`
-- Tests: `python3 -m unittest discover -s tests -v`
+- Tests: `python3 tests/run_parallel.py` (all modules, one shard per CPU); one module: `python3 -m unittest tests.test_<name>`
 
 ## Cloud lane
 

@@ -1,5 +1,5 @@
 import hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -20,6 +20,22 @@ import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
 CALLER_CLAUDE_PID = board.caller_claude_pid  # the real one; fixtures patch it so the test runner's claude is never recorded
+
+
+def run_board(*argv, env=None, input=None):
+    """`board.main(argv)` in this process, shaped like `subprocess.run(..., capture_output=True, text=True)`:
+    a new python per call costs seconds under load. Fixture patches (merge_refusal, caller_claude_pid) apply."""
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.dict(os.environ, env or {}), mock.patch.object(sys, "stdin", io.StringIO(input or "")), \
+            redirect_stdout(out), redirect_stderr(err):
+        try:
+            code = board.main(list(argv))
+        except SystemExit as e:
+            code = e.code
+            if not (code is None or isinstance(code, int)):
+                print(code, file=sys.stderr)  # what Python does with SystemExit("message")
+                code = 1
+    return subprocess.CompletedProcess(list(argv), code or 0, out.getvalue(), err.getvalue())
 
 
 def no_claude_pid(test):
@@ -113,8 +129,7 @@ class BoardTest(unittest.TestCase):
 
     def test_set_tty_runlog_stored(self):
         job_id = board.cmd_new(self.root, "x")
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id,
-                              "tty=ttys003", "runlog=runs/x.log"], capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "set", job_id, "tty=ttys003", "runlog=runs/x.log")
         self.assertEqual(out.returncode, 0, out.stderr)
         job = self.jobs()[0]
         self.assertEqual((job["tty"], job["runlog"]), ("ttys003", "runs/x.log"))
@@ -212,8 +227,7 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         before = (self.root / "board.json").read_text()
         for bad in ("tty=ttys1; rm", "tty=/dev/ttys1", "tty=??", "tty=ttys1\n", "runlog=runs/../board.json", "runlog=x.log"):
-            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "stage=review", bad],
-                                 capture_output=True, text=True)
+            out = run_board("--dir", str(self.root), "set", job_id, "stage=review", bad)
             self.assertNotEqual(out.returncode, 0, bad)
             self.assertIn("bad field", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
@@ -240,8 +254,7 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         before = (self.root / "board.json").read_text()
         for bad in ("lane=quick", "lane=FAST", "lane=fast ", "lane=fast\n"):
-            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "stage=review", bad],
-                                 capture_output=True, text=True)
+            out = run_board("--dir", str(self.root), "set", job_id, "stage=review", bad)
             self.assertNotEqual(out.returncode, 0, bad)
             self.assertIn("fast|standard|debug|bigboy", out.stderr, bad)
         self.assertEqual((self.root / "board.json").read_text(), before)
@@ -611,12 +624,10 @@ class BoardTest(unittest.TestCase):
 
     def test_lane_accepts_bigboy_rejects_epic(self):
         job_id = board.cmd_new(self.root, "x")
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=bigboy"],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "set", job_id, "lane=bigboy")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.jobs()[0]["lane"], "bigboy")
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "set", job_id, "lane=epic"],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "set", job_id, "lane=epic")
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual(self.jobs()[0]["lane"], "bigboy")
 
@@ -642,8 +653,7 @@ class BoardTest(unittest.TestCase):
 
     def assert_refused(self, parent, *, fix=False):
         before = (self.root / "board.json").read_text()
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "plan-apply", parent]
-                             + (["--fix"] if fix else []), capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "plan-apply", parent, *(["--fix"] if fix else []))
         self.assertNotEqual(out.returncode, 0, out.stdout)
         self.assertEqual((self.root / "board.json").read_text(), before)
         return out.stderr
@@ -657,8 +667,7 @@ class BoardTest(unittest.TestCase):
     def test_plan_apply_creates_waiting_children(self):
         parent = self.plan(self.ticket(1), self.ticket(2, setup="Add STRIPE_KEY to .env"),
                            self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes", title="Show the button"))
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "plan-apply", parent],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "plan-apply", parent)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout), {"children": ["002-part-1", "003-part-2", "004-show-the-button"]})
         p = self.child("001-big")
@@ -828,8 +837,7 @@ class BoardTest(unittest.TestCase):
         os.utime(lock, (stale, stale))
         self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0), {"acquired": True, "holder": "003-part-2"})
         self.assertIn("003-part-2", lock.read_text())
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "chain-lock", parent, "002-part-1",
-                              "--wait", "0"], capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "chain-lock", parent, "002-part-1", "--wait", "0")
         self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"acquired": False, "holder": "003-part-2"}))
 
     def test_chain_lock_live(self):
@@ -855,8 +863,7 @@ class BoardTest(unittest.TestCase):
         board.cmd_chain_lock(self.root, parent, "002-part-1")
         self.assertEqual(board.cmd_chain_unlock(self.root, parent, "003-part-2"), {"released": False})
         self.assertTrue(lock.exists())
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "chain-unlock", parent, "002-part-1"],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "chain-unlock", parent, "002-part-1")
         self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"released": True}))
         self.assertFalse(lock.exists())
         self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0)["acquired"], True)
@@ -963,8 +970,7 @@ class BoardTest(unittest.TestCase):
         # Resume aborts the waiting dependents; every child is then done or aborted, so all_merged is true.
         board.cmd_abort(self.root, c4, requeue=False)
         board.cmd_abort(self.root, c5, requeue=False)
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "ready", parent],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "ready", parent)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual((json.loads(out.stdout)["all_merged"], json.loads(out.stdout)["merged"]), (True, 2))
         # One aborted child plus one needs-human child: the parent keeps running and names the needs-human one.
@@ -1369,8 +1375,7 @@ class BoardTest(unittest.TestCase):
         self.cloud_backlog([("A", ["a.py"])])
         before = (self.root / "backlog.md").read_bytes()
         for n in ("0", "-1"):
-            out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", n],
-                                 capture_output=True, text=True)
+            out = run_board("--dir", str(self.root), "cloud-claim", n)
             self.assertNotEqual(out.returncode, 0)
             self.assertIn("N must be at least 1", out.stderr)
             self.assertEqual((self.root / "backlog.md").read_bytes(), before)
@@ -1378,8 +1383,7 @@ class BoardTest(unittest.TestCase):
 
     def test_cloud_claim_cli_prints_json(self):
         self.cloud_backlog([("A", ["a.py"])])
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "cloud-claim", "4"],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "cloud-claim", "4")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout), {"claimed": [{"id": "001-a", "feature": "A"}]})
 
@@ -1953,8 +1957,7 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(self.child(parent)["reason"].startswith(f"bigboy blocked: {c4}. Fix: "))
 
     def test_cli_runall_start(self):
-        run = lambda *a: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *a],
-                                        capture_output=True, text=True)
+        run = lambda *a: run_board("--dir", str(self.root), *a)
         self.assertIn("runall-start", run("--help").stdout)
         out = run("runall-start")
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -2214,8 +2217,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "manual-checks.md").read_text(),
                          "# Manual checks\n- [ ] open one\n- [x] ticked one\n- [ ] ticked one\n- [ ] new\n")
         (self.root / "manual-checks.md").unlink()
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "manual-add", "a", "a"],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "manual-add", "a", "a")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), ["a"])
         self.assertEqual((self.root / "manual-checks.md").read_text(), "# Manual checks\n- [ ] a\n")
@@ -2378,8 +2380,7 @@ class BoardTest(unittest.TestCase):
     def test_abort_cli_cascade_prints_ids(self):
         a, b, c = (board.cmd_new(self.root, t) for t in ("a", "b", "c"))
         self.edit_jobs(**{b: {"stage": "waiting", "depends_on": [a]}})
-        run = lambda *args: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "abort", *args],
-                                           capture_output=True, text=True)
+        run = lambda *args: run_board("--dir", str(self.root), "abort", *args)
         out = run(a, "--cascade")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout), {"aborted": ["001-a", "002-b"]})
@@ -2731,7 +2732,7 @@ class BoardTest(unittest.TestCase):
         return ids
 
     def cli(self, *args):
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *args], capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), *args)
         self.assertEqual(out.returncode, 0, out.stderr)
         return json.loads(out.stdout)
 
@@ -3460,8 +3461,9 @@ class BoardTest(unittest.TestCase):
             board.cmd_new(self.root, "Again", "042-from-the-mac")
         with self.assertRaises(SystemExit):
             board.cmd_new(self.root, "Bad", "../evil")
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "new", "CLI", "--id", "007-cli"],
-                             capture_output=True, text=True, check=True).stdout.strip()
+        out = run_board("--dir", str(self.root), "new", "CLI", "--id", "007-cli")
+        out.check_returncode()
+        out = out.stdout.strip()
         self.assertEqual(out, "007-cli")
 
     def test_cloud_stage_and_session_url(self):
@@ -3533,8 +3535,7 @@ class BoardTest(unittest.TestCase):
         self.assertIs(next(j for j in self.jobs() if j["id"] == job_id)["stalled"], True)
 
     def test_watchdog_cli_prints_flagged(self):
-        run = lambda: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "watchdog"],
-                                     capture_output=True, text=True)
+        run = lambda: run_board("--dir", str(self.root), "watchdog")
         fresh = self.aged("Fresh one", 1, stage="build")
         before = (self.root / "board.json").read_text()
         out = run()
@@ -3577,7 +3578,7 @@ class BoardTest(unittest.TestCase):
         return (self.root / "roadmap.md").read_text()
 
     def rm_cli(self, *args):
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), *args], capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), *args)
         self.assertEqual(out.returncode, 0, out.stderr)
         return json.loads(out.stdout)
 
@@ -3891,8 +3892,7 @@ class BoardTest(unittest.TestCase):
 
     # --- artifacts (Cloud lane: the job folder a cloud session pushes to scrum-artifacts/<id>) ---
     def artifacts(self, job_id):
-        out = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "artifacts", job_id],
-                             capture_output=True, text=True)
+        out = run_board("--dir", str(self.root), "artifacts", job_id)
         self.assertEqual(out.returncode, 0, out.stderr)
         return sorted(out.stdout.splitlines())
 
@@ -5606,13 +5606,11 @@ class ReviewPlanTest(unittest.TestCase):
         since = self.round_one(self.MIXED)
         self.commit("src/a.py", "a = 3\n")
         before = (self.root / "board.json").read_bytes()
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "review-plan", self.job,
-                            "--incremental"], capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "review-plan", self.job, "--incremental")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.count("\n"), 1)
         self.assertEqual(json.loads(r.stdout), {"spawn": ["security", "code"], "since": since})
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "review-plan", self.job],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "review-plan", self.job)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"spawn": ["code"], "since": None})
         self.assertEqual((self.root / "board.json").read_bytes(), before)
@@ -5660,8 +5658,7 @@ class MoveRatioTest(unittest.TestCase):
         self.commit({"a.py": "# a\n# end a\n", "b.py": "# b\n" + self.BLOCK + extra})
 
     def run_cli(self, job=None):
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "move-ratio", job or self.job],
-                           capture_output=True, text=True, timeout=60)
+        r = run_board("--dir", str(self.root), "move-ratio", job or self.job)
         self.assertNotIn("Traceback", r.stderr)
         lines = r.stdout.splitlines()
         self.assertEqual(len(lines), 1, r.stdout)
@@ -5716,6 +5713,19 @@ class MoveRatioTest(unittest.TestCase):
 class RouteCheckTest(unittest.TestCase):
     """board.py route-check: the Fast lane promotion, Review clean-round and Approve model decisions."""
 
+    @classmethod
+    def setUpClass(cls):
+        """The committed worktree, built once: each setUp copies it (git init + commit per test cost seconds under load)."""
+        cls.base_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.base_tmp.cleanup)
+        cls.base_wt = Path(cls.base_tmp.name) / "wt"
+        cls.base_wt.mkdir()
+        (cls.base_wt / "README.md").write_text("readme\n")
+        for args in (("init", "-q", "-b", "main"), ("add", "README.md"), ("commit", "-q", "-m", "base"),
+                     ("checkout", "-q", "-b", "work")):
+            subprocess.run(["git", "-C", str(cls.base_wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                           capture_output=True)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
@@ -5724,12 +5734,7 @@ class RouteCheckTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(base / "no-usage.json")})
         env.start()
         self.addCleanup(env.stop)
-        self.wt.mkdir()
-        (self.wt / "README.md").write_text("readme\n")
-        self.git("init", "-q", "-b", "main")
-        self.git("add", "README.md")
-        self.git("commit", "-q", "-m", "base")
-        self.git("checkout", "-q", "-b", "work")
+        shutil.copytree(self.base_wt, self.wt, symlinks=True)
         self.job = board.cmd_new(self.root, "Route me")
         self.jd = self.root / "jobs" / self.job
         board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
@@ -5782,25 +5787,21 @@ class RouteCheckTest(unittest.TestCase):
         self.assertIn(code, (0, None))
         self.assertEqual(json.loads(out.getvalue()), {"promote": None, "clean_round": True, "approver_sonnet": True})
         self.assertEqual(out.getvalue().count("\n"), 1)
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", self.job,
-                            "--check-fails", "2"], capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "route-check", self.job, "--check-fails", "2")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), {"promote": None, "clean_round": False, "approver_sonnet": False})
 
     def test_route_check_unknown_job_fails(self):
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", "999-nope"],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "route-check", "999-nope")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("999-nope", r.stderr)
         (self.root / "jobs" / "998-gone").mkdir()
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", "998-gone"],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "route-check", "998-gone")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no job '998-gone' on the board", r.stderr)
         other = board.cmd_new(self.root, "Folder gone")
         (self.root / "jobs" / other).rmdir()
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", other],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "route-check", other)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no job folder", r.stderr)
 
@@ -6121,8 +6122,7 @@ class RouteCheckTest(unittest.TestCase):
         self.round(1, check="FAIL")
         self.assertIsNone(self.route(clean_start=True)["promote"])
         self.assertEqual(self.route(check_fails=2)["promote"], "check failed twice")
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "route-check", self.job],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "route-check", self.job)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), want_std)
 
@@ -6244,8 +6244,7 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIn("auth", got["why"])
 
     def test_lilguy_fit_unknown_job_exits(self):
-        r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "lilguy-fit", "999-nope"],
-                           capture_output=True, text=True)
+        r = run_board("--dir", str(self.root), "lilguy-fit", "999-nope")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("999-nope", r.stderr)
         with self.assertRaises(SystemExit):
@@ -6656,13 +6655,12 @@ class WindowReportTest(unittest.TestCase):
 
     def test_window_report_cli_prints_list(self):
         self.five(used=50)
-        argv = [sys.executable, str(BOARD_PY), "--dir", str(self.root), "window-report"]
-        env = {**os.environ, **self.env}
-        first = subprocess.run(argv, capture_output=True, text=True, env=env)
+        argv = ["--dir", str(self.root), "window-report"]
+        first = run_board(*argv, env=self.env)
         self.assertEqual(first.returncode, 0, first.stderr)
         cards = json.loads(first.stdout)  # the real clock is long past R
         self.assertEqual([(c["window"], c["resets_at"]) for c in cards], [("five_hour", 1_700_000_000)])
-        second = subprocess.run(argv, capture_output=True, text=True, env=env)
+        second = run_board(*argv, env=self.env)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(json.loads(second.stdout), [])
 
@@ -7352,8 +7350,7 @@ class FableTest(unittest.TestCase):
                                               + "- [x] [3] Small → 010-small\n")
 
     def cli(self, *args):
-        return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "fable-ok", *args],
-                              capture_output=True, text=True)
+        return run_board("--dir", str(self.root), "fable-ok", *args)
 
     def test_fable_ok_cli_gating(self):
         self.setup_jobs()
