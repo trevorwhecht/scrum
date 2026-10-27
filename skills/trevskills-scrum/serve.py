@@ -289,9 +289,9 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a heavy job waits while a usage window is
-    nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules `ready`
-    applies to new claims."""
+    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a heavy job waits while a usage
+    window is nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules
+    `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM

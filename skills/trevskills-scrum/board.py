@@ -2964,8 +2964,9 @@ def swap_grew(swap):
 
 def machine_ok(path, manual=False, claim=False):
     """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
-    not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU busy, then CPU load (the
-    5-minute load average over the cores; both CPU checks also skipped for manual clicks), then the session ceiling.
+    not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then swap, then free
+    disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
+    manual clicks), then the session ceiling.
     Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
@@ -3115,7 +3116,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
-        machine = go and machine_ok(root, manual=manual, claim=True)  # checked once: a machine-wide state, so it gates the whole call
+        # checked once: a machine-wide state, so it gates the whole call
+        machine = go and machine_ok(root, manual=manual, claim=True)
         # paused or stalled work goes before new claims; a job with a live session is already being resumed
         first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper
