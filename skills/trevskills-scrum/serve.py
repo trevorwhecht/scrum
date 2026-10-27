@@ -3312,9 +3312,25 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "/backlog":
             op = body.get("op")
             if op == "add":  # points picked by hand skip the paid estimate
-                items = board.backlog_op(root, "add", text=body.get("text"), **({"points": body["points"]} if "points" in body else {}))
-                if items[-1]["points"] is None:
-                    threading.Thread(target=estimate, args=(root, items[-1]["text"]), daemon=True).start()
+                urgency = "later" if body.get("urgency") is None else body["urgency"]
+                if urgency not in ("now", "next", "later"):
+                    raise SystemExit("urgency must be now, next or later")
+                if urgency == "now":  # start a job at once, like Run now, with no backlog line
+                    text = board.clean(body.get("text") or "", board.ITEM_MAX)
+                    if not text:
+                        raise SystemExit("backlog item text is empty")
+                    if refusal := heavy_refusal(root, None):
+                        return 409, {"error": refusal}
+                    job_id = board.cmd_new(root, text[:60])
+                    (root / "jobs" / job_id / "feature.md").write_text(text + "\n")
+                    spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
+                    return 202, {"id": job_id, "feature": text}
+                top = urgency == "next"
+                items = board.backlog_op(root, "add", text=body.get("text"), top=top,
+                                         **({"points": body["points"]} if "points" in body else {}))
+                new = items[0] if top else items[-1]
+                if new["points"] is None:
+                    threading.Thread(target=estimate, args=(root, new["text"]), daemon=True).start()
                 return 200, items
             kwargs = {"index": body.get("index")}
             if op == "edit":

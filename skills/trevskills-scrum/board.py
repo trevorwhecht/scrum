@@ -28,7 +28,8 @@
   board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
-  board.py backlog-add [--setup "<step>; <step>"] [--priority N] "<item>"...  append "- [ ] <item>" lines to backlog.md
+  board.py backlog-add [--setup "<step>; <step>"] [--priority N | --top] "<item>"...  append "- [ ] <item>" lines to backlog.md
+                                                    (--top: insert above the first item with {p:5}, so next claims it first)
                                    (--setup adds a " {setup: step; step}" marker: next and runall-start skip the item until
                                    Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5), then
                                    estimate each in the background
@@ -409,9 +410,10 @@ def check_points(points):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None):
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None, top=False):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
-    add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker."""
+    add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker.
+    add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins)."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -420,9 +422,13 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             if points is not KEEP:
                 check_points(points)
             check_priority(priority)
-            lines.append(format_item({"done": False, "points": None if points is KEEP else points, "priority": priority,
-                                      "text": clean(text, ITEM_MAX), "job": None, "why": None,
-                                      "setup": None if setup is None else setup_steps(setup)}))
+            line = format_item({"done": False, "points": None if points is KEEP else points, "priority": 5 if top else priority,
+                                "text": clean(text, ITEM_MAX), "job": None, "why": None,
+                                "setup": None if setup is None else setup_steps(setup)})
+            if top and items:
+                lines.insert(items[0]["line"], line)
+            else:
+                lines.append(line)
         elif op == "edit":
             item = pick(items, index)
             old = item["text"]
@@ -800,16 +806,18 @@ def migrate_focus():
         return list(focused)
 
 
-def cmd_backlog_add(root, items, setup=None, priority=None):
+def cmd_backlog_add(root, items, setup=None, priority=None, top=False):
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
-    texts as stored. An empty checklist adds nothing."""
+    texts as stored. An empty checklist adds nothing. top puts each item first with {p:5} (see backlog_op)."""
+    if top and priority is not None:
+        raise SystemExit("--top and --priority cannot be combined")
     if setup is not None:
         setup_steps(setup)
     check_priority(priority)
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item, setup=setup, priority=priority)
+            backlog_op(root, "add", text=item, setup=setup, priority=priority, top=top)
             added.append(clean(item, ITEM_MAX))
     return added
 
@@ -4310,6 +4318,7 @@ def main(argv=None):
     ba = sub.add_parser("backlog-add")
     ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
     ba.add_argument("--priority", type=int, metavar="N", help="importance 1-5, highest claimed first")
+    ba.add_argument("--top", action="store_true", help="insert first with {p:5}, so next claims it first")
     ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
     sub.add_parser("rank-backlog")
@@ -4500,7 +4509,7 @@ def main(argv=None):
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority))
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority, a.top))
 
 
 def spawn_estimates(root, texts):

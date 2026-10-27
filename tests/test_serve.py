@@ -427,6 +427,49 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(code, 202)
         self.assertEqual((self.root / "jobs" / out["id"] / "feature.md").read_text(), text + "\n")
 
+    def test_backlog_add_urgency_next_later_bad(self):
+        self.keep_backlog()
+        path = self.root / "backlog.md"
+        path.write_text("# Backlog\n- [ ] [3] Dark mode\n- [ ] CSV export\n")
+        with mock.patch.object(self.serve, "estimate") as est:
+            code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": "T", "urgency": "next"})
+            self.assertEqual(code, 200)
+            self.assertEqual((items[0]["text"], items[0]["priority"]), ("T", 5))
+            self.assertTrue(self.wait_for(lambda: est.call_count == 1))
+            self.assertEqual(est.call_args.args[1], "T")  # the estimate runs on the new top item
+            for body in ({"op": "add", "text": "L", "urgency": "later"}, {"op": "add", "text": "M"},
+                         {"op": "add", "text": "N", "urgency": None}):
+                code, items = self.req("POST", "/api/p/repo/backlog", body)
+                self.assertEqual((code, items[-1]["text"], items[-1]["priority"]), (200, body["text"], None))
+        before = path.read_text()
+        self.assertEqual(before, "# Backlog\n- [ ] T {p:5}\n- [ ] [3] Dark mode\n- [ ] CSV export\n- [ ] L\n- [ ] M\n- [ ] N\n")
+        for bad in ("soon", "", "Next", 0, False, True, ["next"]):
+            code, out = self.post_raw("/api/p/repo/backlog", {"op": "add", "text": "S", "urgency": bad})
+            self.assertEqual((code, out), (400, {"error": "urgency must be now, next or later"}), bad)
+        self.assertEqual(path.read_text(), before)
+
+    def test_backlog_add_urgency_now(self):
+        self.keep_backlog()
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        jobs = lambda: {j["id"] for j in self.serve.board.read_board(self.root)["jobs"]}
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "heavy_refusal", return_value=None):
+            for empty in ("", "   \n ", None):
+                had = jobs()
+                code, out = self.post_raw("/api/p/repo/backlog", {"op": "add", "text": empty, "urgency": "now"})
+                self.assertEqual((code, out), (400, {"error": "backlog item text is empty"}), empty)
+                self.assertEqual(jobs(), had)
+            spawn.assert_not_called()
+            code, out = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": "Do it", "urgency": "now"})
+        self.assertEqual(code, 202)
+        job_id = out["id"]
+        self.assertEqual(out["feature"], "Do it")
+        job = next(j for j in self.serve.board.read_board(self.root)["jobs"] if j["id"] == job_id)
+        self.assertEqual((job["title"], job["stage"]), ("Do it", "spec"))
+        self.assertEqual((self.root / "jobs" / job_id / "feature.md").read_text(), "Do it\n")
+        self.assertEqual(spawn.call_args.args[2:], (job_id, "start", f"/trevskills-scrum start {job_id}"))
+        self.assertEqual(path.read_text(), before)
+
     def test_add_with_points_skips_estimate(self):
         self.keep_backlog()
         with mock.patch.object(self.serve, "estimate") as est:
