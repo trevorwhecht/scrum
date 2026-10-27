@@ -6,11 +6,11 @@
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
                                    clears the pause
-  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...] [--recommend KEY WHY]  park the job at
-                                   needs-human with a closed question (command: approve|resume|abort <id>
+  board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...] --title TITLE [--recommend KEY WHY]  park
+                                   the job at needs-human with a closed question (command: approve|resume|abort <id>
                                    [--requeue|--cascade], rework <id> "<text>", shell: <cmd>), log it to questions.log;
-                                   --recommend stores {"key","why"}, the option the agent advises, cleared with the
-                                   question. With [--kind K] (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked
+                                   --title (a STOP_TITLES key) is stored as stopTitle; --recommend stores {"key","why"},
+                                   the option the agent advises; both are cleared with the question. With [--kind K] (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked
                                    for K) the job is not parked: it keeps its stage, the unblock is logged and
                                    {"unblock": true, "n": N} is printed; else it parks and prints {"unblock": false}
                                    (lanes/unblock.md)
@@ -139,6 +139,28 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
+# Every needs-human stop's fixed title (lanes/stops.md): key -> one-line meaning. The dashboard shows the key with
+# "_" replaced by a space.
+STOP_TITLES = {
+    "UNCOMMITTED_CHANGES": "the main checkout or the job's worktree has files nobody committed",
+    "WRONG_BRANCH": "the main checkout is on another branch, or the profile's Base branch line is malformed or missing "
+                    "on origin",
+    "MERGE_CONFLICT": "the branch still conflicts with the default branch after two tries",
+    "CHECKS_FAILING": "tests or CI still fail after the allowed fix attempts (debug fixes included)",
+    "MERGE_BLOCKED": "GitHub will not take the merge: the PR was closed, the merge or done step was refused, or the "
+                     "GitHub CLI is missing or signed out",
+    "DATABASE_CHANGE": "the job changes the database structure, and the migrate needs an OK or it stopped",
+    "ROUND_LIMIT": "the approver asked for a second round of fixes, and a job only gets one",
+    "BUILDER_BLOCKED": "the builder, debugger or approver could not go on",
+    "REVIEW_ESCALATED": "the approver escalated for another reason, or its output could not be read",
+    "BIGBOY_OFF_TRACK": "the tracker says the remaining tickets no longer reach the goal",
+    "BIGBOY_BLOCKED": "a multi-ticket job cannot start its next ticket: the chain lock is held or its children are "
+                      "blocked",
+    "DEPENDENCY": "a job this one waited on finished, was aborted or was removed",
+    "MD_CONTRADICTION": "a knowledge-save job found a fact that contradicts the target .md or the code",
+    "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
+}
+
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
 ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
                             r'|shell: \S.*)'
@@ -238,6 +260,7 @@ def locked_board(root):
                 job.pop("question", None)
                 job.pop("options", None)
                 job.pop("recommend", None)
+                job.pop("stopTitle", None)
         tmp = path.with_name("board.json.tmp")
         tmp.write_text(json.dumps(board, indent=2) + "\n")
         os.replace(tmp, path)
@@ -1312,7 +1335,7 @@ def pipeline_health(root, digest_id: str, jobs: list[str]) -> list[str]:
             f"Find and fix why {tool} fails across jobs. Failing jobs:\n\n" + "".join(f"- {j}\n" for j in failed))
         cmd_ask(root, job_id, f"pipeline health: {tool} failed in {len(failed)} of {len(jobs)} jobs in digest "
                               f"{digest_id}, {lost}",
-                [f"Got it=abort {job_id}", f"Add a fix to the backlog=abort {job_id} --requeue"])
+                [f"Got it=abort {job_id}", f"Add a fix to the backlog=abort {job_id} --requeue"], title="DIGEST")
         created.append(job_id)
     return created
 
@@ -2906,6 +2929,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
             elif (new[1] or "").startswith(BLOCKED):
                 log_stop(root, parent["id"], "bigboy", new[1])
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
+            if new[0] == "needs-human":
+                parent["stopTitle"] = "BIGBOY_BLOCKED"
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
                "all_merged": finished == len(kids)}
     if was != "needs-human" and parent["stage"] == "needs-human":
@@ -3009,7 +3034,7 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     while the job is still in that stage (checked under the lock), else raise SystemExit and write nothing.
     stage=needs-human is refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
     if "stage=needs-human" in pairs and not internal:
-        raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command": '
+        raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command" --title TITLE: '
                          "set never parks a job at needs-human")
     d = Path(root) / "jobs" / check_id(job_id)
     files, div = job_files(d), diverged(d)
@@ -3078,10 +3103,13 @@ UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", 
 UNBLOCK_MAX = 2  # unblocks per job, ever; a kind is unblocked at most once (the loop guard compares kinds, not text)
 
 
-def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
+def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title):
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
-    An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead."""
+    An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead.
+    title must be a STOP_TITLES key; it is stored as stopTitle on a parked job (not on an unblock or a stall)."""
+    if title not in STOP_TITLES:
+        raise SystemExit(f"ask needs --title, one of: {', '.join(STOP_TITLES)} (got {title!r})")
     question = question.strip()
     if not question:
         raise SystemExit("ask needs a question")
@@ -3122,7 +3150,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
             reason = f"{STALL}{question}"
             if job.get("reason") != reason:
                 job.pop("outcome", None)
-            for k in ("question", "options", "recommend"):
+            for k in ("question", "options", "recommend", "stopTitle"):
                 job.pop(k, None)
             job.update(stalled=True, reason=reason, updatedAt=now())
             questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
@@ -3131,9 +3159,10 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
         reason = question
         if job.get("reason") != reason:
             job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
-        job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
+        job.update(stage="needs-human", reason=reason, question=question, options=parsed, stopTitle=title,
+                   updatedAt=now())
         entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                 "question": question, "options": parsed, "reason": reason,
+                 "question": question, "options": parsed, "reason": reason, "stopTitle": title,
                  "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
         if recommend:
             job["recommend"] = entry["recommend"] = recommend
@@ -3206,7 +3235,7 @@ def wake_waiting(root, room=None, hold=None) -> dict:
                     continue
                 if j.get("wake"):  # no sound: serve.py spawns the retry right away, the card only covers a dead session
                     q = f"retry: {deps[0]} is done, so this job tries again."
-                    j.update(stage="needs-human", question=q, reason=q, updatedAt=now(), options=[
+                    j.update(stage="needs-human", question=q, reason=q, stopTitle="DEPENDENCY", updatedAt=now(), options=[
                         {"key": "a", "label": "Try again", "command": f"approve {j['id']}"},
                         {"key": "b", "label": "Remove this job", "command": f"abort {j['id']} --cascade"}])
                     j.pop("wake")
@@ -3219,10 +3248,11 @@ def wake_waiting(root, room=None, hold=None) -> dict:
         try:  # one refused ask (the job was aborted meanwhile) must not hide the claimed ready jobs from the caller
             if wake:
                 cmd_ask(root, job_id, f"retry: {dep} was aborted or removed, so this job no longer waits on it.",
-                        [f"Try again=approve {job_id}", f"Remove this job=abort {job_id} --cascade"])
+                        [f"Try again=approve {job_id}", f"Remove this job=abort {job_id} --cascade"], title="DEPENDENCY")
             else:
                 cmd_ask(root, job_id, f"blocked: {dep} was aborted or removed, so this job has nothing to wait for.",
-                        [f"Put back on the backlog=abort {job_id} --requeue", f"Remove this job=abort {job_id} --cascade"])
+                        [f"Put back on the backlog=abort {job_id} --requeue", f"Remove this job=abort {job_id} --cascade"],
+                        title="DEPENDENCY")
         except SystemExit as e:
             print(f"wake_waiting: {job_id}: {e}", file=sys.stderr)
     return {"ready": ready, "lost": list(lost), **({"retry": retry} if retry else {})}
@@ -3662,7 +3692,7 @@ def migrate_paused(board: dict) -> list[str]:
             job.update(stage=m.group(1), paused=True)
             out.append(job["id"])
         elif (m := LEGACY_STALL_RE.match(reason)) and m.group(1) in WATCHED and not job.get("paused"):
-            for k in ("question", "options", "recommend"):
+            for k in ("question", "options", "recommend", "stopTitle"):
                 job.pop(k, None)
             job.update(stage=m.group(1), stalled=True, reason=f"{STALL}{m.group(2)}")
             out.append(job["id"])
@@ -4016,6 +4046,7 @@ def main(argv=None):
     ak.add_argument("--b", required=True, metavar="LABEL=COMMAND")
     ak.add_argument("--c", metavar="LABEL=COMMAND")
     ak.add_argument("--kind")
+    ak.add_argument("--title")
     ak.add_argument("--recommend", nargs=2, metavar=("KEY", "WHY"))
     wo = sub.add_parser("wait-on")
     wo.add_argument("id")
@@ -4120,7 +4151,7 @@ def main(argv=None):
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "ask":
         out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind,
-                      a.recommend)
+                      a.recommend, title=a.title)
         if a.kind is not None:
             print(json.dumps(out if isinstance(out, dict) else {"unblock": False}))
     elif a.cmd == "wait-on":

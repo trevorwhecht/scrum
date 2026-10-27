@@ -4984,6 +4984,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nold line\nkeep B\n",) * 2)
         self.assertEqual(job["stage"], "needs-human")
         self.assertTrue(job["reason"].startswith("digest apply: git commit failed: hook says no"), job["reason"])
+        self.assertEqual(job["stopTitle"], "DIGEST")
         self.assertEqual(job["question"], job["reason"])
         self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
                          [("Retry", f"resume {job['id']}"), ("Abort", f"abort {job['id']}")])
@@ -7521,7 +7522,7 @@ class ParkedParentTest(unittest.TestCase):
     def test_agent_types_child_auto_resumed(self):
         self.write([("060-a", "done", None), ("074-b", "build", None)])
         self.board.cmd_ask(self.root, "074-b", "scrum-debugger, scrum-builder are not loaded as agent types in this "
-                           "session", ["Resume=resume 074-b", "Abort=abort 074-b"])
+                           "session", ["Resume=resume 074-b", "Abort=abort 074-b"], title="MERGE_CONFLICT")
         with mock.patch.object(self.board, "projects", return_value={"p": self.root.parent}), \
                 mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
                 mock.patch.object(self.serve, "running", return_value=False), \
@@ -7852,7 +7853,7 @@ class WeeklyTest(unittest.TestCase):
                                          {"id": "p2", "project": "other", "job": "001-weekly-digest-001-p2-docs-x-md"}],
                                "skipped": []})
         job = self.board.read_board(self.scrum)["jobs"][0]
-        self.assertEqual((job["title"], job["stage"]), ("Weekly digest 001 p1: CLAUDE.md", "needs-human"))
+        self.assertEqual((job["title"], job["stage"], job["stopTitle"]), ("Weekly digest 001 p1: CLAUDE.md", "needs-human", "DIGEST"))
         self.assertEqual(job["reason"], "Weekly digest 001 p1 proposes an edit to CLAUDE.md in reg: Seen in reg and other (p1). "
                                         "Build it runs it as a normal job, Skip it drops it.")
         self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
