@@ -8,6 +8,7 @@ and every 10 minutes, while a project has a job in stage cloud or awaiting its a
   python3 serve.py --estimate "<item>" --dir <scrum>      → estimate one backlog item and exit (board.py backlog-add)
   python3 serve.py --digest-auto <NNN> --dir <scrum>      → apply, queue or skip every pending proposal of a digest, print JSON, exit
   python3 serve.py --digest-skill-check <NNN> <PID> --dir <scrum> → re-check a queued skill proposal, print JSON, exit 1 if stale
+  python3 serve.py --weekly-ask <NNN>                     → ask Trevor about each pending proposal of a weekly digest, print JSON, exit
 
 Projects come from the registry that /trevskills-scrum fills in (board.py register). Binds 127.0.0.1 only. Every
 request must carry a localhost Host header (blocks DNS rebinding), and every write must be a JSON POST from no
@@ -1085,6 +1086,7 @@ def watchdog_tick():
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
        tick.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
+    5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
     global RESUME_ROOM
     try:
@@ -1153,6 +1155,10 @@ def watchdog_tick():
         except (Exception, SystemExit) as e:
             print(f"watchdog: auto continue: {e}", file=sys.stderr, flush=True)
     window_tick()
+    try:
+        weekly_tick()
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
     cooldown_chime()
 
 
@@ -1169,6 +1175,28 @@ def window_tick():
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
+
+
+def weekly_tick():
+    """Start the cross-project weekly digest once per 7d window: only in its last board.WEEKLY_LATE_SECS, while
+    board.fable_ok (no Opus fallback: a paused or unknown week is skipped, retried next tick while the window lasts),
+    when no weekly/*/window holds that resets_at and no weekly run is live. It claims (board.cmd_weekly_start) and
+    spawns in this checkout's registered project (research_home)."""
+    usage, now = board.read_usage(), time.time()
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    week = limits.get("seven_day") if isinstance(limits, dict) else None
+    resets = week.get("resets_at") if isinstance(week, dict) else None
+    if not board.is_num(resets) or not now < resets <= now + board.WEEKLY_LATE_SECS or not board.fable_ok(usage, now):
+        return
+    if board.weekly_ran(resets):
+        return
+    if not (home := research_home()):
+        print("watchdog: weekly digest: the trevskills-scrum repo is not registered", file=sys.stderr, flush=True)
+        return
+    if running(home[0], "weekly"):
+        return
+    if (out := board.cmd_weekly_start(resets, now))["id"]:
+        spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more
@@ -3233,6 +3261,70 @@ def digest_auto(root, digest_id):
     return out
 
 
+def weekly_set_status(path: Path, pid: str, status: str, reason: str) -> None:
+    """Set one weekly proposal's status and reason while it is still pending: re-read under DIGEST_LOCK, tmp +
+    os.replace."""
+    with DIGEST_LOCK:
+        data, raw = read_proposals(path)
+        hit = [e for e in raw if (v := valid_proposal(e)) and v["id"] == pid and v["status"] == "pending"]
+        for entry in hit:
+            entry.update(status=status, reason=reason)
+        if hit:
+            tmp = path.with_name("proposals.json.tmp")
+            tmp.write_text(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
+
+
+def weekly_ask(digest_id: str) -> dict:
+    """Turn each pending proposal of weekly digest NNN (board.weekly_dir()) into one needs-human job on its target
+    repo's board, with a pre-written spec and Build it / Skip it options; no target file is written. Only an edit to a
+    registered repo's file, not settings or hooks, whose old text occurs once, is asked; every other proposal is
+    skipped with its reason. A re-run passes over non-pending proposals, and an open job with the same title skips it."""
+    out = {"asked": [], "skipped": []}
+    if not board.DIGEST_RE.fullmatch(digest_id):
+        return out
+    path = board.weekly_dir() / digest_id / "proposals.json"
+    names = {str(r): n for n, r in board.projects().items()}
+
+    def skip(p, why):
+        out["skipped"].append({"id": p["id"], "reason": why})
+        weekly_set_status(path, p["id"], "skipped", why)
+
+    for p in [v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["status"] == "pending"]:
+        where = os.path.isabs(p["target"]) and repo_of(p["target"])
+        if p["kind"] != "edit":
+            skip(p, "weekly takes edits only")
+            continue
+        if digest_denied(p["target"]):
+            skip(p, "settings or hooks target")
+            continue
+        if not where:
+            skip(p, "target outside every registered repo")
+            continue
+        try:
+            text = Path(p["target"]).read_bytes().decode()
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        if (n := text.count(p["old"])) != 1:
+            skip(p, f"old text found {n} times")
+            continue
+        repo, rel = where
+        project, scrum = names.get(str(repo), repo.name), repo / "scrum"
+        title = f"Weekly digest {digest_id} {p['id']}: {rel}"[:60]
+        if not (job_id := board.cmd_new(scrum, title, unique=True)):
+            skip(p, "already asked")
+            continue
+        why = " ".join(p["why"].replace('"', "").replace("`", "").split()).rstrip(".")
+        d = scrum / "jobs" / job_id
+        (d / "feature.md").write_text(f"# {title}\n\n{p['why'].strip()}\n\nFrom weekly digest {digest_id}.\n", encoding="utf-8")
+        (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel), encoding="utf-8")
+        board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to {rel} in {project}: {why}. "
+                      "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"])
+        out["asked"].append({"id": p["id"], "project": project, "job": job_id})
+        weekly_set_status(path, p["id"], "queued", f"asked: {project} {job_id}")
+    return out
+
+
 def scrum_dir(project):
     repo = board.projects().get(project)
     return repo / "scrum" if repo else None
@@ -3581,6 +3673,7 @@ def main():
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
     p.add_argument("--digest-auto", metavar="NNN", help="apply, queue or skip every pending proposal of this digest, print JSON and exit")
+    p.add_argument("--weekly-ask", metavar="NNN", help="park one needs-human job per pending proposal of this weekly digest, print JSON and exit")
     p.add_argument("--digest-skill-check", nargs=2, metavar=("NNN", "PID"),
                    help="re-check a queued skill proposal before creating it, print JSON, exit 1 when it no longer holds")
     p.add_argument("--tailnet-host", default="", help="also accept this tailnet hostname in Host/Origin (else SCRUM_TAILNET_HOST, else detected)")
@@ -3593,6 +3686,8 @@ def main():
         sys.exit(0 if res["ok"] else 1)
     if a.digest_auto is not None:
         return print(json.dumps(digest_auto(a.dir.resolve(), a.digest_auto)))
+    if a.weekly_ask is not None:
+        return print(json.dumps(weekly_ask(a.weekly_ask)))
     if a.estimate is not None:
         return estimate(a.dir.resolve(), a.estimate)
     global TAILNET

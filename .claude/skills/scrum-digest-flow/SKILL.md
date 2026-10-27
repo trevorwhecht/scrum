@@ -44,6 +44,15 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
 - `digest_revert(root, digest_id, pid)`: only an `applied` proposal; swaps old and new and re-applies through `digest_apply` (repo, `mark_applied=False`, its own `Revert digest` job) or `digest_write_global`; then sets `reverted` from `applied` under the lock.
 - Any read-modify-write you add re-checks the live status under `DIGEST_LOCK` right before writing.
 
+## Weekly
+- The cross-project weekly digest lives in `board.weekly_dir()` (`~/.claude/trevskills-scrum/weekly/<NNN>/`, beside `projects.json`; `SCRUM_REGISTRY` moves both). It never touches a project's `scrum/digests/`.
+- `board.cmd_weekly_start(resets_at, now)` claims, under `registry_lock()`, every registered project's done jobs updated in the 7d window that no earlier `weekly/*/jobs.txt` lists; it writes `window` (the integer `resets_at`) even when none qualify. `board.weekly_ran(resets_at)` reads those markers.
+- serve.py `weekly_tick()` (watchdog, after `window_tick()`) runs it in the last `board.WEEKLY_LATE_SECS` of the window, only when `board.fable_ok`, once per window, and spawns `/trevskills-scrum weekly-digest <NNN>` in `research_home()`'s project.
+- `lanes/digest.md` `## Weekly` runs `scrum-digester` (**Weekly mode**, `WEEKLY_DIR`) on `board.FABLE_MODEL` with no Opus fallback, then `serve.py --weekly-ask <NNN>`.
+- serve.py `weekly_ask(digest_id)` parks one needs-human job (`cmd_new(unique=True)`, `digest_item_spec(f"weekly-{NNN}", ...)`, `cmd_ask` with Build it / Skip it) per pending repo edit and marks it `queued`; anything else is `skipped`. `weekly_set_status` re-reads under `DIGEST_LOCK`. No target file is written.
+- `lanes/commands.md` resume sends a `Weekly digest ` reason to **New job** step 2.
+- Tests: `tests/test_board.py` `WeeklyStartTest`, `tests/test_serve.py` `WeeklyTest`.
+
 ## HTTP (serve.py `Handler.route`)
 - `GET /api/p/<project>/digests` lists digests (`digests()`).
 - `POST /api/p/<project>/digest` starts one (`digest_now`; 409 when running or nothing new).

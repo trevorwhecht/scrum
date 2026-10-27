@@ -7775,5 +7775,169 @@ class CheckoutAlertTest(unittest.TestCase):
             self.assertEqual(g.call_count, 4)
 
 
+class WeeklyTest(unittest.TestCase):
+    """weekly_tick and weekly_ask, on the DigestTest fake home: "reg" (home of the weekly run) and "other" registered."""
+    get, post, backups, rule = AiSettingsTest.get, AiSettingsTest.post, AiSettingsTest.backups, DigestTest.rule
+
+    def setUp(self):
+        DigestTest.setUp(self)
+        self.other = self.home / "other"
+        (self.other / "scrum").mkdir(parents=True)
+        self.weekly = Path(os.environ["SCRUM_REGISTRY"]).parent / "weekly"
+        Path(os.environ["SCRUM_REGISTRY"]).write_text(json.dumps([str(self.reg), str(self.other)]))
+        self.usage = None
+        for patcher in (mock.patch.object(self.serve, "research_home", lambda: ("reg", self.scrum)),
+                        mock.patch.object(self.board, "read_usage", lambda: self.usage)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.serve, "spawn")
+        self.spawn = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def use(self, five=10, seven=10, left=86400, age=0):
+        """usage.json: 7d window resetting `left` seconds from now, written `age` seconds ago."""
+        t = time.time()
+        self.usage = {"rate_limits": {"five_hour": {"used_percentage": five, "resets_at": t + 3600},
+                                      "seven_day": {"used_percentage": seven, "resets_at": t + left}}, "written_at": t - age}
+
+    def done(self, root, title):
+        job_id = self.board.cmd_new(root, title)
+        self.board.cmd_set(root, job_id, ["stage=done"])
+        return str(root / "jobs" / job_id)
+
+    def test_tick_spawns_late_in_window_when_fable_ok(self):
+        a, b = self.done(self.scrum, "reg job"), self.done(self.other / "scrum", "other job")
+        self.use(left=2 * 86400 - 60)
+        self.serve.weekly_tick()
+        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001")
+        self.assertEqual((self.weekly / "001" / "jobs.txt").read_text(), f"{a}\n{b}\n")
+        self.assertEqual((self.weekly / "001" / "window").read_text(), f"{int(self.usage['rate_limits']['seven_day']['resets_at'])}\n")
+
+    def test_tick_waits_early_in_window(self):
+        self.done(self.scrum, "reg job")
+        for left in (2 * 86400 + 60, 5 * 86400, -60):  # too early, and a window already reset
+            self.use(left=left)
+            self.serve.weekly_tick()
+        self.spawn.assert_not_called()
+        self.assertFalse(self.weekly.exists())
+
+    def test_tick_runs_once_per_window(self):
+        self.done(self.scrum, "reg job")
+        self.use()
+        with mock.patch.object(self.serve, "running", return_value=True):
+            self.serve.weekly_tick()
+        self.assertFalse(self.weekly.exists(), "a live weekly run claims nothing")
+        self.serve.weekly_tick()
+        self.done(self.other / "scrum", "later job")
+        self.serve.weekly_tick()
+        self.assertEqual(self.spawn.call_count, 1)
+        self.assertEqual(sorted(p.name for p in self.weekly.iterdir()), ["001"])
+
+    def test_tick_skips_when_fable_paused_or_unknown(self):
+        self.done(self.scrum, "reg job")
+        for kw in ({"seven": 85}, {"five": 80}, {"age": 301}):
+            self.use(**kw)
+            self.serve.weekly_tick()
+        self.usage = None
+        self.serve.weekly_tick()
+        self.usage = {"rate_limits": "bad"}
+        self.serve.weekly_tick()
+        self.spawn.assert_not_called()
+        self.assertFalse(self.weekly.exists())
+        self.use(seven=84)  # room frees up later in the same window: it still runs
+        self.serve.weekly_tick()
+        self.assertEqual(self.spawn.call_count, 1)
+
+    def weekly_digest(self, proposals, digest_id="001"):
+        d = self.weekly / digest_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "proposals.json").write_text(proposals if isinstance(proposals, str) else json.dumps({"proposals": proposals}))
+        return d / "proposals.json"
+
+    def prop(self, pid, target, old="old line", new="new line", **extra):
+        return {"id": pid, "target": str(target), "why": f'Seen in "reg" and `other` ({pid}).', "old": old, "new": new, **extra}
+
+    def entries(self, path):
+        return [(p["id"], p.get("status"), p.get("reason")) for p in json.loads(path.read_text())["proposals"]]
+
+    def test_ask_parks_one_needs_human_job_per_repo_edit(self):
+        (self.reg / "CLAUDE.md").write_text("keep\nold line\n")
+        (self.other / "docs").mkdir()
+        (self.other / "docs" / "x.md").write_text("old line\n")
+        path = self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md"), self.prop("p2", self.other / "docs" / "x.md")])
+        out = self.serve.weekly_ask("001")
+        self.assertEqual(out, {"asked": [{"id": "p1", "project": "reg", "job": "001-weekly-digest-001-p1-claude-md"},
+                                         {"id": "p2", "project": "other", "job": "001-weekly-digest-001-p2-docs-x-md"}],
+                               "skipped": []})
+        job = self.board.read_board(self.scrum)["jobs"][0]
+        self.assertEqual((job["title"], job["stage"]), ("Weekly digest 001 p1: CLAUDE.md", "needs-human"))
+        self.assertEqual(job["reason"], "Weekly digest 001 p1 proposes an edit to CLAUDE.md in reg: Seen in reg and other (p1). "
+                                        "Build it runs it as a normal job, Skip it drops it.")
+        self.assertEqual([(o["label"], o["command"]) for o in job["options"]],
+                         [("Build it", "resume 001-weekly-digest-001-p1-claude-md"), ("Skip it", "abort 001-weekly-digest-001-p1-claude-md")])
+        jd = self.scrum / "jobs" / "001-weekly-digest-001-p1-claude-md"
+        self.assertEqual((jd / "feature.md").read_text(),
+                         "# Weekly digest 001 p1: CLAUDE.md\n\nSeen in \"reg\" and `other` (p1).\n\nFrom weekly digest 001.\n")
+        spec = (jd / "spec.md").read_text()
+        self.assertTrue(spec.startswith("# Apply digest weekly-001 p1 to CLAUDE.md\nUI surface: no\nHard stops: none\nLane: fast\n"), spec)
+        self.assertIn("```\nold line\n```", spec)
+        other = self.board.read_board(self.other / "scrum")["jobs"]
+        self.assertEqual([(j["id"], j["stage"]) for j in other], [("001-weekly-digest-001-p2-docs-x-md", "needs-human")])
+        self.assertEqual(self.entries(path), [("p1", "queued", "asked: reg 001-weekly-digest-001-p1-claude-md"),
+                                              ("p2", "queued", "asked: other 001-weekly-digest-001-p2-docs-x-md")])
+
+    def test_ask_skips_global_denied_skill_and_stale(self):
+        (self.reg / "CLAUDE.md").write_text("old line\nold line\n")
+        (self.reg / ".claude" / "settings.json").write_text("old line\n")
+        path = self.weekly_digest([
+            self.prop("p1", self.rule()),
+            self.prop("p2", self.reg / ".claude" / "settings.json"),
+            self.prop("p3", self.reg / "skills" / "new" / "SKILL.md", old="", new="---\nname: new\n---\n", kind="skill"),
+            {"id": "p4", "kind": "backlog", "why": "a stop", "backlog": "fix the stop"},
+            self.prop("p5", self.reg / "CLAUDE.md", old="gone line"),
+            self.prop("p6", self.reg / "CLAUDE.md"),
+            self.prop("p7", self.reg / "CLAUDE.md", status="applied"),
+        ])
+        out = self.serve.weekly_ask("001")
+        want = [("p1", "target outside every registered repo"), ("p2", "settings or hooks target"),
+                ("p3", "weekly takes edits only"), ("p4", "weekly takes edits only"), ("p5", "old text found 0 times"),
+                ("p6", "old text found 2 times")]
+        self.assertEqual(out, {"asked": [], "skipped": [{"id": i, "reason": r} for i, r in want]})
+        self.assertEqual(self.entries(path), [(i, "skipped", r) for i, r in want] + [("p7", "applied", None)])
+        self.assertEqual(self.board.read_board(self.scrum)["jobs"], [])
+
+    def test_ask_writes_no_target_file(self):
+        rule = self.rule()
+        (self.reg / "CLAUDE.md").write_text("keep\nold line\n")
+        self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md"), self.prop("p2", rule)])
+        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 1)
+        self.assertEqual((self.reg / "CLAUDE.md").read_text(), "keep\nold line\n")
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.backups(), [])
+        self.assertFalse((self.scrum / "backlog.md").exists())
+
+    def test_ask_rerun_creates_no_duplicates(self):
+        (self.reg / "CLAUDE.md").write_text("old line\n")
+        path = self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md")])
+        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 1)
+        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": []})
+        data = json.loads(path.read_text())
+        data["proposals"][0]["status"] = "pending"  # a crash between the ask and the status write
+        path.write_text(json.dumps(data))
+        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": [{"id": "p1", "reason": "already asked"}]})
+        jobs = self.board.read_board(self.scrum)["jobs"]
+        self.assertEqual([(j["id"], j["stage"]) for j in jobs], [("001-weekly-digest-001-p1-claude-md", "needs-human")])
+        self.assertEqual(self.entries(path), [("p1", "skipped", "already asked")])
+
+    def test_ask_malformed_proposals_is_empty(self):
+        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": []}, "no folder")
+        self.weekly_digest("{not json")
+        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": []})
+        self.assertEqual(self.serve.weekly_ask("../x"), {"asked": [], "skipped": []})
+        out = subprocess.run([sys.executable, str(Path(self.serve.__file__)), "--weekly-ask", "001"],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"asked": [], "skipped": []}), out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

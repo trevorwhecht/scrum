@@ -1351,6 +1351,37 @@ class ContractTest(unittest.TestCase):
         self.assertLess(cleanup.index("stage=done reason="), cleanup.index("B digest-due"))
         self.assertIn("**Digest**", cleanup[cleanup.index("B digest-due"):])
 
+    def test_weekly_digest_lane(self):
+        weekly = self.h2(self.lane("digest"), "## Weekly")
+        for phrase in ('Agent override `model: "claude-fable-5-1"`', "   WEEKLY_DIR=$W\n   Write proposals.json for this weekly digest.\n",
+                       "write `$W/error.md` containing the one line `fable unavailable` and stop",
+                       "Never respawn it without the override", "once more with the same override",
+                       "`digester produced no valid proposals`", "serve.py --weekly-ask <NNN>", "`W=<weekly_dir>/<NNN>`",
+                       '{"asked": [{"id", "project", "job"}], "skipped": [{"id", "reason"}]}'):
+            self.assertIn(phrase, weekly, phrase)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("board_weekly", BOARD_PY)
+        board = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(board)
+        self.assertIn(f'model: "{board.FABLE_MODEL}"', weekly)
+        for phrase in ("--digest-auto", "B digest-start", "B digest-trim"):
+            self.assertNotIn(phrase, weekly, phrase)
+        commands = self.lane("commands")
+        self.assertIn("- **`/trevskills-scrum weekly-digest <NNN>`**: run **Digest** `## Weekly`", commands)
+        resume = next(l for l in commands.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
+        branch = "**`Weekly digest `**: run `B set <id> stage=spec reason=`, then **New job** from step 2. Step 3 finds the pre-written `spec.md` and skips the spec writer."
+        self.assertIn(branch, resume)
+        self.assertLess(resume.index(branch), resume.index("**Answered question** (any other reason)"))
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        for phrase in ("**Weekly mode**", "WEEKLY_DIR/jobs.txt", "2 or more different projects", "`## Follow-ups`",
+                       "~/.claude/trevskills-scrum/projects.json", "Propose only kind `edit`",
+                       "- Write only `DIGEST_DIR/proposals.json` (in weekly mode, `WEEKLY_DIR/proposals.json`)."):
+            self.assertIn(phrase, digester, phrase)
+        flow = (ROOT / ".claude" / "skills" / "scrum-digest-flow" / "SKILL.md").read_text()
+        self.assertIn("\n## Weekly\n", flow)
+        for name in ("cmd_weekly_start", "weekly_tick", "weekly_ask", "WEEKLY_LATE_SECS"):
+            self.assertIn(name, flow, name)
+
     def test_digest_stops_table_parses(self):
         sample = ("DIGEST NOTES\nJobs read: 0\n## Repeated questions\nNone\n## Stops\n"
                   "| Cause | Count | Jobs | Picks | Automate |\n|---|---|---|---|---|\n"
