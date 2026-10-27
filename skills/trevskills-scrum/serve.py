@@ -1155,15 +1155,15 @@ def watchdog_tick():
 
 
 def window_tick():
-    """board.cmd_window_report for every project, each in its own guard. When it wrote a scorecard and digest-due's
-    reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn while one runs), unless
-    cool-down is on: the scorecard is still written, the skipped digest is not replayed (the dashboard Digest button
-    is not held)."""
+    """board.cmd_window_report for every project, each in its own guard. Every tick, whether or not a scorecard was
+    written, when digest-due's reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn
+    while one runs), so a busy or failed start is retried next tick. Cool-down skips it: the scorecard is still
+    written, the skipped digest waits for cool-down to end (the dashboard Digest button is not held)."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
-            if board.cmd_window_report(root) and not board.cooling_down() \
-                    and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
+            board.cmd_window_report(root)
+            if not board.cooling_down() and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
