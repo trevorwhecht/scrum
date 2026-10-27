@@ -1715,7 +1715,9 @@ class ContractTest(unittest.TestCase):
             self.assertIn(collision, step1, name)
             step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
             self.assertIn(wait, step4, name)
-            self.assertIn('rm -rf "$T"', step4, name)
+            for phrase in ("rm -rf <the mktemp path written out>", "kill <their PIDs written out>", "never pass `$T`"):
+                self.assertIn(phrase, step4, f"{name}: {phrase}")
+            self.assertNotIn('rm -rf "$T"', step4, name)
 
     def test_ux_reviewer_renders_page(self):
         self.assert_reviewer_renders("ux")
@@ -1753,7 +1755,9 @@ class ContractTest(unittest.TestCase):
             for phrase in (check, lsof, "outside $T or WORKTREE", "Rendered: no — <reason>"):
                 self.assertIn(phrase, text, f"{name}: {phrase}")
             step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
-            self.assertIn('rm -rf "$T"', step4, name)
+            for phrase in ("rm -rf <the mktemp path written out>", "kill <their PIDs written out>", "never pass `$T`"):
+                self.assertIn(phrase, step4, f"{name}: {phrase}")
+            self.assertNotIn('rm -rf "$T"', step4, name)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         bullet = next(l for l in builder.splitlines() if "A criterion that needs the running app" in l)
         for phrase in (start, "never 8765", check, lsof, 'rm -rf "$T"', "Never use port 3001"):
