@@ -1509,7 +1509,7 @@ def cmd_window_report(root, now=None) -> list[dict]:
 # --- digest-verify: Merge's Agent rules guard lets a job through without a human when its rules-file diff is exactly
 # the digest edits Trevor already approved (status queued) and nothing else. Any doubt fails safe to Trevor.
 CITATION_RE = re.compile(r"(?:(\S+)\s+)?digest\s+(\d{3})\s+([\w-]+)")
-RULES_RE = re.compile(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$")
+RULES_RE = re.compile(r"(^|/)agents/scrum-[^/]*\.md$|(^|/)trevskills-scrum/SKILL\.md$|(^|/)trevskills-scrum/lanes/[^/]*\.md$")
 DIGEST_ORDERS_MAX = 6  # up to this many proposals in one file, every application order is tried
 
 

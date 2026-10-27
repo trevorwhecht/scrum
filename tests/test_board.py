@@ -4486,6 +4486,10 @@ class DigestVerifyTest(unittest.TestCase):
     def test_rules_re_covers_lane_files(self):
         self.assertTrue(board.RULES_RE.search("skills/trevskills-scrum/lanes/cloud.md"))
         self.assertIsNone(board.RULES_RE.search("src/lanes/foo.md"))
+        self.assertTrue(board.RULES_RE.search("skills/trevskills-scrum/SKILL.md"))
+        self.assertTrue(board.RULES_RE.search("agents/scrum-builder.md"))
+        self.assertIsNone(board.RULES_RE.search("macos/skills/trevskills-mac-cleanup/SKILL.md"))
+        self.assertIsNone(board.RULES_RE.search("SKILL.md"))
 
     BUILDER = "# Builder\n\nRule one.\n\nRule two.\n"
     PLANNER = "# Planner\n\nPlan it.\n"
