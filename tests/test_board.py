@@ -5503,7 +5503,7 @@ class ReviewPlanTest(unittest.TestCase):
         self.git(self.wt, "rm", "-q", *rels)
         self.git(self.wt, "commit", "-q", "-m", "delete")
 
-    def test_review_plan_deletion_dominated_skips_ui_ux(self):
+    def test_review_plan_deletion_dominated_still_spawns_ui_ux(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 100, "src/big.py": "x = 1\n" * 100})
         self.delete("src/big.py")
         self.commit("web/page.html", "<p>x</p>\n" * 9 + "<p>new</p>\n")  # +1 -91 on a UI file
@@ -5511,10 +5511,8 @@ class ReviewPlanTest(unittest.TestCase):
             with self.subTest(globs=globs):
                 self.project(globs)
                 out = board.cmd_review_plan(self.root, self.job)
-                self.assertEqual(out, {"spawn": ["code"], "since": None})
-                self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
-                self.assertEqual(self.read(1, "ux"), self.DEL_SKIP)
-                self.assertEqual(self.read(1, "security"), self.SEC_SKIP)
+                self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": None})
+                self.assertEqual(self.files(1), ["review-security.md"])
         with self.subTest("no UI file: UI_SKIP wins"):
             self.project("*.css")
             out = board.cmd_review_plan(self.root, self.job)
@@ -5526,17 +5524,16 @@ class ReviewPlanTest(unittest.TestCase):
         self.big_base({"web/page.html": "<p>x</p>\n" * 10})
         self.commit("web/page.html", "<p>x</p>\n" + "<p>new</p>\n")  # +1 -9: exactly 90%
         out = board.cmd_review_plan(self.root, self.job)
-        self.assertEqual(out["spawn"], ["code"])
-        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
 
     def test_review_plan_deletion_dominated_keeps_security_on_sensitive_path(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 50, "src/auth.py": "x = 1\n" * 50})
         self.delete("src/auth.py")
         self.commit("web/page.html", "<p>new</p>\n")
         out = board.cmd_review_plan(self.root, self.job)
-        self.assertEqual(out, {"spawn": ["security", "code"], "since": None})
-        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
-        self.assertFalse((self.rdir(1) / "review-security.md").exists())
+        self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
+        self.assertEqual(self.files(1), [])
 
     def test_review_plan_80pct_deletion_unchanged(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 10})
@@ -5563,10 +5560,9 @@ class ReviewPlanTest(unittest.TestCase):
     def test_review_plan_rerun_removes_stale_deletion_skip(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 100})
         self.commit("web/page.html", "<p>new</p>\n")
-        board.cmd_review_plan(self.root, self.job)
-        self.assertEqual(self.read(1, "ui"), self.DEL_SKIP)
+        self.rdir(1).mkdir(parents=True, exist_ok=True)
+        (self.rdir(1) / "review-ui.md").write_text(self.DEL_SKIP)  # left by an earlier run
         self.assertFalse(board._real_review(self.rdir(1) / "review-ui.md"))
-        self.commit("src/more.py", "y = 1\n" * 100)  # +101 -100: no longer deletion-dominated
         out = board.cmd_review_plan(self.root, self.job)
         self.assertEqual(out["spawn"], ["ux", "ui", "code"])
         self.assertEqual(self.files(1), ["review-security.md"])
