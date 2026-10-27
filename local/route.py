@@ -18,9 +18,13 @@ import re
 import shutil
 import sys
 import time
-import tomllib
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11: the local-server config check is skipped
+    tomllib = None
 
 CONFIG = str(Path(__file__).resolve().parent / 'routing.json')
 RUNNERS = ('cloud', 'skip')
@@ -35,6 +39,8 @@ def _codex_installed():
 
 def _codex_local_base_url():
     """The top-level openai_base_url of the Codex config when it points at a loopback host, else None."""
+    if tomllib is None:
+        return None
     path = os.environ.get('SCRUM_CODEX_CONFIG') or Path.home() / '.codex' / 'config.toml'
     try:
         with open(path, 'rb') as f:
