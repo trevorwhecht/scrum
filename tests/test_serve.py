@@ -6213,10 +6213,28 @@ class CloudPollTest(unittest.TestCase):
         card = [{"window": "five_hour"}]
         self.assertEqual(tick(card, "bad window five_hour-1.json"),
                          [("good", root, "digest", "digest", "/trevskills-scrum digest")])
-        self.assertEqual(tick([], "bad window five_hour-1.json"), [])
+        spawn = [("good", root, "digest", "digest", "/trevskills-scrum digest")]
+        self.assertEqual(tick([], "bad window five_hour-1.json"), spawn)
         for reason in ("10 done", "questions", None):
             self.assertEqual(tick(card, reason), [], reason)
+            self.assertEqual(tick([], reason), [], reason)
         self.assertEqual(tick(card, "bad window five_hour-1.json", busy=True), [])
+
+    def test_watchdog_tick_bad_window_retries_after_busy(self):
+        s = self.serve
+        projects = {"good": self.window_projects()["good"]}
+        root = projects["good"] / "scrum"
+        due = {"due": True, "undigested": 3, "questionsGrowth": 0, "reason": "bad window five_hour-1.json"}
+        def tick(busy):
+            with mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.object(s.board, "cmd_window_report", return_value=[]), \
+                    mock.patch.object(s.board, "cmd_digest_due", return_value=due), \
+                    mock.patch.object(s, "running", side_effect=lambda p, j: busy and j == "digest"), \
+                    mock.patch.object(s, "spawn", return_value="runs/d.log") as sp:
+                s.watchdog_tick()
+            return [c.args for c in sp.call_args_list]
+        self.assertEqual(tick(True), [])
+        self.assertEqual(tick(False), [("good", root, "digest", "digest", "/trevskills-scrum digest")])
 
 
     def test_watchdog_tick_bad_window_digest_held_during_cooldown(self):
