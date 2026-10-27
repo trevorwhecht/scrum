@@ -4,7 +4,7 @@ This repo IS the scrum. `install.sh` symlinks `skills/trevskills-scrum`, `skills
 `agents/scrum-*.md` and `codex/AGENTS.md` into `~/.claude` / `~/.codex`, so the main checkout is live:
 never leave it dirty, and land changes with `/trevskills-commitpush` or the pipeline.
 
-- Test: `python3 tests/run_parallel.py` (stdlib only) is the full run: it deals the test ids into one shard per CPU and prints one line per shard. It took WALLTIME; run single modules (`python3 -m unittest tests.test_<name>`) while working.
+- Test: `python3 tests/run_parallel.py` (stdlib only) is the full run: it deals the test ids into one shard per CPU and prints one line per shard. It took 160 s on 8 cores at a 1-minute load average of 4.2 (2026-10-27), inside the 600 s Bash timeout; run single modules (`python3 -m unittest tests.test_<name>`) while working.
 - Subprocess and timing tests with 5 s timeouts (`tests/test_board_small_fixes.py`, `tests/test_buildlock.py`, `DigestTest` in `tests/test_serve.py`) can fail in the full run under load; re-run a failing test alone before treating it as a real failure.
 - A load timeout that passes when re-run alone is not a review finding; at most one line under Notes.
 - `tests/test_contracts.py` pins exact agent and SKILL.md wording: `self.section(text, "## A", "## B")` slices a
