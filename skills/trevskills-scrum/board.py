@@ -29,9 +29,9 @@
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
   board.py backlog-add [--setup "<step>; <step>"] [--priority N | --top] "<item>"...  append "- [ ] <item>" lines to backlog.md
-                                                    (--top: insert above the first item with {p:5}, so next claims it first)
                                    (--setup adds a " {setup: step; step}" marker: next and runall-start skip the item until
-                                   Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5), then
+                                   Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5; --top
+                                   inserts above the first item with {p:5}, so next claims it first), then
                                    estimate each in the background
   board.py rank-backlog            one-off backfill: Jev rates each open backlog item with no {p:N} marker (jev-gate.py
                                    rank, logged to jev.log), writes {p:N} where it gave one, print {"rated","unrated","skipped"}
