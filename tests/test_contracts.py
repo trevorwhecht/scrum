@@ -1700,7 +1700,7 @@ class ContractTest(unittest.TestCase):
 
     def test_merge_always_fast_forwards(self):
         text = skill_text()
-        self.assertEqual(text.count("pull --ff-only"), 1)
+        self.assertEqual(re.sub(r"` Fix: [^`]*`", "", text).count("pull --ff-only"), 1)  # Trevor-run fixes aside
         cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
         restart = cleanup.index("**Restart.**")
         ff = cleanup.index('git -C "$REPO" pull --ff-only')
@@ -1984,7 +1984,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, step1, phrase)
         self.assertLess(merge.index("Uncommitted change in"), merge.index("gh pr merge"))
         self.assertLess(merge.index("Uncommitted change in"), merge.index("push -u origin"))
-        self.assertEqual(text.count("pull --ff-only"), 1)
+        self.assertEqual(re.sub(r"` Fix: [^`]*`", "", text).count("pull --ff-only"), 1)  # Trevor-run fixes aside
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
         self.assertIn("Uncommitted change in", approve)
         self.assertLess(approve.index("Uncommitted change in"), approve.index("human-approval.md"))
@@ -2007,6 +2007,14 @@ class ContractTest(unittest.TestCase):
         for why in ("`not on <default>`", "`uncommitted changes`", "`fast-forward failed`", "`restart failed`",
                     "`verify failed`"):
             self.assertIn(why, cleanup[cleanup.index("merged, not live: <why>"):], why)
+        live = cleanup[cleanup.index("merged, not live: <why>"):]
+        for fix in (" Fix: run git checkout <default> in <repo name>, then git pull --ff-only.",
+                    " Fix: stash or commit the changes in <repo name> (git stash or git commit), then git pull --ff-only.",
+                    " Fix: if local main holds commits origin lacks, push them or run git reset --hard origin/<default> "
+                    "yourself, then git pull --ff-only."):
+            self.assertIn(fix, live, fix)
+            self.assertNotIn("'", fix)
+        self.assertIn("Trevor runs these fixes; agents never do.", live)
         merged = next(l for l in text.splitlines() if l.strip().startswith("- `MERGED`:"))
         self.assertNotIn("stage=done", merged)
         self.assertIn("step 7", merged)
@@ -2077,6 +2085,15 @@ class ContractTest(unittest.TestCase):
         for prefix in ("'Hard stop: schema — ", "'Hard stop: agent rules — ", "'bigboy off track: ",
                        '"Base branch line', "'Base branch <BB>", "'blocked: "):
             self.assertTrue(any(prefix in sp for sp in spans), prefix)
+
+    def test_main_checkout_fixes_stay_text(self):
+        for lane, span in self.ask_spans():
+            for command in self.ask_options(span):
+                for bad in ("reset --hard", "git stash", "git checkout <default>"):
+                    self.assertNotIn(bad, command, f"{lane}: {span}")
+        text = skill_text()
+        self.assertIn("never stash, merge, reset or switch branches in the main checkout", text)
+        self.assertIn("Never stash, clean or switch branches in the main checkout on your own", text)
 
     def ask_spans(self):
         """(lane file name, span) for every `B ask ...` code span in SKILL.md and lanes/*.md."""
@@ -2197,6 +2214,21 @@ class ContractTest(unittest.TestCase):
                        "Only the Throw away the changes option Trevor picks throws anything away."):
             self.assertIn(phrase, guard, phrase)
         self.assertLess(guard.index("Test command"), guard.index("/trevskills-commitpush"))
+        dirty = next(l for l in guard.splitlines() if "**Uncommitted changes (self-heal):**" in l)
+        dirty_q = self.ask_question(re.search(r"`(B ask [^`]+)`", dirty).group(1))
+        wrong = next(l for l in guard.splitlines() if "**Wrong branch:**" in l)
+        wrong_q = self.ask_question(re.search(r"`(B ask [^`]+)`", wrong).group(1))
+        self.assertTrue(dirty_q.startswith("Uncommitted change in <repo name>:"), dirty_q)
+        self.assertTrue(wrong_q.startswith("<repo name> main checkout is on <branch>, not <default>"), wrong_q)
+        for phrase in ("git stash", "git commit", "Keep my changes and carry on, the recommended option",
+                       "throws away this job"):
+            self.assertIn(phrase, dirty_q, phrase)
+        for phrase in ("git checkout <default>", "Carry on, the recommended option", "throws away this job"):
+            self.assertIn(phrase, wrong_q, phrase)
+        for q in (dirty_q, wrong_q):
+            self.assertNotIn('"', q)
+            self.assertNotIn("`", q)
+        self.assertIn("recommend key `a`", guard)
 
     def test_merge_agent_rules_gate(self):
         gate = self.lane("rules-gate")

@@ -7730,7 +7730,8 @@ class CheckoutAlertTest(unittest.TestCase):
         root = self.repo(ahead=2)
         self.assertEqual(self.board(root, []),
                          "myrepo main checkout has 2 commit(s) not on origin/main, so merges cannot go live. "
-                         "Push or fix it by hand.")
+                         "Push them, or run git reset --hard origin/main yourself in the chat to drop them; "
+                         "agents never run it.")
 
     def test_clean_checkout_no_alert(self):
         root = self.repo()
@@ -7744,6 +7745,10 @@ class CheckoutAlertTest(unittest.TestCase):
         jobs = [{"id": "1-a", "stage": "done", "updatedAt": "2026-10-25T10:00:00Z", "reason": "merged"},
                 {"id": "2-b", "stage": "done", "updatedAt": "2026-10-25T11:00:00Z",
                  "reason": "merged, not live: fast-forward failed (diverged)"}]
+        self.assertEqual(self.board(root, jobs),
+                         "2-b merged, not live: fast-forward failed. Fix the main checkout, then clear the reason.")
+        jobs[1]["reason"] = ("merged, not live: fast-forward failed. Fix: if local main holds commits origin lacks, push "
+                             "them or run git reset --hard origin/main yourself, then git pull --ff-only.")
         self.assertEqual(self.board(root, jobs),
                          "2-b merged, not live: fast-forward failed. Fix the main checkout, then clear the reason.")
 
@@ -7775,7 +7780,8 @@ class CheckoutAlertTest(unittest.TestCase):
         ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
         with mock.patch.object(self.serve, "git_run", side_effect=[ok("main\n"), ok("1\n"), ok("main\n"), ok("0\n")]) as g, \
                 mock.patch.object(self.serve.time, "time", side_effect=[1000.0, 1059.0, 1061.0]):
-            want = "myrepo main checkout has 1 commit(s) not on origin/main, so merges cannot go live. Push or fix it by hand."
+            want = ("myrepo main checkout has 1 commit(s) not on origin/main, so merges cannot go live. Push them, or run "
+                    "git reset --hard origin/main yourself in the chat to drop them; agents never run it.")
             self.assertEqual(self.serve.board_with_activity(root, "p")["checkoutAlert"], want)
             self.assertEqual(g.call_count, 2)
             self.assertEqual(self.serve.board_with_activity(root, "p")["checkoutAlert"], want)

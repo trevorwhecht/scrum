@@ -2147,7 +2147,8 @@ def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
             n = int(ahead.stdout.strip()) if not ahead.returncode and ahead.stdout.strip().isdigit() else 0
             if n:
                 alert = (f"{Path(repo).name} main checkout has {n} commit(s) not on origin/{name}, "
-                         "so merges cannot go live. Push or fix it by hand.")
+                         f"so merges cannot go live. Push them, or run git reset --hard origin/{name} yourself "
+                         "in the chat to drop them; agents never run it.")
         CHECKOUT_ALERT[str(repo)] = (now, alert)
     if alert:
         return alert
