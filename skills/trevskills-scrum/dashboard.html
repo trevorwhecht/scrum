@@ -181,6 +181,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:0}
 .facts dt{color:var(--muted);font-size:12px;line-height:44px}
 .facts dd{margin:0;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:44px}
+#doc .facts{margin-bottom:16px}#doc .facts dt{line-height:1.45}#doc .facts dd{min-height:0}  /* spec.md header rows: text only, nothing to tap */
 .skill{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:99px;padding:2px 8px}
 #agPicker{display:grid;gap:8px}
 #agSkills{display:flex;flex-wrap:wrap;gap:6px}
@@ -724,6 +725,25 @@ $("laneFilter").value = laneFilter;
 if ($("laneFilter").value !== laneFilter) laneFilter = "";  // a stored value that is no longer an option
 $("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; store.set("scrum.lane", laneFilter); render(); });
 
+// spec.md's header lines (UI surface, Hard stops, Human setup, Lane) above the first "## " as plain labelled rows:
+// [head HTML, the markdown without those lines]. No header lines: ["", md] unchanged. Unknown values pass through.
+const specHeader = md => {
+  const LABELS = {"UI surface": "Changes the UI", "Hard stops": "Needs Trevor's sign-off for", "Human setup": "Manual setup", "Lane": "Track"};
+  const HARD_STOPS = {none: "none", schema: "database schema", money: "money", auth: "login", secrets: "secrets"};
+  const TRACKS = {fast: ["fast", "small change, shorter checks"], standard: ["full", "the full build, check and review pipeline"],
+    debug: ["bug fix", "reproduce the bug with a test first, then fix it"], bigboy: ["bigboy", "too big for one job: split into smaller child jobs"]};
+  const lines = md.split("\n"), end = lines.findIndex(l => l.startsWith("## ")), rows = [];
+  const rest = lines.filter((l, i) => {
+    const m = (end < 0 || i < end) && /^(UI surface|Hard stops|Human setup|Lane):\s*(.*)$/.exec(l);
+    if (!m) return true;
+    const v = m[2].trim(), [track, hint] = m[1] === "Lane" ? TRACKS[v] || [v] : [];
+    const shown = m[1] === "Hard stops" ? v.split(",").map(s => HARD_STOPS[s.trim()] || s.trim()).join(", ") : track ?? v;
+    rows.push(`<dt>${LABELS[m[1]]}</dt><dd${hint ? ` title="${esc(hint)}"` : ""}>${esc(shown)}</dd>`);
+    return false;
+  });
+  return rows.length ? [`<dl class="facts">${rows.join("")}</dl>`, rest.join("\n")] : ["", md];
+};
+
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
   const url = `${job.docBase ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
@@ -739,7 +759,11 @@ async function show(job, file) {
     }
     if (!res.ok) throw new Error(`${res.status}`);
     const md = await res.text();
-    $("doc").innerHTML = window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
+    // spec.md: the "# " title, then its header rows (built outside marked, so they show without it), then the rest.
+    const [head, rest] = file === "spec.md" ? specHeader(md) : ["", md];
+    const title = head && /^# .*$/m.exec(rest), cut = title ? title.index + title[0].length : 0;
+    const render = s => window.marked ? marked.parse(s) : `<pre>${esc(s)}</pre>`;
+    $("doc").innerHTML = (cut ? render(rest.slice(0, cut)) : "") + head + render(rest.slice(cut));
   } catch (e) {
     $("doc").innerHTML = `<p class="empty">Couldn't load ${esc(file)} (${esc(e.message)}).</p>`;
   }
@@ -896,8 +920,8 @@ function stopBox(job) {
   const note = !st.noteOpen ? "" : `<div class="sendback"><textarea name="note" maxlength="2000" placeholder="Anything the builder should know? (optional)" aria-label="Note for the builder"${dis}>${esc(st.note || "")}</textarea>
     <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>Send back</button></div>`;
   return `<div class="stop" role="status"
-    data-agent-hint="This job stopped and needs Trevor. The first line is what is wrong; then either the exact fix or the ways forward, the recommended one first.">
-    <b>Waiting on you</b><p>${esc(stopIssue(job.question || job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
+    data-agent-hint="This job stopped and needs Trevor. The first line is the agent's question in full, or what went wrong; then either the exact fix or the buttons for the ways forward, the recommended one first.">
+    <b>Waiting on you</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
 }
 
 function renderActions(job) {

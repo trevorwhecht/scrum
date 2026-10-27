@@ -2286,7 +2286,8 @@ class ContractTest(unittest.TestCase):
         text = DASHBOARD.read_text()
         self.assertNotIn("nextStep", text)
         box = text[text.index("function stopBox(job)"):text.index("function renderActions")]
-        self.assertIn("esc(stopIssue(job.question || job.reason))", box)
+        self.assertIn("esc(job.question || stopIssue(job.reason))", box)
+        self.assertIn("the agent's question in full", box)
         status = text[text.index("const statusLine = "):text.index("function stopBox(job)")]
         self.assertIn("`Waiting on you: ${stopIssue(job.question || job.reason)}`", status)
         card = text[text.index("function card(job)"):text.index("function render()")]
