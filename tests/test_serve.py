@@ -7525,6 +7525,100 @@ class DropMallocLoggingTest(unittest.TestCase):
         self.assertLess(src.index("drop_malloc_logging()"), src.index("add_argument"))
 
 
+class CheckoutAlertTest(unittest.TestCase):
+    """board.json's checkoutAlert: the live checkout has commits not on origin/<branch>, else the newest done job is
+    `merged, not live: fast-forward failed`; None otherwise."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.CHECKOUT_ALERT.clear()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def git(self, cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+    def repo(self, name="myrepo", ahead=0, origin=True):
+        """A clone of a temp bare origin on main, plus `ahead` local commits, with a scrum/ board."""
+        repo = self.tmp / name
+        if origin:
+            bare = self.tmp / "origin.git"
+            self.git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
+            seed = self.tmp / "seed"
+            self.git(self.tmp, "init", "-q", "-b", "main", str(seed))
+            self.git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first")
+            self.git(seed, "push", "-q", str(bare), "main")
+            self.git(self.tmp, "clone", "-q", str(bare), str(repo))
+        else:
+            self.git(self.tmp, "init", "-q", "-b", "main", str(repo))
+            self.git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first")
+        for i in range(ahead):
+            self.git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", f"local {i}")
+        (repo / "scrum").mkdir()
+        return repo / "scrum"
+
+    def board(self, root, jobs):
+        (root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        return self.serve.board_with_activity(root, "p")["checkoutAlert"]
+
+    def test_ahead_of_origin_alerts(self):
+        root = self.repo(ahead=2)
+        self.assertEqual(self.board(root, []),
+                         "myrepo main checkout has 2 commit(s) not on origin/main, so merges cannot go live. "
+                         "Push or fix it by hand.")
+
+    def test_clean_checkout_no_alert(self):
+        root = self.repo()
+        jobs = [{"id": "1-a", "stage": "done", "updatedAt": "2026-10-25T10:00:00Z", "reason": "merged"},
+                {"id": "2-b", "stage": "running", "updatedAt": "2026-10-25T11:00:00Z",
+                 "reason": "merged, not live: fast-forward failed"}]
+        self.assertIsNone(self.board(root, jobs))
+
+    def test_newest_done_ff_failed_alerts(self):
+        root = self.repo()
+        jobs = [{"id": "1-a", "stage": "done", "updatedAt": "2026-10-25T10:00:00Z", "reason": "merged"},
+                {"id": "2-b", "stage": "done", "updatedAt": "2026-10-25T11:00:00Z",
+                 "reason": "merged, not live: fast-forward failed (diverged)"}]
+        self.assertEqual(self.board(root, jobs),
+                         "2-b merged, not live: fast-forward failed. Fix the main checkout, then clear the reason.")
+
+    def test_older_ff_failed_ignored(self):
+        root = self.repo()
+        jobs = [{"id": "1-a", "stage": "done", "updatedAt": "2026-10-25T10:00:00Z",
+                 "reason": "merged, not live: fast-forward failed"},
+                {"id": "2-b", "stage": "done", "updatedAt": "2026-10-25T11:00:00Z", "reason": "merged"}]
+        self.assertIsNone(self.board(root, jobs))
+
+    def test_no_origin_ref_no_alert(self):
+        root = self.repo(origin=False, ahead=1)
+        ff = [{"id": "3-c", "stage": "done", "updatedAt": "2026-10-25T11:00:00Z",
+               "reason": "merged, not live: fast-forward failed"}]
+        self.assertIsNone(self.board(root, []))
+        self.assertEqual(self.board(root, ff),
+                         "3-c merged, not live: fast-forward failed. Fix the main checkout, then clear the reason.")
+        detached = self.repo(name="detached", ahead=1)
+        self.git(detached.parent, "checkout", "-q", "--detach")
+        self.assertIsNone(self.board(detached, []))
+        self.serve.CHECKOUT_ALERT.clear()
+        failing = subprocess.CompletedProcess([], 1, "", "boom")
+        with mock.patch.object(self.serve, "git_run", return_value=failing):
+            self.assertIsNone(self.board(self.repo(name="broken", ahead=1), []))
+
+    def test_git_check_cached(self):
+        root = self.repo(ahead=1)
+        (root / "board.json").write_text(json.dumps({"jobs": []}))
+        ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
+        with mock.patch.object(self.serve, "git_run", side_effect=[ok("main\n"), ok("1\n"), ok("main\n"), ok("0\n")]) as g, \
+                mock.patch.object(self.serve.time, "time", side_effect=[1000.0, 1059.0, 1061.0]):
+            want = "myrepo main checkout has 1 commit(s) not on origin/main, so merges cannot go live. Push or fix it by hand."
+            self.assertEqual(self.serve.board_with_activity(root, "p")["checkoutAlert"], want)
+            self.assertEqual(g.call_count, 2)
+            self.assertEqual(self.serve.board_with_activity(root, "p")["checkoutAlert"], want)
+            self.assertEqual(g.call_count, 2)
+            self.assertIsNone(self.serve.board_with_activity(root, "p")["checkoutAlert"])
+            self.assertEqual(g.call_count, 4)
+
 
 if __name__ == "__main__":
     unittest.main()
