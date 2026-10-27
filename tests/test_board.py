@@ -7420,5 +7420,73 @@ class FableTest(unittest.TestCase):
         self.assertFalse((self.root / "routing.log").exists())
 
 
+class WeeklyStartTest(unittest.TestCase):
+    """board.cmd_weekly_start: this 7d window's done jobs from every registered project, claimed once."""
+    NOW = 2_000_000_000.0
+    RESETS = NOW + 86400  # one day left: the window opened 6 days ago
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.a, self.b = base / "a" / "scrum", base / "b" / "scrum"
+        for root in (self.a, self.b):
+            root.mkdir(parents=True)
+        (base / "reg").mkdir()
+        (base / "reg" / "projects.json").write_text(json.dumps([str(self.a.parent), str(self.b.parent)]))
+        self.weekly = base / "reg" / "weekly"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "reg" / "projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def job(self, root, title, stage="done", ago=86400):
+        job_id = board.cmd_new(root, title)
+        with board.locked_board(root) as b:
+            board.find(b, job_id).update(stage=stage, updatedAt=datetime.fromtimestamp(self.NOW - ago, timezone.utc).isoformat())
+        return str(root / "jobs" / job_id)
+
+    def test_claims_this_weeks_done_jobs_across_projects(self):
+        a1, b1 = self.job(self.a, "a one"), self.job(self.b, "b one", ago=6 * 86400)
+        out = board.cmd_weekly_start(self.RESETS, self.NOW)
+        self.assertEqual(out, {"id": "001", "jobs": [a1, b1]})
+        self.assertEqual((self.weekly / "001" / "window").read_text(), "2000086400\n")
+        self.assertEqual((self.weekly / "001" / "jobs.txt").read_text(), f"{a1}\n{b1}\n")
+        self.assertTrue(board.weekly_ran(self.RESETS))
+
+    def test_skips_jobs_an_earlier_weekly_listed(self):
+        a1 = self.job(self.a, "a one")
+        self.assertEqual(board.cmd_weekly_start(self.RESETS, self.NOW)["jobs"], [a1])
+        b1 = self.job(self.b, "b one")
+        out = board.cmd_weekly_start(self.RESETS + 3600, self.NOW + 3600)  # a1 still in this window, but already listed
+        self.assertEqual(out, {"id": "002", "jobs": [b1]})
+        self.assertEqual(board.cmd_weekly_start(self.RESETS + 3600, self.NOW + 3600), {"id": None, "jobs": []},
+                         "a claimed window claims nothing again")
+        self.assertEqual(sorted(p.name for p in self.weekly.iterdir()), ["001", "002"])
+
+    def test_old_and_unfinished_jobs_left_out(self):
+        self.job(self.a, "last week", ago=7 * 86400 + 1)
+        self.job(self.a, "in review", stage="review")
+        self.job(self.b, "aborted", stage="aborted")
+        kept = self.job(self.b, "just in", ago=6 * 86400)
+        self.assertEqual(board.cmd_weekly_start(self.RESETS, self.NOW)["jobs"], [kept])
+
+    def test_no_jobs_writes_window_marker(self):
+        self.job(self.a, "in review", stage="review")
+        self.assertEqual(board.cmd_weekly_start(self.RESETS, self.NOW), {"id": None, "jobs": []})
+        self.assertEqual((self.weekly / "001" / "window").read_text(), "2000086400\n")
+        self.assertEqual((self.weekly / "001" / "jobs.txt").read_text(), "")
+        self.assertTrue(board.weekly_ran(self.RESETS))
+        self.assertFalse(board.weekly_ran(self.RESETS + 7 * 86400))
+
+    def test_per_project_digest_due_unchanged(self):
+        self.job(self.a, "a one")
+        before = board.cmd_digest_due(self.a)
+        board.cmd_weekly_start(self.RESETS, self.NOW)
+        self.assertEqual(board.cmd_digest_due(self.a), before)
+        self.assertEqual(before["undigested"], 1)
+        for root in (self.a, self.b):
+            self.assertFalse((root / "digests").exists(), root)
+
+
 if __name__ == "__main__":
     unittest.main()

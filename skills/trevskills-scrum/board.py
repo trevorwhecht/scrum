@@ -1106,6 +1106,48 @@ def claim_folder(parent):
     return name
 
 
+WEEKLY_LATE_SECS = 172800  # serve.py weekly_tick runs the cross-project Fable digest in the 7d window's last 2 days
+
+
+def weekly_dir():
+    """The cross-project weekly digests, beside projects.json (SCRUM_REGISTRY moves both)."""
+    return registry_path().parent / "weekly"
+
+
+def weekly_ran(resets_at):
+    """True when a weekly/*/window file already holds this 7d window's integer resets_at."""
+    d = weekly_dir()
+    return any(p.read_text().strip() == str(int(resets_at)) for p in (d.glob("*/window") if d.is_dir() else []))
+
+
+def cmd_weekly_start(resets_at, now):
+    """Claim this 7d window's done jobs from every registered project as weekly digest NNN, under registry_lock(): every
+    done job whose updatedAt is in [resets_at - 7 days, now] and that no earlier weekly/*/jobs.txt lists, one absolute
+    job-folder path per jobs.txt line. Writes `window` even when no job qualifies (id None then), so a window is tried
+    once. A window already claimed claims nothing. Never touches any project's digests/."""
+    with registry_lock():
+        if weekly_ran(resets_at):
+            return {"id": None, "jobs": []}
+        d, seen = weekly_dir(), set()
+        for p in d.glob("*/jobs.txt") if d.is_dir() else []:
+            seen.update(l.strip() for l in p.read_text().splitlines() if l.strip())
+        jobs, since = [], resets_at - 7 * 86400
+        for repo in projects().values():
+            try:
+                board = read_board(repo / "scrum")
+            except SystemExit as e:  # one broken board.json never holds the other projects' week
+                print(f"weekly-start: {repo}: {e}", file=sys.stderr)
+                continue
+            for j in board["jobs"]:
+                path, at = str(repo / "scrum" / "jobs" / j["id"]), _epoch(j.get("updatedAt"))
+                if j.get("stage") == "done" and at is not None and since <= at <= now and path not in seen:
+                    jobs.append(path)
+        digest_id = claim_folder(d)
+        (d / digest_id / "window").write_text(f"{int(resets_at)}\n")
+        (d / digest_id / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+    return {"id": digest_id if jobs else None, "jobs": jobs}
+
+
 def cmd_digest_trim(root, digest_id):
     """Slim each listed done job's folder to feature.md, spec.md and decision.md, plus review-code.md and check.md in each
     round-<N>/ dir (a round dir with neither is removed); returns the trimmed ids. Idempotent."""
