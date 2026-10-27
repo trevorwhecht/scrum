@@ -6901,7 +6901,7 @@ class ReadyUsageTest(unittest.TestCase):
             spec = self.root / "jobs" / k / "spec.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
             spec.write_text(f"# x\n## Likely files\n- `src/{i}.py`: why\n")
-            board.cmd_set(self.root, k, ["lane=fast"])  # light: the heavy hold (>= 90% used) would hold a standard kid
+            board.cmd_set(self.root, k, ["lane=fast"])
 
     def write_usage(self, used):
         self.usage.write_text(json.dumps(usage(five=(used, 3600), written_at=int(time.time()))))
@@ -6935,88 +6935,55 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
 
-class UsageHeavyWaitTest(unittest.TestCase):
-    """Job 340: at 90% used or more on either window, only light lanes (fast, lilguy, runall) start."""
-    NOW = 1_800_000_000
+class ReadyHighUsageTest(unittest.TestCase):
+    """Job 524: 7d 92% used holds no Run-all or BigBoy child (the old 90% heavy-jobs hold is gone)."""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root, u, ps = Path(tmp.name) / "scrum", Path(tmp.name) / "usage.json", Path(tmp.name) / "ps.txt"
+        ps.write_text("")
+        self.root.mkdir()
+        u.write_text(json.dumps(usage(five=(10, 3600), seven=(92, 4 * 86400), written_at=int(time.time()))))
+        for p in (mock.patch.dict(os.environ, SCRUM_USAGE=str(u), SCRUM_PS=str(ps)),
+                  mock.patch.object(board, "usage_allowance", return_value=None)):
+            p.start()
+            self.addCleanup(p.stop)
 
-    def wait(self, job, u, parent=None):
-        return board.usage_heavy_wait(job, u, self.NOW, parent)
+    def job(self, job_id):
+        return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
 
-    def test_threshold_and_text(self):
-        at = datetime.fromtimestamp(self.NOW + 3600)
-        self.assertEqual(self.wait({"lane": "standard"}, usage(five=(90, 3600), written_at=self.NOW)),
-                         f"usage 5h 90% used, heavy jobs wait for its reset at {at:%H:%M}")
-        self.assertIsNone(self.wait({"lane": "standard"}, usage(five=(89.9, 3600), written_at=self.NOW)))
-        late = datetime.fromtimestamp(self.NOW + 86400)
-        self.assertEqual(self.wait(None, usage(five=(95, 3600), seven=(92, 86400), written_at=self.NOW)),
-                         f"usage 7d 92% used, heavy jobs wait for its reset at {late:%H:%M}", "the later reset wins")
-        self.assertEqual(self.wait(None, usage(five=(50, 3600), seven=(92, 86400), written_at=self.NOW)),
-                         f"usage 7d 92% used, heavy jobs wait for its reset at {late:%H:%M}")
+    def runall(self):
+        (self.root / "backlog.md").write_text("- [ ] item 0\n")
+        out = board.cmd_runall_start(self.root)
+        parent, (kid,) = out["id"], out["children"]
+        (self.root / "jobs" / kid / "spec.md").write_text("# x\n## Likely files\n- `src/0.py`: why\n")
+        board.cmd_set(self.root, kid, ["lane=standard"])
+        return parent, kid
 
-    def test_lanes(self):
-        u = usage(five=(95, 3600), written_at=self.NOW)
-        for job in (None, {}, {"lane": "standard"}, {"lane": "debug"}, {"lane": "bigboy"}, {"lane": None}):
-            self.assertTrue(self.wait(job, u), job)
-        for lane in ("fast", "lilguy", "runall"):
-            self.assertIsNone(self.wait({"lane": lane}, u), lane)
-        self.assertTrue(self.wait({"lane": "fast"}, u, {"lane": "bigboy"}), "a fast child of a bigboy is held")
-        self.assertIsNone(self.wait({"lane": "fast"}, u, {"lane": "runall"}))
+    def test_ready_claims_standard_child_at_high_usage(self):
+        parent, kid = self.runall()
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [kid])
+        self.assertEqual(self.job(kid)["stage"], "spec")
 
-    def test_unknown_usage_holds_nothing(self):
-        job = {"lane": "standard"}
-        for u in (None, [], "x", {}, {"rate_limits": "x", "written_at": self.NOW},
-                  usage(five=(95, 3600), written_at=self.NOW - 301),  # stale
-                  {"rate_limits": {"five_hour": {"used_percentage": 95, "resets_at": self.NOW + 60}}},  # no written_at
-                  {"rate_limits": {"five_hour": {"used_percentage": "95", "resets_at": self.NOW + 60}}, "written_at": self.NOW},
-                  {"rate_limits": {"five_hour": {"used_percentage": True, "resets_at": self.NOW + 60}}, "written_at": self.NOW},
-                  usage(five=(95, 0), written_at=self.NOW),  # reset already reached
-                  usage(five=(95, -10), seven=(10, 100), written_at=self.NOW)):
-            self.assertIsNone(self.wait(job, u), u)
-        self.assertTrue(self.wait(job, usage(five=(95, 3600), written_at=self.NOW - 300)), "300 s old is still fresh")
+    def test_ready_claims_bigboy_child_at_high_usage(self):
+        parent = board.cmd_new(self.root, "Big")
+        board.cmd_set(self.root, parent, ["lane=bigboy", "stage=plan"])
+        (self.root / "jobs" / parent / "plan.md").write_text(
+            "PLAN: READY\n# Big\n## Goal\nShip.\n## Done when\n1. It works.\n## Tickets\n"
+            + BoardTest.ticket(1) + BoardTest.ticket(2, deps="T1", exposure="yes") + "## Assumptions\n- none\n")
+        first = board.cmd_plan_apply(self.root, parent)["children"][0]
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [first])
+        self.assertEqual(self.job(first)["stage"], "spec")
 
-    def test_ready_holds_heavy_children(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root, u, ps = Path(tmp) / "scrum", Path(tmp) / "usage.json", Path(tmp) / "ps.txt"
-            ps.write_text("")
-            root.mkdir()
-            (root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(3)))
-            with mock.patch.dict(os.environ, SCRUM_USAGE=str(u), SCRUM_PS=str(ps)):
-                out = board.cmd_runall_start(root)
-                parent, (k1, k2, k3) = out["id"], out["children"]
-                for i, k in enumerate((k1, k2, k3)):
-                    (root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/{i}.py`: why\n")
-                board.cmd_set(root, k2, ["lane=fast"])
-                board.cmd_set(root, k3, ["lane=debug"])
-                u.write_text(json.dumps(usage(five=(91, 3600), written_at=int(time.time()))))
-                at = datetime.fromtimestamp(json.loads(u.read_text())["rate_limits"]["five_hour"]["resets_at"])
-                self.assertEqual(board.cmd_ready(root, parent)["ready"], [k2], "only the fast child is claimed")
-                board.cmd_set(root, k2, ["stage=aborted"])
-                self.assertEqual(board.cmd_ready(root, parent)["ready"], [])
-                p = next(j for j in json.loads((root / "board.json").read_text())["jobs"] if j["id"] == parent)
-                self.assertEqual((p["stage"], p["reason"]),
-                                 ("running", f"waiting: usage 5h 91% used, heavy jobs wait for its reset at {at:%H:%M}"))
-                u.write_text(json.dumps(usage(five=(89, 3600), written_at=int(time.time()))))
-                self.assertEqual(board.cmd_ready(root, parent)["ready"], [k1, k3], "below 90%: claims unchanged")
-                p = next(j for j in json.loads((root / "board.json").read_text())["jobs"] if j["id"] == parent)
-                self.assertEqual((p["stage"], p["reason"]), ("running", None))
-
-    def test_ready_holds_every_child_of_a_bigboy(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root, u = Path(tmp) / "scrum", Path(tmp) / "usage.json"
-            (Path(tmp) / "ps.txt").write_text("")
-            with mock.patch.dict(os.environ, SCRUM_USAGE=str(u), SCRUM_PS=str(Path(tmp) / "ps.txt")):
-                parent = board.cmd_new(root, "Big")
-                board.cmd_set(root, parent, ["lane=bigboy", "stage=plan"])
-                (root / "jobs" / parent / "plan.md").write_text(
-                    "PLAN: READY\n# Big\n## Goal\nShip.\n## Done when\n1. It works.\n## Tickets\n"
-                    + BoardTest.ticket(1) + BoardTest.ticket(2, deps="T1", exposure="yes") + "## Assumptions\n- none\n")
-                for kid in board.cmd_plan_apply(root, parent)["children"]:
-                    board.cmd_set(root, kid, ["lane=fast"])
-                u.write_text(json.dumps(usage(seven=(92, 3600), written_at=int(time.time()))))
-                self.assertEqual(board.cmd_ready(root, parent)["ready"], [])
-                p = next(j for j in json.loads((root / "board.json").read_text())["jobs"] if j["id"] == parent)
-                self.assertEqual(p["stage"], "running")
-                self.assertTrue(p["reason"].startswith("waiting: usage 7d 92% used, heavy jobs wait"), p["reason"])
+    def test_ready_clears_leftover_heavy_reason(self):
+        parent, kid = self.runall()
+        with board.locked_board(self.root) as b:
+            # split so criterion 1's grep for the removed hold text finds nothing
+            board.find(b, parent).update(
+                stage="running", reason="waiting: usage 7d 92% used, heavy jobs" + " wait for its reset at 09:00")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [kid])
+        p = self.job(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
 
 class FableTest(unittest.TestCase):

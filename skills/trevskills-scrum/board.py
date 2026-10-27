@@ -2242,35 +2242,6 @@ USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the 
 USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
 USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
 USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
-USAGE_HEAVY_PCT = 90  # used % on either window at or above which heavy jobs (not fast/lilguy) wait for its reset
-HEAVY_WAIT = "heavy jobs wait: "  # serve.heavy_refusal's prefix; like MACHINE_WAIT, a hold that retries by itself
-LIGHT_LANES = ("fast", "lilguy", "runall")  # lanes that start below the heavy-usage hold
-
-
-def usage_heavy_wait(job, usage, now, parent=None):
-    """Why a heavy job must not start now, or None. Heavy: no job yet, a child of a bigboy parent, or a lane that is
-    missing, standard, debug or bigboy. It waits while a fresh (USAGE_STALE_SECS) usage.json shows a window at
-    USAGE_HEAVY_PCT % used or more that has not reset; the text names the qualifying window that resets last.
-    Stale, missing or malformed usage holds nothing."""
-    if job is not None and (parent or {}).get("lane") != "bigboy" and job.get("lane") in LIGHT_LANES:
-        return None
-    if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
-        return None
-    at = usage.get("written_at")
-    if not is_num(at) or now - at > USAGE_STALE_SECS:
-        return None
-    last = None
-    for key, label in WINDOWS:
-        w = usage["rate_limits"].get(key)
-        if not isinstance(w, dict) or not is_num(w.get("used_percentage")) or not is_num(w.get("resets_at")):
-            continue
-        if w["used_percentage"] >= USAGE_HEAVY_PCT and w["resets_at"] > now \
-                and (last is None or w["resets_at"] > last[2]):
-            last = label, w["used_percentage"], w["resets_at"]
-    if last is None:
-        return None
-    label, used, resets = last
-    return f"usage {label} {round(used)}% used, heavy jobs wait for its reset at {datetime.fromtimestamp(resets):%H:%M}"
 
 
 class Allowance(int):
@@ -2888,16 +2859,12 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         room = ram_room() if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)
-        ready, heavy = [], None
-        usage, at = (read_usage(), time.time()) if go and not machine else (None, 0)  # read once per call
+        ready = []
         for k in kids if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
             if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") \
                     or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
-                continue
-            if wait := usage_heavy_wait(k, usage, at, parent):  # near the usage limit: only light lanes start
-                heavy = heavy or wait
                 continue
             if slot_conflict(k, slots, files):
                 continue
@@ -2909,8 +2876,6 @@ def cmd_ready(root, parent_id, live=(), manual=False):
             busy.append(k)
             slots.append(k)
             ready.append(k["id"])
-        if heavy and not ready and not machine:  # held like a machine wait (never needs-human) until the reset
-            machine = heavy
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
@@ -3225,7 +3190,7 @@ def wake_waiting(root, room=None, hold=None) -> dict:
     whose dependency was aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. A `wake` job
     (cmd_wait_on then=, child or not) is never claimed into spec: it goes back to needs-human with Try again, counts
     against room and is listed under "retry" (only when any is). A job for which `hold(job)` is truthy (a sibling blocks
-    the restart, or the heavy-usage hold) is left as it is, waiting with its wake, outside room. Returns {"ready", "lost"[, "retry"]}."""
+    the restart) is left as it is, waiting with its wake, outside room. Returns {"ready", "lost"[, "retry"]}."""
     ready, lost, retry = [], {}, []
     if not any(map(parked_waiting, read_board(root)["jobs"])):  # nothing parked: never rewrite board.json each tick
         return {"ready": ready, "lost": []}

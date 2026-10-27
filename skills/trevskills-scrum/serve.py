@@ -176,7 +176,7 @@ def start_ready(project, root, parent_id, manual=False):
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
     `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
-    them waiting, never needs-human, and so does the heavy-usage hold (board.usage_heavy_wait) and cool-down (an automatic start: machine_ok with claim=True). A
+    them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True). A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True):
         return
@@ -185,9 +185,8 @@ def wake_waiting(project, root):
     allow = board.usage_allowance(board.read_usage(), time.time(), live)
     if allow is not None:
         room = min(room, max(0, allow - live))
-    usage, at = board.read_usage(), time.time()  # read once: the hold runs inside the board lock
-    out = board.wake_waiting(root, room, hold=lambda j: board.usage_heavy_wait(j, usage, at) or (
-        j.get("wake") and board.resume_blocker(root, j["id"], live_ids(project))))
+    out = board.wake_waiting(root, room, hold=lambda j: j.get("wake") and board.resume_blocker(
+        root, j["id"], live_ids(project)))
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
@@ -292,9 +291,8 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a heavy job waits while a usage
-    window is nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules
-    `ready` applies to new claims."""
+    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a Run-all/BigBoy child also waits
+    for the overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM
@@ -303,23 +301,12 @@ def resume_refusal(project, root, job, manual=False):
         RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
-    if heavy := heavy_refusal(root, job):
-        return heavy
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     if not blocker:
         return None
     refusal = Refusal(f"can't resume yet: {blocker}. Fix: click Resume when {', '.join(blocker.ids)} finish.")
     refusal.blocker = blocker
     return refusal
-
-
-def heavy_refusal(root, job):
-    """board.usage_heavy_wait for a start in this project, as a refusal text, or None. job=None checks a start that
-    has no job yet (backlog Run, reopen, auto continue); a child is judged with its parent from board.json."""
-    parent = job and job.get("parent") and next(
-        (j for j in board.read_board(root)["jobs"] if j["id"] == job["parent"]), None)
-    wait = board.usage_heavy_wait(job, board.read_usage(), time.time(), parent or None)
-    return wait and f"{board.HEAVY_WAIT}{wait}. Fix: it starts by itself after the reset."
 
 
 class Refusal(str):
@@ -405,15 +392,13 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     job_id = job["id"]
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
-        if not refusal.startswith((board.MACHINE_WAIT, board.HEAVY_WAIT)) and not getattr(refusal, "blocker", None):
+        if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
             return refused(root, job_id, refusal)
         board.cmd_answer(root, job_id, key)
         with board.locked_board(root) as b:  # the machine guard or a sibling queues the pick like a Play; play_queue_tick starts it
             if (live := board.find(b, job_id))["stage"] == "needs-human":
                 live.setdefault("play_queued", board.now())
         return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
-    if option_command(opt.get("command"))[0] in ("approve", "rework") and (refusal := heavy_refusal(root, job)):
-        return refused(root, job_id, refusal)
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
     if not parsed:
@@ -934,7 +919,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no work in
     flight, no paused or resumable stalled job (board.resume_first), no auto-started run-all still running and a
     claimable backlog line, in rank order: board.projects() order, which the dashboard's Rank dialog sets. board.machine_ok
-    (cool-down, RAM, disk, the session ceiling; claim=True), board.usage_allowance and heavy_refusal are checked before each start; the first failure stops
+    (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
@@ -957,8 +942,6 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                 live = board.live_sessions()
                 allow = board.usage_allowance(board.read_usage(), time.time(), live)
                 if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
-                    return
-                if heavy_refusal(root, None):  # a run-all's new jobs are heavy until specced; retry after the reset
                     return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
         except (Exception, SystemExit) as e:
@@ -3541,8 +3524,6 @@ class Handler(BaseHTTPRequestHandler):
                     text = board.clean(body.get("text") or "", board.ITEM_MAX)
                     if not text:
                         raise SystemExit("backlog item text is empty")
-                    if refusal := heavy_refusal(root, None):
-                        return 409, {"error": refusal}
                     job_id = board.cmd_new(root, text[:60])
                     (root / "jobs" / job_id / "feature.md").write_text(text + "\n")
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
@@ -3567,8 +3548,6 @@ class Handler(BaseHTTPRequestHandler):
             if askme is not None and (type(askme) is not int or askme not in (1, 2, 3)):  # bool is an int subclass; reject it
                 raise SystemExit("askme must be 1, 2, 3 or null")
         if rest == "/backlog/run":
-            if refusal := heavy_refusal(root, None):  # before cmd_next, so the line stays open
-                return 409, {"error": refusal}
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
@@ -3609,8 +3588,6 @@ class Handler(BaseHTTPRequestHandler):
         if action == "setup-done":
             return setup_done(project, root, job_id)
         if action == "reopen":
-            if refusal := heavy_refusal(root, None):  # the new job has no lane yet
-                return refused(root, job_id, refusal)
             new_id = board.cmd_reopen(root, job_id, body.get("note") or "")
             spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
             return 202, {"id": new_id, "reopened_from": job_id}
@@ -3628,7 +3605,7 @@ class Handler(BaseHTTPRequestHandler):
                 resume_job(project, root, job, jobs, manual=manual)
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
-                if not refusal.startswith((board.MACHINE_WAIT, board.HEAVY_WAIT)) and not getattr(refusal, "blocker", None):
+                if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
                     return refused(root, job_id, refusal)
                 with board.locked_board(root) as b:  # the machine guard or a sibling queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
@@ -3638,8 +3615,6 @@ class Handler(BaseHTTPRequestHandler):
             return 202, {"id": job_id, "action": action}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}
-        if action in ("approve", "rework") and (refusal := heavy_refusal(root, job)):
-            return refused(root, job_id, refusal)
         if action == "approve":
             approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
