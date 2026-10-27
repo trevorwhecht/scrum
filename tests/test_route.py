@@ -78,6 +78,13 @@ class RouteTests(unittest.TestCase):
         for word in ('urllib.request', 'chat(', 'loaded' + '_models', 'KEEP_ALIVE', 'SCRUM_ROUTE'):
             self.assertNotIn(word, text)
 
+    def test_codex_review_without_tomllib_falls_through(self):
+        (self.root / 'codex-config.toml').write_text('openai_base_url = "http://127.0.0.1:11434/v1"\n')
+        with patch.object(route_mod, 'tomllib', None):
+            self.assertIsNone(route_mod._codex_local_base_url())
+            self.assertEqual(route_mod.route('codex-review'),
+                             {'runner': 'cloud', 'model': None, 'why': 'codex quota below thresholds'})
+
     def test_codex_review_config_check_edge_cases(self):
         config = self.root / 'codex-config.toml'
         low = {'runner': 'cloud', 'model': None, 'why': 'codex quota below thresholds'}
