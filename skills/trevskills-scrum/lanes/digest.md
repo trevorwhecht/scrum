@@ -23,7 +23,7 @@ Each registered project's questions.log holds stop lines: kind `ask`, `stall`, `
 
 ## Weekly
 
-The cross-project weekly digest. serve.py's watchdog (`weekly_tick`) claims it in the last 2 days of the 7-day usage window, only while Fable has room, and starts `/trevskills-scrum weekly-digest <NNN>` headless in the trevskills-scrum project. It reads that week's done jobs from every registered project. It runs from the main checkout like **Digest**, and never edits a file, pushes, merges or opens a PR. Every proposal goes to Trevor as a question on its target repo's board; none is applied here. It never runs steps 1, 2 or 4 above, so no per-project digest is started, trimmed or applied.
+The cross-project weekly digest. serve.py's watchdog (`weekly_tick`) claims it in the last 2 days of the 7-day usage window, only while Fable has room, and starts `/trevskills-scrum weekly-digest <NNN>` headless in the trevskills-scrum project. It reads that week's done jobs from every registered project. It runs from the main checkout like **Digest**, and never edits an agent, skill, rule or memory file, pushes, merges or opens a PR. Every proposal goes to Trevor as a question on its target repo's board; none is applied here. It never runs steps 1, 2 or 4 above, so no per-project digest is started, trimmed or applied.
 
 1. `W=<weekly_dir>/<NNN>`, where `<weekly_dir>` is `$HOME/.claude/trevskills-scrum/weekly` (board.py `weekly_dir()`, beside `projects.json`). If `$W/jobs.txt` is missing, say there is no such weekly digest and stop.
 2. Spawn `scrum-digester` with Agent override `model: "claude-fable-5-1"` and wait for it. Prompt:
