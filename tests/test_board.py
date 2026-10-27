@@ -3504,6 +3504,82 @@ class BoardTest(unittest.TestCase):
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         self.assertEqual(board.roadmap_show(self.root)["blocker"], {"job": self.J2, "reason": ""})
 
+    def test_stalled_helpers_accept_both_shapes(self):
+        legacy = {"stage": "needs-human", "reason": "stalled in build: no board update"}
+        new = {"stage": "build", "stalled": True, "reason": "stalled: no live session"}
+        self.assertTrue(board.stalled(legacy))
+        self.assertTrue(board.stalled(new))
+        self.assertEqual(board.stall_stage(legacy), "build")
+        self.assertEqual(board.stall_stage(new), "build")
+        not_stalled = [
+            {"stage": "needs-human", "paused": True, "reason": "stalled in build: paused by Trevor"},
+            {"stage": "build", "paused": True, "stalled": True, "reason": "stalled in build: paused by Trevor"},
+            *({"stage": s, "stalled": True, "reason": "stalled: no live session"}
+              for s in ("done", "aborted", "waiting", "needs-human")),
+            {"stage": "needs-human", "reason": "blocked: x"},
+        ]
+        for job in not_stalled:
+            self.assertFalse(board.stalled(job), job)
+            self.assertIsNone(board.stall_stage(job), job)
+        self.assertIn("stalled: ", board.RESUMABLE)
+
+    @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # a build sibling would hold its slot
+    def test_ready_treats_new_shape_stalled_child_as_idle(self):
+        parent, (c1, c2, c3) = self.three()
+        board.cmd_ready(self.root, parent)  # claims c1 and c2
+        board.cmd_set(self.root, c1, ["stage=done"])
+        self.edit_jobs(**{c2: {"stage": "build", "stalled": True, "reason": "stalled: no live session"}})
+        kid = self.child(c2)
+        self.assertTrue(board.idle(kid))
+        self.assertEqual(board.resume_first([kid, dict(kid, lane="lilguy")]), 1)
+        self.assertEqual(board.resume_first([dict(kid, paused=True)]), 1)
+        self.edit_jobs(**{c3: {"stage": "needs-human", "reason": "stalled in check: x"}})
+        self.assertIsNone(board.resume_blocker(self.root, c3))  # c3 has no spec: it runs alone beside any busy sibling
+        self.edit_jobs(**{c2: {"stalled": False}})
+        self.assertEqual(str(board.resume_blocker(self.root, c3)), "this job runs alone")  # the contrast: c2 busy again
+        self.edit_jobs(**{c2: {"stalled": True}, c3: {"stage": "waiting", "reason": None}})
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["in_progress"]), ([], 0))
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        # legacy shape: the needs-human stalled child is still named
+        self.edit_jobs(**{c2: {"stage": "needs-human", "stalled": False, "reason": "stalled in build: x"}})
+        board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 003-part-2"))
+
+    def test_watchdog_skips_new_shape_stalled(self):
+        self.aged("New stall", 31, stage="build", stalled=True, reason="stalled: no live session")
+        before = (self.root / "board.json").read_bytes()
+        mtime = (self.root / "board.json").stat().st_mtime_ns
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.root / "board.json").read_bytes(), before)
+        self.assertEqual((self.root / "board.json").stat().st_mtime_ns, mtime)
+
+    def test_abort_cascade_takes_new_shape_stalled_dependent(self):
+        a, b = board.cmd_new(self.root, "a"), board.cmd_new(self.root, "b")
+        self.edit_jobs(**{b: {"stage": "build", "stalled": True, "reason": "stalled: no live session", "depends_on": [a]}})
+        self.assertEqual(board.cmd_abort(self.root, a, False, cascade=True), ["001-a", "002-b"])
+        self.assertEqual((self.by_id()[b]["stage"], self.by_id()[b]["reason"]), ("aborted", "Removed with 001-a"))
+
+    def test_roadmap_show_no_blocker_for_new_shape_stalled(self):
+        self.roadmap()
+        jobs = [{"id": self.J2, "stage": "build", "stalled": True, "reason": "stalled: no live session"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertIsNone(board.roadmap_show(self.root)["blocker"])
+
+    def test_set_drops_stalled_on_resume_or_stage_change(self):
+        job_id = board.cmd_new(self.root, "x")
+        stall = {"stage": "build", "stalled": True, "reason": "stalled: no live session"}
+        self.edit_jobs(**{job_id: stall})
+        board.cmd_set(self.root, job_id, ["reason=x"])
+        self.assertIs(self.jobs()[0].get("stalled"), True)
+        board.cmd_set(self.root, job_id, ["stage=build", "reason="], unpause=True)
+        self.assertNotIn("stalled", self.jobs()[0])
+        self.edit_jobs(**{job_id: stall})
+        board.cmd_set(self.root, job_id, ["stage=check"])
+        self.assertNotIn("stalled", self.jobs()[0])
+
     def test_roadmap_write_round_trips_unchanged(self):
         self.roadmap()
         lines, _ = board.read_roadmap(self.root)
@@ -6548,6 +6624,16 @@ class WindowReportTest(unittest.TestCase):
         self.assertEqual(c["wasted_jobs"], ["201-x", "202-y", "203-z", "204-w"])
         self.assertEqual(c["wasted_tokens"], 350)
         self.assertEqual(c["wasted_pct"], 35.0)
+
+    def test_scorecard_counts_new_shape_stall_as_wasted(self):
+        R = self.R
+        self.board(("203-z", "build", R - 100), ("204-w", "build", R - 100))
+        ask = [{"key": "a", "label": "Resume", "command": "resume 203-z"}]
+        self.questions(
+            {"date": self.at(R - 400), "job": "203-z", "kind": "ask", "options": ask, "reason": "stalled: no live session"},
+            {"date": self.at(R - 300), "job": "204-w", "kind": "ask", "options": ask, "reason": "pick one"})
+        self.five(used=50)
+        self.assertEqual(self.card()["wasted_jobs"], ["203-z"])
 
     def test_window_report_lane_fit(self):
         wt = self.base / "wt"

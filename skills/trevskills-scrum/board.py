@@ -613,7 +613,8 @@ def cmd_abort(root, job_id, requeue, reason=None, cascade=False):
             for gone in aborted:  # grows while it runs: each aborted dependent is followed in turn
                 for kid in board["jobs"]:
                     if gone in (kid.get("depends_on") or []) and kid["stage"] not in ("done", "aborted") \
-                            and (kid["stage"] in ("waiting", "needs-human") or kid.get("paused") or kid.get("play_queued")):
+                            and (kid["stage"] in ("waiting", "needs-human") or kid.get("paused") or kid.get("play_queued")
+                                 or stalled(kid)):
                         parent = jobs.get(kid.get("parent")) or {}
                         abort_job(root, kid, parent.get("lane") == "runall", f"Removed with {job_id}")
                         aborted.append(kid["id"])
@@ -1364,7 +1365,7 @@ def _scorecard(root, e, t, board, questions):
     for q in questions:
         if q.get("job") in jobs and within(q["_ts"]) and (
                 q.get("kind") == "stall" or "unblock" in q
-                or ("options" in q and str(q.get("reason") or "").startswith(STALLED))):
+                or ("options" in q and str(q.get("reason") or "").startswith((STALLED, STALL)))):
             wasted.add(q["job"])
     wasted = sorted(wasted)
     over = [f["id"] for f in fits if f["over_routed"]]
@@ -2325,8 +2326,9 @@ IDLE = ("waiting", "done", "aborted", "needs-human")  # every other child stage 
 
 
 def idle(job) -> bool:
-    """Not in progress: an IDLE stage, or paused by Trevor (it keeps its stage but holds no slot)."""
-    return job.get("stage") in IDLE or bool(job.get("paused"))
+    """Not in progress: an IDLE stage, paused by Trevor or stalled in its own stage (it keeps its stage but holds no
+    slot)."""
+    return job.get("stage") in IDLE or bool(job.get("paused")) or stalled(job)
 
 
 BLOCKED = "bigboy blocked"
@@ -2338,11 +2340,9 @@ MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RA
 
 def resume_first(jobs: list[dict]) -> int:
     """How many jobs on this board must be played, resumed or aborted before any new claim in its project: the ones
-    Trevor paused (not done or aborted), plus the unpaused needs-human ones stalled in a stage (not
-    lilguy-in-checkout)."""
+    Trevor paused (not done or aborted), plus the unpaused stalled ones, either shape (not lilguy-in-checkout)."""
     return sum(bool(j.get("paused")) and j.get("stage") not in ("done", "aborted")
-               or not j.get("paused") and j.get("stage") == "needs-human"
-               and (j.get("reason") or "").startswith(STALLED) and not lilguy_in_checkout(j) for j in jobs)
+               or stalled(j) and not lilguy_in_checkout(j) for j in jobs)
 
 
 def usage_path():
@@ -3142,6 +3142,8 @@ def cmd_ready(root, parent_id, live=()):
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
             if waits:  # every action is on a child, so the parent keeps running and names them
                 new = "running", WAITING_ON + ", ".join(waits)
+            elif any(stalled(k) for k in kids):  # a child stalled in its own stage is auto-resumed; keep running
+                new = "running", None
             elif not runall and aborted and stuck_on(kids, set(aborted)):  # Resume skips the dependents
                 new = "needs-human", f"{BLOCKED}: {', '.join(aborted)}. Fix: click Resume to skip the children " \
                     "that depend on them and run the final review."
@@ -3295,12 +3297,14 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             job.pop("holdPause", None)  # Trevor's Play: a later overload pause may be auto-played again
             job.pop("paused", None)  # resume and rework re-enter a stage; spawn bookkeeping keeps the pause
             job.pop("limitResetAt", None)  # resume re-enters the same stage, so the stage-change drop below never runs
+            job.pop("stalled", None)
         if job["stage"] != was and "outcome" not in given:
             job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
             job["pid"] = pid  # internal, not in FIELDS: a hand-set pid could mark a job alive forever
         if job["stage"] != was:
             job.pop("limitResetAt", None)  # serve.py's usage-limit hold ends when the job leaves its stage
+            job.pop("stalled", None)  # so does a stall in that stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
         if given.get("stage") == "done" and (given.get("reason") or "").startswith("merged + gaps"):
@@ -3846,15 +3850,36 @@ WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
-RESUMABLE = (STALLED, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
+RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
 # existing resume path.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
 PAUSED = "paused by Trevor"
 PAUSED_RE = re.compile(rf"^{STALLED}(\w+): {PAUSED}")
 ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"
+
+
+def stalled(job: dict) -> bool:
+    """Stalled and not paused, in either shape: legacy (needs-human, reason `stalled in <stage>: `) or new (its own
+    WATCHED stage with board `stalled` true). A leftover `stalled` on any other stage is ignored."""
+    if job.get("paused"):
+        return False
+    if job.get("stalled"):
+        return job.get("stage") in WATCHED
+    return job.get("stage") == "needs-human" and str(job.get("reason") or "").startswith(STALLED)
+
+
+def stall_stage(job: dict) -> str | None:
+    """The stage a stalled job stalled in, or None when `stalled(job)` is False."""
+    if not stalled(job):
+        return None
+    if job.get("stalled"):
+        return job["stage"]
+    m = re.match(rf"{STALLED}(\w+):", job.get("reason") or "")
+    return m and m.group(1)
 
 
 def migrate_paused(board: dict) -> list[str]:
@@ -3958,7 +3983,7 @@ def cmd_watchdog(root, alive=None):
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
                      and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
-                     and stalled_since(j, cutoff)]
+                     and not j.get("stalled") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
             for job in stale:

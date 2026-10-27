@@ -218,7 +218,7 @@ class ColumnsBrowserTest(unittest.TestCase):
         m = re.search(r"^const RESUMABLE = (\[.*?\]);$", DASHBOARD.read_text(), re.M)
         self.assertIsNotNone(m)
         self.assertEqual(tuple(json.loads(m.group(1))), board.RESUMABLE)
-        self.assertEqual(board.RESUMABLE, ("stalled in ", "bigboy off track", "bigboy review: main not updated",
+        self.assertEqual(board.RESUMABLE, ("stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated",
                                            "bigboy blocked", "Base branch "))
 
 

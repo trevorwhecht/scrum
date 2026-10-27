@@ -1321,6 +1321,63 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertIn("play_queued", self.stage_of(kid))
 
+    NEW_STALL = {"stage": "build", "stalled": True, "reason": "stalled: no live session"}
+
+    def test_resume_post_accepts_new_shape_stalled(self):
+        b = self.serve.board
+        job_id = b.cmd_new(self.root, "New-shape stall")
+        self.addCleanup(self.edit_job, job_id, stage="aborted", stalled=None, play_queued=None)
+        self.edit_job(job_id, **self.NEW_STALL)
+        self.assertTrue(self.serve.resumable(self.stage_of(job_id)))
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {"manual": True}),
+                             (202, {"id": job_id, "action": "resume"}))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(job_id, "resume", f"/trevskills-scrum resume {job_id}")])
+        with mock.patch.object(self.serve, "resume_refusal", return_value="waiting: free RAM 5% (< 20%)"), \
+                mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(b, "now", return_value="2026-10-25T10:00:00+00:00"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {"manual": True}),
+                             (202, {"id": job_id, "action": "resume", "queued": True, "message": "queued, starts next"}))
+        spawn.assert_not_called()
+        self.assertEqual(self.stage_of(job_id)["play_queued"], "2026-10-25T10:00:00+00:00")
+
+    def test_play_queue_tick_starts_new_shape_stalled(self):
+        b = self.serve.board
+        job_id = b.cmd_new(self.root, "Queued new-shape stall")
+        self.addCleanup(self.edit_job, job_id, stage="aborted", stalled=None, play_queued=None)
+        self.edit_job(job_id, **self.NEW_STALL, play_queued="2026-10-25T10:00:00+00:00")
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.object(self.serve, "resume_refusal", return_value=None), \
+                mock.patch.object(self.serve, "running", return_value=False), \
+                mock.patch.object(self.serve, "resume_job") as resume:
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, jobs))
+        self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], [job_id])
+        self.assertNotIn("play_queued", self.stage_of(job_id))
+
+    def test_board_with_activity_next_retry_at(self):
+        b, s = self.serve.board, self.serve
+        ids = [b.cmd_new(self.root, t) for t in ("Retry due", "Retry spent", "Retry past", "Legacy none",
+                                                  "Held reset", "Held retry", "Plain build")]
+        due, spent, past, legacy, held, held_retry, plain = ids
+        for j in ids:
+            self.addCleanup(self.edit_job, j, stage="aborted", stalled=None, limitResetAt=None)
+            self.addCleanup(s.AUTO_RESUME.pop, f"repo/{j}", None)
+        for j in (due, spent, past):
+            self.edit_job(j, **self.NEW_STALL)
+        self.edit_job(legacy, stage="needs-human", reason="stalled in build: no live session. Fix: click Resume.")
+        self.edit_job(held, stage="build", reason=None, limitResetAt=1_800_000_000)
+        self.edit_job(held_retry, stage="build", reason=None, limitResetAt=1_800_000_000)
+        self.edit_job(plain, stage="build", reason=None)
+        s.AUTO_RESUME[f"repo/{due}"] = [1, 4_000_000_000.0]
+        s.AUTO_RESUME[f"repo/{spent}"] = [s.AUTO_RESUME_MAX, 4_000_000_000.0]
+        s.AUTO_RESUME[f"repo/{past}"] = [1, 1_000.0]
+        s.AUTO_RESUME[f"repo/{held_retry}"] = [2, 4_100_000_000.0]
+        jobs = self.board_jobs()
+        self.assertEqual({j: jobs[j]["nextRetryAt"] for j in ids[:-1]},
+                         {due: 4_000_000_000.0, spent: None, past: None, legacy: None,
+                          held: 1_800_000_120, held_retry: 4_100_000_000.0})
+        self.assertNotIn("nextRetryAt", jobs[plain])
+
     # --- cool down (jobs 305, 421): a flag file that holds only new work; in-flight work and Trevor's clicks still start ---
     def cooling(self):
         flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
@@ -5377,6 +5434,26 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(live["crash"]["stage"], "needs-human")
         self.assertNotIn("limitResetAt", live["crash"])
 
+    def test_new_shape_stall_resumed_once_per_stage(self):
+        s = self.serve
+        self.jobs = [{"id": "ns", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+                      "runlog": "runs/crash.log"}]
+        self.assertEqual(self.sweep(), ["ns"])
+        self.assertIn("p/ns/build", s.STALL_RESUMED)
+        self.assertEqual(self.sweep(), [], "its one non-limit resume in build is spent")
+
+    def test_new_shape_limit_stall_held_in_stage(self):
+        s, now = self.serve, 1_800_000_000
+        (self.root / "runs" / "nl.log").write_text("hit your limit resets_at=1800003600")
+        self.jobs = [{"id": "nl", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+                      "runlog": "runs/nl.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=now):
+            self.assertEqual(self.sweep(), [])
+        [live] = json.loads((self.root / "board.json").read_text())["jobs"]
+        self.assertEqual((live["stage"], live["limitResetAt"]), ("build", 1_800_003_600))
+        self.assertNotIn("stalled", live)
+
     def test_limit_reset_clock_time_after_log_mtime_stays_within_5h(self):
         log, job = self.root / "runs" / "limit.log", {"runlog": "runs/limit.log"}
         day = datetime.now().replace(second=0, microsecond=0)
@@ -5949,6 +6026,26 @@ class ExitedRunSweepTest(unittest.TestCase):
                 mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.board, "play") as play:
             self.assertEqual(self.serve.respawn_exited("p", self.root), [])
         self.assertTrue(self.serve.RUNS["p/pz"]["handled"])
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        spawn.assert_not_called()
+        play.assert_not_called()
+
+
+    def test_new_shape_stalled_run_is_handled(self):
+        stall = {"stage": "build", "stalled": True, "reason": "stalled: no live session",
+                 "updatedAt": "2026-01-01T00:00:00+00:00", "worktree": "/tmp/wt-ns"}
+        self.write([{"id": "par", "stage": "running", "lane": "runall", "children": ["ns"]},
+                    {"id": "ns", "parent": "par", **stall}])
+        (self.root / "jobs" / "ns").mkdir()
+        (self.root / "jobs" / "ns" / "spec.md").write_text("# x\n")
+        self.run_entry("ns")
+        before = (self.root / "board.json").read_text()
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.board, "play") as play:
+            self.assertEqual(self.serve.respawn_exited("p", self.root), [])
+            kids = [j for j in json.loads(before)["jobs"] if j["id"] == "ns"]
+            self.assertFalse(self.serve.respawn_orphans("p", self.root, {"id": "par"}, kids, lambda: (lambda job: False)))
+        self.assertTrue(self.serve.RUNS["p/ns"]["handled"])
         self.assertEqual((self.root / "board.json").read_text(), before)
         spawn.assert_not_called()
         play.assert_not_called()
@@ -6895,6 +6992,11 @@ class ParkedParentTest(unittest.TestCase):
                 self.write(kids)
                 self.assertEqual(self.tick(**kw), [], case)
                 lock.unlink(missing_ok=True)
+
+    def test_new_shape_stalled_child_not_parked(self):
+        self.write([("060-a", "done", None), ("074-b", "build", "stalled: no live session", {"stalled": True})])
+        by_id = self.jobs()
+        self.assertEqual(self.serve.parked_parent("p", self.root, by_id["054-run-all"], by_id, lambda: (lambda job: False)), [])
 
     def test_parked_parent_marked_once(self):
         self.write(self.PARKED)

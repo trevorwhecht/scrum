@@ -13,6 +13,9 @@ PAUSED = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "pa
           "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
 STALLED = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
 CASES = ((PAUSED, "Play"), (STALLED, "Resume"))
+# A job stalled in its own stage (board `stalled` true) keeps its stage, so its panel takes the not-needs-human branch.
+NEW_SHAPE = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "stalled": True, "worktree": "/tmp/wt-021",
+             "reason": "stalled: no live session. Fix: click Resume.", "updatedAt": "2026-01-01T00:00:00Z"}
 SUBMIT = ('{ const btn = {dataset: {}, disabled: false}; window.btn = btn; await handlers.submit({preventDefault() {},'
           ' submitter: btn, target: {dataset: {act: "resume"}, querySelector: () => btn}}); }')
 
@@ -37,7 +40,13 @@ def assert_inline(case, html, label, alert=ALERT):
 
 class RefusedResume(unittest.TestCase):
     def test_refused_resume_shows_reason_inline(self):
-        for job, label in CASES:
+        offered, refused = js(f"""const n = {json.dumps(NEW_SHAPE)}; jobs = [n]; renderActions(n); out(els.actions.innerHTML);
+            jobs = [{{...n, resumeRefusal: {json.dumps(MSG)}}}]; renderActions(jobs[0]); out(els.actions.innerHTML);""")
+        self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', offered)
+        for gone in ('data-act="approve"', 'data-act="rework"'):
+            self.assertNotIn(gone, offered)
+        self.assertNotIn('data-act="resume"', refused)
+        for job, label in CASES + ((NEW_SHAPE, "Resume"),):
             with self.subTest(label=label):
                 shown, viewer, disabled, html = js(f"""jobs = [{json.dumps(job)}]; renderActions(jobs[0]);
                     postFails = {json.dumps(MSG)}; {SUBMIT}
