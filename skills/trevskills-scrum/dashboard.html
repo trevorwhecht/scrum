@@ -355,7 +355,7 @@ const SLOW = "Server is slow: showing the last good data.";
 let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
-const shown = (list = jobs) => list.filter(j => (!filter || j.project === filter) && (!laneFilter || (laneFilter === "roadmap" ? !!roadmapSteps[j.key] : laneOf(j) === laneFilter)));
+const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || (laneFilter === "roadmap" ? !!roadmapSteps[j.key] : laneOf(j) === laneFilter)));
 // 32-bit FNV-1a over the name's characters.
 const fnv1a = s => [...s].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0, 2166136261);
 // Twelve hues 30° apart. In name order each project takes its hash slot, or the next free one, so no two of up to 12 share
@@ -696,13 +696,16 @@ async function poll() {
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);
     runs = runsByKey(runList);
-    // A done or aborted job's routing.log can't change, so it is fetched once, and only while its card is in the
-    // rendered Done column (render()'s set); active ones refetch every poll.
+    // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll, sending
+    // the last ETag so an unchanged log comes back as a bodyless 304 and keeps its text.
     const final = j => ["done", "aborted"].includes(j.stage);
-    const doneCards = new Set(shown(all).filter(j => colOf(j) === "done").sort(newestFirst).slice(0, doneShown).map(j => j.key));
-    await Promise.all(all.filter(j => j.routed && !(final(j) && (routesFinal.has(j.key) || !doneCards.has(j.key))))
-      .map(j => fetch(`p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`, {cache: "no-store"})
-        .then(r => r.ok ? r.text() : "").catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); })));
+    await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key))).map(j => {
+      const url = `p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`;
+      return fetch(url, {cache: "no-store", headers: etags[url] && j.key in routes ? {"If-None-Match": etags[url]} : {}})
+        .then(r => r.status === 304 && j.key in routes ? routes[j.key]
+          : r.ok ? r.text().then(t => { const tag = r.headers.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return t; }) : "")
+        .catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); });
+    }));
     auditRunsChanged();
     const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
     const nextManuals = Object.fromEntries(projects.map((p, i) => [p, checks[i]]));

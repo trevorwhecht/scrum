@@ -159,30 +159,6 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
 """
 
 
-# Job 463: counts routing.log requests per job id before Load more, after it and one poll, and after one more poll.
-ROUTING_SCRIPT = r"""
-let chromium;
-try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.stringify({skip: "playwright module not found"})); process.exit(0); }
-(async () => {
-  let browser;
-  try { browser = await chromium.launch(); } catch (e) { console.log(JSON.stringify({skip: "chromium failed to launch: " + String(e.message).split("\n")[0]})); return; }
-  try {
-    const page = await browser.newPage({viewport: {width: 1600, height: 900}});
-    const counts = {};
-    page.on("request", r => { const m = r.url().match(/\/jobs\/([^/]+)\/routing\.log$/); if (m) counts[m[1]] = (counts[m[1]] || 0) + 1; });
-    await page.goto(process.env.DASH_URL);
-    await page.waitForSelector('[data-col="done"] .card');
-    const first = {...counts};
-    await page.click('[data-col="done"] [data-more]');
-    await page.waitForTimeout(2600);  // past one 2 s poll
-    const loaded = {...counts};
-    await page.waitForTimeout(2600);
-    console.log(JSON.stringify({first, loaded, later: {...counts}}));
-  } finally { await browser.close(); }
-})().catch(e => { console.log(JSON.stringify({error: String(e.stack)})); });
-"""
-
-
 class ColumnsBrowserTest(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node")
@@ -235,32 +211,6 @@ class ColumnsBrowserTest(unittest.TestCase):
         self.assertEqual((got["third"]["done"], got["third"]["more"]), (newest, False), got)
         self.assertEqual(got["third"]["focus"], "005-done", got)  # the first card the last click revealed
         self.assertIn("· 25", got["third"]["header"])
-
-    def test_routing_log_fetched_only_for_shown_done_cards(self):
-        jobs = [{"id": f"{n:03d}-done", "title": f"Done {n}", "stage": "aborted" if n % 5 == 0 else "done",
-                 "updatedAt": f"2026-01-01T00:{n:02d}:00Z"} for n in range(1, 26)]
-        jobs += [{"id": f"{n:03d}-build", "title": f"Build {n}", "stage": "build", "updatedAt": "2026-01-02T10:00:00Z"}
-                 for n in (26, 27)]
-        (self.reg / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
-        for j in jobs:
-            d = self.reg / "scrum" / "jobs" / j["id"]
-            d.mkdir()
-            (d / "routing.log").write_text(json.dumps({"role": "scrum-builder", "runner": "cloud"}) + "\n")
-        env = dict(os.environ, DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
-        if "NODE_PATH" not in env:
-            npm = shutil.which("npm")
-            root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip() if npm else ""
-            env["NODE_PATH"] = root or "/opt/node22/lib/node_modules"
-        out = subprocess.run([self.node, "-e", ROUTING_SCRIPT], capture_output=True, text=True, env=env, timeout=120).stdout
-        got = json.loads(out.strip().splitlines()[-1])
-        if "skip" in got:
-            raise unittest.SkipTest(got["skip"])
-        done = lambda counts: {k: v for k, v in counts.items() if k.endswith("-done")}
-        self.assertEqual(done(got["first"]), {f"{n:03d}-done": 1 for n in range(16, 26)}, got)
-        self.assertEqual(done(got["loaded"]), {f"{n:03d}-done": 1 for n in range(6, 26)}, got)
-        self.assertEqual(done(got["later"]), done(got["loaded"]), got)
-        self.assertEqual(sorted(k for k in got["first"] if k.endswith("-build")), ["026-build", "027-build"], got)
-        self.assertGreater(got["later"]["026-build"], got["first"]["026-build"], "an active job's log refetches")
 
     def test_resume_prefixes_match_board(self):
         sys.path.insert(0, str(BOARD_PY.parent))
