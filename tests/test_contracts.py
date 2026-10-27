@@ -361,6 +361,31 @@ class ContractTest(unittest.TestCase):
         self.assertLess(template.index("## Follow-ups"), template.index("## Dropped"))
         self.assertLess(template.index("## Dropped"), template.index("## Manual checks"))
 
+    def test_nextjs_ui_rules_in_agents(self):
+        once = ("**Next.js UI rules.**", "trevskills-nextjs-ui/SKILL.md",
+                "lists `next` under `dependencies` or `devDependencies`", "never the whole file")
+        for name in ("scrum-spec-writer", "scrum-builder", "scrum-review-ui", "scrum-review-ux"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            for phrase in once:
+                self.assertEqual(text.count(phrase), 1, f"{name}: {phrase}")
+            para = next(l for l in text.splitlines() if "**Next.js UI rules.**" in l)
+            for phrase in once + ("grep -n '^#' $HOME/.claude/skills/trevskills-nextjs-ui/SKILL.md", "`### Tables`",
+                                  "where a section disagrees with `ui-behaviour.md`, `ui-behaviour.md` wins",
+                                  "skip this step when the skill file or package.json is missing",
+                                  "does not list `next`", "no blocked status", "`dashboard.html`"):
+                self.assertIn(phrase, para, f"{name}: {phrase}")
+            if name == "scrum-spec-writer":
+                self.assertIn("never contradict", para)
+            else:
+                self.assertIn("`UI surface: yes`", para)
+                self.assertIn("`WORKTREE/package.json`", para)
+            if name == "scrum-review-ui":
+                for phrase in ("(nextjs-ui: <heading>)", "(nextjs-ui: Alignment — left, always)",
+                               "`[blocking]` with confidence ≥ 80", "`pre-existing:"):
+                    self.assertIn(phrase, para, phrase)
+            else:
+                self.assertNotIn("(nextjs-ui:", text)
+
     def test_spec_writer_requires_prod_run_for_real_data(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("real business data", "never lists its prod run under Out", "test fixtures"):
