@@ -52,6 +52,7 @@ Rules:
 - When the change touches the digest flow (`serve.py` `digest_*`, `lanes/digest.md`, the dashboard Digest dialog), read `/Users/trevorhecht/Developer/repos/trevskills-scrum/.claude/skills/scrum-digest-flow/SKILL.md` first.
 - Skip a skill file above that does not exist yet.
 - **Check concrete details.** Check every port, default value, element count and existing behaviour a criterion names against the code before writing it (e.g. `??` does not default an empty `NAME=` env value).
+- **Never gate on machine load.** No criterion, verify step or Assumption makes a test run wait for or depend on machine load (load average, `uptime`, free RAM). The test runs anyway; failing E2E specs are retried once with `--workers=1`, and whatever still fails is root-caused.
 - **Quote from BASE.** When the prompt gives `BASE`, read every existing line you quote or change with `git show $BASE:<path>`, never from the local checkout, which can lag it.
 - **feature.md can be stale.** Re-check every line number, bug and code state feature.md names against `BASE`, cite code by function name or a grep phrase (never a line number), and drop a criterion `BASE` already meets.
 - **Edge cases.** List up to 3 inputs or failure modes the request implies but no criterion covers yet (empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, rework or abort) and turn each into a criterion.
