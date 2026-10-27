@@ -4066,6 +4066,12 @@ class BoardTest(unittest.TestCase):
                          "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
 
+    def test_wake_waiting_asks_when_dependency_aborted_while_held(self):
+        self.wait_board({"id": "001-first", "stage": "aborted"},
+                        {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        self.assertEqual(board.wake_waiting(self.root, hold=lambda j: True), {"ready": [], "lost": ["002-second"]})
+        self.assertEqual(self.jobs()[1]["stage"], "needs-human")
+
     def test_wait_on_then_keeps_worktree_and_records_wake(self):
         self.wait_board({"id": "001-first", "stage": "review"},
                         {"id": "002-second", "stage": "approve", "worktree": "/tmp/wt-002", "branch": "scrum/002-second",

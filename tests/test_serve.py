@@ -6561,6 +6561,43 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["003-third"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "spec"))
 
+    def heavy_usage(self):
+        now = time.time()
+        return {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 95, "resets_at": now + 3600}}}
+
+    def wake_at_high_usage(self, *jobs, room=1):
+        self.queue_board({"id": "001-first", "stage": "done"}, *jobs)
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=room), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "read_usage", return_value=self.heavy_usage()):
+            self.serve.wake_waiting("idle", self.root)
+        return spawn, appr
+
+    def test_wake_waiting_holds_heavy_job_at_high_usage(self):
+        spawn, _ = self.wake_at_high_usage(
+            {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "lane": "standard"},
+            {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        spawn.assert_not_called()
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "waiting"))
+
+    def test_wake_waiting_starts_light_job_at_high_usage(self):
+        spawn, _ = self.wake_at_high_usage(
+            {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "lane": "standard"},
+            {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"], "lane": "fast"})
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["003-third"])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "spec"))
+
+    def test_wake_waiting_holds_heavy_wake_job_at_high_usage(self):
+        spawn, appr = self.wake_at_high_usage(
+            {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "lane": "bigboy",
+             "wake": "approve 002-second"})
+        spawn.assert_not_called()
+        appr.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.assertEqual(self.job("002-second")["wake"], "approve 002-second")
+
     def test_wake_waiting_holds_while_machine_busy(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
