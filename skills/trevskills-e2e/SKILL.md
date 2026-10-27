@@ -19,14 +19,14 @@ Inputs: the repo root (the current directory, or `WORKTREE` when an agent runs i
 
 ## 2. Map changed files to routes/pages
 
-- **With a base:** list the changed files with `git diff --name-only <BASE>...HEAD`. Map each UI file to the route(s) or page(s) it renders: the file-system route for `app/`, `pages/` or `routes/` files; for a shared component or stylesheet, every route whose page imports it (`grep -rl` for the import). Files that render nothing (tests, docs, config) map to no route.
+- **With a base:** list the changed files with `git diff --name-only <BASE>...HEAD`. Keep only the runtime files, using the same exclusion as the Check gate (`grep -vE '(^|/)(__tests__|e2e|tests?|docs?)/|\.(test|spec)\.[cm]?[jt]sx?$|\.(md|mdx|txt)$'`): test files (including `*.test.tsx` and `*.spec.ts`), files under test, e2e or docs directories, and `.md`/`.mdx`/`.txt` files map to no route. Map each remaining UI file to the route(s) or page(s) it renders: the file-system route for `app/`, `pages/` or `routes/` files; for a shared component or stylesheet, every route whose page imports it (`grep -rl` for the import). Files that render nothing (tests, docs, config) map to no route.
 - **Run directly with no base:** the target is all routes.
 
 Then find the saved specs that cover each target route: the spec files in the E2E/test directory whose `page.goto(...)` or test title names the route.
 
 ## 3. Replay the saved suite first
 
-Replay needs no AI: run the E2E command as-is, once. With a base, run only the specs that cover the target routes when the runner accepts file arguments (e.g. `npx playwright test <spec files>`); otherwise run the whole command. Record each spec file run under `Specs run:`. Passing specs need no further reading.
+Replay needs no AI and runs once. With a base, run only the saved specs that cover the target routes: `npx playwright test <spec files>`. When the `E2E:` command is an `npm run` script or a `playwright test` command, the spec files are appended to it, keeping any env prefix such as `E2E_PORT=...`; an `npm run` script takes them after `--`. When no changed file maps to a route and section 4 adds no spec, nothing runs and the report says `Specs run: 0 — none`. Run the whole command only when no base is given. Record each spec file run under `Specs run:`. Passing specs need no further reading.
 
 ## 4. Cover changed UI that has no spec
 

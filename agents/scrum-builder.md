@@ -28,9 +28,9 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - Every test must fail if the behaviour breaks: hand-written literal expectations (never values computed by the code under test), and never an assertion on a mock.
    - A phrase assert on prose uses a phrase found only in the new rule, never a word that already appears elsewhere in the asserted section.
    - An e2e test whose record is missing from the dev DB creates that record in its own setup; never skip it, mark it fixme or leave it out, so it cannot pass without running.
-   - While working, run only the focused test. Run the full suite once before the final commit.
-4. Run the project's test, typecheck, lint and build commands from `PROJECT`. Fix whatever you broke, and name in build.md any failure you didn't cause.
-   - Run the build command through the machine-wide build lock, as the Check gate does: `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$PROJECT"`.
+4. Run the focused tests for the files you changed: the test files you wrote or edited, plus the test files that cover the changed sources, found with `grep -l` for the module name over the test directories. Then run `Typecheck` and `Lint` from `PROJECT`, each one that is not `none`. Fix whatever you broke, and name in build.md any failure you didn't cause.
+   - The builder never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command: those run once in the Check gate. When no test covers the changed sources and you wrote or edited none, say so in build.md; never fall back to the full `Test`.
+   - Each build.md acceptance-criteria line names the focused command that was run.
    - For a failure in a file outside your diff, first grep `JOB_DIR/../../backlog.md` for that file's path and for the failing test's class and method names; when an open `- [ ]` line names any of them, cite that line in build.md and never re-run it on BASE to prove it.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - When tsc fails only on files under `.next/types`, delete `.next/types` in WORKTREE and re-run tsc before calling it a failure.
@@ -65,7 +65,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
 **Resumed runs.** You'll be pointed at a round folder (`JOB_DIR/round-N/`) holding `check.md` and/or `review-*.md`, or at `JOB_DIR/decision.md`, `JOB_DIR/rework.md` or `JOB_DIR/ci.md`:
 - If the worktree is mid-merge (the orchestrator merged the default branch in, and there are conflict markers): resolve every conflict, keeping both sides' intent. Then `git add -A && git commit --no-edit`, and note what you resolved in build.md.
 - After any merge of the default branch that changed `prisma/schema.prisma`, run `npx prisma generate` before the typecheck.
-- After any merge of the default branch that changed `package.json` or the lockfile, run PROJECT's install command before the typecheck and build.
+- After any merge of the default branch that changed `package.json` or the lockfile, run PROJECT's install command before the typecheck.
 - Fix every failing check, and every finding marked `[blocking]` in a CHANGES review. `[minor]` findings and Notes are optional.
 - You may decline a finding that is wrong; give the reason in build.md.
 - Do not start a new review yourself, and do not edit any review file.

@@ -2785,9 +2785,61 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn('Build runs as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$F/project.md"`', check)
         self.assertNotIn("'<Build>'", check)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
-        step4 = self.section(builder, "4. Run the project's test", "5. Commit on your branch")
-        self.assertIn('`python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project "$PROJECT"`', step4)
+        step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
+        self.assertNotIn("buildlock.py", step4)
         self.assertNotIn("'<Build>'", step4)
+
+    def test_builder_runs_focused_tests_only(self):
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertNotIn("Run the full suite once", builder)
+        step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
+        for phrase in ("`grep -l` for the module name over the test directories",
+                       "never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command",
+                       "names the focused command that was run",
+                       "JOB_DIR/../../backlog.md", "Write PASS only for a command you ran",
+                       "delete `.next/types` in WORKTREE", "A criterion that needs the running app"):
+            self.assertIn(phrase, step4, phrase)
+        self.assertIn("run PROJECT's install command before the typecheck.", builder)
+
+    def test_check_gate_runtime_file_rule(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        regex = ("git -C \"$WT\" diff --name-only \"$BASE\"...HEAD | grep -vE "
+                 "'(^|/)(__tests__|e2e|tests?|docs?)/|\\.(test|spec)\\.[cm]?[jt]sx?$|\\.(md|mdx|txt)$'")
+        self.assertEqual(check.count(regex), 1)
+        for phrase in ("a file the regex does not exclude counts as runtime",
+                       "at least one runtime file matches `UI globs`",
+                       "Build is skipped when there is no runtime file",
+                       "Test, Typecheck and Lint always run",
+                       "`E2E: skipped, no runtime file matches UI globs`",
+                       "`Build: skipped, no runtime file in diff`",
+                       "never makes `CHECK: FAIL`",
+                       "when the E2E command from step 2 ran"):
+            self.assertIn(phrase, check, phrase)
+        self.assertNotIn("and any file in `git -C \"$WT\" diff --name-only \"$BASE\"...HEAD` matches `UI globs`, run", check)
+
+    def test_e2e_reviewer_needs_runtime_file(self):
+        text = skill_text()
+        rule = "a runtime file (the Check gate's runtime-file rule) matches `UI globs`"
+        review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
+        step3 = self.section(review, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
+        self.assertIn(rule, step3)
+        self.assertIn("overwriting any file the **Check gate** E2E triage left", step3)
+        self.assertIn('rm -f "$F/jobs/$ID/round-$N/review-e2e.md"', step3)
+        fast = self.section(text, "## Fast lane", "## Debug lane")
+        self.assertIn(rule, self.section(fast, "2. **Review.**", "3. **Route:**"))
+        self.assertNotIn("(the Check gate's matching)", fast)
+
+    def test_e2e_replay_scoped_to_changed_routes(self):
+        body = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text().split("\n---\n", 1)[1]
+        mapping = self.section(body, "## 2. Map changed files", "## 3. Replay")
+        self.assertIn("same exclusion as the Check gate", mapping)
+        self.assertIn("`*.test.tsx`", mapping)
+        replay = self.section(body, "## 3. Replay", "## 4. Cover changed UI")
+        for phrase in ("Specs run: 0 — none", "appended to it, keeping any env prefix such as `E2E_PORT=...`",
+                       "only when no base is given"):
+            self.assertIn(phrase, replay, phrase)
+        agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        self.assertIn("never the whole suite", agent)
 
     def test_unblocker_has_no_edit(self):
         path = ROOT / "agents" / "scrum-unblocker.md"
