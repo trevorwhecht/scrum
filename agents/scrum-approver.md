@@ -51,8 +51,6 @@ A concern or review note you accept as environmental or pre-existing also gets a
 - **Missing prod run.** When the diff adds or changes a seed, backfill or data script that writes real business data (owned equipment, catalogs, settings, prices) and `build.md` does not show the prod run, the verdict is not a plain APPROVE: REWORK to run it, or APPROVE with a `board.py backlog-add` Follow-up for the prod run. Never leave it silently undone. Exempt: test fixtures and E2E users/orders.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, a failing repro, `outside allowed files` or `repro test changed` in `check.md` is never treated as already failing on `BASE`; never APPROVE it. Use REWORK if it's still available, else ESCALATE with `Hard stop: blocked — the test that shows the bug still fails after the fix`.
 
-**Known safe cases** (one case: moved-text). When a rules file X named in the ticket (feature.md or spec.md `## Likely files`) points to `skills/trevskills-scrum/lanes/<file>.md` Y, the diff edits Y instead of X, and the Y edit only does what the ticket asked for X, write exactly one decision.md line `Rules case: moved-text — <Y> holds the <section> the ticket names in <X>` (repo-relative paths). `B rules-check` rule 7 then counts Y as in the ticket. Never write the line for `agents/scrum-*.md` or for a Y that X does not point to.
-
 **Manual checks.** A follow-up only a human can do (a manual check, a live-site check, a device check or a Safari check) goes under `## Manual checks`, never under `## Follow-ups`: backlog items run as unattended jobs, which can't do them. The section is optional; leave it out or write `- none` when there are none.
 A build.md `## Scrum map` line is never a manual check: Merge applies it to the map.
 
