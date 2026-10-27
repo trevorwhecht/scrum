@@ -50,20 +50,21 @@ class RoadmapCard(unittest.TestCase):
     def test_card_shows_name_position_step_and_blocker(self):
         html, = run('render(); console.log(JSON.stringify(els.board.innerHTML));', {"p": ACTIVE, "q": None})
         self.assertNotIn("roadmap", cols(html))
-        self.assertEqual(cols(html)[0], "spec")
-        col = html[html.index('data-col="spec"'):html.index('data-col="build"')]
-        self.assertEqual(col.count('class="card roadmap"'), 1, "step 002-b is not on the board, so the card waits in spec")
-        self.assertIn("<span>· 1</span>", col, "the card counts in its column")
-        # With the current step's job on the board, the card sits in that job's column, ahead of the job's own card.
+        col = html[html.index('data-col="running"'):]
+        self.assertEqual(col.count('class="card roadmap"'), 1, "an unfinished roadmap sits in running")
+        self.assertIn("waiting: step not started", col, "step 002-b is not on the board")
+        # With the step's job on the board the card stays in running; the job's own card sits in its stage column.
         # card() is stubbed: its helpers sit outside the slice run() loads, and only the placement is under test.
-        html, = run('card = j => `<i data-key="${j.key}"></i>`; jobs = [{id: "002-b", project: "p", key: "p/002-b", stage: "needs-human", title: "B", '
+        html, = run('card = j => `<i data-key="${j.key}"></i>`; jobs = [{id: "002-b", project: "p", key: "p/002-b", stage: "spec", title: "B", '
                     'updatedAt: "2026-10-01T00:00:00Z"}]; render(); console.log(JSON.stringify(els.board.innerHTML));',
                     {"p": ACTIVE, "q": None})
-        col = html[html.index('data-col="needs-human"'):html.index('data-col="done"')]
-        self.assertEqual(col.count('class="card roadmap"'), 1)
-        self.assertLess(col.index('class="card roadmap"'), col.index('data-key="p/002-b"'))
-        self.assertIn("<span>· 2</span>", col)
-        self.assertNotIn('class="card roadmap"', html[html.index('data-col="spec"'):html.index('data-col="needs-human"')])
+        self.assertEqual(html.count('class="card roadmap"'), 1)
+        self.assertNotIn('class="card roadmap"', html[html.index('data-col="spec"'):html.index('data-col="build"')])
+        self.assertIn('data-key="p/002-b"', html[html.index('data-col="spec"'):html.index('data-col="build"')])
+        self.assertIn('class="card roadmap"', html[html.index('data-col="running"'):])
+        self.assertNotIn("waiting:", html)
+        cool, = run('els.cooldown = {dataset: {on: "1"}}; console.log(JSON.stringify(roadmapCard("p")));', {"p": ACTIVE})
+        self.assertIn("waiting: cooling down", cool)
         card, = run('console.log(JSON.stringify(roadmapCard("p")));', {"p": ACTIVE})
         self.assertTrue(card.startswith('<button class="card roadmap" data-roadmap="p"'), card)
         for want in ('<span class="tag" data-project="p" style="--h:', '>p</span>', '<span class="lanechip">roadmap</span>',
@@ -103,7 +104,6 @@ class RoadmapCard(unittest.TestCase):
         self.assertIn("<span>· 11</span>", col)
         html, = run('render(); console.log(JSON.stringify(els.board.innerHTML));', {"p": None, "q": None})
         self.assertNotIn("roadmap", cols(html))
-        self.assertEqual(cols(html)[0], "spec")
         html, = run('render(); console.log(JSON.stringify(els.board.innerHTML));', {}, projects=())
         self.assertNotIn("roadmap", cols(html))
 
