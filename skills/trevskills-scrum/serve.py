@@ -2902,9 +2902,10 @@ def digest_queue_skill(root: Path, digest_id: str, prop: dict, edits: Sequence[d
     return None
 
 
-def digest_queue_repo_edit(digest_id: str, prop: dict) -> None:
-    """Queue an edit to a registered repo's file as a backlog item in that repo's scrum/, with its pre-written spec."""
-    repo, rel = repo_of(prop["target"])
+def digest_queue_repo_edit(digest_id: str, prop: dict, where: tuple[Path, str] | None = None) -> None:
+    """Queue an edit to a registered repo's file as a backlog item in that repo's scrum/, with its pre-written spec.
+    where: its (repo, rel) as resolved before digest_apply, whose fast-forward may have re-pointed the target."""
+    repo, rel = where or repo_of(prop["target"])
     queue_digest_item(repo / "scrum", f"Apply digest {digest_id} {prop['id']} to {rel}: {prop['why']}",
                       digest_item_spec(digest_id, prop, rel))
 
@@ -3033,9 +3034,14 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
         if (r := git_run(repo, "worktree", "add", "-q", "--detach", wt, f"origin/{branch}")).returncode:
             return [], [entry(p, f"worktree failed: {first(r)}") for p in props], None
         done, queued = [], []  # done: (proposal, path relative to repo)
+        wt_real = Path(wt).resolve()  # macOS: /var/... is /private/var/...
         for p in props:
-            rel = repo_of(p["target"])[1]
-            target = Path(wt) / rel
+            # a symlink tracked on origin may point outside wt; never read or write through it
+            target = (wt_real / repo_of(p["target"])[1]).resolve()
+            if target != wt_real and wt_real not in target.parents:
+                queued.append(entry(p, "target escapes worktree"))
+                continue
+            rel = str(target.relative_to(wt_real))
             try:
                 orig = target.read_bytes()
                 text = orig.decode()
@@ -3148,7 +3154,7 @@ def digest_auto(root, digest_id):
     out = {"applied": [], "queued": [], "skipped": [], "job": None}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
-    updates, by_repo = {}, {}
+    updates, by_repo, where = {}, {}, {}
 
     def skip(p, why):
         out["skipped"].append({"id": p["id"], "target": p["target"], "reason": why})
@@ -3199,6 +3205,7 @@ def digest_auto(root, digest_id):
             skip(p, "settings or hooks file")
         elif repo := repo_of(p["target"]):
             by_repo.setdefault(repo[0], []).append(p)
+            where[p["id"]] = repo
         elif why := digest_write_global(p):
             skip(p, why)
         else:
@@ -3213,7 +3220,7 @@ def digest_auto(root, digest_id):
             if q["reason"].startswith("old text found"):
                 skip(by_id[q["id"]], q["reason"])
             else:
-                digest_queue_repo_edit(digest_id, by_id[q["id"]])
+                digest_queue_repo_edit(digest_id, by_id[q["id"]], where[q["id"]])
                 queue(by_id[q["id"]], q["reason"])
     with DIGEST_LOCK:
         digest_set_statuses(root, digest_id, updates)
