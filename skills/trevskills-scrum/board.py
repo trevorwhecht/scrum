@@ -2935,7 +2935,8 @@ COOLING_CLAIM = f"{COOLING}: no new backlog claim. Fix: click Resume work in the
 
 def cooldown_path():
     """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no new work starts on its own (backlog
-    claims, Run-all child claims, auto-continue, cloud-claim, the next roadmap step); work already on the board finishes."""
+    claims, Run-all and BigBoy child claims, wake-waiting, auto-continue, cloud-claim, the next roadmap step, the
+    bad-window digest); work already started finishes, and Trevor's own clicks still start work."""
     return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
 
@@ -2962,9 +2963,10 @@ def swap_grew(swap):
 
 
 def machine_ok(path, manual=False, claim=False):
-    """None when the machine has room for new work, else why not: cool-down (only for a new claim, claim=True, and
-    skipped for Trevor's manual clicks), then free RAM, then swap, then free disk, then CPU busy, then CPU load (the
-    5-minute load average over the cores; both CPU checks also skipped for manual clicks), then the session ceiling.
+    """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
+    not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then swap, then free
+    disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
+    manual clicks), then the session ceiling.
     Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
@@ -3092,9 +3094,11 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
-def cmd_ready(root, parent_id, live=()):
+def cmd_ready(root, parent_id, live=(), manual=False):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
-    `live` ids count as in progress whatever their stage (see resume_blocker)."""
+    `live` ids count as in progress whatever their stage (see resume_blocker). Cool-down holds every claim (Run-all and
+    BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
+    all_merged, so its final review runs."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -3112,7 +3116,8 @@ def cmd_ready(root, parent_id, live=()):
         blocked = not held and (legacy or (parent["stage"] == "running"
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
-        machine = go and machine_ok(root, claim=runall)  # checked once: a machine-wide state, so it gates the whole call
+        # checked once: a machine-wide state, so it gates the whole call
+        machine = go and machine_ok(root, manual=manual, claim=True)
         # paused or stalled work goes before new claims; a job with a live session is already being resumed
         first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper

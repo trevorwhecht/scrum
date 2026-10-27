@@ -160,12 +160,13 @@ def setup_done(project, root, job_id):
             job.update(setup="done", updatedAt=board.now())
     if not ok:
         return 409, {"error": "job isn't a BigBoy child waiting on Human setup"}
-    return 200, {"id": job_id, **start_ready(project, root, job["parent"])}
+    return 200, {"id": job_id, **start_ready(project, root, job["parent"], manual=True)}
 
 
-def start_ready(project, root, parent_id):
-    """Claim the parent's startable children and start each one headless. Returns cmd_ready's output."""
-    out = board.cmd_ready(root, parent_id, live_ids(project))
+def start_ready(project, root, parent_id, manual=False):
+    """Claim the parent's startable children and start each one headless. Returns cmd_ready's output. Cool-down holds
+    the claims unless `manual` (Trevor's click)."""
+    out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
     return out
@@ -174,9 +175,9 @@ def start_ready(project, root, parent_id):
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
     `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
-    them waiting, never needs-human. A `wait-on --then` job comes back at needs-human ("retry") and gets an approve
-    spawn instead, from the same room."""
-    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root):
+    them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True). A
+    `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
+    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True):
         return
     room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
     live = board.live_sessions()
@@ -196,7 +197,8 @@ def resume_job(project, root, job, jobs, manual=False):
     refused child is unpaused and flagged stalled, so the auto-resume sweep starts it once a slot frees. A refused lilguy
     child in the main checkout still at spec round 0 has done no work, so it goes back to waiting for start_ready to
     claim again (nothing resumes a lilguy job, so a stalled flag would park it for good). Cool-down never holds the
-    paused children (work in flight); a Run-all parent's new claims after them wait while cooling down."""
+    paused children (work in flight); the parent's new child claims after them (Run-all or BigBoy) wait while cooling
+    down unless `manual` (Trevor's Play)."""
     job_id = job["id"]
     if job.get("children") and job.get("paused") and job["stage"] == "running":  # else its own session resumes
         board.cmd_set(root, job_id, ["stage=running", "reason="], unpause=True)
@@ -215,7 +217,7 @@ def resume_job(project, root, job, jobs, manual=False):
                                     reason=f"{board.STALL}waiting for a free slot after Play")
             else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
-        start_ready(project, root, job_id)
+        start_ready(project, root, job_id, manual=manual)
         return
     spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
@@ -287,9 +289,9 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds only new claims, never a resume); a heavy job waits while a usage window is
-    nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules `ready`
-    applies to new claims."""
+    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a heavy job waits while a usage
+    window is nearly spent (heavy_refusal, manual clicks too); a Run-all/BigBoy child also waits for the overlap rules
+    `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM
@@ -1154,11 +1156,14 @@ def watchdog_tick():
 
 def window_tick():
     """board.cmd_window_report for every project, each in its own guard. When it wrote a scorecard and digest-due's
-    reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn while one runs)."""
+    reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn while one runs), unless
+    cool-down is on: the scorecard is still written, the skipped digest is not replayed (the dashboard Digest button
+    is not held)."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
-            if board.cmd_window_report(root) and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
+            if board.cmd_window_report(root) and not board.cooling_down() \
+                    and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)

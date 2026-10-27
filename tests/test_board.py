@@ -1587,8 +1587,9 @@ class BoardTest(unittest.TestCase):
         play.assert_not_called()
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [a, b], "claims again once the flag is gone")
 
-    def test_ready_cooling_down_bigboy_claims_and_finishes(self):
-        """Job 421: a BigBoy parent's children already exist, so cool-down lets it claim them and reach its final review."""
+    def test_ready_cooling_down_bigboy_holds_children(self):
+        """Job 466: cool-down holds a BigBoy parent's child claims too; Trevor's manual click still claims, and a parent
+        whose children all finished still reaches its final review."""
         parent, a, b = (board.cmd_new(self.root, t) for t in ("big", "a", "b"))
         self.edit_jobs(**{parent: {"lane": "bigboy", "stage": "running", "reason": None, "children": [a, b]},
                           a: {"parent": parent, "stage": "done"}, b: {"parent": parent, "stage": "done"}})
@@ -1602,11 +1603,20 @@ class BoardTest(unittest.TestCase):
                           d: {"parent": parent, "stage": "waiting", "depends_on": [a, b], "parallel": True}})
         self.spec(c, "src/c.py")
         self.spec(d, "src/d.py")
-        with self.cooling(), mock.patch.object(board, "play"):
+        with self.cooling(), mock.patch.object(board, "play") as play:
             out = board.cmd_ready(self.root, parent)
-        self.assertEqual(out["ready"], [c, d])
+        self.assertEqual(out["ready"], [])
+        self.assertEqual((self.child(c)["stage"], self.child(d)["stage"]), ("waiting", "waiting"))
+        self.assertEqual(self.child(parent)["stage"], "running")
+        self.assertTrue(self.child(parent)["reason"].startswith("waiting: cooling down"), self.child(parent)["reason"])
+        play.assert_not_called()
+        with self.cooling(), mock.patch.object(board, "play"):
+            out = board.cmd_ready(self.root, parent, manual=True)
+        self.assertEqual(out["ready"], [c, d], "Trevor's click claims while cooling down")
         self.assertEqual((self.child(c)["stage"], self.child(d)["stage"]), ("spec", "spec"))
-        self.assertEqual(self.child(parent)["reason"], None)
+        self.edit_jobs(**{c: {"stage": "waiting"}, d: {"stage": "waiting"}})
+        with mock.patch.object(board, "play"):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c, d], "claims once the flag is gone")
 
     def test_cooldown_refuses_new_backlog_claims(self):
         """Job 421: cool-down refuses the automatic backlog claims; Trevor's Run now (an explicit index) still claims."""
