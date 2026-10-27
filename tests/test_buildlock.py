@@ -1,4 +1,4 @@
-import fcntl, importlib.util, os, re, signal, subprocess, sys, tempfile, time, unittest
+import fcntl, importlib.util, io, os, re, signal, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -204,6 +204,25 @@ class BuildLockTest(unittest.TestCase):
         r = self.run_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="1")
         self.assertEqual(r.returncode, 124)
         self.assertEqual(list(self.marker_dir().glob("*")), [])
+
+    def run_inproc_unlink_fails(self, argv, holder_dies_after=None, **env):
+        """Run main() in-process while the marker unlink raises OSError; return its exit code."""
+        holder = self.hold()
+        if holder_dies_after:
+            threading.Timer(holder_dies_after, holder.kill).start()
+        with mock.patch.dict(os.environ, {**self.env, **env}), \
+                mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")), \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            return load().main(argv)
+
+    def test_marker_unlink_failure_keeps_exit_code(self):
+        code = self.run_inproc_unlink_fails([sys.executable, "-c", "raise SystemExit(7)"], holder_dies_after=1,
+                                            SCRUM_BUILD_LOCK_TIMEOUT="20")
+        self.assertEqual(code, 7)
+
+    def test_marker_unlink_failure_on_timeout(self):
+        code = self.run_inproc_unlink_fails([sys.executable, "-c", "pass"], SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual(code, 124)
 
     def project(self, build):
         f = self.dir / "project.md"
