@@ -47,13 +47,40 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       console.log(JSON.stringify({card, modal, fit}));
       return;
     }
+    if (mode === "kids") {  // a 12-child parent: its card's Load more, empty columns hidden, then the modal's own Load more
+      const key = process.env.PARENT, sel = `.card[data-key="${key}"]`;
+      const state = () => page.evaluate(s => {
+        const more = document.querySelector("#board [data-kids-more]");
+        return {lines: document.querySelectorAll(`${s} .meta.kid`).length, more: !!more,
+                sibling: !!more && more.previousElementSibling === document.querySelector(s) && more.parentElement.matches(".col"),
+                focused: !!document.activeElement?.matches("[data-kids-more]"), viewer: document.getElementById("viewer").open,
+                build: document.querySelector('[data-col="build"]').getClientRects().length,
+                running: document.querySelector('[data-col="running"]').getClientRects().length};
+      }, sel);
+      const board = [await state()];
+      await page.click("#board [data-kids-more]");
+      board.push(await state());
+      await page.click("#board [data-kids-more]");
+      board.push(await state());
+      await page.reload();
+      await page.waitForSelector(sel);
+      await page.click(`${sel} .title`);
+      await page.waitForFunction(() => document.getElementById("viewer").open && document.querySelector("#actions .kids"));
+      const modal = () => page.evaluate(() => ({rows: document.querySelectorAll("#actions .kids .kid").length,
+        more: !!document.querySelector("#actions .kids [data-kids-more]"), open: document.getElementById("viewer").open,
+        key: document.getElementById("viewer").dataset.key}));
+      const before = await modal();
+      await page.click("#actions [data-kids-more]");
+      console.log(JSON.stringify({board, modal: [before, await modal()]}));
+      return;
+    }
     await page.click(".card[data-key]");
     await page.waitForFunction(() => document.getElementById("viewer").open && document.querySelector("#tabs .close"));
     const measure = () => page.evaluate(() => {
       const tabs = document.getElementById("tabs"), close = tabs.querySelector(".close"), c = close.getBoundingClientRect();
       return {overflow: tabs.scrollWidth > tabs.clientWidth, paddingRight: getComputedStyle(tabs).paddingRight,
               marginLeft: getComputedStyle(close).marginLeft, position: getComputedStyle(close).position,
-              tabsRight: tabs.getBoundingClientRect().right, close: {width: c.width, height: c.height, right: c.right},
+              tabsRight: tabs.getBoundingClientRect().right, build: document.querySelector('[data-col="build"]').getClientRects().length, close: {width: c.width, height: c.height, right: c.right},
               actions: [...document.querySelectorAll("#actions .btn, #actions summary")].filter(b => b.checkVisibility())
                 .map(b => { const r = b.getBoundingClientRect(); return {text: b.textContent.trim(), height: r.height, width: r.width}; })};
     });
@@ -102,8 +129,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
-    def browse(self, mode, width=None):
-        env = dict(os.environ, MODE=mode, WIDTH=str(width or ""), DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
+    def browse(self, mode, width=None, **extra):
+        env = dict(os.environ, **extra, MODE=mode, WIDTH=str(width or ""), DASH_URL=f"http://127.0.0.1:{self.server.server_address[1]}/dashboard.html")
         if "NODE_PATH" not in env:
             npm = shutil.which("npm")
             root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip() if npm else ""
@@ -152,6 +179,26 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertEqual(m["position"], "static", m)
         self.assertGreater(float(m["marginLeft"].removesuffix("px")), 0, m)  # margin-left:auto pushes the ✕ right
         self.assertAlmostEqual(m["close"]["right"], m["tabsRight"] - 10, delta=1, msg=m)  # 10 px padding after the ✕
+        self.assertGreater(m["build"], 0, m)  # an empty column stays visible above 640 px
+
+    def test_parent_card_load_more_390(self):
+        board = json.loads(self.board_path.read_text())
+        kids = [f"{n:03d}-kid" for n in range(21, 33)]
+        board["jobs"] += [{"id": "020-run-all", "title": "Run all", "stage": "running", "children": kids, "files": ["feature.md"]}] + [
+            {"id": k, "title": k, "stage": "waiting", "parent": "020-run-all", "depends_on": []} for k in kids]
+        self.board_path.write_text(json.dumps(board))
+        (self.board_path.parent / "jobs" / "020-run-all").mkdir()
+        (self.board_path.parent / "jobs" / "020-run-all" / "feature.md").write_text("# feature\n")
+        key = f"{PROJECT}/020-run-all"
+        got = self.browse("kids", PARENT=key)
+        first, second, third = got["board"]
+        self.assertEqual((first["lines"], first["more"], first["sibling"], first["viewer"]), (5, True, True, False), got)
+        self.assertEqual((first["build"], first["running"] > 0), (0, True), got)  # empty column hidden at 390 px
+        self.assertEqual((second["lines"], second["more"], second["focused"], second["viewer"]), (10, True, True, False), got)
+        self.assertEqual((third["lines"], third["more"], third["viewer"]), (12, False, False), got)
+        before, after = got["modal"]
+        self.assertEqual((before["rows"], before["more"]), (5, True), got)
+        self.assertEqual((after["rows"], after["more"], after["open"], after["key"]), (10, True, True, key), got)
 
     def test_option_buttons_390px(self):
         board = json.loads(self.board_path.read_text())

@@ -2622,6 +2622,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                  "depends_on": [], "setup": "pending"},
                 {"key": "p/004-c", "project": "p", "id": "004-c", "ticket": "T3", "stage": "waiting", "parent": "001-big",
                  "depends_on": ["002-a", "003-b"]},
+                {"key": "p/010-run-all", "project": "p", "id": "010-run-all", "children": [f"01{n}-k" for n in range(1, 8)]},
+                *[{"key": f"p/01{n}-k", "project": "p", "id": f"01{n}-k", "stage": "done" if n <= 3 else "build",
+                   "parent": "010-run-all"} for n in range(1, 8)],
                 {"key": "p/005-run-all", "project": "p", "id": "005-run-all", "lane": "runall", "children": ["006-x", "007-y"]},
                 {"key": "p/006-x", "project": "p", "id": "006-x", "ticket": None, "stage": "spec", "parent": "005-run-all",
                  "depends_on": []},
@@ -2629,16 +2632,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                  "depends_on": []}]
         out = subprocess.run([node, "-e", f"let jobs = {json.dumps(jobs)};\n{src}\n"
                               "console.log(JSON.stringify([bigboyLines(jobs[0]), bigboyLines(jobs[3]), jobs.map(setupWait),"
-                              " bigboyLines(jobs[4]), bigboyLines(jobs[5])]))"],
+                              " bigboyLines(jobs[12]), bigboyLines(jobs[13]), bigboyLines(jobs[4])]))"],
                              capture_output=True, text=True, check=True).stdout
-        parent, child, waits, run_parent, run_child = json.loads(out)
+        parent, child, waits, run_parent, run_child, seven = json.loads(out)
+        self.assertEqual(seven, '<span class="meta">T3/7 merged</span>' + "".join(
+            f'<span class="meta kid">01{n}-k build</span>' for n in range(4, 8)) + '<span class="meta kid">011-k done</span>')
         self.assertEqual(run_parent, '<span class="meta">T0/2 merged</span><span class="meta kid">006-x spec</span>'
                          '<span class="meta kid">007-y waiting</span>')
         self.assertEqual(run_child, '<span class="meta">Child of 005-run-all</span>')
-        self.assertEqual(parent, '<span class="meta">T1/3 merged</span><span class="meta kid">T1 done</span>'
-                         '<span class="meta kid">T2 waiting</span><span class="meta kid">T3 waiting ← T1, T2</span>')
+        self.assertEqual(parent, '<span class="meta">T1/3 merged</span><span class="meta kid">T2 waiting</span>'
+                         '<span class="meta kid">T3 waiting ← T1, T2</span><span class="meta kid">T1 done</span>')
         self.assertEqual(child, '<span class="meta">T3 of 001-big</span>')
-        self.assertEqual(waits, [False, False, True, False, False, False, False])
+        self.assertEqual(waits, [False, False, True, False] + [False] * 8 + [False, False, False])
         card = text[text.index("function card(job)"):text.index("function render()")]
         for phrase in ('human || setup ? " human"', "esc(statusLine(job))", '"waiting", "plan", "running"'):
             self.assertIn(phrase, card, phrase)

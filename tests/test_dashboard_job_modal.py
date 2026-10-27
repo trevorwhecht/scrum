@@ -60,11 +60,18 @@ class JobModal(unittest.TestCase):
         html = run("childLinks(jobs[0])")
         rows = re.findall(r'<form data-act="goto" data-key="([^"]+)"><button class="btn tall kid( human)?" type="submit">(.*?)</button></form>', html)
         self.assertEqual(rows, [
-            ("p/006-a", "", 'T1 <span class="id">006-a</span> done'),
             ("p/007-b", " human", 'T2 <span class="id">007-b</span> needs-human'),
             ("p/008-c", " human", 'T3 <span class="id">008-c</span> waiting'),
+            ("p/006-a", "", 'T1 <span class="id">006-a</span> done'),
         ])
-        self.assertIn('<p class="note kid"><span class="id">009-gone</span> —</p>', html)
+        self.assertTrue(html.endswith('<p class="note kid"><span class="id">009-gone</span> —</p></div>'), html)  # finished group, last
+        self.assertNotIn("data-kids-more", html)
+        seven = run('(jobs.push(...[1,2,3,4,5,6,7].map(n => ({key: `p/1${n}-k`, project: "p", id: `1${n}-k`, stage: "build"}))),'
+                    ' childLinks({key: "p/010-seven", project: "p", children: [1,2,3,4,5,6,7].map(n => `1${n}-k`)}))')
+        self.assertEqual(len(re.findall(r'<form data-act="goto"', seven)), 5)
+        self.assertIn('data-key="p/15-k"', seven)
+        self.assertNotIn('data-key="p/16-k"', seven)
+        self.assertTrue(seven.endswith('<button class="btn tall more" type="button" data-kids-more="p/010-seven">Load more</button></div>'), seven)
         self.assertNotIn('data-key="p/009-gone"', html)
         self.assertIn('Child <span class="id">012-x</span> build', run("childLinks(jobs[4])"))
         self.assertEqual(run("childLinks(jobs[1])"), "")

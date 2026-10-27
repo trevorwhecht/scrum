@@ -43,6 +43,8 @@ class DashboardMobile390Css(unittest.TestCase):
         close = decls(phone, "#tabs .close")
         self.assertIn("min-height:44px", close)
         self.assertIn("min-width:44px", close)
+        self.assertIn("margin-left:0", decls(phone, "#filter"))
+        self.assertIn("display:none", decls(phone, ".col.none"))
 
     def test_backlog_row_buttons_44px(self):
         row = decls(split(css())[0], "#blList .btn")
