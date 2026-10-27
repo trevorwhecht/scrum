@@ -36,7 +36,8 @@ def skill_text():
         part = next((p for p in parts[1:] if p.startswith(heading)), parts[0])
         return part.split("\n\n", 1)[1].rstrip("\n")
     # Merge keeps steps 1-2 in SKILL.md; its lane file continues at step 3 on the next line
-    text = text.replace("\n\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", "\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", 1)
+    at = text.index("\n## Merge (")
+    text = text[:at] + text[at:].replace("\n\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", "\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", 1)
     return POINTER.sub(body, text)
 
 

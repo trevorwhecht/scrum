@@ -145,11 +145,7 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/review.md` when this section r
 
 ## Migrate (Merge's schema guard)
 
-Schema changes migrate and merge unattended (Trevor's call); this stops only when `/trevskills-migrate` stops.
-
-1. `cd "$WT"` and invoke `/trevskills-migrate` (Skill tool) there with args `base=$BASE`, plus `prod-approved=<content>` if `$F/jobs/$ID/prod-approval.md` exists, following it exactly. Every question it would put to Trevor is a stop: never answer one yourself.
-2. On a stop, `cd "$REPO"`. If its only stop is Step 8.2 (`prod-approval-sha: <sha>`), write `<sha>` to `$F/jobs/$ID/prod-approval-pending.md` and run `B ask $ID 'migrate needs your OK: the database update would <what the flagged SQL does> because <why>.' --a "Merge anyway=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop. If the stop names a migration folder this branch lacks, find the one board job (not done or aborted) whose `git -C "$REPO" ls-tree -r --name-only "scrum/<id>"` lists a path containing `/<folder>/`, run `B wait-on $ID <that id> --then "approve $ID"`, and stop on exit 0, keeping the worktree; with no such job or a non-zero exit, fall through. If the stop is `/trevskills-migrate` Step 1's duplicate-column finding naming a concrete alternative (drop, reuse or read through a relation), the job is not in the **Lilguy lane**, and `$F/jobs/$ID/rework.md` has no line starting `Auto-rework: duplicate column`, follow **`/trevskills-scrum rework`** with `$ID` and the note `Auto-rework: duplicate column — <the alternative>` and stop, with no `B ask`: on this path never migrate anyway and never touch dev or prod data; otherwise fall through. On any other stop, run `B ask $ID 'migrate stopped: the database update stopped; we should <what to change> because <why>.' --a "Try again=approve $ID" --b "Remove this job=abort $ID --cascade" --recommend <key> '<why>'` and stop; never work around it.
-3. On success, commit what it generated (`git -C "$WT" add prisma && git -C "$WT" commit -m "Add migration"`, skipped when nothing changed), write `git -C "$WT" rev-parse HEAD:prisma` to `$F/jobs/$ID/migrated.md`, and `cd "$REPO"`.
+Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section runs.
 
 ## Merge (APPROVE, or /trevskills-scrum approve)
 
