@@ -36,7 +36,8 @@ def skill_text():
         part = next((p for p in parts[1:] if p.startswith(heading)), parts[0])
         return part.split("\n\n", 1)[1].rstrip("\n")
     # Merge keeps steps 1-2 in SKILL.md; its lane file continues at step 3 on the next line
-    text = text.replace("\n\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", "\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", 1)
+    at = text.index("\n## Merge (")
+    text = text[:at] + text[at:].replace("\n\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", "\nRead `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md`", 1)
     return POINTER.sub(body, text)
 
 
@@ -2189,7 +2190,7 @@ class ContractTest(unittest.TestCase):
         for prefix in ("Hard stop: schema — ", "blocked: ", "bigboy off track: ",
                        "Base branch line", "Base branch <BB>", "debug: ",
                        "migrate needs your OK: ", "migrate stopped: ", "merge refused: ", "merge conflicts with ",
-                       "approver ", "CI still fails", "Uncommitted change in ", "Uncommitted files in the job worktree",
+                       "approver ", "CI still fails", "Uncommitted change in ", "Unpushed commits in ", "Uncommitted files in the job worktree",
                        "bigboy chain lock held by "):
             self.assertTrue(any(q.startswith(prefix) for q in questions), prefix)
 
@@ -2277,6 +2278,7 @@ class ContractTest(unittest.TestCase):
         rule = self.section(text, "**Every stop is a closed question.**", "\n\n")
         self.assertIn("Read `$HOME/.claude/skills/trevskills-scrum/lanes/stops.md` for the Issue / Options / Recommended "
                       "shape every question takes.", rule)
+        self.assertIn("a question only in chat leaves the old one on the board", rule)
         self.assertLess(len((ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_bytes()), 80000)
 
     def test_merge_main_checkout_self_heal(self):
@@ -2302,12 +2304,25 @@ class ContractTest(unittest.TestCase):
         for phrase in ("git stash", "git commit", "Keep my changes and carry on, the recommended option",
                        "throws away this job"):
             self.assertIn(phrase, dirty_q, phrase)
+        for phrase in ("git push", "commit and push"):
+            self.assertIn(phrase, dirty_q, phrase)
         for phrase in ("git checkout <default>", "Carry on, the recommended option", "throws away this job"):
             self.assertIn(phrase, wrong_q, phrase)
-        for q in (dirty_q, wrong_q):
+        ahead = next(l for l in guard.splitlines() if "**Unpushed commits:**" in l)
+        ahead_q = self.ask_question(re.search(r"`(B ask [^`]+)`", ahead).group(1))
+        self.assertTrue(ahead_q.startswith("Unpushed commits in <repo name>:"), ahead_q)
+        for phrase in ("git pull, then git push", "Carry on, the recommended option", "throws away this job"):
+            self.assertIn(phrase, ahead_q, phrase)
+        for phrase in ('git -C "$REPO" fetch origin "$DEFAULT"', 'rev-list --count "origin/$DEFAULT..$DEFAULT"',
+                       '--a "Carry on=resume $ID" --b "Remove this job=abort $ID --cascade"'):
+            self.assertIn(phrase, ahead, phrase)
+        self.assertLess(guard.index("**Wrong branch:**"), guard.index("**Unpushed commits:**"))
+        for q in (dirty_q, wrong_q, ahead_q):
             self.assertNotIn('"', q)
             self.assertNotIn("`", q)
-        self.assertIn("recommend key `a`", guard)
+        self.assertIn("All three asks recommend key `a`", guard)
+        approve = next(l for l in self.lane("commands").splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
+        self.assertIn("or `Unpushed commits in <repo name>: ...`", approve)
 
     def test_merge_conflicts_ask_after_two(self):
         text = skill_text()

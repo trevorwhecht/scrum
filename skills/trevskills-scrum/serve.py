@@ -140,7 +140,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root."""
     reason = None
-    if action in ("approve", "rework"):  # record_outcomes compares against this: same reason = nothing changed
+    if action in ("approve", "rework", "resume"):  # record_outcomes compares against this: same reason = nothing changed
         try:
             reason = board.find(board.read_board(root), job_id).get("reason")
         except (SystemExit, OSError, ValueError):
@@ -148,7 +148,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     proc, log = board.spawn(root, job_id, action, prompt, flags)
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
-                                       **({"reason": reason} if action in ("approve", "rework") else {})}
+                                       **({"reason": reason} if action in ("approve", "rework", "resume") else {})}
     return log
 
 
@@ -975,7 +975,7 @@ def outcome_line(root, run, code):
 
 
 def record_outcomes(project, root):
-    """A dashboard approve/rework run that exited (code >= 0) and left its job needs-human with the reason it had at
+    """A dashboard approve/rework/resume run that exited (code >= 0) and left its job needs-human with the reason it had at
     spawn: write the job's `outcome` line. Each exited run is looked at once. Returns the ids written."""
     with RUNS_LOCK:
         runs = [(k, r) for k, r in RUNS.items() if k.startswith(f"{project}/") and "reason" in r
