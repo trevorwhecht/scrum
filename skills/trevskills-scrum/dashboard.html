@@ -127,6 +127,7 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #blTriageBody{font-size:13px;overflow-wrap:anywhere}
 #blAdd textarea,#blList li textarea{flex:1;min-width:0;min-height:44px;resize:none;field-sizing:content;line-height:20px;padding:11px 8px}  /* one line empty, grows with the text */
 #blList li textarea:not(:focus){field-sizing:fixed;height:44px;white-space:nowrap;overflow:hidden}  /* a row collapses to one line until clicked */#blAdd .pts{min-height:44px;flex:none}
+#blAdd .urg{font:inherit;font-size:13px;min-height:44px;flex:none;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px}
 #blList{list-style:none;margin:0;padding:0}
 #blList li{display:flex;gap:6px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)}
 #blList .badge,#blList .lanechip{flex:none;margin-right:0}
@@ -226,7 +227,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
-@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#filter,#laneFilter{font-size:16px}
+@media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#blAdd .urg,#filter,#laneFilter{font-size:16px}
   #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
 </style>
 </head>
@@ -248,7 +249,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
-    <form id="blAdd"><select name="points" class="pts px" aria-label="Difficulty points"></select><textarea name="text" rows="1" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Enter adds the item. Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."></textarea><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
+    <form id="blAdd"><select name="urgency" class="urg" aria-label="Urgency" data-agent-hint="Later (the default) adds the item at the bottom of the backlog, where its priority decides when it is claimed. Next adds it first with {p:5}, so the next claim (B next, Run all, auto continue) takes it before anything else; the newest Next wins. Now adds no backlog line: it starts the item as a job at once, like Run now, and closes this dialog; the points pick is ignored."><option value="later" selected>Later</option><option value="next">Next</option><option value="now">Now</option></select><select name="points" class="pts px" aria-label="Difficulty points"></select><textarea name="text" rows="1" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Enter adds the item. Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."></textarea><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
     <ol id="blList"></ol>
     <section id="blManual" hidden aria-labelledby="blManualTitle"><h3 id="blManualTitle">Manual checks</h3><ul id="blManualList"></ul></section>
@@ -1115,6 +1116,7 @@ async function showProjectBacklog() {
 }
 $("backlogBtn").addEventListener("click", () => {
   pickProject($("blProject"), "scrum.backlogProject");
+  $("blAdd").urgency.value = "later";  // each open starts on Later, so a past Now never fires by accident
   showProjectBacklog();
   $("backlog").showModal();
 });
@@ -1139,10 +1141,11 @@ $("blAdd").points.innerHTML = ptsOptions(null);
 $("blAdd").points.addEventListener("change", e => paintPts(e.target));
 $("blAdd").addEventListener("submit", e => {
   e.preventDefault();
-  const form = e.target, points = form.points.value;
+  const form = e.target, points = form.points.value, urgency = form.urgency.value;
   backlogCall(async url => {
-    await post(url, {op: "add", text: form.text.value, ...(points && {points: +points})});
+    await post(url, {op: "add", text: form.text.value, urgency, ...(points && {points: +points})});
     form.reset(); paintPts(form.points);
+    if (urgency === "now") $("backlog").close();
   });
 });
 // Images dropped or pasted on the add input upload to scrum/attachments/ and append a [screenshot: path] token.
