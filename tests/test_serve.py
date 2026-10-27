@@ -11,6 +11,7 @@ os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so;
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
 
@@ -1234,28 +1235,38 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["cooldown", "cpu_busy_pct", "free_disk_gb", "free_ram_pct", "max_cpu_busy_pct", "max_swap_pct",
-                "min_free_disk_gb", "min_free_ram_pct", "sessions", "swap_pct", "usage", "verdict"]
+        keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct",
+                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "sessions",
+                "swap_pct", "usage", "verdict"]
+        cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
+        cores.start()
+        self.addCleanup(cores.stop)
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
-                               "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90})
+                               "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90,
+                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
             self.assertEqual(self.req("GET", "/api/machine")[1],
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
-                              "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90})
+                              "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90,
+                              "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95.04"):
             out = self.req("GET", "/api/machine")[1]
         self.assertEqual((out["cpu_busy_pct"], out["verdict"]), (95.0, "CPU busy 95% (> 90%)"))
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168.04"):
+            out = self.req("GET", "/api/machine")[1]
+        self.assertEqual((out["cpu_load_pct"], out["verdict"]), (168.0, "CPU load 168% of 8 cores (> 150%)"))
         disk = []
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB="", SCRUM_CPU_BUSY_PCT="",
-                             SCRUM_CPU_LOG=str(Path(self.tmp.name) / "no-cpu-log.json")), \
+                             SCRUM_CPU_LOAD_PCT="", SCRUM_CPU_LOG=str(Path(self.tmp.name) / "no-cpu-log.json")), \
+                mock.patch.object(self.serve.board.os, "getloadavg", side_effect=OSError("no load")), \
                 mock.patch.object(self.serve.board.subprocess, "run", side_effect=OSError("no such command")), \
                 mock.patch.object(self.serve.board.shutil, "disk_usage",
                                   side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
@@ -1263,7 +1274,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
-                                             "cpu_busy_pct": None, "max_cpu_busy_pct": 90}))
+                                             "cpu_busy_pct": None, "max_cpu_busy_pct": 90,
+                                             "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 150}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 

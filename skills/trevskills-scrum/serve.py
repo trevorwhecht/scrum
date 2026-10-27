@@ -1351,7 +1351,8 @@ def machine_status():
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
             "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
             "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
-            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT}
+            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": r(board.cpu_load_pct()),
+            "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT}
 
 
 def machine_usage(now):

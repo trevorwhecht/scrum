@@ -11,6 +11,7 @@ os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so;
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
+os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
@@ -1765,6 +1766,51 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="90"):
             self.assertIsNone(board.machine_ok(self.tmp.name), "exactly 90% passes")
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="", SCRUM_CPU_LOG=str(self.cpu_log())):
+            self.assertIsNone(board.machine_ok(self.tmp.name), "unknown passes")
+
+    def test_cpu_load_pct(self):
+        """2026-10-26: load 13.4 on 8 cores with busy at 51%; the 5-minute load average over the cores catches the
+        threads queued behind them."""
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168.4"):
+            self.assertEqual(board.cpu_load_pct(), 168.4)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=""):
+            with mock.patch.object(board.os, "getloadavg", return_value=(20.0, 12.0, 9.0)), \
+                    mock.patch.object(board.os, "cpu_count", return_value=8):
+                self.assertEqual(board.cpu_load_pct(), 150.0, "the 5-minute value")
+            with mock.patch.object(board.os, "getloadavg", return_value=(1.0, 0.0, 2.0)), \
+                    mock.patch.object(board.os, "cpu_count", return_value=8):
+                self.assertEqual(board.cpu_load_pct(), 0.0, "a zero load is a reading")
+            with mock.patch.object(board.os, "getloadavg", side_effect=OSError("no load")), \
+                    mock.patch.object(board.os, "cpu_count", return_value=8):
+                self.assertIsNone(board.cpu_load_pct())
+            with mock.patch.object(board.os, "getloadavg", return_value=(20.0, 12.0, 9.0)):
+                for cores in (0, None):
+                    with mock.patch.object(board.os, "cpu_count", return_value=cores):
+                        self.assertIsNone(board.cpu_load_pct(), cores)
+            with mock.patch.object(board.os, "cpu_count", return_value=8):
+                saved = board.os.getloadavg
+                del board.os.getloadavg
+                try:
+                    self.assertIsNone(board.cpu_load_pct(), "no getloadavg")
+                finally:
+                    board.os.getloadavg = saved
+
+    def test_machine_ok_cpu_load(self):
+        self.assertEqual(board.MAX_CPU_LOAD_PCT, 150)
+        reason = "CPU load 168% of 8 cores (> 150%)"
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168"), mock.patch.object(board.os, "cpu_count", return_value=8):
+            self.assertEqual(board.machine_ok(self.tmp.name), reason)
+            self.assertEqual(board.machine_ok(self.tmp.name, claim=True), reason)
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True), "Trevor's clicks skip the load check")
+            self.assertIsNone(board.machine_ok(self.tmp.name, manual=True, claim=True))
+            with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95"):
+                self.assertEqual(board.machine_ok(self.tmp.name), "CPU busy 95% (> 90%)", "busy before load")
+            with self.sessions(14):
+                self.assertEqual(board.machine_ok(self.tmp.name), reason, "load before the session ceiling")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="150"):
+            self.assertIsNone(board.machine_ok(self.tmp.name), "exactly 150% passes")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=""), \
+                mock.patch.object(board.os, "getloadavg", side_effect=OSError("no load")):
             self.assertIsNone(board.machine_ok(self.tmp.name), "unknown passes")
 
     def swap_log(self, samples=None, raw=None):
