@@ -99,6 +99,10 @@ body:has(dialog[open]){overflow:hidden}
 #diverged{padding:12px 20px;border-bottom:1px solid var(--line)}#diverged:empty{display:none}
 #diverged h3{font-size:13px;margin:0 0 4px}#diverged ul{margin:0;padding-left:18px;overflow-wrap:anywhere}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:var(--c,hsl(var(--h) 50% 42%));cursor:pointer}
+.tag[data-project]{position:relative}
+.tag[data-project]::after{content:"";position:absolute;left:50%;top:50%;width:max(100%,44px);height:44px;transform:translate(-50%,-50%)}
+.tabs .tag{font:600 10px system-ui,sans-serif;border:0;padding:1px 6px;border-radius:4px;color:#fff;background:var(--c,hsl(var(--h) 50% 42%))}  /* back to the card look over .tabs button */
+.tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 header{flex-wrap:wrap}
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
@@ -378,6 +382,7 @@ const hue = p => projectHue[p] ?? fnv1a(p) % 12 * 30;
 let projectColour = {};
 const tagStyle = p => { const c = projectColour[p]; return typeof c === "string" ? `--h:${hue(p)};--c:${esc(c)}` : `--h:${Number.isInteger(c) ? c : hue(p)}`; };
 const tag = p => `<span class="tag" data-project="${esc(p)}" style="${tagStyle(p)}">${esc(p)}</span>`;
+const tagButton = p => `<button type="button" class="tag" data-project="${esc(p)}" style="${tagStyle(p)}" aria-label="Change ${esc(p)} colour">${esc(p)}</button>`;
 
 // Pinned by test_dashboard_lane_label.
 function laneLabel(job) {
@@ -803,7 +808,7 @@ function open(job) {
   const files = job.files || [];
   const pr = (job.pr ? `<a href="${esc(job.pr)}" target="_blank" rel="noopener">PR ↗</a>` : "")
     + (job.cloud ? `<a href="${esc(job.cloud)}" target="_blank" rel="noopener">Cloud session ↗</a>` : "");
-  $("tabs").innerHTML = tag(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
+  $("tabs").innerHTML = tagButton(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
   $("diverged").innerHTML = "";  // the previous job's bullets must not show while this job's files load
@@ -825,7 +830,7 @@ function openRoadmap(p) {
   $("viewer").dataset.key = doc.key;
   $("viewerTitle").textContent = rm.name;
   $("viewerStatus").textContent = "";
-  $("tabs").innerHTML = tag(p) + '<button data-file="roadmap.md" aria-pressed="false">roadmap.md</button><button class="close" aria-label="Close">✕</button>';
+  $("tabs").innerHTML = tagButton(p) + '<button data-file="roadmap.md" aria-pressed="false">roadmap.md</button><button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = $("actions").innerHTML = $("diverged").innerHTML = "";
   if (!$("viewer").open) $("viewer").showModal();
   show(doc, "roadmap.md");

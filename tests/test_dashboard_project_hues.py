@@ -65,6 +65,22 @@ class ProjectHues(unittest.TestCase):
                       "--c (a stored #rrggbb) beats the hue in the tag's CSS")
 
 
+    def test_tag_button_markup(self):
+        text = DASHBOARD.read_text()
+        tail = "\n".join(l for l in text.splitlines() if l.startswith(("const esc = ", "let projectColour = ", "const tagStyle = ", "const tagButton = ")))
+        got = hues(f"(projectHue = projectHues({json.dumps(SIX)}), (() => {{ {tail}\n"
+                   "projectColour = {'trevskills-scrum': 90, onewitharts: '#a1b2c3'};"
+                   "return ['trevskills-scrum', 'onewitharts', 'a<b'].map(tagButton); })())")
+        self.assertEqual(got, ['<button type="button" class="tag" data-project="trevskills-scrum" style="--h:90" aria-label="Change trevskills-scrum colour">trevskills-scrum</button>',
+                               '<button type="button" class="tag" data-project="onewitharts" style="--h:150;--c:#a1b2c3" aria-label="Change onewitharts colour">onewitharts</button>',
+                               '<button type="button" class="tag" data-project="a&lt;b" style="--h:210" aria-label="Change a&lt;b colour">a&lt;b</button>'])
+
+    def test_tag_hit_area_is_44px(self):
+        text = DASHBOARD.read_text()
+        self.assertIn(".tag[data-project]{position:relative}", text)
+        self.assertIn('.tag[data-project]::after{content:"";position:absolute;left:50%;top:50%;width:max(100%,44px);height:44px;transform:translate(-50%,-50%)}', text)
+        self.assertIn(".tag:focus-visible{outline:2px solid var(--accent)", text)
+
     def test_stale_colour_reply_leaves_reopened_dialog_alone(self):
         """Save on project a, close, open project b, then a's POST lands: b's dialog stays open with no error."""
         node = shutil.which("node")
