@@ -4468,12 +4468,26 @@ class DigestVerifyTest(unittest.TestCase):
         self.feature("Apply digest 006 p1 to agents/scrum-builder.md\n")
         self.commit("agents/scrum-builder.md", "# Builder\n\nRule one, sharper.\n\nRule two.\n")
 
-    def test_digest_verify_fails_with_standards_doc_edit(self):
-        self.exact_builder_edit()
+    STANDARDS = "# Standards\n\nIntro.\n\n## Human-only set\n\nOnly Trevor merges these.\n\n## Script rules\n\nRule 1.\n"
+
+    def standards_base(self):
         (self.wt / "docs").mkdir()
-        self.commit("docs/skill-standards.md", "# Standards\n\nLoosened.\n")
-        out = self.assert_fails("docs/skill-standards.md")
+        self.commit("docs/skill-standards.md", self.STANDARDS)
+        self.git(self.wt, "tag", "has-standards")
+        self.exact_builder_edit()
+
+    def test_digest_verify_fails_with_standards_doc_human_only_set_edit(self):
+        self.standards_base()
+        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Only Trevor", "Agents"))
+        out = self.assert_fails("docs/skill-standards.md: the Human-only set changed", "--base", "has-standards")
         self.assertIn("human-only", out["error"])
+
+    def test_digest_verify_passes_with_standards_doc_edit_outside_section(self):
+        self.standards_base()
+        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Intro.", "Intro, reworded."))
+        code, out = self.run_cli("--base", "has-standards")
+        self.assertEqual((code, out), (0, {"ok": True, "files": ["agents/scrum-builder.md"],
+                                           "proposals": ["repo digest 006 p1"]}))
 
     def test_digest_verify_fails_with_board_py_edit(self):
         self.exact_builder_edit()
