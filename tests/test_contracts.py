@@ -2807,6 +2807,24 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertNotIn("buildlock.py", step4)
         self.assertNotIn("'<Build>'", step4)
 
+    def test_load_never_gates_tests_or_stops(self):
+        spec_writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = spec_writer[spec_writer.index("Never gate on machine load"):]
+        rule = rule[:rule.index("\n")]
+        self.assertIn("--workers=1", rule)
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
+        rule = step4[step4.index("never wait for, skip or block on machine load"):]
+        self.assertIn("--workers=1", rule[:rule.index("\n")])
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        for phrase in ('SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/e2e.lock"',
+                       "npx playwright test --workers=1 <spec files>", "E2E: lock wait timed out twice"):
+            self.assertIn(phrase, check, phrase)
+        stops = (SKILL_DIR / "lanes" / "stops.md").read_text()
+        for phrase in ("never a reason to `B ask`", "1-minute CPU load average 14 on an 8-core Mac (limit 8)",
+                       "never load above 8"):
+            self.assertIn(phrase, stops, phrase)
+
     def test_builder_runs_focused_tests_only(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         self.assertNotIn("Run the full suite once", builder)

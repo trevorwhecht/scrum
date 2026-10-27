@@ -32,6 +32,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - The builder never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command: those run once in the Check gate. When no test covers the changed sources and you wrote or edited none, say so in build.md; never fall back to the full `Test`.
    - Each build.md acceptance-criteria line names the focused command that was run.
    - For a failure in a file outside your diff, first grep `JOB_DIR/../../backlog.md` for that file's path and for the failing test's class and method names; when an open `- [ ]` line names any of them, cite that line in build.md and never re-run it on BASE to prove it.
+   - A test run must never wait for, skip or block on machine load (load average, `uptime`, free RAM): run it anyway, re-run failing Playwright specs once with `--workers=1`, and root-cause whatever still fails; load is never a reason for `STATUS: BLOCKED`.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - When tsc fails only on files under `.next/types`, delete `.next/types` in WORKTREE and re-run tsc before calling it a failure.
    - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
