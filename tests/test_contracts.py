@@ -2833,7 +2833,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command",
                        "names the focused command that was run",
                        "JOB_DIR/../../backlog.md", "Write PASS only for a command you ran",
-                       "delete `.next/types` in WORKTREE", "A criterion that needs the running app"):
+                       "delete that folder in WORKTREE and re-run tsc", "A criterion that needs the running app"):
             self.assertIn(phrase, step4, phrase)
         self.assertIn("run PROJECT's install command before the typecheck.", builder)
 
