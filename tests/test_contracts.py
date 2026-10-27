@@ -438,6 +438,17 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, check, phrase)
         self.assertGreaterEqual(check.count("the approver still adds its Follow-up"), 3)
 
+    def test_check_gate_runs_full_test_in_background(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        for phrase in (
+            "run_in_background",
+            "600 s",
+            "never replace it with one module or a subset",
+            "builder's own run",
+        ):
+            self.assertIn(phrase, check, phrase)
+        self.assertLess(check.index("never replace it with one module or a subset"), check.index("re-run only those files once"))
+
     def test_skill_checks_prereqs_at_setup(self):
         text = skill_text()
         setup = self.section(text, "## Setup", "## Commands")
