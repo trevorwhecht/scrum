@@ -694,19 +694,19 @@ async function poll() {
     if (res.status === 404) return $("status").textContent = STALE;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const list = await res.json();
-    projects = list.map(p => p.name);
+    const ps = projects = list.map(p => p.name);
     projectHue = projectHues(projects);
     projectColour = Object.fromEntries(list.map(p => [p.name, p.colour ?? null]));
     if (filter && !projects.includes(filter)) filter = "";
     const [boards, items, checks, runList, roadmapList] = await Promise.all([
-      Promise.all(projects.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
+      Promise.all(ps.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
+      Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
+      Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
       getJson("api/runs", []),
-      Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
+      Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
     renderCheckoutAlert(boards);
-    roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));
-    const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
+    roadmaps = Object.fromEntries(ps.map((p, i) => [p, roadmapList[i]]));
+    const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: ps[i], key: `${ps[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);
     runs = runsByKey(runList);
     // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll, sending
@@ -720,8 +720,8 @@ async function poll() {
         .catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); });
     }));
     auditRunsChanged();
-    const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
-    const nextManuals = Object.fromEntries(projects.map((p, i) => [p, checks[i]]));
+    const nextBacklogs = Object.fromEntries(ps.map((p, i) => [p, items[i]]));
+    const nextManuals = Object.fromEntries(ps.map((p, i) => [p, checks[i]]));
     const backlogChanged = JSON.stringify([nextBacklogs, nextManuals]) !== JSON.stringify([backlogs, manuals]);
     backlogs = nextBacklogs;
     manuals = nextManuals;
