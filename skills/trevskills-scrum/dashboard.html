@@ -774,6 +774,7 @@ async function show(job, file) {
   const url = `${job.docBase ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
   try {
     const res = await fetch(url, {cache: "no-store"});
+    if ($("viewer").dataset.key !== job.key) return;  // the modal moved to another job while this loaded
     // board.json files is a snapshot: a job file missing on disk drops its tab instead of showing the 404.
     if (res.status === 404 && !job.base) {
       [...$("tabs").querySelectorAll("button[data-file]")].find(b => b.dataset.file === file)?.remove();
@@ -784,12 +785,14 @@ async function show(job, file) {
     }
     if (!res.ok) throw new Error(`${res.status}`);
     const md = await res.text();
+    if ($("viewer").dataset.key !== job.key) return;
     // spec.md: the "# " title, then its header rows (built outside marked, so they show without it), then the rest.
     const [head, rest] = file === "spec.md" ? specHeader(md) : ["", md];
     const title = head && /^# .*$/m.exec(rest), cut = title ? title.index + title[0].length : 0;
     const render = s => window.marked ? marked.parse(s) : `<pre>${esc(s)}</pre>`;
     $("doc").innerHTML = (cut ? render(rest.slice(0, cut)) : "") + head + render(rest.slice(cut));
   } catch (e) {
+    if ($("viewer").dataset.key !== job.key) return;
     $("doc").innerHTML = `<p class="empty">Couldn't load ${esc(file)} (${esc(e.message)}).</p>`;
   }
 }
