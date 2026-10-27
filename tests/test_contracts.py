@@ -914,6 +914,19 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**BigBoy lane**", cleanup)
         self.assertIn("parent", cleanup)
 
+    def test_skill_documents_urgency_words(self):
+        self.assertIn("now`/`next`/`later <feature>",
+                      frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"].replace('"', "`"))
+        commands = self.section(skill_text(), "## Commands", "## New job")
+        line = lambda head: next(l for l in commands.splitlines() if l.startswith(f"- **`/trevskills-scrum {head} <feature text>`**"))
+        self.assertIn("the same as the bare `/trevskills-scrum <feature text>`", line("now"))
+        self.assertIn("then `B backlog-add --top -- '<text>'`", line("next"))
+        self.assertIn("Bare `/trevskills-scrum next` with no text stays as above", line("next"))
+        self.assertIn("**Dupe check** and **Rank**", line("later"))
+        self.assertIn("then `B backlog-add [--priority N] -- '<text>'`", line("later"))
+        for word in ("next", "later"):
+            self.assertIn("It starts no job", line(word))
+
     def test_skill_documents_resume_and_watchdog(self):
         text = skill_text()
         self.assertIn("resume", frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"])
