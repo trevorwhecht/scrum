@@ -1503,8 +1503,10 @@ class ServeTest(unittest.TestCase):
                 self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{parent}/resume", {"manual": True}),
                                  (202, {"id": parent, "action": "resume"}))
             self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
-            self.assertEqual(self.stage_of(wait)["stage"], "waiting", "no new claim while cooling down")
-            self.assertEqual(self.stage_of(parent)["reason"], "waiting: cooling down")
+            # job 466: Play is Trevor's click, so cool-down no longer holds its claim; the jobs this test resumed (their
+            # sessions are mocked, so they still read paused/stalled) hold it instead (board.resume_first)
+            self.assertEqual(self.stage_of(wait)["stage"], "waiting")
+            self.assertRegex(self.stage_of(parent)["reason"], r"^waiting: \d+ paused jobs? needs? Play or Abort first$")
             asked = self.asked("resume 1")
             code, out, m = self.answer(asked, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
             self.assertEqual((code, out), (202, {"id": asked, "action": "answer", "command": "resume"}))
@@ -1523,6 +1525,38 @@ class ServeTest(unittest.TestCase):
             if self.stage_of(j)["stage"] != "aborted":
                 b.cmd_abort(self.root, j, False)
 
+    def test_cooldown_setup_done_and_play_still_start(self):
+        """Job 466: Setup done and Play are Trevor's clicks, so they claim a BigBoy parent's ready children while cooling
+        down."""
+        b = self.serve.board
+        parent, c1, c2 = self.bigboy()
+        self.addCleanup(lambda: [b.cmd_abort(self.root, j, False) for j in (c1, c2, parent)
+                                 if self.stage_of(j)["stage"] not in ("done", "aborted")])
+        with self.cooling():
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                code, out = self.req("POST", f"/api/p/repo/jobs/{c1}/setup-done", {})
+            self.assertEqual(code, 200, out)
+            self.assertEqual(out["ready"], [c1])
+            self.assertEqual(self.stage_of(c1)["stage"], "spec")
+            self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(c1, "start", f"/trevskills-scrum start {c1}")])
+            self.edit_job(c1, stage="done")
+            self.assertEqual(sorted(b.cmd_pause(self.root, parent)), [parent])
+            kid = b.cmd_new(self.root, "Cool paused bigboy kid")
+            self.edit_job(kid, parent=parent, stage="build", paused=True, reason=self.PAUSED_REASON, parallel=True)
+            self.edit_job(c2, parallel=True)  # so the claim may run beside the resumed kid
+            for j in (kid, c2):
+                (self.root / "jobs" / j).mkdir(exist_ok=True)
+                (self.root / "jobs" / j / "spec.md").write_text(f"## Likely files\n- `src/{j}.py`\n")
+            self.edit_job(parent, children=[c1, c2, kid])
+            jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+            # the mocked spawn registers no run: count the resumed kid live, as its real session would be
+            with mock.patch.object(self.serve, "spawn") as spawn, \
+                    mock.patch.object(self.serve, "live_ids", return_value={kid}):
+                self.serve.resume_job("repo", self.root, self.stage_of(parent), jobs, manual=True)
+            self.assertEqual(sorted(c.args[2:4] for c in spawn.call_args_list), sorted([(kid, "resume"), (c2, "start")]))
+            self.assertEqual(self.stage_of(c2)["stage"], "spec")
+            self.assertNotIn("paused", self.stage_of(parent))
+        self.addCleanup(lambda: self.stage_of(kid)["stage"] == "aborted" or b.cmd_abort(self.root, kid, False))
     def post_raw_bytes(self, path, data, headers=None):
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", data=data,
                                    headers={"Content-Type": "application/json", **(headers or {})})
@@ -4342,6 +4376,19 @@ class DigestTest(unittest.TestCase):
         self.board.cmd_digest_start(self.scrum)
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
 
+    def test_digest_button_not_held_during_cooldown(self):
+        """Job 466: cool-down skips only the automatic bad-window digest; Trevor's Digest button still starts one."""
+        self.done_job()
+        flag = self.scrum / "cooldown"
+        flag.write_text("")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)), \
+                mock.patch.object(self.serve.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
+            self.assertTrue(self.board.cooling_down())
+            code, out = self.post("/api/p/reg/digest", {})
+            self.assertEqual(code, 202, out)
+            popen.assert_called_once()
+
     def test_digest_now_spawns_on_questions_growth(self):
         (self.scrum / "questions.log").write_text("{}\n" * 14)
         self.assertEqual(self.serve.digest_now("reg", self.scrum), (409, {"error": "nothing new to digest"}))
@@ -6151,6 +6198,27 @@ class CloudPollTest(unittest.TestCase):
         self.assertEqual(tick(card, "bad window five_hour-1.json", busy=True), [])
 
 
+    def test_watchdog_tick_bad_window_digest_held_during_cooldown(self):
+        """Job 466: the bad-window digest is an automatic start, so cool-down skips it; the scorecard is still written."""
+        s = self.serve
+        projects = {"good": self.window_projects()["good"]}
+        root = projects["good"] / "scrum"
+        flag = root / "cooldown"
+        due = {"due": True, "undigested": 3, "questionsGrowth": 0, "reason": "bad window five_hour-1.json"}
+        def tick():
+            with mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)), \
+                    mock.patch.object(s.board, "cmd_window_report", return_value=[{"window": "five_hour"}]) as wr, \
+                    mock.patch.object(s.board, "cmd_digest_due", return_value=due), \
+                    mock.patch.object(s, "running", return_value=False), \
+                    mock.patch.object(s, "spawn", return_value="runs/d.log") as sp:
+                s.watchdog_tick()
+            return [c.args for c in wr.call_args_list], [c.args for c in sp.call_args_list]
+        flag.write_text("")
+        self.assertEqual(tick(), ([(root,)], []))
+        flag.unlink()
+        self.assertEqual(tick(), ([(root,)], [("good", root, "digest", "digest", "/trevskills-scrum digest")]))
+
 class ExitedRunSweepTest(unittest.TestCase):
     """watchdog_tick's safety net for a dashboard-started `claude -p` start/resume run that exited mid-stage."""
     STALLED = "stalled: session exited while the job was still in build."
@@ -6426,6 +6494,30 @@ class WatchdogIdleParentTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(self.job("002-second")["stage"], "waiting")
 
+    def test_wake_waiting_held_during_cooldown(self):
+        """Job 466: a parked wait-on job and a --then retry are automatic starts, so cool-down holds them."""
+        flag = self.repo / "cooldown"
+        wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
+                "reason": "waiting on 001-first", "wake": "approve 002-second"}
+        plain = {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]}
+        healthy = mock.patch.dict(os.environ, SCRUM_FREE_RAM="80", SCRUM_SWAP_PCT="0", SCRUM_FREE_DISK_GB="500",
+                                  SCRUM_CPU_BUSY_PCT="5", SCRUM_CPU_LOAD_PCT="5", SCRUM_COOLDOWN=str(flag))
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake), dict(plain))
+        before = (self.root / "board.json").read_bytes()
+        flag.write_text("")
+        with healthy, mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "waiting"))
+        self.assertEqual((self.root / "board.json").read_bytes(), before, "board.json not rewritten")
+        flag.unlink()
+        with healthy, mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual(sorted(c.args[2:4] for c in spawn.call_args_list),
+                         [("002-second", "approve"), ("003-third", "start")])
+
     def test_watchdog_tick_resume_blocks_claims(self):
         held = {"id": "010-held", "stage": "build", "limitResetAt": int(time.time()) - 300}  # reset + 120 s is past
         cases = {"stalled child": ("002-kid", {"stage": "needs-human", "reason": self.STALLED}, ()),
@@ -6566,8 +6658,9 @@ class WatchdogIdleParentTest(unittest.TestCase):
                          [None, "2026-10-25T10:01:00+00:00", "2026-10-25T10:02:00+00:00"])
 
     def test_cooldown_holds_only_new_work(self):
-        """Job 421: with the cool-down flag on, the watchdog finishes work in flight (the 189 BigBoy parent, queued Plays,
-        auto-resumes, orphan respawns) and holds only new work (Run-all claims, auto continue); with it gone the same
+        """Jobs 421, 466: with the cool-down flag on, the watchdog finishes work in flight (the 189 BigBoy parent's final
+        review, queued Plays, auto-resumes, orphan respawns) and holds every automatic start of new work (Run-all and
+        BigBoy child claims incl. a FIX ticket and a flagged child's sibling, auto continue); with it gone the same
         boards start."""
         flag = self.repo / "cooldown"
         old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
@@ -6589,10 +6682,25 @@ class WatchdogIdleParentTest(unittest.TestCase):
                                "children": ["021-a", "022-b"]},
                               {"id": "021-a", "stage": "done", "parent": "020-big"},
                               {"id": "022-b", "stage": "done", "parent": "020-big"}],
+            "bigboy fix ticket": [  # back in running after plan-apply --fix: one waiting FIX child, the rest done
+                {"id": "030-big", "stage": "running", "lane": "bigboy", "children": ["031-a", "032-b", "033-fix"]},
+                {"id": "031-a", "stage": "done", "parent": "030-big"},
+                {"id": "032-b", "stage": "done", "parent": "030-big"},
+                {"id": "033-fix", "stage": "waiting", "parent": "030-big"}],
+            "bigboy next child": [{"id": "040-big", "stage": "running", "lane": "bigboy", "children": ["041-a", "042-wait"]},
+                                  {"id": "041-a", "stage": "done", "parent": "040-big"},
+                                  {"id": "042-wait", "stage": "waiting", "parent": "040-big"}],
             "auto continue": []}
+        boards["bigboy flagged sibling"] = boards["bigboy next child"]
+        flagged = {"bigboy flagged sibling": ["041-a"]}  # board.cmd_watchdog's flagged ids: start_ready on its parent
         want = {"orphan": [("002-claimed", "start")], "runall claim": [],
                 "queued play and auto-resume": [("010-q", "resume"), ("011-solo", "resume")],
-                "bigboy review": [("020-big", "resume")], "auto continue": []}
+                "bigboy review": [("020-big", "resume")], "bigboy fix ticket": [], "bigboy next child": [],
+                "bigboy flagged sibling": [], "auto continue": []}
+        want_off = {"bigboy fix ticket": [("033-fix", "start")], "bigboy next child": [("042-wait", "start")],
+                    "bigboy flagged sibling": [("042-wait", "start")]}
+        waiting = {"orphan": "003-wait", "runall claim": "003-wait", "bigboy fix ticket": "033-fix",
+                   "bigboy next child": "042-wait", "bigboy flagged sibling": "042-wait"}
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
         for case, jobs in boards.items():
             for cooling in (True, False):
@@ -6602,7 +6710,9 @@ class WatchdogIdleParentTest(unittest.TestCase):
                     self.queue_board(*(dict(j) for j in jobs))
                     if cooling:
                         flag.write_text("")
-                    with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+                    watch = mock.patch.object(self.board, "cmd_watchdog", return_value=flagged[case]) \
+                        if case in flagged else mock.patch.dict(os.environ)
+                    with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)), watch:
                         spawn, _, _ = self.tick()
                     flag.unlink(missing_ok=True)
                     if cooling:
@@ -6612,13 +6722,16 @@ class WatchdogIdleParentTest(unittest.TestCase):
                             self.assertEqual((self.job("020-big")["stage"], self.job("020-big")["reason"]),
                                              ("review", "stalled: no board update for 2 min and no live session. "
                                               "Fix: click Resume."))
-                        if case in ("orphan", "runall claim"):
-                            self.assertEqual(self.job("003-wait")["stage"], "waiting")
-                        if case == "runall claim":  # a respawn skips that parent's claim for the tick, so its own board
-                            self.assertTrue(self.job("001-par")["reason"].startswith("waiting: cooling down"))
+                        if case in waiting:
+                            self.assertEqual(self.job(waiting[case])["stage"], "waiting")
+                        if case in ("runall claim", "bigboy fix ticket", "bigboy next child", "bigboy flagged sibling"):
+                            parent = self.job(waiting[case])["parent"]  # a respawn skips that parent's claim for the tick
+                            self.assertTrue(self.job(parent)["reason"].startswith("waiting: cooling down"), case)
                         self.assertIn("- [ ] Open item", (self.root / "backlog.md").read_text())
                     else:  # the control: the same board starts work once the flag is gone
                         self.assertTrue(spawn.called, case)
+                        if case in want_off:
+                            self.assertEqual([c.args[2:4] for c in spawn.call_args_list], want_off[case])
 
     def test_idle_runall_parent_starts_waiting_child(self):
         self.check_starts("runall")
