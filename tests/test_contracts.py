@@ -415,6 +415,22 @@ class ContractTest(unittest.TestCase):
     def section(self, text, start, end):
         return text[text.index(start):text.index(end, text.index(start))]
 
+    def test_check_gate_settles_flaky_tests_outside_diff(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        for phrase in (
+            "re-run only those files once",
+            "Test: pre-existing, <file> passes alone",
+            'worktree add --detach "$WT-base" "$BASE"',
+            'worktree remove -f "$WT-base"',
+            "Test: pre-existing, <file> fails on $BASE",
+            "every failing test file is outside that diff",
+            "passes on `$BASE` makes `CHECK: FAIL`",
+            "E2E: pre-existing, <spec> passes alone",
+            "same `E2E_PORT`",
+        ):
+            self.assertIn(phrase, check, phrase)
+        self.assertGreaterEqual(check.count("the approver still adds its Follow-up"), 3)
+
     def test_skill_checks_prereqs_at_setup(self):
         text = skill_text()
         setup = self.section(text, "## Setup", "## Commands")
