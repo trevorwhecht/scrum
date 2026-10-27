@@ -546,20 +546,20 @@ function roadmapCard(p) {
   if (!rm) return "";
   const ph = cur && rm.phases.find(x => x.n === cur.p), st = ph?.steps.find(x => x.n === cur.s), n = rm.next, b = rm.blocker;
   const next = `next: ${n ? `${n.p !== cur?.p ? `P${n.p} ` : ""}S${n.s} ${n.request}` : "none"}`;
-  const block = b ? `${b.job} ${b.reason}`.trim() : "none";
+  const block = b ? `${b.job} ${b.reason}`.trim() : "none", wait = roadmapWaiting(p);
   // Each line is one row that ellipsizes; the full text stays in its title.
   const line = (text, cls = "meta", html = esc(text)) => `<span class="${cls} line" title="${esc(text)}">${html}</span>`;
   return `<button class="card roadmap" data-roadmap="${esc(p)}">${tag(p)}<span class="lanechip">roadmap</span>${line(rm.name, "title")}
     ${line(cur ? `P${cur.p}/${rm.phases.length} ${ph?.title ?? ""} · S${cur.s}/${ph?.steps.length ?? 0}` : "done")}
-    ${cur ? line(st?.request ?? "") + line(next) + line(`blocker: ${block}`, "meta", `blocker: ${b ? `<b>${esc(block)}</b>` : "none"}`) : ""}</button>`;
+    ${cur ? line(st?.request ?? "") + (wait ? line(`waiting: ${wait}`) : "") + line(next) + line(`blocker: ${block}`, "meta", `blocker: ${b ? `<b>${esc(block)}</b>` : "none"}`) : ""}</button>`;
 }
-// A roadmap card's column: done when finished, else its current step's job's column, else spec (no job yet, or not on the board).
-function roadmapCol(p) {
-  const rm = roadmaps[p], cur = rm?.current;
-  if (!cur) return "done";
-  const st = rm.phases.find(x => x.n === cur.p)?.steps.find(x => x.n === cur.s), job = st?.job && jobs.find(j => j.key === `${p}/${st.job}`);
-  return job ? colOf(job) : "spec";
-}
+// A roadmap card's column: done when finished, else running. Its step job's own card sits in the job's stage column.
+const roadmapCol = p => roadmaps[p]?.current ? "running" : "done";
+// The current step's job, or null while it is not started: no job on the board yet (cooling down, or just not claimed).
+const roadmapWaiting = p => {
+  const cur = roadmaps[p]?.current, job = cur && roadmaps[p].phases.find(x => x.n === cur.p)?.steps.find(x => x.n === cur.s)?.job;
+  return cur && !(job && jobs.some(j => j.key === `${p}/${job}`)) ? ($("cooldown").dataset.on ? "cooling down" : "step not started") : "";
+};
 // Projects whose roadmap card is visible: the project filter applies, and only All pipelines or roadmap show it.
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
