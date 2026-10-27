@@ -6525,6 +6525,42 @@ class WatchdogIdleParentTest(unittest.TestCase):
                          [("002-second", "approve", "/trevskills-scrum approve 002-second")])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
 
+    def test_wake_waiting_holds_child_while_sibling_blocks(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "resume_blocker", return_value="003-x holds the files"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        appr.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.assertEqual(self.job("002-second")["wake"], "approve 002-second")
+        with mock.patch.object(self.serve, "approve_job") as appr, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "resume_blocker", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        appr.assert_called_once()
+        self.assertEqual(self.job("002-second")["stage"], "needs-human")
+
+    def test_wake_waiting_held_job_leaves_room(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None), \
+                mock.patch.object(self.board, "resume_blocker", return_value="held"):
+            self.serve.wake_waiting("idle", self.root)
+        appr.assert_not_called()
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["003-third"])
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "spec"))
+
     def test_wake_waiting_holds_while_machine_busy(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
