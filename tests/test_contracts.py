@@ -788,6 +788,14 @@ class ContractTest(unittest.TestCase):
         step1 = self.section(skill, "1. **Plan.**", "2. **Child specs")
         self.assertIn("spec.md", step1)
 
+    def test_planner_depends_only_on_real_output(self):
+        text = (ROOT / "agents" / "scrum-planner.md").read_text()
+        for phrase in ("whose merged output this ticket needs", "never a dependency",
+                       "lists them all as `Depends on: none`", "every ticket whose output it shows",
+                       "a ticket it does not expose is not a dependency"):
+            self.assertIn(phrase, text, phrase)
+        self.assertNotIn("lists every other ticket", text)
+
     def test_bigboy_child_specs_lazy(self):
         text = self.rules()
         line = next(l for l in text.splitlines() if l.startswith("2. **Child specs, startable children only.**"))
@@ -881,8 +889,10 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_documents_lane_line(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
-        for phrase in ("Lane: fast|standard|debug|bigboy", "100", "3 files", "8 files", "500"):
+        for phrase in ("Lane: fast|standard|debug|bigboy", "100", "3 files", "30 files", "1,500",
+                       "however many items it has", "Size: about <n> files, <m> lines"):
             self.assertIn(phrase, text, phrase)
+        self.assertNotIn("8 files", text)
         self.assertLess(text.index("Hard stops:"), text.index("Lane:"))
         self.assertNotIn("epic", text)
         self.assertRegex(text, r"[^.\n]*`debug`[^.\n]*\bbug\b")

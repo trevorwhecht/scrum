@@ -699,11 +699,17 @@ class BoardTest(unittest.TestCase):
     def test_plan_apply_requires_exposure_last(self):
         cases = [[self.ticket(1), self.ticket(2, deps="T1")],                                          # none
                  [self.ticket(1, exposure="yes"), self.ticket(2, deps="T1", exposure="yes")],           # two
-                 [self.ticket(1), self.ticket(2), self.ticket(3, deps="T1", exposure="yes")]]           # not last
+                 [self.ticket(1, exposure="yes"), self.ticket(2)]]                                       # not last
         for tickets in cases:
             self.tmp.cleanup()
             self.assertIn("Exposure", self.assert_refused(self.plan(*tickets)))
             self.assertEqual(len(self.jobs()), 1)
+
+    def test_plan_apply_exposure_depends_on_subset(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1", exposure="yes"))
+        self.assertEqual(board.cmd_plan_apply(self.root, parent), {"children": ["002-part-1", "003-part-2", "004-part-3"]})
+        self.assertEqual([self.child(k)["stage"] for k in ("002-part-1", "003-part-2", "004-part-3")], ["waiting"] * 3)
+        self.assertEqual(self.child("004-part-3")["depends_on"], ["002-part-1"])
 
     def test_plan_apply_twice_refused(self):
         parent, kids = self.three()
