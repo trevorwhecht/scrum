@@ -623,7 +623,7 @@ def resume_held(project, root, job, jobs, now):
 
 CLOUD_EVERY = 600  # seconds between one project's cloud-sync polls; fixed, not a setting
 CLOUD_LAST = {}  # project -> time of its last cloud-sync poll (0 = never, so the first one runs at once)
-CLOUD_HOME = ("Hard stop: schema", "Hard stop: agent rules")  # moved jobs whose Sync tail needs a session
+CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a session
 
 
 def cloud_tick(project, root, jobs, now=None):

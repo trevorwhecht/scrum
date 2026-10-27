@@ -6110,8 +6110,7 @@ class CloudPollTest(unittest.TestCase):
         _, sp = self.tick(self.cloud, now=10_000, result={"moved": moved, "error": None})
         self.assertEqual([c.args for c in sp.call_args_list], [
             ("p", self.root, "001-art", "cloud-home", "/trevskills-scrum cloud-home 001-art"),
-            ("p", self.root, "003-schema", "cloud-home", "/trevskills-scrum cloud-home 003-schema"),
-            ("p", self.root, "004-rules", "cloud-home", "/trevskills-scrum cloud-home 004-rules")])
+            ("p", self.root, "003-schema", "cloud-home", "/trevskills-scrum cloud-home 003-schema")])
         for c in sp.call_args_list:
             self.assertEqual(c.kwargs, {}, "default flags: no model override")
 

@@ -11,7 +11,7 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
 - `skills/trevskills-scrum/lanes/digest.md`: the orchestrator steps (digest-start, reader, digester, `serve.py --digest-auto`).
 - `agents/scrum-digest-reader.md` writes `scrum/digests/<NNN>/notes.md`; `agents/scrum-digester.md` writes `proposals.json`.
 - `skills/trevskills-scrum/serve.py`: everything after the `# --- Digest:` comment.
-- `skills/trevskills-scrum/board.py`: `cmd_digest_due`, `cmd_digest_start`, `cmd_digest_trim`, `cmd_digest_verify` (the Merge agent rules guard uses verify).
+- `skills/trevskills-scrum/board.py`: `cmd_digest_due`, `cmd_digest_start`, `cmd_digest_trim`.
 
 ## Proposal shape
 - `proposals.json` is agent-written and untrusted.

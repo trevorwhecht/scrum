@@ -8,7 +8,7 @@ AGENTS = {
     "scrum-approver": "opus", "scrum-debugger": "opus",
     "scrum-digest-reader": "sonnet", "scrum-digester": "opus", "scrum-triager": "opus",
     "scrum-planner": "opus", "scrum-tracker": "sonnet", "scrum-bigboy-reviewer": "opus",
-    "scrum-review-e2e": "sonnet", "scrum-review-rules": "opus", "scrum-unblocker": "opus",
+    "scrum-review-e2e": "sonnet", "scrum-unblocker": "opus",
 }
 DASHBOARD = ROOT / "skills" / "trevskills-scrum" / "dashboard.html"
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -18,7 +18,7 @@ FIRST_LINE = {
     "scrum-review-ux": "VERDICT: PASS", "scrum-review-ui": "VERDICT: PASS", "scrum-review-code": "VERDICT: PASS",
     "scrum-debugger": "ASSESSMENT: READY", "scrum-digest-reader": "DIGEST NOTES",
     "scrum-planner": "PLAN: READY", "scrum-tracker": "TRACK: ON TRACK", "scrum-bigboy-reviewer": "BIGBOY: PASS",
-    "scrum-review-e2e": "VERDICT: PASS", "scrum-review-rules": "VERDICT: PASS",
+    "scrum-review-e2e": "VERDICT: PASS",
     "scrum-unblocker": "VERDICT: REWORK | RESPEC | ESCALATE",
 }
 
@@ -587,7 +587,7 @@ class ContractTest(unittest.TestCase):
         for phrase in ("**Merge**'s schema guard", "**Check gate** step 2 commands and its `.env` check"):
             self.assertIn(phrase, check, phrase)
         skill = ROOT / "skills" / "trevskills-scrum"
-        files = [skill / "SKILL.md", *sorted(f for f in (skill / "lanes").glob("*.md") if f.name != "rules-gate.md")]
+        files = [skill / "SKILL.md", *sorted((skill / "lanes").glob("*.md"))]
         for f in files:
             for span in re.findall(r"`(B ask [^`]+)`", f.read_text()):
                 self.assertNotIn("Hard stop: agent rules", span, f.name)
@@ -595,6 +595,26 @@ class ContractTest(unittest.TestCase):
         for phrase in ("stops at the Merge", "scrum-review-rules"):
             self.assertNotIn(phrase, claude, phrase)
         self.assertIn("Batch rule edits", claude)
+
+    def test_agent_rules_machinery_retired(self):
+        """Job 497: the rules gate, its reviewer, standards doc and board.py commands are gone, and nothing names them."""
+        for rel in ("skills/trevskills-scrum/lanes/rules-gate.md", "agents/scrum-review-rules.md", "docs/skill-standards.md"):
+            self.assertFalse((ROOT / rel).exists(), rel)
+        skill = ROOT / "skills" / "trevskills-scrum"
+        files = [skill / "SKILL.md", *(skill / "lanes").glob("*.md"), skill / "board.py", skill / "serve.py",
+                 *(ROOT / "agents").glob("*.md"), ROOT / "CLAUDE.md", *(ROOT / ".claude" / "skills").rglob("*.md")]
+        for f in files:
+            text = f.read_text()
+            for phrase in ("rules-gate", "scrum-review-rules", "skill-standards", "digest-verify", "rules-check",
+                           "Rules case:"):
+                self.assertNotIn(phrase, text, f"{phrase} in {f.relative_to(ROOT)}")
+        cloud = self.lane("cloud")
+        sync = cloud[cloud.index("3. **Sync**"):]
+        self.assertNotIn("**Digest rules edits.**", sync)
+        self.assertNotIn("Hard stop: agent rules", sync)
+        rule = self.section(skill_text(), "**Every stop is a closed question.**", "\n\n")
+        self.assertNotIn("`Hard stop: agent rules`", rule)
+        self.assertIn("`Hard stop: schema`", rule)
 
     def test_skill_clean_round_skips_approver(self):
         text = skill_text()
@@ -2069,7 +2089,7 @@ class ContractTest(unittest.TestCase):
         for f in files:
             self.assertNotIn("stage=needs-human", f.read_text(), f.name)
         spans = re.findall(r"`(B ask [^`]+)`", self.rules())
-        self.assertGreaterEqual(len(spans), 27)  # every former free-text park, now a closed question
+        self.assertGreaterEqual(len(spans), 26)  # every former free-text park, now a closed question
         for span in spans:
             commands = self.ask_options(span)
             self.assertIn(len(commands), (2, 3), span)
@@ -2082,7 +2102,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`B set` refuses the needs-human stage.", text)
         self.assertNotIn("Every needs-human reason is", text)
         # Prefix-dependent readers (board.RESUMABLE, serve.py CLOUD_HOME, cloud.md) still match the asked questions.
-        for prefix in ("'Hard stop: schema — ", "'Hard stop: agent rules — ", "'bigboy off track: ",
+        for prefix in ("'Hard stop: schema — ", "'bigboy off track: ",
                        '"Base branch line', "'Base branch <BB>", "'blocked: "):
             self.assertTrue(any(prefix in sp for sp in spans), prefix)
 
@@ -2107,7 +2127,7 @@ class ContractTest(unittest.TestCase):
 
     def test_ask_prefixes_unchanged(self):
         questions = [self.ask_question(sp) for _, sp in self.ask_spans()]
-        for prefix in ("Hard stop: schema — ", "Hard stop: agent rules — ", "blocked: ", "bigboy off track: ",
+        for prefix in ("Hard stop: schema — ", "blocked: ", "bigboy off track: ",
                        "Base branch line", "Base branch <BB>", "debug: ",
                        "migrate needs your OK: ", "migrate stopped: ", "merge refused: ", "merge conflicts with ",
                        "approver ", "CI still fails", "Uncommitted change in ", "Uncommitted files in the job worktree",
@@ -2139,7 +2159,7 @@ class ContractTest(unittest.TestCase):
                 self.assertNotIn(bad, q, span)
             self.assertIsNone(re.search(r"/[\w<>.-]*\.[A-Za-z]", q), span)
         text = self.rules()
-        self.assertEqual(text.count("`$F/jobs/$ID/stop.md`"), 5)  # stops.md, schema, worktree files, main checkout, agent rules
+        self.assertEqual(text.count("`$F/jobs/$ID/stop.md`"), 4)  # stops.md, schema, worktree files, main checkout
 
     def test_ask_labels_plain(self):
         import shlex
@@ -2186,9 +2206,9 @@ class ContractTest(unittest.TestCase):
         for phrase in ("say what happened and why it needs Trevor", "say what each button does",
                        "must read on its own", "a rule number or an internal term",
                        "rewrites any templated or passed-through text", "before calling `B ask`, keeping its prefix",
-                       "decision.md line 2", "rules-check failure string", "`## For Trevor` line",
-                       "`This change edits the scrum standards doc (skill-standards.md), which agents aren't allowed "
-                       "to merge on their own. Reviews and tests passed. Merge it?`",
+                       "decision.md line 2", "`## For Trevor` line",
+                       "`This change adds a database column, which agents aren't allowed to apply on their own. Reviews "
+                       "and tests passed. Apply it and merge?`",
                        "says in words what the detail holds and where it is shown", "`jobs/<id>/stop.md`",
                        "`Remove this job=abort <id> --cascade`", "`Send back with a note`",
                        "`--recommend <key> '<why>'`", "by your own judgement", "every `'` removed",
@@ -2229,55 +2249,6 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn('"', q)
             self.assertNotIn("`", q)
         self.assertIn("recommend key `a`", guard)
-
-    def test_merge_agent_rules_gate(self):
-        gate = self.lane("rules-gate")
-        for phrase in ('`B rules-check $ID --worktree "$WT" --base "$BASE"`', "spawn `scrum-review-rules` and wait for it",
-                       "HEAD=$HEAD", "its second line is `Reviewed: $HEAD`, reuse it",
-                       "is `VERDICT: PASS` and its second line is `Reviewed: $HEAD`, continue Merge without a human",
-                       "`B ask $ID 'Hard stop: agent rules — This change edits the rules the scrum agents follow, and agents "
-                       "may not merge it on their own because <plain fail>. The code reviews and tests passed. Merge anyway "
-                       "merges it as is; Send back with a note returns it to the builder to fix. The changed files are in "
-                       "the stop.md tab of this job.'",
-                       "--b 'Send back with a note=rework <id> \"<fail>: read rules-review.md, then fix it so B rules-check "
-                       "exits 0 and the rules review is PASS\"' --recommend <key> '<why>'`",
-                       "This file, the `## Human-only set` section of `docs/skill-standards.md`, `B rules-check`'s code, ",
-                       "(only board.py outside the rules-check code, or docs/skill-standards.md outside its Human-only set, "
-                       "changed)", "it changes <part>, which only Trevor may merge",
-                       "the rules reviewer asked for changes, and its notes are in the rules-review.md tab",
-                       "the automatic rules check could not run",
-                       "Write the matching files to `$F/jobs/$ID/stop.md`",
-                       '--a "Merge anyway=approve $ID"', "--b 'Send back with a note=rework <id>",
-                       "a missing or unreadable file, another HEAD) counts as CHANGES"):
-            self.assertIn(phrase, gate, phrase)
-        self.assertLess(gate.index("1. **Script rules.**"), gate.index("2. **Judged rules.**"))
-
-    def test_rules_reviewer_quotes_every_judged_rule(self):
-        text = (ROOT / "agents" / "scrum-review-rules.md").read_text()
-        for phrase in ("JOB_DIR/rules-review.md", "Reviewed: <HEAD from your prompt>", "word for word",
-                       "`VERDICT: PASS` only when all six rules 9-14 are quoted", "a rule left out, is `VERDICT: CHANGES`"):
-            self.assertIn(phrase, text, phrase)
-
-    def test_rules_known_safe_case_moved_text(self):
-        line = "Rules case: moved-text — <Y> holds the <section> the ticket names in <X>"
-        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("**Known safe cases**", line, "Never write the line for `agents/scrum-*.md`"):
-            self.assertIn(phrase, approver, phrase)
-        rule7 = self.section((ROOT / "docs" / "skill-standards.md").read_text(), "### 7. ", "### 8. ")
-        self.assertIn("Known safe\n  case moved-text", rule7)
-        self.assertIn("has moved", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
-
-    def test_skill_standards_doc_tags_every_rule(self):
-        text = (ROOT / "docs" / "skill-standards.md").read_text()
-        heads = re.findall(r"^### (\d+)\. .* `(script|judge)`$", text, re.M)
-        self.assertEqual(heads, [(str(n), "script" if n <= 8 else "judge") for n in range(1, 15)])
-        for n in range(1, 15):
-            body = self.section(text, f"### {n}. ", f"### {n + 1}. " if n < 14 else "- Fix:")
-            self.assertTrue(all(k in body for k in ("- Why:", "- Check:")), n)
-        self.assertEqual(text.count("- Fix:"), 14)
-        for phrase in ("## Human-only set", "the never-list at the top of `SKILL.md`", "`agents/scrum-review-rules.md`",
-                       "`skills/trevskills-scrum/lanes/rules-gate.md`", "the Merge step 1 guard bullets"):
-            self.assertIn(phrase, text, phrase)
 
     def test_merge_conflicts_ask_after_two(self):
         text = skill_text()
@@ -2854,14 +2825,10 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                 self.assertIn(phrase, path.read_text(), f"{name}: {phrase}")
 
     def test_skill_md_within_body_budget(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("board_budget", BOARD_PY)
-        board = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(board)
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
-        self.assertLessEqual(text.count("\n"), board.BODY_MAX_LINES)
+        self.assertLessEqual(text.count("\n"), 500)  # skill best practices: under 500 lines
         self.assertLessEqual(len(text), 20000)
-        self.assertLessEqual(len(text) // 4, board.BODY_MAX_TOKENS)
+        self.assertLessEqual(len(text) // 4, 5000)  # agentskills.io: a 5k-token body
 
     def test_moved_sections_have_lane_files(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -3242,23 +3209,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for name, model in AGENTS.items():
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("model"), model, name)
 
-    def test_cloud_sync_reverifies_agent_rules_digest_jobs(self):
-        text = skill_text()
-        cloud = self.lane("cloud")
-        sync = cloud[cloud.index("3. **Sync**"):]
-        start = sync.index("**Digest rules edits.**")
-        rule = sync[start:sync.index("\n", start)]
-        for phrase in ("reason starts `Hard stop: agent rules`", "B digest-verify $ID", "exits 0", "run **Merge**",
-                       "WT=$REPO/.claude/worktrees/scrum-$ID", "BASE=origin/<baseRefName>", "needs-human",
-                       "**Artifacts home**", "**Follow-ups**"):
-            self.assertIn(phrase, rule, phrase)
-        for phrase in ("lanes/rules-gate.md", "B rules-check", "scrum-review-rules", "rules-review.md"):
-            self.assertIn(phrase, rule, phrase)
-        self.assertLess(rule.index("B digest-verify $ID"), rule.index("rules-gate.md"))
-        self.assertNotIn("approve $ID", rule)  # approve would write human-approval.md, "Approved by Trevor"
-        # It runs after the folder comes home and its follow-ups are queued.
-        self.assertLess(sync.index("**Follow-ups.**"), start)
-
     def test_cloud_setup_reuses_install(self):
         setup = (ROOT / "cloud" / "setup.sh").read_text()
         self.assertIn("https://github.com/trevorwhecht/scrum", setup)
@@ -3309,328 +3259,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = DASHBOARD.read_text()
         for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
             self.assertIn(phrase, text, phrase)
-
-
-class RulesCheckTest(unittest.TestCase):
-    """board.py rules-check: the script rules (1-8) of docs/skill-standards.md over a job worktree's diff."""
-    SKILL = ("---\nname: demo-skill\ndescription: Runs the demo. Use when asked for a demo.\n---\n\n# Demo\n\n"
-             "This skill is a sanctioned exception to the global git rules:\n- never push main\n\nJev never approves.\n\n"
-             "## Setup\n\nSet up.\n\n## Merge\n\n1. **Preconditions:**\n   - **Agent rules guard:** stop for Trevor.\n"
-             "2. Run `B set $ID stage=merging`.\n")
-    AGENT = ("---\nname: scrum-demo\ndescription: Scrum demo agent. Writes demo.md. Spawned only by the orchestrator.\n"
-             "tools: Read, Write\nmodel: opus\n---\n\nRule one.\n")
-    CONTRACTS = ('import unittest\nFIRST_LINE = {\n    "scrum-demo": "DEMO: OK",\n}\n\n\n'
-                 'class T(unittest.TestCase):\n    def test_ok(self):\n        pass\n')
-    BOARD = "x = 1\n# --- rules-check: the script half\ny = 2\n# --- end rules-check\nz = 3\n"
-    STANDARDS = ("# Standards\n\nIntro.\n\n## Human-only set\n\nOnly Trevor merges these.\n\n## Script rules\n\n"
-                 "### 1. Names\n")
-    LIKELY = ("## Likely files\n- `agents/scrum-demo.md`\n- `skills/trevskills-scrum/SKILL.md`\n"
-              "- `skills/trevskills-scrum/lanes/*.md`\n- `tests/test_contracts.py`\n- `skills/trevskills-scrum/board.py`\n"
-              "- `docs/skill-standards.md`\n")
-
-    @classmethod
-    def setUpClass(cls):
-        """The committed base repo, built once: each setUp copies it (git init + commit per test cost seconds under load)."""
-        import tempfile
-        cls.base_tmp = tempfile.TemporaryDirectory()
-        cls.addClassCleanup(cls.base_tmp.cleanup)
-        cls.base_repo = Path(cls.base_tmp.name) / "repo"
-        files = {"agents/scrum-demo.md": cls.AGENT, "skills/trevskills-scrum/SKILL.md": cls.SKILL,
-                 "skills/trevskills-scrum/lanes/demo.md": "# Demo lane\n\nStep one.\n",
-                 "tests/test_contracts.py": cls.CONTRACTS, "skills/trevskills-scrum/board.py": cls.BOARD,
-                 "docs/skill-standards.md": cls.STANDARDS, "README.md": "readme\n"}
-        for rel, text in files.items():
-            (cls.base_repo / rel).parent.mkdir(parents=True, exist_ok=True)
-            (cls.base_repo / rel).write_text(text)
-        cls.git(cls.base_repo, "init", "-q", "-b", "main")
-        cls.git(cls.base_repo, "add", *files)
-        cls.git(cls.base_repo, "commit", "-q", "-m", "base")
-
-    def setUp(self):
-        import os, sys, tempfile
-        from unittest import mock
-        sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
-        import board
-        self.board = board
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        base = Path(self.tmp.name)
-        self.repo, self.wt = base / "repo", base / "wt"
-        self.root = self.repo / "scrum"
-        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json"),
-                                           "SCRUM_USAGE": str(base / "no-usage.json")})
-        env.start()
-        self.addCleanup(env.stop)
-        shutil.copytree(self.base_repo, self.repo, symlinks=True)
-        self.job = board.cmd_new(self.root, "Rules edit")
-        self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
-        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
-        (self.root / "jobs" / self.job / "spec.md").write_text("# Rules edit\n\n" + self.LIKELY)
-
-    @staticmethod
-    def git(cwd, *args):
-        subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
-                       capture_output=True)
-
-    def commit(self, rel, text):
-        (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
-        (self.wt / rel).write_text(text)
-        self.git(self.wt, "add", rel)
-        self.git(self.wt, "commit", "-q", "-m", "edit")
-
-    def run_cli(self):
-        import io
-        from contextlib import redirect_stdout
-        out = io.StringIO()
-        with redirect_stdout(out):
-            code = self.board.main(["--dir", str(self.root), "rules-check", self.job])
-        return code or 0, json.loads(out.getvalue())
-
-    def assert_fails(self, needle):
-        code, out = self.run_cli()
-        self.assertEqual(code, 1, out)
-        self.assertFalse(out["ok"])
-        self.assertTrue(any(needle in f for f in out["failures"]), out["failures"])
-        return out
-
-    def test_compliant_rules_diff_passes(self):
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["ok"], out["failures"]), (0, True, []), out)
-        self.assertEqual(out["files"], ["agents/scrum-demo.md"])
-
-    def test_no_rules_file_changed_fails(self):
-        self.commit("tests/test_contracts.py", self.CONTRACTS + "# note\n")
-        self.assert_fails("the diff changes no rules file")
-
-    def test_rule1_frontmatter_needs_name_and_description(self):
-        self.commit("agents/scrum-demo.md", "Rule one.\n")
-        self.assert_fails("rule 1: agents/scrum-demo.md")
-
-    def test_rule2_bad_name(self):
-        self.commit("agents/scrum-demo.md", self.AGENT.replace("name: scrum-demo", "name: Claude_Demo"))
-        self.assert_fails("rule 2: agents/scrum-demo.md")
-
-    def test_rule3_description_angle_brackets_and_second_person(self):
-        self.commit("agents/scrum-demo.md", self.AGENT.replace("Writes demo.md.", "Writes <demo>."))
-        self.assert_fails("rule 3: agents/scrum-demo.md")
-        self.commit("agents/scrum-demo.md", self.AGENT.replace("Writes demo.md.", "You write demo.md."))
-        self.assert_fails("rule 3: agents/scrum-demo.md")
-
-    def test_rule3_existing_violation_is_not_new(self):
-        bad = self.AGENT.replace("Writes demo.md.", "Writes <demo>.")
-        (self.repo / "agents" / "scrum-demo.md").write_text(bad)
-        self.git(self.repo, "commit", "-q", "-am", "old violation")
-        self.git(self.wt, "merge", "-q", "main")
-        self.git(self.repo, "branch", "-f", "base-now", "main")
-        self.board.cmd_set(self.root, self.job, ["base=base-now"])
-        self.commit("agents/scrum-demo.md", bad + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-
-    def test_rules_2_3_5_second_violation_still_fails(self):
-        """Base already has one @ link and one angle bracket; the diff adding another of each still fails."""
-        bad = self.AGENT.replace("Writes demo.md.", "Writes <demo>.") + "See @docs/a.md first.\n"
-        (self.repo / "agents" / "scrum-demo.md").write_text(bad)
-        self.git(self.repo, "commit", "-q", "-am", "old violations")
-        self.git(self.wt, "merge", "-q", "main")
-        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
-        self.commit("agents/scrum-demo.md", bad + "Then @docs/b.md.\n")
-        self.assert_fails("rule 5: agents/scrum-demo.md: has an @ link")
-        self.commit("agents/scrum-demo.md", bad.replace("Writes <demo>.", "Writes <demo> and <more>."))
-        self.assert_fails("rule 3: agents/scrum-demo.md: description has an angle bracket")
-
-    def test_rule4_new_file_over_budget_fails(self):
-        self.commit("skills/trevskills-scrum/lanes/big.md", "# Big\n\n## Contents\n" + "line\n" * 501)
-        self.assert_fails("rule 4: skills/trevskills-scrum/lanes/big.md")
-
-    def test_rule4_over_budget_file_may_shrink_not_grow(self):
-        big = self.AGENT + "line\n" * 600
-        (self.repo / "agents" / "scrum-demo.md").write_text(big)
-        self.git(self.repo, "commit", "-q", "-am", "big")
-        self.git(self.wt, "merge", "-q", "main")
-        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
-        self.commit("agents/scrum-demo.md", big.replace("line\n", "", 1))
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-        self.commit("agents/scrum-demo.md", big + "more\n")
-        self.assert_fails("rule 4: agents/scrum-demo.md")
-
-    def head(self, cwd):
-        return subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-
-    def test_rule5_at_link_fails(self):
-        self.commit("agents/scrum-demo.md", self.AGENT + "See @docs/notes.md first.\n")
-        self.assert_fails("rule 5: agents/scrum-demo.md")
-
-    def test_rule5_long_reference_needs_contents(self):
-        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\n" + "step\n" * 120)
-        self.assert_fails("rule 5: skills/trevskills-scrum/lanes/demo.md")
-        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\n## Contents\n- Steps\n\n" + "step\n" * 120)
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-
-    def test_rule5_reference_points_to_another_lane(self):
-        self.commit("skills/trevskills-scrum/lanes/demo.md", "# Demo lane\n\nRead `lanes/other.md` next.\n")
-        self.assert_fails("rule 5: skills/trevskills-scrum/lanes/demo.md")
-
-    def test_rule6_contract_suite_must_pass(self):
-        self.commit("tests/test_contracts.py", self.CONTRACTS.replace("pass", "self.fail('pinned phrase gone')"))
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        self.assert_fails("rule 6: python3 -m unittest tests.test_contracts fails")
-
-    def test_rule6_skipped_without_contracts_file(self):
-        self.git(self.repo, "rm", "-q", "tests/test_contracts.py")
-        self.git(self.repo, "commit", "-q", "-m", "no contracts")
-        self.git(self.wt, "merge", "-q", "main")
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["ok"], out["failures"]), (0, True, []), out)
-
-    def test_rule6_deleted_contracts_file_still_fails(self):
-        self.git(self.wt, "rm", "-q", "tests/test_contracts.py")
-        self.git(self.wt, "commit", "-q", "-m", "drop contracts")
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        self.assert_fails("rule 6: python3 -m unittest tests.test_contracts fails")
-        self.assert_fails("rule 6: FIRST_LINE pin for scrum-demo")
-
-    def test_rule6_first_line_pin_kept(self):
-        self.commit("tests/test_contracts.py", self.CONTRACTS.replace('    "scrum-demo": "DEMO: OK",\n', ""))
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        self.assert_fails("rule 6: FIRST_LINE pin for scrum-demo")
-
-    def test_rule7_file_outside_ticket_fails(self):
-        self.commit("README.md", "readme, edited\n")
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        out = self.assert_fails("rule 7: README.md")
-        self.assertFalse(any("agents/scrum-demo.md" in f for f in out["failures"]), out)
-
-    def test_rule7_feature_md_names_the_file(self):
-        (self.root / "jobs" / self.job / "spec.md").write_text("# Rules edit\n")
-        (self.root / "jobs" / self.job / "feature.md").write_text("Sharpen agents/scrum-demo.md rule two.\n")
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-        (self.root / "jobs" / self.job / "feature.md").write_text("Sharpen xagents/scrum-demo.md.bak rule two.\n")
-        self.assert_fails("rule 7: agents/scrum-demo.md")
-
-    CLOUD = "skills/trevskills-scrum/lanes/cloud.md"
-    MOVED = ("Rules case: moved-text — skills/trevskills-scrum/lanes/cloud.md holds the Cloud lane steps the ticket "
-             "names in skills/trevskills-scrum/SKILL.md\n")
-
-    def moved_base(self, pointer=True):
-        """Job 205's shape at the merge-base: SKILL.md points to lanes/cloud.md (when pointer), and the ticket names
-        only SKILL.md."""
-        skill = self.SKILL + ("\n## Cloud lane\n\nRead $HOME/.claude/skills/trevskills-scrum/lanes/cloud.md when this "
-                              "lane runs. See agents/scrum-demo.md.\n" if pointer else "")
-        for rel, text in (("skills/trevskills-scrum/SKILL.md", skill), (self.CLOUD, "# Cloud lane\n\nStep one.\n"),
-                          ("agents/scrum-demo.md", self.AGENT + "See skills/trevskills-scrum/lanes/cloud.md.\n")):
-            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.repo / rel).write_text(text)
-        self.git(self.repo, "add", "-A", "--", "skills", "agents")
-        self.git(self.repo, "commit", "-q", "-m", "cloud lane")
-        self.git(self.wt, "merge", "-q", "main")
-        self.board.cmd_set(self.root, self.job, ["base=" + self.head(self.repo)])
-        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n")
-        return skill
-
-    def ticket(self, likely, decision=None):
-        jd = self.root / "jobs" / self.job
-        (jd / "spec.md").write_text("# Rules edit\n\n## Likely files\n" + likely)
-        if decision is not None:
-            (jd / "decision.md").write_text("# Decision\n\nVERDICT: APPROVE\n" + decision)
-
-    def test_rule7_moved_text_case_passes(self):
-        self.moved_base()
-        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED)
-        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-
-    def test_rule7_moved_text_needs_approver_line(self):
-        self.moved_base()
-        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
-        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
-        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED.replace("lanes/cloud.md", "lanes/demo.md"))
-        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
-
-    def test_rule7_moved_text_needs_pointer_in_x(self):
-        skill = self.moved_base(pointer=False)
-        self.ticket("- `skills/trevskills-scrum/SKILL.md`\n", self.MOVED)
-        self.commit("skills/trevskills-scrum/SKILL.md", skill + "\nRead skills/trevskills-scrum/lanes/cloud.md.\n")
-        self.commit(self.CLOUD, "# Cloud lane\n\nStep one, sharper.\n")
-        self.assert_fails(f"rule 7: {self.CLOUD} is not named")
-
-    def test_rule7_moved_text_refuses_agents_and_unnamed_x(self):
-        self.moved_base()
-        agent_y = self.MOVED.replace("skills/trevskills-scrum/lanes/cloud.md", "agents/scrum-demo.md")
-        agent_x = self.MOVED.replace("skills/trevskills-scrum/SKILL.md", "agents/scrum-demo.md")
-        cases = (("X not in the ticket", "- `README.md`\n", self.MOVED, self.CLOUD),
-                 ("Y is a scrum agent", "- `skills/trevskills-scrum/SKILL.md`\n", agent_y, "agents/scrum-demo.md"),
-                 ("X is a scrum agent", "- `agents/scrum-demo.md`\n", agent_x, self.CLOUD))
-        for n, (case, likely, line, y) in enumerate(cases):
-            with self.subTest(case=case):
-                self.ticket(likely, line)
-                self.commit(y, (self.repo / y).read_text() + f"Edit {n}.\n")
-                self.assert_fails(f"rule 7: {y} is not named")
-
-    def test_rule8_human_only_files(self):
-        for rel in ("agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"):
-            with self.subTest(rel=rel):
-                self.commit(rel, "---\nname: scrum-review-rules\ndescription: Grades rules.\n---\n\nx\n")
-                out = self.assert_fails(f"rule 8: changes {rel}, which only Trevor may merge")
-                self.assertFalse(any("human-only" in f for f in out["failures"]), out)
-
-    def test_rule8_standards_doc_outside_section_passes(self):
-        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Intro.", "Intro, reworded."))
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-
-    def test_rule8_standards_doc_human_only_set_fails(self):
-        self.assertEqual(self.board.HUMAN_ONLY_FILES,
-                         ("agents/scrum-review-rules.md", "skills/trevskills-scrum/lanes/rules-gate.md"))
-        self.assertEqual(self.board.HUMAN_ONLY_SECTIONS["docs/skill-standards.md"],
-                         [("the Human-only set", "## Human-only set", "\n## Script rules")])
-        msg = "rule 8: changes the Human-only set in docs/skill-standards.md, which only Trevor may merge"
-        self.commit("docs/skill-standards.md", self.STANDARDS.replace("Only Trevor", "Agents"))
-        self.assert_fails(msg)
-        self.commit("docs/skill-standards.md", self.STANDARDS.replace("## Script rules", "## Rules"))
-        self.assert_fails(msg)
-
-    def test_rule8_never_list_and_guard_bullets(self):
-        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("- never push main\n", ""))
-        self.assert_fails("rule 8: changes the never-list in skills/trevskills-scrum/SKILL.md, which only Trevor may merge")
-        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("stop for Trevor.", "merge."))
-        out = self.assert_fails("rule 8: changes the Merge step 1 guard bullets in skills/trevskills-scrum/SKILL.md, "
-                                "which only Trevor may merge")
-        self.assertFalse(any("never-list" in f for f in out["failures"]), out)
-
-    def test_rule8_skill_md_outside_human_only_sections_passes(self):
-        self.commit("skills/trevskills-scrum/SKILL.md", self.SKILL.replace("Set up.", "Set up fast."))
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-
-    def test_rule8_rules_check_code(self):
-        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("z = 3", "z = 4"))
-        self.commit("agents/scrum-demo.md", self.AGENT + "Rule two.\n")
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"]), (0, []), out)
-        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("y = 2", "y = 0"))
-        self.assert_fails("rule 8: changes the rules-check code in skills/trevskills-scrum/board.py, which only Trevor may merge")
-
-    def test_board_py_only_edit_outside_rules_check_passes(self):
-        """The Merge guard also routes board.py diffs here; one that leaves the rules-check code alone passes."""
-        self.commit("skills/trevskills-scrum/board.py", self.BOARD.replace("z = 3", "z = 4"))
-        code, out = self.run_cli()
-        self.assertEqual((code, out["failures"], out["files"]), (0, [], []), out)
-
-    def test_real_repo_markers_exist(self):
-        """Rule 8's section markers are found in the real files, so the human-only set is never silently empty."""
-        for rel, sections in self.board.HUMAN_ONLY_SECTIONS.items():
-            text = (ROOT / rel).read_text()
-            for label, start, end in sections:
-                self.assertIsNotNone(self.board._section(text, start, end), f"{rel}: {label}")
 
 
 if __name__ == "__main__":
