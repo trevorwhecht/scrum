@@ -12,6 +12,6 @@ The orchestrator spawns no subagents (no spec writer, builder, reviewer or appro
 
 **Promotion.** Run `B set $ID lane=fast` and append `Promoted to fast: <trigger>` to `$F/jobs/$ID/promoted.md`. Keep the worktree and its commits. Then run **New job** step 3 with `WORKTREE=$WT` (its `B lilguy-fit` now says `already on fast lane`), then 3b and 3c, except that `Lane: bigboy` and `Lane: debug` count as `standard`. Skip step 4 and go on at step 5, so the builder continues from the existing commits. From there the **Fast lane** promotions to standard apply.
 
-**Resume.** A lilguy job with a worktree flagged `stalled in <stage>` re-runs this lane: step 2 for `build`, step 3 for `check`, **Merge** from step 1 for `merging`.
+**Resume.** A lilguy job with a worktree flagged `stalled` re-runs this lane: step 2 for `build`, step 3 for `check`, **Merge** from step 1 for `merging`.
 
 6. End with the **Final report** (job id, stage, PR URL, and for needs-human the reason).
