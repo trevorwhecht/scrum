@@ -337,11 +337,15 @@ const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type"
 // A 404 from one of our own routes means serve.py predates this dashboard.html; callers pass STALE as `missing` to say so.
 const STALE = "Dashboard server is out of date. Restart serve.py.";
 // A dropped or failed read (a busy serve.py) repeats that URL's last good body instead of the fallback, so one slow
-// request never empties a column or hides the usage button; `missed` counts them for poll's status line.
-const lastGood = {};
+// request never empties a column or hides the usage button; `missed` counts them for poll's status line. etags holds
+// the ETag of each lastGood body: sent as If-None-Match, a 304 means that body still holds, so nothing re-downloads.
+const lastGood = {}, etags = {};
 let missed = 0;
-const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store"})
-  .then(r => r.ok ? r.json().then(v => (lastGood[url] = v)) : r.status === 404 ? (delete lastGood[url], missing) : Promise.reject())
+const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-store",
+    headers: etags[url] && url in lastGood ? {"If-None-Match": etags[url]} : {}})
+  .then(r => r.status === 304 && url in lastGood ? lastGood[url]
+    : r.ok ? r.json().then(v => { const tag = r.headers?.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return (lastGood[url] = v); })
+    : r.status === 404 ? (delete lastGood[url], delete etags[url], missing) : Promise.reject())
   .catch(() => { missed++; return url in lastGood ? lastGood[url] : fallback; });
 // One run at a time: a call while the last is still in flight shares it, so slow polls never stack up behind
 // Chrome's 6 connections per host.
@@ -692,11 +696,16 @@ async function poll() {
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);
     runs = runsByKey(runList);
-    // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll.
+    // A done or aborted job's routing.log can't change, so it is fetched once; active ones refetch every poll, sending
+    // the last ETag so an unchanged log comes back as a bodyless 304 and keeps its text.
     const final = j => ["done", "aborted"].includes(j.stage);
-    await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key)))
-      .map(j => fetch(`p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`, {cache: "no-store"})
-        .then(r => r.ok ? r.text() : "").catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); })));
+    await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key))).map(j => {
+      const url = `p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`;
+      return fetch(url, {cache: "no-store", headers: etags[url] && j.key in routes ? {"If-None-Match": etags[url]} : {}})
+        .then(r => r.status === 304 && j.key in routes ? routes[j.key]
+          : r.ok ? r.text().then(t => { const tag = r.headers.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return t; }) : "")
+        .catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); });
+    }));
     auditRunsChanged();
     const nextBacklogs = Object.fromEntries(projects.map((p, i) => [p, items[i]]));
     const nextManuals = Object.fromEntries(projects.map((p, i) => [p, checks[i]]));

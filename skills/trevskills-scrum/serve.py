@@ -1184,6 +1184,8 @@ def set_cooldown(on):
     if type(on) is not bool:
         return 400, {"error": "on must be true or false"}
     flag = board.cooldown_path()
+    with MACHINE_LOCK:
+        MACHINE_CACHE.clear()  # the meter shows the new cool-down on its next read
     if on:
         flag.parent.mkdir(parents=True, exist_ok=True)
         flag.touch()
@@ -1339,6 +1341,20 @@ def save_attachment(root, data, mime):
         tmp.write_bytes(raw)
         os.replace(tmp, path)
     return {"path": str(path)}
+
+
+MACHINE_TTL = 5  # seconds /api/machine reuses its last reading; about two 2 s dashboard polls
+MACHINE_CACHE = {}  # {"at": time.monotonic(), "value": machine_status()}; set_cooldown clears it
+MACHINE_LOCK = threading.Lock()
+
+
+def cached_machine_status():
+    """GET /api/machine: machine_status(), reused while younger than MACHINE_TTL, since memory_pressure and sysctl fork
+    on every read. The claim and resume gates call board.machine_ok directly, uncached."""
+    with MACHINE_LOCK:  # held while reading, so concurrent tabs share one set of forks
+        if not MACHINE_CACHE or time.monotonic() - MACHINE_CACHE["at"] >= MACHINE_TTL:
+            MACHINE_CACHE.update(at=time.monotonic(), value=machine_status())
+        return MACHINE_CACHE["value"]
 
 
 def machine_status():
@@ -2023,19 +2039,72 @@ def build_lock_waiting(worktree):
     return False
 
 
+BOARD_CACHE = {}  # str(scrum root) -> ((st_ino, st_mtime_ns, st_size), parsed board.json); final jobs carry `routed`
+BOARD_CACHE_LOCK = threading.Lock()
+
+
+def cached_board(root):
+    """board.json parsed, reused while its (inode, mtime, size) is unchanged; an os.replace can land within one mtime
+    tick, so the inode and size count too. Done and aborted jobs get their `routed` flag once per parse. A ValueError
+    (malformed or mid-write) caches nothing. Callers never mutate the result: board_with_activity copies each job."""
+    with open(root / "board.json", "rb") as f:
+        st = os.fstat(f.fileno())
+        key = (st.st_ino, st.st_mtime_ns, st.st_size)
+        with BOARD_CACHE_LOCK:
+            hit = BOARD_CACHE.get(str(root))
+        if hit and hit[0] == key:
+            return hit[1]
+        data = json.loads(f.read().decode())
+    for job in data.get("jobs", []):
+        if job.get("stage") in ("done", "aborted"):
+            job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
+    with BOARD_CACHE_LOCK:
+        BOARD_CACHE[str(root)] = (key, data)
+    return data
+
+
+BACKLOG_CACHE = {}  # str(scrum root) -> (stat keys of backlog.md and board.json, board.backlog_items)
+BACKLOG_CACHE_LOCK = threading.Lock()
+
+
+def file_key(path):
+    """(st_ino, st_mtime_ns, st_size) of path, or None when it is missing."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def cached_backlog_items(root):
+    """GET /api/p/<project>/backlog: board.backlog_items(root), reused while backlog.md and board.json keep their stat
+    (their `waits` read both). Stat is taken first, so a write during the parse only costs one extra parse."""
+    key = (file_key(root / "backlog.md"), file_key(root / "board.json"))
+    with BACKLOG_CACHE_LOCK:
+        hit = BACKLOG_CACHE.get(str(root))
+    if hit and hit[0] == key:
+        return hit[1]
+    items = board.backlog_items(root)
+    with BACKLOG_CACHE_LOCK:
+        BACKLOG_CACHE[str(root)] = (key, items)
+    return items
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
     Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
     waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
-    `nextRetryAt` (epoch seconds, or None)."""
-    data = json.loads((root / "board.json").read_text())
-    stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
-    title = {j.get("id"): j.get("title") or "" for j in data.get("jobs", [])}
-    for job in data.get("jobs", []):
-        job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
-        if job.get("stage") not in ("done", "aborted"):
+    `nextRetryAt` (epoch seconds, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    no live field outlives the poll that computed it."""
+    cached = cached_board(root)
+    stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
+    title = {j.get("id"): j.get("title") or "" for j in cached.get("jobs", [])}
+    data = {**cached, "jobs": [dict(j) for j in cached.get("jobs", [])]}
+    for job in data["jobs"]:
+        if job.get("stage") not in ("done", "aborted"):  # a final job's routed flag is cached by cached_board
+            job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
             job["activity"] = activity(root, job)
             if "fable" in (board.orchestrator_model(root, job.get("id")) or "").lower():
                 job["fable"] = True  # the card's Fable chip
@@ -2055,7 +2124,7 @@ def board_with_activity(root, project):
         if job.get("stage") == "check" and job.get("worktree") and build_lock_waiting(job["worktree"]):
             job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
-            job["waitingOn"]["titles"] = [title.get(i, "") for i in job["waitingOn"]["ids"]]
+            job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     return data
 
 
@@ -3139,6 +3208,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def send(self, code, body, ctype, headers=()):
+        """A 200 GET carries a strong ETag (sha1 of the body); a matching If-None-Match gets a bodyless 304, so an
+        unchanged poll moves only headers."""
+        if code == 200 and self.command == "GET":
+            tag = f'"{hashlib.sha1(body).hexdigest()[:16]}"'
+            headers = [*headers, ("ETag", tag)]
+            if self.headers.get("If-None-Match") == tag:
+                code, body = 304, b""
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
@@ -3195,7 +3271,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
                                         "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
         if path == "/api/machine":
-            return self.send_json(200, machine_status())
+            return self.send_json(200, cached_machine_status())
         if path == "/api/runs":
             discusses = discuss_runs()
             with RUNS_LOCK:
@@ -3204,7 +3280,7 @@ class Handler(BaseHTTPRequestHandler):
                                              "exit": r["proc"].poll()} for k, r in RUNS.items()] + discusses)
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
-            return self.send_json(200, board.backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+            return self.send_json(200, cached_backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
         if m := re.fullmatch(r"/api/p/(.+)/windows", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, latest_windows(root)) if root else self.send_json(404, {"error": "no such project"})

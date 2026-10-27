@@ -65,6 +65,9 @@ class ServeTest(unittest.TestCase):
         guard = mock.patch.object(self.serve.board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
         guard.start()
         self.addCleanup(guard.stop)
+        ttl = mock.patch.object(self.serve, "MACHINE_TTL", 0)  # each /api/machine here reads its own env
+        ttl.start()
+        self.addCleanup(ttl.stop)
 
     @classmethod
     def tearDownClass(cls):
@@ -1663,6 +1666,123 @@ class ServeTest(unittest.TestCase):
         code, data = self.req("GET", "/p/repo/board.json")
         self.assertEqual(code, 200)
         return {j["id"]: j for j in data["jobs"]}
+
+    # --- job 463: ETag 304s, board.json and backlog caches keyed on file stat, a short /api/machine cache ---
+    def get_raw(self, path, tag=None, host=None):
+        """(status, ETag header, Content-Length header, body bytes) for a GET, 304 and 4xx included."""
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        self.addCleanup(c.close)
+        headers = {} if tag is None else {"If-None-Match": tag}
+        if host:
+            headers["Host"] = host
+        c.request("GET", path, headers=headers)
+        r = c.getresponse()
+        return r.status, r.getheader("ETag"), r.getheader("Content-Length"), r.read()
+
+    def test_get_etag_304(self):
+        ttl = mock.patch.object(self.serve, "MACHINE_TTL", 60)  # one reading for both /api/machine GETs
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        self.serve.MACHINE_CACHE.clear()
+        job = self.serve.board.cmd_new(self.root, "Etag routed")
+        self.addCleanup(self.edit_job, job, stage="aborted")
+        log = self.root / "jobs" / job / "routing.log"
+        log.write_text('{"role": "scrum-builder", "runner": "cloud"}\n')
+        for path in ("/p/repo/board.json", "/api/p/repo/backlog", "/api/machine", f"/p/repo/jobs/{job}/routing.log"):
+            with self.subTest(path=path):
+                code, tag, _, body = self.get_raw(path)
+                self.assertEqual(code, 200)
+                self.assertRegex(tag, r'^"[0-9a-f]{16}"$')
+                self.assertEqual(tag, '"%s"' % __import__("hashlib").sha1(body).hexdigest()[:16])
+                self.assertEqual(self.get_raw(path, tag), (304, tag, "0", b""))
+                for stale in ('"0000000000000000"', "not-a-tag", tag.strip('"')):
+                    got = self.get_raw(path, stale)
+                    self.assertEqual((got[0], got[1], got[3]), (200, tag, body), stale)
+        self.assertEqual(self.get_raw(f"/p/repo/jobs/{job}/routing.log", "garbage")[3],
+                         b'{"role": "scrum-builder", "runner": "cloud"}\n')
+        self.assertEqual(self.get_raw("/p/nope/board.json")[:2], (404, None))
+        self.assertEqual(self.get_raw("/api/machine", host="evil.example")[:2], (403, None))
+
+    def test_board_cache_reuses_parse_and_keeps_live_fields(self):
+        b = self.serve.board
+        live, gone = b.cmd_new(self.root, "Cache live"), b.cmd_new(self.root, "Cache done")
+        self.addCleanup(self.edit_job, live, stage="aborted")
+        self.edit_job(live, stage="build")
+        self.edit_job(gone, stage="done")
+        text = (self.root / "board.json").read_text()
+        with mock.patch.object(self.serve.json, "loads", wraps=json.loads) as loads:
+            first = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+            parses = sum(1 for c in loads.call_args_list if c.args and c.args[0] == text)
+            first[live]["title"] = "mutated by a caller"
+            (self.root / "jobs" / live / "decision.md").write_text("APPROVE\n")
+            second = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertEqual(parses, 1, "edit_job just rewrote board.json")
+        self.assertEqual(sum(1 for c in loads.call_args_list if c.args and c.args[0] == text), parses,
+                         "an unchanged board.json is not parsed again")
+        self.assertEqual(second[live]["title"], "Cache live", "the cached job dict is never the one returned")
+        self.assertEqual(second[gone]["stage"], "done", "done jobs stay in the response")
+        self.assertEqual(second[live]["activity"]["text"], "approver: APPROVE")
+        self.edit_job(live, title="Cache renamed")
+        self.assertEqual({j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}[live]["title"],
+                         "Cache renamed")
+
+    def test_board_cache_skips_malformed(self):
+        path = self.root / "board.json"
+        good = path.read_bytes()
+        self.addCleanup(path.write_bytes, good)
+        path.write_bytes(b'{"jobs": [')
+        st = path.stat()
+        with self.assertRaises(ValueError):
+            self.serve.board_with_activity(self.root, "repo")
+        self.assertNotEqual(self.serve.BOARD_CACHE.get(str(self.root), (None,))[0], (st.st_ino, st.st_mtime_ns, st.st_size))
+        code, _, _, body = self.get_raw("/p/repo/board.json")
+        self.assertEqual((code, body), (200, b'{"jobs": ['), "the raw bytes, as before")
+        path.write_bytes(good)
+        with mock.patch.object(self.serve.json, "loads", wraps=json.loads) as loads:
+            jobs = self.serve.board_with_activity(self.root, "repo")["jobs"]
+        self.assertEqual(sum(1 for c in loads.call_args_list if c.args and c.args[0] == good.decode()), 1)
+        self.assertEqual([j["id"] for j in jobs], [j["id"] for j in json.loads(good)["jobs"]])
+
+    def test_backlog_cache_refreshes_on_change(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        job = self.serve.board.cmd_new(self.root, "Base job")
+        self.addCleanup(self.edit_job, job, stage="aborted")
+        self.edit_job(job, stage="build")
+        path.write_text(f"# Backlog\n- [x] Base work {{#base}} → {job}\n- [ ] Needs base {{needs #base}}\n")
+        waits = lambda: [i["waits"] for i in self.req("GET", "/api/p/repo/backlog")[1]]
+        self.assertEqual(waits(), [[], ["base"]])
+        with mock.patch.object(self.serve.board, "backlog_items", wraps=self.serve.board.backlog_items) as items:
+            self.assertEqual(waits(), [[], ["base"]])
+            self.assertEqual(items.call_count, 0, "unchanged files: the cached list")
+            self.edit_job(job, stage="done")
+            self.assertEqual(waits(), [[], []], "the needed job merged")
+            self.assertEqual(items.call_count, 1)
+        self.assertEqual(self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": "Cache added"})[0], 200)
+        self.assertEqual([i["text"] for i in self.req("GET", "/api/p/repo/backlog")[1]][-1], "Cache added")
+
+    def test_api_machine_cached_and_cleared_by_cooldown(self):
+        self.assertEqual(self.serve.MACHINE_TTL, 0, "ServeTest.setUp turns the cache off")
+        ttl = mock.patch.object(self.serve, "MACHINE_TTL", 5)
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        self.serve.MACHINE_CACHE.clear()
+        flag = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "cooldown"
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag), SCRUM_FREE_RAM="50"):
+            self.assertEqual(self.req("GET", "/api/machine")[1]["free_ram_pct"], 50.0)
+            with mock.patch.object(self.serve.board, "free_ram_pct", return_value=11.0) as ram, \
+                    mock.patch.object(self.serve.board, "swap_used_pct", return_value=2.0) as swap:
+                self.assertEqual(self.req("GET", "/api/machine")[1]["free_ram_pct"], 50.0, "within MACHINE_TTL")
+                self.assertEqual((ram.call_count, swap.call_count), (0, 0))
+                self.assertEqual(self.raw_post("/api/cooldown", {"on": True}), (200, {"cooldown": True}))
+                m = self.req("GET", "/api/machine")[1]
+                self.assertEqual((m["cooldown"], m["free_ram_pct"]), (True, 11.0), "Cool down cleared the cache")
+                self.serve.MACHINE_CACHE["at"] -= 6  # older than MACHINE_TTL
+                ram.return_value = 12.0
+                self.assertEqual(self.req("GET", "/api/machine")[1]["free_ram_pct"], 12.0)
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
 
     def test_board_json_refusal_only_for_resumable_jobs(self):
         b = self.serve.board
@@ -7290,6 +7410,8 @@ class DropMallocLoggingTest(unittest.TestCase):
         import serve
         src = inspect.getsource(serve.main)
         self.assertLess(src.index("drop_malloc_logging()"), src.index("add_argument"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

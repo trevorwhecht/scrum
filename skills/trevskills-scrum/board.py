@@ -360,6 +360,8 @@ def waiting_on(item, items, board):
     """The ids in item's needs that still block it: a line with that id is open, or is claimed by a job whose board
     stage is not done or aborted. An id no line carries, a closed line with no job, or a job missing from the board
     does not block."""
+    if not item["needs"]:
+        return []  # most items: skip building the board's stage map
     stage = {j.get("id"): j.get("stage") for j in board.get("jobs") or []}
     blocks = lambda i: not i["done"] or (i["job"] in stage and stage[i["job"]] not in ("done", "aborted"))
     return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
