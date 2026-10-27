@@ -29,7 +29,7 @@ let runs = {}, jobs = [];
 """
 
 
-def js(tail):
+def js(tail, stubs=""):
     """Run tail (async) in node over dashboard.html's job-modal code with $, post, poll and fetch stubbed. Returns the
     JSON values tail prints with out(...)."""
     node = shutil.which("node")
@@ -40,7 +40,7 @@ def js(tail):
     src = (text[text.index("const paused = "):text.index("function bigboyLines(")]
            + text[text.index("async function show(job, file)"):text.index("function open(job)")]
            + text[text.index("// Abort works on any unfinished job"):text.index("const blProject = ")])
-    script = f"{esc}\n{HARNESS}\n{src}\nconst out = v => console.log(JSON.stringify(v));\n(async () => {{ {tail} }})();"
+    script = f"{esc}\n{HARNESS}\n{stubs}{src}\nconst out = v => console.log(JSON.stringify(v));\n(async () => {{ {tail} }})();"
     res = subprocess.run([node, "-e", script], capture_output=True, text=True)
     if res.returncode:
         raise AssertionError(res.stderr)
@@ -61,6 +61,35 @@ def answers(html):
 
 
 class StopBox(unittest.TestCase):
+    def test_running_session_replaces_stop_box(self):
+        text = DASHBOARD.read_text()
+        card = text[text.index("function card(job)"):text.index("function render(")]
+        stubs = ('const tag = () => "", laneLabel = () => "", bigboyLines = () => "", roundRow = () => "", routeTags = () => "",'
+                 ' progress = () => null, ago = () => "", STALE_MS = 1, routes = {};\n')
+        started = 1767268860
+        tail = (card + """
+          const job = {...JOB, options: OPTS}, at = STARTED;
+          const view = run => { runs = run ? {[job.key]: run} : {}; renderActions(job);
+            const c = card(job); return {box: stopBox(job), actions: els.actions.innerHTML, status: statusLine(job), human: /class="card[^"]*human/.test(c),
+              running: (c.match(/<span class="running">/g) || []).length}; };
+          out([view({alive: true, action: "answer", started: at}), view({alive: true, action: "rework", started: at}), view({alive: true, action: "discuss", started: at}),
+            view(null), view({alive: false, action: "answer", started: at, exit: 0})]);""").replace("JOB", json.dumps(ASKED)).replace("OPTS", json.dumps(OPTIONS)).replace("STARTED", str(started))
+        res = js(tail, stubs=stubs)
+        answer, rework, discuss, none, ended = res[0]
+        for r, word in ((answer, "Answer"), (rework, "Rework")):
+            self.assertEqual(r["box"], "")
+            self.assertRegex(r["status"], rf"^{word} running since \d")
+            self.assertIn('<p class="running">' + r["status"], r["actions"])
+            self.assertNotIn("Waiting on you", r["actions"])
+            self.assertFalse(r["human"])
+            self.assertEqual(r["running"], 1)
+        for r in (discuss, none, ended):
+            self.assertIn("Waiting on you", r["box"])
+            self.assertEqual(len(re.findall(r'data-answer="', r["box"])), 3)
+            self.assertEqual(r["status"], "Waiting on you: The migration drops a column.")
+            self.assertTrue(r["human"])
+        self.assertNotIn("disabled", ended["box"])
+
     def test_stop_box_single_reason(self):
         text = DASHBOARD.read_text()
         for gone in ("waitingBanner", "optionsRow", "Click Discuss first.", "const splitReason"):
@@ -192,7 +221,7 @@ class StopBox(unittest.TestCase):
         self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled"'
                       ' : playQueued(job) ? "waiting" : job.stage;', text)
         card = text[text.index("function card(job)"):text.index("function render(")]
-        self.assertIn('human = (job.stage === "needs-human" && !playQueued(job) && !stall)', card)
+        self.assertIn('human = (job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job))', card)
 
     def test_stalled_status_line(self):
         j = {"key": "p/040-s", "project": "p", "id": "040-s", "stage": "build", "updatedAt": "2026-01-01T00:00:00Z"}

@@ -554,7 +554,7 @@ const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p ===
 function card(job) {
   // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
-  const human = (job.stage === "needs-human" && !playQueued(job) && !stall) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  const human = (job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job)) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
@@ -907,6 +907,8 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
 // waitingOn(job) helper above; its titles run parallel to ids. A Play the machine guard queued names the reading it waits
 // on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/".
+// An answered or reworked needs-human job whose session runs reads as that run, not as a question; a Discuss session keeps the question.
+const answering = job => job.stage === "needs-human" && !!runs[job.key]?.alive && runs[job.key].action !== "discuss";
 const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && job.resumeRefusal
   ? `Waiting for CPU/RAM: ${noPaths(String(job.resumeRefusal).replace(/^waiting: /, "").split(" Fix: ")[0])}`
   : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
@@ -916,6 +918,7 @@ const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && jo
   : playQueued(job) ? "Queued, starts next"
   : isStalled(job) ? `Stalled: ${stopIssue(job.reason)}`
   : limitHeld(job) ? "Stalled: usage limit"
+  : answering(job) ? runLine(runs[job.key])
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
   : setupWait(job) ? "Waiting on you: setup"
@@ -940,7 +943,7 @@ function stopBox(job) {
   if (paused(job)) return `<div class="stop" role="status"
     data-agent-hint="This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for.">
     <b>Waiting on you</b><p>${esc(job.waiting)}</p><p>Answer it in the job's terminal.</p></div>`;
-  if (job.stage !== "needs-human" || playQueued(job) || isStalled(job)) return "";
+  if (job.stage !== "needs-human" || playQueued(job) || isStalled(job) || answering(job)) return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const rec = job.recommend, dis = off ? " disabled" : "";
   const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
