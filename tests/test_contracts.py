@@ -3038,7 +3038,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_dashboard_shows_cloud_stage_and_link(self):
         text = DASHBOARD.read_text()
-        self.assertIn('"merging", "cloud", "needs-human"', text)
+        self.assertIn('"merging", "cloud", "stalled", "needs-human"', text)
         self.assertIn("Cloud session ↗", text)
 
     # --- Human setup for any lane ---

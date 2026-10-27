@@ -10,7 +10,8 @@ def status(job):
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
     pick = lambda *starts: "\n".join(l for l in text.splitlines() if l.startswith(starts))
-    src = pick("const paused = ", "const setupWait = ", "const playQueued = ")
+    src = pick("const paused = ", "const setupWait = ", "const playQueued = ", "const WATCHED = ", "const isStalled = ",
+               "const limitHeld = ")
     src += "\n" + text[text.index("const noPaths = "):text.index("// A needs-human job's closed question")]
     script = f"{src}\nconsole.log(JSON.stringify(statusLine({json.dumps(job)})));"
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)

@@ -192,20 +192,30 @@ class JobModal(unittest.TestCase):
         return [json.loads(l) for l in subprocess.run([node, "-e", script], capture_output=True, text=True,
                                                       check=True).stdout.splitlines()]
 
-    def test_card_limit_hold_badge(self):
+    def test_card_stalled_badge(self):
         old = "new Date(Date.now() - 2 * 3600 * 1000).toISOString()"
         base = '{key: "p/030-h", project: "p", id: "030-h", title: "Held", stage: "build", reason: null'
-        [held, plain, human, stamp] = self.card_js(
-            f"for (const extra of [', limitResetAt: 1800000000', '', ', stage: \"needs-human\", limitResetAt: 1800000000'])"
+        extras = [", limitResetAt: 1700000000, nextRetryAt: 1800000000", ', stalled: true, reason: "stalled: no live session."',
+                  "", ', stage: "needs-human", reason: "CHANGES after 3 rounds.", limitResetAt: 1800000000']
+        [held, stalled, plain, human, stamp] = self.card_js(
+            f"for (const extra of {json.dumps(extras)})"
             f" console.log(JSON.stringify(card(eval(`({base}, updatedAt: {old}${{extra}}}})`))));"
             " console.log(JSON.stringify(when(1800000000)));")
-        self.assertIn(f'<span class="badge">waiting for reset {stamp}</span>', held)
         self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
-        self.assertNotIn("stale since", held)
-        self.assertIn("stale since", plain)  # the same 2-hour-old card without the hold is stale
-        for html in (plain, human):
+        badges = lambda html: re.findall(r'<span class="badge"[^>]*>([^<]*)</span>', html)
+        self.assertEqual(badges(held), [f"stalled · retry {stamp}"])
+        self.assertEqual(badges(stalled), ["stalled"])
+        for html in (held, stalled):
+            self.assertRegex(html, r'<span class="badge" data-agent-hint="[^"]+">stalled')
+            self.assertNotIn("human", re.match(r'<button class="([^"]*)"', html).group(1).split())
+            self.assertIn('<span class="bar" role="progressbar"', html)  # keeps its progress bar, not red
+            self.assertNotIn("stale since", html)
+        self.assertIn("stale since", plain)  # the same 2-hour-old card without the stall is stale
+        self.assertEqual(badges(human), [])  # a needs-human ask gets no stalled badge
+        for html in (held, stalled, plain, human):
             self.assertNotIn("waiting for reset", html)
         text = DASHBOARD.read_text()
+        self.assertNotIn("waiting for reset", text)
         self.assertIn("Date.now() - staleAt(job) > STALE_MS", text[text.index("function card(job)"):text.index("function render(")])
 
     def test_no_options_unchanged(self):
@@ -217,7 +227,7 @@ class JobModal(unittest.TestCase):
 
     def test_options_replace_needs_human_row(self):
         html = self.actions_html({**self.ASKED, "question": "Which way?", "options": self.OPTIONS,
-                                  "reason": "stalled in build: x. Fix: click Resume."})
+                                  "reason": "CHANGES after 3 rounds."})
         self.assertIn('<b>Waiting on you</b><p>Which way?</p>', html)
         self.assertEqual(re.findall(r'<button class="btn tall" type="button" data-answer="(\w)">([^<]*)</button>', html),
                          [("a", "Ship it"), ("b", "Redo"), ("c", "Drop &lt;it&gt;")])

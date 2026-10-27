@@ -23,7 +23,8 @@ class PausedCard(unittest.TestCase):
         self.assertIn('${hold ? " paused" : ""}', card)
         self.assertIn('${hold ? \'<span class="badge">paused</span>\' : ""}', card)
         self.assertIn("!hold && !held", card)  # a paused card is never stale
-        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;', DASHBOARD.read_text())
+        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled"'
+                      ' : playQueued(job) ? "waiting" : job.stage;', DASHBOARD.read_text())
 
     def test_play_branch_in_panel(self):
         self.assertTrue(run('heldByTrevor({stage: "build", paused: true})'))
@@ -42,6 +43,7 @@ class PausedCard(unittest.TestCase):
         html, = render_run(f"out(card({json.dumps(job)}));")
         self.assertNotIn("human", re.search(r'<button class="([^"]*)"', html).group(1).split())
         self.assertNotIn("stale since", html)
+        self.assertRegex(html, r'<span class="badge" data-agent-hint="[^"]+">stalled</span>')
         old, = render_run(f"out(card({json.dumps({**job, 'stalled': False})}));")
         self.assertIn("stale since", old)  # the contrast: the same job unflagged is stale
 

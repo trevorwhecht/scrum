@@ -175,8 +175,8 @@ class StopBox(unittest.TestCase):
         self.assertEqual(status, "Waiting on you: The migration drops a column.")
 
     def test_status_line_waiting_on_titles(self):
-        queued = {"key": "p/229-m", "project": "p", "id": "229-m", "stage": "needs-human", "play_queued": "2026-01-01",
-                  "reason": "stalled in build: x. Fix: click Resume.", "updatedAt": "2026-01-01T00:00:00Z",
+        queued = {"key": "p/229-m", "project": "p", "id": "229-m", "stage": "build", "stalled": True, "play_queued": "2026-01-01",
+                  "reason": "stalled: x. Fix: click Resume.", "updatedAt": "2026-01-01T00:00:00Z",
                   "waitingOn": {"ids": ["221-a", "222-b", "223-c"], "why": "shares SKILL.md",
                                 "titles": ["Add the orders table", "", None]}}
         got, = js(f"""const j = {json.dumps(queued)};
@@ -186,18 +186,40 @@ class StopBox(unittest.TestCase):
                                "Waiting on 221-a Add the orders table (not merged yet)", "Waiting on 221-a (runs alone)",
                                ""])
         text = DASHBOARD.read_text()
-        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;', text)
+        self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled"'
+                      ' : playQueued(job) ? "waiting" : job.stage;', text)
         card = text[text.index("function card(job)"):text.index("function render(")]
-        self.assertIn('const human = (job.stage === "needs-human" && !playQueued(job))', card)
+        self.assertIn('human = (job.stage === "needs-human" && !playQueued(job) && !stall)', card)
+
+    def test_stalled_status_line(self):
+        j = {"key": "p/040-s", "project": "p", "id": "040-s", "stage": "build", "updatedAt": "2026-01-01T00:00:00Z"}
+        stalled = {**j, "stalled": True, "reason": "stalled: no live session. Fix: click Resume."}
+        legacy = {**j, "stage": "needs-human", "reason": "stalled in plan: x. Fix: click Resume."}
+        held = {**j, "stage": "review", "limitResetAt": 1800000000, "reason": "CHANGES after 1 round."}
+        got, = js(f"""const s = {json.dumps(stalled)}, l = {json.dumps(legacy)}, h = {json.dumps(held)};
+          out([s, l, h, {{...s, waitingOn: {{ids: ["9"], why: "x"}}}}, {{...s, paused: true}}, {{...h, paused: true}},
+               {{...s, resumeRefusal: "can't resume yet: 222. Fix: wait."}}, {{...s, play_queued: "x"}},
+               {{...s, play_queued: "x", resumeRefusal: "waiting: swap 30%. Fix: close apps."}}, {{...s, stage: "done"}}].map(statusLine));""")
+        self.assertEqual(got, ["Stalled: no live session.", "Stalled: x.", "Stalled: usage limit", "Waiting on 9 (x)",
+                               "Paused by you", "Paused by you", "Waiting: can't resume yet: 222.", "Queued, starts next",
+                               "Waiting for CPU/RAM: swap 30%.", "Done"])
+
+    def test_legacy_stalled_panel_resumes(self):
+        legacy = {**ASKED, "reason": "stalled in plan: x. Fix: click Resume."}
+        html, box = js(f"const l = {json.dumps(legacy)}; jobs = [l]; renderActions(l); out(els.actions.innerHTML); out(stopBox(l));")
+        self.assertIn('data-act="resume"', html)
+        self.assertEqual(box, "")
+        for gone in ("Waiting on you", 'data-act="approve"', 'data-act="rework"', "Discuss first"):
+            self.assertNotIn(gone, html)
 
     def test_play_hidden_when_refused(self):
         paused = {"key": "p/030-p", "project": "p", "id": "030-p", "stage": "build", "paused": True,
                   "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
-        stalled = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
+        stalled = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
         refusal = "can't resume yet: 222. Fix: click Resume when 222 finish."
-        # The note names what blocks the click only for a job Trevor paused with no waitingOn (its status line says "Paused by you").
+        # The note names what blocks the click for a paused or stalled job with no waitingOn.
         waiting = {**paused, "waitingOn": {"ids": ["222"], "why": "still running"}}
-        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", None), (waiting, "Play", None)):
+        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222."), (waiting, "Play", None)):
             with self.subTest(label=label):
                 for missing in ({}, {"resumeRefusal": None}):
                     html, = js(f"renderActions({json.dumps({**job, **missing})}); out(els.actions.innerHTML);")
@@ -239,7 +261,7 @@ class StopBox(unittest.TestCase):
     def test_post_error_survives_rerender(self):
         msg = "can't resume yet: 222. Fix: click Resume when 222 finish."
         shown = msg.replace("'", "&#39;")
-        job = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
+        job = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
         submit = ('{ const btn = {dataset: {}, disabled: false}; await handlers.submit({preventDefault() {}, submitter: btn,'
                   ' target: {dataset: {act: "resume"}, querySelector: () => btn}}); }')
         first, again, other, moved = js(f"""jobs = [{json.dumps(job)}]; postFails = {json.dumps(msg)}; {submit}

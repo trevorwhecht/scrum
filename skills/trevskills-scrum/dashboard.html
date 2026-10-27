@@ -303,9 +303,10 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div id="aiBody"><nav id="aiCats" aria-label="Categories"></nav><article id="aiList"></article></div>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "cloud", "needs-human", "done"];
-// Aborted jobs are finished too: they sit, dimmed, in the done column rather than a ninth column.
-const colOf = job => job.stage === "aborted" ? "done" : playQueued(job) ? "waiting" : job.stage;
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "cloud", "stalled", "needs-human", "done"];
+// Aborted jobs are finished too: they sit, dimmed, in the done column rather than a column of their own.
+// A stalled or limit-held job (queued Play included) waits on its retry in the stalled column.
+const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled" : playQueued(job) ? "waiting" : job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const PTS = [null, 1, 2, 3, 5, 8, 13];
@@ -434,15 +435,21 @@ const tickAgo = () => {
 };
 
 // A running job whose interactive session is stopped on a permission prompt, a question or a reply (board.py hook).
-const paused = job => !!job.waiting && ["spec", "build", "check", "review", "approve", "merging"].includes(job.stage);
+const paused = job => !!job.waiting && WATCHED.includes(job.stage);
 // A BigBoy child that can't start until Trevor clicks Setup done.
 const setupWait = job => job.stage === "waiting" && job.setup === "pending";
 // A job Trevor paused (board.py cmd_pause): it keeps its stage column until he clicks Play in its panel.
 const heldByTrevor = job => !!job.paused;
+// board.py WATCHED and stalled(): stalled and not paused, legacy (needs-human, reason "stalled in <stage>: ") or new
+// (its own WATCHED stage with board `stalled` true); a leftover `stalled` on another stage is ignored.
+const WATCHED = ["spec", "build", "check", "review", "approve", "merging"];
+const isStalled = job => !job.paused && (job.stalled ? WATCHED.includes(job.stage) : job.stage === "needs-human" && (job.reason || "").startsWith("stalled in "));
+// serve.py limit_held(): held in its stage until the usage limit resets.
+const limitHeld = job => !!job.limitResetAt && WATCHED.includes(job.stage) && !job.paused;
 // A stalled job whose Resume the machine guard queued (serve.py play_queued): nothing left for Trevor to do.
 const playQueued = job => (job.stage === "needs-human" || !!job.stalled) && !!job.play_queued;
 const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
-const needsYou = kid => !!kid && ((kid.stage === "needs-human" && !playQueued(kid)) || heldByTrevor(kid) || setupWait(kid));
+const needsYou = kid => !!kid && ((kid.stage === "needs-human" && !playQueued(kid) && !isStalled(kid)) || heldByTrevor(kid) || setupWait(kid));
 // board.py WAITING_ON: a running parent whose children wait on Trevor. Only ids still waiting on him are kept.
 const WAITING_ON = "waiting on you in: ";
 const waitingOn = job => job.stage === "running" && (job.reason || "").startsWith(WAITING_ON)
@@ -532,15 +539,14 @@ function roadmapCol(p) {
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
 function card(job) {
-  const human = (job.stage === "needs-human" && !playQueued(job)) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
-  // A job held in its stage until the usage limit resets (serve.py's limitResetAt) waits on the clock, so it is not stale.
-  const held = !human && job.limitResetAt, hold = heldByTrevor(job);
+  // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
+  const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
+  const human = (job.stage === "needs-human" && !playQueued(job) && !stall) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
-  // A job stalled in its own stage (board `stalled`) is already flagged and waits for Resume, so it is not stale either.
-  const stale = !human && !hold && !held && !job.stalled && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
+  const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${held ? `<span class="badge">waiting for reset ${esc(when(job.limitResetAt))}</span>` : ""}
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
@@ -814,17 +820,17 @@ const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "pla
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
 // When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
-// what blocks it, except for a paused job with no waitingOn: it says "Paused by you", so a note gives the refusal.
+// what blocks it; a paused or stalled job with no waitingOn also gets that refusal as a note in its panel.
 const RESUMABLE = ["stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = job => {
   const reason = job.reason || "";
   if (!RESUMABLE.some(p => reason.startsWith(p))) return "";
-  if (job.resumeRefusal) return !job.paused || job.waitingOn ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
+  if (job.resumeRefusal) return !(job.paused || isStalled(job)) || job.waitingOn ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
   return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 };
-// A paused or stalled-in-its-stage job keeps its stage, so its panel takes the not-needs-human branch: Play or Resume goes there.
-const playForm = job => heldByTrevor(job) || job.stalled ? resumeForm(job) : "";
+// A paused or stalled job (legacy needs-human shape included) takes the not-needs-human branch: Play or Resume goes there.
+const playForm = job => heldByTrevor(job) || isStalled(job) ? resumeForm(job) : "";
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
     <button class="btn primary tall" type="submit">Setup done</button></form>`;
@@ -851,6 +857,8 @@ const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && jo
   : job.paused ? "Paused by you"
   : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
   : playQueued(job) ? "Queued, starts next"
+  : isStalled(job) ? `Stalled: ${stopIssue(job.reason)}`
+  : limitHeld(job) ? "Stalled: usage limit"
   : job.stage === "needs-human" ? `Waiting on you: ${stopIssue(job.question || job.reason)}`
   : paused(job) ? `Waiting on you: ${job.waiting}`
   : setupWait(job) ? "Waiting on you: setup"
@@ -875,7 +883,7 @@ function stopBox(job) {
   if (paused(job)) return `<div class="stop" role="status"
     data-agent-hint="This job's interactive session is paused on a permission prompt, a question or a reply. The first line is what it is waiting for.">
     <b>Waiting on you</b><p>${esc(job.waiting)}</p><p>Answer it in the job's terminal.</p></div>`;
-  if (job.stage !== "needs-human" || playQueued(job)) return "";
+  if (job.stage !== "needs-human" || playQueued(job) || isStalled(job)) return "";
   const st = answerState[job.key] || {}, run = runs[job.key], off = st.pending || (run?.alive && run.action !== "discuss");
   const rec = job.recommend, dis = off ? " disabled" : "";
   const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
@@ -911,7 +919,7 @@ function actionsHtml(job, err) {
   if (run?.alive && run.action !== "discuss") return banner + kids + now + pauseForm(job) + moreMenu(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") { const held = heldByTrevor(job) || !!job.stalled;  // Play and Reopen never show together, so err can follow both
+  if (job.stage !== "needs-human" || isStalled(job)) { const held = heldByTrevor(job) || isStalled(job);  // Play and Reopen never show together, so err can follow both
     return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + (held ? err : "") + pauseForm(job) + moreMenu(job) + (held ? "" : err); }
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.
