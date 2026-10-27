@@ -78,6 +78,13 @@ console.log(JSON.stringify(seen));""")
         self.assertEqual(out[3], ["a<b", "up"], "a poll re-render keeps focus on the same project")
         self.assertEqual(out[4:], [True, "no throw"], "an unchanged order leaves the rows alone; a missing list is fine")
 
+    def test_poll_indexes_local_project_list(self):
+        body = fn_body(DASHBOARD.read_text(), "poll")
+        self.assertIn("const ps = projects = ", body)
+        after = body[body.index("Promise.all("):]
+        self.assertNotIn("projects[", after)
+        self.assertNotIn("projects.map(", after)
+
 
 if __name__ == "__main__":
     unittest.main()
