@@ -2717,8 +2717,8 @@ def parse_plan(text):
     exposure = [t for t in tickets if t["exposure"]]
     if len(exposure) != 1:
         raise SystemExit(f"plan.md has {len(exposure)} Exposure: yes tickets; exactly 1 allowed")
-    if set(names) - {exposure[0]["ticket"]} - set(exposure[0]["depends"]):
-        raise SystemExit(f"plan.md: the Exposure: yes ticket {exposure[0]['ticket']} must depend on every other ticket")
+    if tickets[-1] is not exposure[0]:
+        raise SystemExit(f"plan.md: the Exposure: yes ticket {exposure[0]['ticket']} must be the last ticket")
     return (md_section(text, "Goal") or "").strip(), tickets
 
 
