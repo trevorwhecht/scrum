@@ -11,7 +11,7 @@ SHOWN = "can&#39;t resume yet: 222. Fix: click Resume when 222 finish."
 ALERT = f'<p class="error" role="alert">{SHOWN}</p>'
 PAUSED = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "paused": True, "parent": "192-run-all",
           "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
-STALLED = {**ASKED, "reason": "stalled in check: no board update for 30 min. Fix: click Resume."}
+STALLED = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
 CASES = ((PAUSED, "Play"), (STALLED, "Resume"))
 # A job stalled in its own stage (board `stalled` true) keeps its stage, so its panel takes the not-needs-human branch.
 NEW_SHAPE = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "stalled": True, "worktree": "/tmp/wt-021",
@@ -46,6 +46,7 @@ class RefusedResume(unittest.TestCase):
         for gone in ('data-act="approve"', 'data-act="rework"'):
             self.assertNotIn(gone, offered)
         self.assertNotIn('data-act="resume"', refused)
+        self.assertIn('<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>', refused)
         for job, label in CASES + ((NEW_SHAPE, "Resume"),):
             with self.subTest(label=label):
                 shown, viewer, disabled, html = js(f"""jobs = [{json.dumps(job)}]; renderActions(jobs[0]);
@@ -74,12 +75,10 @@ class RefusedResume(unittest.TestCase):
                     renderActions(jobs[0]); renderActions(jobs[0]); out(els.actions.innerHTML);
                     jobs[0] = {{...jobs[0], resumeRefusal: {json.dumps(MSG)}}}; renderActions(jobs[0]); out(els.actions.innerHTML);""")
                 assert_inline(self, again, label)
-                # The poll swapped the button out; only a paused job gets the "Waiting:" note (its status line hides the reason).
-                # Either way the full reason is still there once.
+                # The poll swapped the button out for the "Waiting:" note, and the full reason is still there once.
                 self.assertNotIn('data-act="resume"', waiting)
                 note = '<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>'
-                if job is PAUSED: self.assertIn(f'{note}{ALERT}', waiting)
-                else: self.assertNotIn(note, waiting)
+                self.assertIn(f'{note}{ALERT}', waiting)
                 self.assertEqual(waiting.count(SHOWN), 1, waiting)
 
     def test_refused_resume_reason_clears(self):
