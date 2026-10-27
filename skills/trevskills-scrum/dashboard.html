@@ -461,6 +461,8 @@ const isStalled = job => !job.paused && (job.stalled ? WATCHED.includes(job.stag
 const limitHeld = job => !!job.limitResetAt && WATCHED.includes(job.stage) && !job.paused;
 // A stalled job whose Resume the machine guard queued (serve.py play_queued): nothing left for Trevor to do.
 const playQueued = job => (job.stage === "needs-human" || !!job.stalled) && !!job.play_queued;
+// A stop's catalog title (board.py STOP_TITLES, e.g. MERGE_CONFLICT) as shown: "MERGE CONFLICT"; "" for an untitled stop.
+const stopTitleText = job => job.stopTitle ? String(job.stopTitle).replace(/_/g, " ") : "";
 const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
 // A parent's card and modal list its unfinished children first, then the finished ones (done, aborted or off the board),
 // each in children order, KIDS_STEP at a time; Load more adds KIDS_STEP. Kept outside the DOM so a poll re-render keeps it.
@@ -566,12 +568,13 @@ const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p ===
 function card(job) {
   // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
-  const human = (job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job)) || paused(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
+  const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);
+  const human = asked || paused(job), titled = asked && stopTitleText(job), setup = setupWait(job), run = runs[job.key], act = job.activity, pct = progress(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
@@ -972,7 +975,7 @@ function stopBox(job) {
     <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>Send back</button></div>`;
   return `<div class="stop" role="status"
     data-agent-hint="This job stopped and needs Trevor. The first line is the agent's question in full, or what went wrong; then either the exact fix or the buttons for the ways forward, the recommended one first.">
-    <b>Waiting on you</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
+    <b>${esc(stopTitleText(job) || "Waiting on you")}</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
 }
 
 function renderActions(job) {
