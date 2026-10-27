@@ -833,6 +833,42 @@ class ContractTest(unittest.TestCase):
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
         self.assertIn("obsolete", approve)
 
+    def test_no_unrequested_redesigns(self):
+        agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text()
+                  for n in ("approver", "triager", "spec-writer", "review-ui", "review-ux")}
+        for name, text in agents.items():
+            for phrase in ("Trevor's words", "redesign of a working screen", " (from <id>)", "## Q&A",
+                           "text overlapping text, a crash, a broken control"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+        approver = agents["approver"]
+        gate = self.section(approver, "**Out-of-scope follow-ups.**", "\nDon't edit code.")
+        for phrase in ("- Trevor decide: <item>", "redesign of a working screen", "Real defects stay under `## Follow-ups`"):
+            self.assertIn(phrase, gate, phrase)
+        for phrase in ("can't fit, so we hid it",
+                       "Hard stop: blocked — we should keep <what was hidden> visible because Trevor did not ask to remove it"):
+            self.assertIn(phrase, approver, phrase)
+        manual = next(l for l in agents["triager"].splitlines() if l.startswith("- **Manual**"))
+        for phrase in ("redesign of a working screen needs Trevor",
+                       "a manual check, a live-site check, a device check or a Safari check"):
+            self.assertIn(phrase, manual, phrase)
+        self.assertIn("OBSOLETE: needs Trevor — <the redesign it would take, in plain words>", agents["spec-writer"])
+        newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
+        step = next(l for l in newjob.splitlines() if "**Obsolete:**" in l)
+        for phrase in ("needs Trevor", "B manual-add '<rest of the line> (from $ID)'", "final report"):
+            self.assertIn(phrase, step, phrase)
+        self.assertLess(step.index("B manual-add"), step.index("B abort $ID"))
+        for name in ("review-ui", "review-ux"):
+            text = agents[name]
+            para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
+            for phrase in ("scrum-base-", "base compared at 390 and 1440", "sideways", "MOVE_ONLY=yes",
+                           "Rendered: n/a", "worktree add --detach /tmp/scrum-base-", "worktree remove --force",
+                           "[blocking]", "VERDICT: CHANGES"):
+                self.assertIn(phrase, para, f"{name}: {phrase}")
+            bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
+            self.assertIn("scrum-base-", bash, name)
+        for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
+            self.assertLessEqual(len(path.read_text()), 20000, path.name)
+
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
 
