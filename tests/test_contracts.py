@@ -888,6 +888,14 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, resume, phrase)
         nxt = next(l for l in commands.splitlines() if "**`/trevskills-scrum next`**" in l)
         self.assertIn("B watchdog", nxt)
+        self.assertIn("leaving each stuck job in its stage with board `stalled` true and reason `stalled: ...` "
+                      "(never `needs-human`)", nxt)
+        self.assertIn("or have board `stalled` true in its stage", resume)
+        self.assertIn("**`stalled`** (board `stalled` true, or a legacy `stalled in <stage>` reason): ", resume)
+        self.assertIn("run `B set --unpause <id> stage=<the job's stage> reason=`", resume)
+        self.assertIn("A stalled job is not a stop: it keeps its stage with board `stalled` true and serve.py resumes it.",
+                      self.section(text, "**Every stop is a closed question.**", "\n\n"))
+        self.assertIn("flagged `stalled` re-runs", self.lane("lilguy"))
         approve = next(l for l in commands.splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
         self.assertIn("`stalled`", approve)
         runall = self.lane("runall")
@@ -969,7 +977,7 @@ class ContractTest(unittest.TestCase):
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
         self.assertIn("(a lilguy job with a worktree: **Lilguy lane**)", resume)
         self.assertNotIn("A lilguy job re-runs its", resume)
-        self.assertIn("sit in a WATCHED stage held by `limitResetAt` (not paused): accept it and re-enter that stage like `stalled in <stage>`", resume)
+        self.assertIn("sit in a WATCHED stage held by `limitResetAt` (not paused): accept it and re-enter that stage like `stalled`, whose", resume)
         self.assertIn("run the **Lilguy lane** instead", step3)
         self.assertNotIn("Worktree mode", step3)
         self.assertIn("lilguy-fit", self.lane("runall"))
@@ -2221,7 +2229,7 @@ class ContractTest(unittest.TestCase):
     def test_resume_reentry_per_reason(self):
         text = self.rules()
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
-        for prefix in ("stalled in <stage>", "`bigboy off track`", "`bigboy review: main not updated`",
+        for prefix in ("**`stalled`** (board `stalled` true, or a legacy `stalled in <stage>` reason)", "`bigboy off track`", "`bigboy review: main not updated`",
                        "`bigboy blocked`", "`Base branch `"):
             self.assertIn(prefix, resume, prefix)
         for phrase in ("BigBoy lane** step 5 sub-steps 2-3", "merge-base --is-ancestor HEAD origin/$DEFAULT",

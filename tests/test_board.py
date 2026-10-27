@@ -417,18 +417,35 @@ class BoardTest(unittest.TestCase):
         opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
         for q, stage, want in (
                 ("scrum-debugger, scrum-builder are not loaded as agent types in this session", "build",
-                 "stalled in build: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
-                ("The scrum Agent Types not loaded here", "check", "stalled in check: The scrum Agent Types not loaded here"),
-                ("agent types are not loaded", "review", "stalled in review: agent types are not loaded"),
-                ("Pick a layout?", "build", "Pick a layout?"),
-                ("agent types are not loaded", "plan", "agent types are not loaded")):
+                 "stalled: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
+                ("The scrum Agent Types not loaded here", "check", "stalled: The scrum Agent Types not loaded here"),
+                ("agent types are not loaded", "review", "stalled: agent types are not loaded")):
             with self.subTest(q=q, stage=stage):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, [f"stage={stage}"])
-                board.cmd_ask(self.root, job_id, q, opts(job_id))
+                with board.locked_board(self.root) as b:  # an old question's leftovers are dropped
+                    board.find(b, job_id).update(question="Old?", options=[{"key": "a"}], recommend={"key": "a"})
+                before = len(self.log_lines())
+                with mock.patch.object(board, "play") as play:
+                    self.assertEqual(board.cmd_ask(self.root, job_id, q, opts(job_id)), {"stalled": True})
+                play.assert_not_called()
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["reason"], job["stalled"]), (stage, want, True))
+                for k in ("question", "options", "recommend"):
+                    self.assertNotIn(k, job)
+                lines = self.log_lines()[before:]
+                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "stall", want)])
+        for q, stage in (("Pick a layout?", "build"), ("agent types are not loaded", "plan")):
+            with self.subTest(q=q, stage=stage):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                with mock.patch.object(board, "play") as play:
+                    board.cmd_ask(self.root, job_id, q, opts(job_id))
+                play.assert_called_once()
                 job = next(j for j in self.jobs() if j["id"] == job_id)
                 self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
-                                 ("needs-human", want, q, [f"resume {job_id}", f"abort {job_id}"]))
+                                 ("needs-human", q, q, [f"resume {job_id}", f"abort {job_id}"]))
+                self.assertNotIn("stalled", job)
 
     # --- ask --kind (scrum-unblocker) ---
     def ask_cli(self, job_id, kind, question="Stuck?"):
@@ -2533,11 +2550,43 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((self.root / "board.json").stat().st_mtime, 1)  # nothing migrated: not written
 
     def test_migrate_paused_skips_other_stalled_reasons(self):
-        job = {"id": "001-a", "stage": "needs-human",
-               "reason": "stalled in build: waiting for a free slot after Play. Fix: click Resume."}
-        self.legacy_board(job)
+        plan = {"id": "002-b", "stage": "needs-human", "reason": "stalled in plan: no board update for 30 min."}
+        self.legacy_board({"id": "001-a", "stage": "needs-human",
+                           "reason": "stalled in build: waiting for a free slot after Play. Fix: click Resume."}, plan)
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a"])
+        self.assertEqual(self.jobs(), [
+            {"id": "001-a", "stage": "build", "stalled": True,
+             "reason": "stalled: waiting for a free slot after Play. Fix: click Resume."}, plan])
+
+    def test_migrate_legacy_stall_on_load(self):
+        self.legacy_board(
+            {"id": "001-a", "stage": "needs-human", "round": 3, "question": "Q?", "options": [{"key": "a"}],
+             "recommend": {"key": "a", "why": "w"},
+             "reason": "stalled in review: no board update for 30 min and no live session. Fix: click Resume."},
+            {"id": "002-b", "stage": "needs-human", "reason": "stalled in merging: session exited."},
+            {"id": "003-c", "stage": "needs-human", "reason": "stalled in check: paused by Trevor. Fix: click Play."},
+            {"id": "004-d", "stage": "needs-human", "reason": "Pick a layout?", "question": "Pick a layout?"})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a", "002-b", "003-c"])
+        self.assertEqual(self.jobs(), [
+            {"id": "001-a", "stage": "review", "round": 3, "stalled": True,
+             "reason": "stalled: no board update for 30 min and no live session. Fix: click Resume."},
+            {"id": "002-b", "stage": "merging", "stalled": True, "reason": "stalled: session exited."},
+            {"id": "003-c", "stage": "check", "paused": True, "reason": "stalled in check: paused by Trevor. Fix: click Play."},
+            {"id": "004-d", "stage": "needs-human", "reason": "Pick a layout?", "question": "Pick a layout?"}])
+        # every locked write migrates too
+        self.legacy_board({"id": "005-e", "stage": "needs-human", "reason": "stalled in spec: x"})
+        with board.locked_board(self.root):
+            pass
+        self.assertEqual(self.jobs(), [{"id": "005-e", "stage": "spec", "stalled": True, "reason": "stalled: x"}])
+
+    def test_migrate_legacy_stall_is_idempotent(self):
+        self.legacy_board({"id": "001-a", "stage": "needs-human", "reason": "stalled in build: session exited."})
+        self.assertEqual(board.cmd_migrate_paused(self.root), ["001-a"])
+        once = (self.root / "board.json").read_text()
+        os.utime(self.root / "board.json", (1, 1))
         self.assertEqual(board.cmd_migrate_paused(self.root), [])
-        self.assertEqual(self.jobs(), [job])
+        self.assertEqual((self.root / "board.json").read_text(), once)
+        self.assertEqual((self.root / "board.json").stat().st_mtime, 1)
 
     # --- reopen ---
     def test_reopen_creates_linked_job(self):
@@ -3013,10 +3062,12 @@ class BoardTest(unittest.TestCase):
             (self.root / "jobs" / j / "build.md").write_text("x")
             self.age_job_dir(j, 3)
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [job_id])
-        self.assertEqual(self.get(job_id)["stage"], "needs-human")
-        self.assertEqual(self.get(job_id)["reason"], "stalled in review: no board or job-dir change for 2 h "
-                         "(session alive but idle). Fix: click Resume.")
+        self.assertEqual((self.get(job_id)["stage"], self.get(job_id)["stalled"]), ("review", True))
+        self.assertEqual(self.get(job_id)["reason"], "stalled: no board or job-dir change for 2 h "
+                         "(session alive but idle)")
         self.assertEqual(self.get(paused)["stage"], "review")
+        self.assertNotIn("stalled", self.get(paused))
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [])  # not flagged again
 
     def test_watchdog_skips_live_job_with_recent_job_dir_file(self):
         job_id = self.aged("Busy review", 180, stage="review")
@@ -3045,8 +3096,8 @@ class BoardTest(unittest.TestCase):
         run-all siblings that share a file wait on it forever."""
         merging = self.aged("Merging", 31, stage="merging")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [merging])
-        self.assertEqual(self.get(merging)["stage"], "needs-human")
-        self.assertTrue(self.get(merging)["reason"].startswith("stalled in merging: "))
+        self.assertEqual((self.get(merging)["stage"], self.get(merging)["stalled"]), ("merging", True))
+        self.assertEqual(self.get(merging)["reason"], "stalled: no board update for 30 min and no live session")
 
     def test_limit_hold_cleared_on_stage_change_and_pause(self):
         def held(title):
@@ -3079,23 +3130,32 @@ class BoardTest(unittest.TestCase):
         for l in lines:
             self.assertRegex(l["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"]) for l in lines], [
-            (Path(self.tmp.name).name, idle, "stall", "stalled in build: no board or job-dir change for 2 h "
-             "(session alive but idle). Fix: click Resume."),
-            (Path(self.tmp.name).name, dead, "stall", "stalled in build: no board update for 30 min and no live "
-             "session. Fix: click Resume.")])
+            (Path(self.tmp.name).name, idle, "stall", "stalled: no board or job-dir change for 2 h "
+             "(session alive but idle)"),
+            (Path(self.tmp.name).name, dead, "stall", "stalled: no board update for 30 min and no live session")])
 
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
         old = self.get(job_id)["updatedAt"]
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [job_id])
         job = self.get(job_id)
-        self.assertEqual(job["stage"], "needs-human")
-        self.assertEqual(job["reason"], "stalled in review: no board update for 30 min and no live session. Fix: click Resume.")
+        self.assertEqual((job["stage"], job["stalled"]), ("review", True))
+        self.assertEqual(job["reason"], "stalled: no board update for 30 min and no live session")
+        self.assertNotIn("Fix: click Resume", job["reason"])
         self.assertNotEqual(job["updatedAt"], old)
         for stage in ("build", "check", "approve"):
             other = self.aged(f"Stuck {stage}", 45, stage=stage)
             self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [other])
-            self.assertTrue(self.get(other)["reason"].startswith(f"stalled in {stage}: "))
+            self.assertEqual((self.get(other)["stage"], self.get(other)["stalled"]), (stage, True))
+
+    def test_watchdog_stall_plays_no_sound(self):
+        dead = self.aged("Dead build", 45, stage="build")
+        idle = self.aged("Idle check", 180, stage="check")
+        (self.root / "jobs" / idle).mkdir(parents=True, exist_ok=True)
+        self.age_job_dir(idle, 3)
+        with mock.patch.object(board, "play") as play:
+            self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == idle), [dead, idle])
+        play.assert_not_called()
 
     def test_watchdog_skips_fresh_live_waiting_and_inactive_jobs(self):
         fresh = self.aged("Fresh", 29, stage="review")
@@ -3119,9 +3179,8 @@ class BoardTest(unittest.TestCase):
         stuck = self.aged("Stuck spec", 31, stage="spec")
         (self.root / "jobs" / stuck / "feature.md").write_text("Stuck spec\n")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [stuck])
-        self.assertEqual(self.get(stuck)["stage"], "needs-human")
-        self.assertEqual(self.get(stuck)["reason"],
-                         "stalled in spec: no board update for 30 min and no live session. Fix: click Resume.")
+        self.assertEqual((self.get(stuck)["stage"], self.get(stuck)["stalled"]), ("spec", True))
+        self.assertEqual(self.get(stuck)["reason"], "stalled: no board update for 30 min and no live session")
         self.assertEqual(self.get(fresh)["stage"], "spec")
 
     def test_watchdog_requeues_orphaned_spec_claim_in_place(self):
@@ -3151,7 +3210,7 @@ class BoardTest(unittest.TestCase):
         old = self.get(lil)["updatedAt"]
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [std])
         self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
-        self.assertEqual(self.get(std)["stage"], "needs-human")
+        self.assertEqual((self.get(std)["stage"], self.get(std)["stalled"]), ("build", True))
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(lil)["stage"], self.get(lil)["updatedAt"]), ("build", old))
 
@@ -3159,8 +3218,8 @@ class BoardTest(unittest.TestCase):
         wt = self.aged("Lil in worktree", 45, stage="build", lane="lilguy", worktree="/tmp/wt-lil")
         here = self.aged("Lil in checkout", 45, stage="build", lane="lilguy")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [wt])
-        self.assertEqual(self.get(wt)["stage"], "needs-human")
-        self.assertTrue(self.get(wt)["reason"].startswith("stalled in build"), self.get(wt)["reason"])
+        self.assertEqual((self.get(wt)["stage"], self.get(wt)["stalled"]), ("build", True))
+        self.assertEqual(self.get(wt)["reason"], "stalled: no board update for 30 min and no live session")
         self.assertEqual(self.get(here)["stage"], "build")
 
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
@@ -3409,7 +3468,7 @@ class BoardTest(unittest.TestCase):
         job_id = self.aged("Dead on a reused tty", 31, stage="build", tty="ttys004", pid=111)
         with ps(reused):
             self.assertEqual(board.cmd_watchdog(self.root), [job_id])
-        self.assertEqual(next(j for j in self.jobs() if j["id"] == job_id)["stage"], "needs-human")
+        self.assertIs(next(j for j in self.jobs() if j["id"] == job_id)["stalled"], True)
 
     def test_watchdog_cli_prints_flagged(self):
         run = lambda: subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "watchdog"],
@@ -3423,7 +3482,9 @@ class BoardTest(unittest.TestCase):
         stuck = self.aged("Zq watchdog cli probe", 40, stage="check")
         out = run()
         self.assertEqual(json.loads(out.stdout), {"flagged": [stuck]})
-        self.assertEqual((self.get(stuck)["stage"], self.get(fresh)["stage"]), ("needs-human", "build"))
+        self.assertEqual((self.get(stuck)["stage"], self.get(stuck)["stalled"], self.get(fresh)["stage"]),
+                         ("check", True, "build"))
+        self.assertEqual(json.loads(run().stdout), {"flagged": []})  # a second run flags nothing
 
     # --- roadmap.md ---
     ROADMAP = ("ROADMAP: onewitharts cleanup\n"
@@ -3542,11 +3603,12 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((out["ready"], out["in_progress"]), ([], 0))
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
-        # legacy shape: the needs-human stalled child is still named
+        # legacy shape: the next locked write migrates the child to the new shape, so it is idle and not named
         self.edit_jobs(**{c2: {"stage": "needs-human", "stalled": False, "reason": "stalled in build: x"}})
         board.cmd_ready(self.root, parent)
-        p = self.child(parent)
-        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting on you in: 003-part-2"))
+        p, kid = self.child(parent), self.child(c2)
+        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        self.assertEqual((kid["stage"], kid["stalled"], kid["reason"]), ("build", True, "stalled: x"))
 
     def test_watchdog_skips_new_shape_stalled(self):
         self.aged("New stall", 31, stage="build", stalled=True, reason="stalled: no live session")
@@ -3562,9 +3624,16 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_abort(self.root, a, False, cascade=True), ["001-a", "002-b"])
         self.assertEqual((self.by_id()[b]["stage"], self.by_id()[b]["reason"]), ("aborted", "Removed with 001-a"))
 
-    def test_roadmap_show_no_blocker_for_new_shape_stalled(self):
+    def test_roadmap_show_blocker_includes_stalled_in_stage(self):
         self.roadmap()
         jobs = [{"id": self.J2, "stage": "build", "stalled": True, "reason": "stalled: no live session"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(board.roadmap_show(self.root)["blocker"], {"job": self.J2, "reason": "stalled: no live session"})
+        jobs = [{"id": self.J2, "stage": "running"},
+                {"id": "021-kid", "parent": self.J2, "stage": "review", "stalled": True, "reason": "stalled: x"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(board.roadmap_show(self.root)["blocker"], {"job": "021-kid", "reason": "stalled: x"})
+        jobs[1]["stage"] = "running"  # a leftover `stalled` outside a WATCHED stage is not a stall
         (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
         self.assertIsNone(board.roadmap_show(self.root)["blocker"])
 
@@ -3618,7 +3687,7 @@ class BoardTest(unittest.TestCase):
         self.assertIn(f"- [~] S2 bigboy {self.J2}:", self.rm_text())
         self.assertRegex(self.rm_text().splitlines()[-1], self.LOG_RE + rf"P1 S2 started: {self.J2}$")
 
-    STALL = "stalled in build: no board update for 30 min and no live session. Fix: click Resume."
+    STALL = "stalled: no board update for 30 min and no live session"
 
     def test_watchdog_stall_logs_roadmap_step(self):
         self.roadmap()
@@ -3626,14 +3695,16 @@ class BoardTest(unittest.TestCase):
         self.aged("Unrelated", 5, stage="build")
         for _ in range(2):  # stall, resume via roadmap-link, stall again: two Log lines
             data = json.loads((self.root / "board.json").read_text())
-            next(j for j in data["jobs"] if j["id"] == self.J2).update(stage="build", updatedAt="2026-01-01T00:00:00+00:00")
+            j2 = next(j for j in data["jobs"] if j["id"] == self.J2)
+            j2.pop("stalled", None)  # the resume's `B set --unpause` drops it
+            j2.update(stage="build", updatedAt="2026-01-01T00:00:00+00:00")
             (self.root / "board.json").write_text(json.dumps(data))
             self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [self.J2])
-            self.assertEqual(self.get(self.J2)["stage"], "needs-human")
+            self.assertEqual((self.get(self.J2)["stage"], self.get(self.J2)["stalled"]), ("build", True))
             self.assertIn(f"- [!] S2 bigboy {self.J2}:", self.rm_text())
             self.assertRegex(self.rm_text().splitlines()[-1],
-                             self.LOG_RE + rf"P1 S2 stopped: {self.J2} stalled in build: no board update for 30 min "
-                             r"and no live session\. Fix: click Resume\.$")
+                             self.LOG_RE + rf"P1 S2 stopped: {self.J2} stalled: no board update for 30 min "
+                             r"and no live session$")
             board.cmd_roadmap_link(self.root, 1, 2, self.J2)
             self.assertIn(f"- [~] S2 bigboy {self.J2}:", self.rm_text())
         logs = (board.md_section(self.rm_text(), "Log") or "").strip().splitlines()
@@ -3648,7 +3719,8 @@ class BoardTest(unittest.TestCase):
         self.assertIn(f"- [!] S2 bigboy {self.J2}:", self.rm_text())
         logs = (board.md_section(self.rm_text(), "Log") or "").strip().splitlines()
         self.assertEqual(len(logs), 2)
-        self.assertRegex(logs[1], self.LOG_RE + rf"P1 S2 stopped: {child} stalled in build: ")
+        self.assertRegex(logs[1], self.LOG_RE + rf"P1 S2 stopped: {child} stalled: no board update for 30 min "
+                         r"and no live session$")
 
     def test_watchdog_stall_roadmap_missing_or_malformed(self):
         import contextlib, io
@@ -3671,8 +3743,8 @@ class BoardTest(unittest.TestCase):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [job_id])
-                self.assertEqual(self.get(job_id)["stage"], "needs-human")
-                self.assertTrue(self.get(job_id)["reason"].startswith("stalled in review: "))
+                self.assertEqual((self.get(job_id)["stage"], self.get(job_id)["stalled"]), ("review", True))
+                self.assertEqual(self.get(job_id)["reason"], "stalled: no board update for 30 min and no live session")
                 if text is None:
                     self.assertFalse((self.root / "roadmap.md").exists())
                 else:

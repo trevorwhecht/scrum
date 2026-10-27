@@ -57,21 +57,22 @@ class ExitedRunTest(unittest.TestCase):
 
         with mock.patch.object(board, "projects", return_value={"repo": self.repo}), \
                 mock.patch.object(board, "session_alive_fn", return_value=lambda job: False), \
-                mock.patch.object(serve, "spawn", side_effect=fake_spawn) as spawn:
+                mock.patch.object(serve, "spawn", side_effect=fake_spawn) as spawn, \
+                mock.patch.object(board, "play") as play:
             serve.watchdog_tick()
             calls = lambda: [(c.args[2], c.args[3], c.args[4]) for c in spawn.call_args_list]
             self.assertEqual(calls(), [(job_id, "resume", f"/trevskills-scrum resume {job_id}")],
                              "the exited start run mid-build must be respawned as resume")
-            self.assertEqual(self.job(job_id)["stage"], "needs-human")
-            self.assertEqual(self.job(job_id)["reason"],
-                             "stalled in build: session exited while the job was still in build. Fix: click Resume.")
-            # the respawned resume run puts the job back in build, then it exits too
-            self.edit_job(job_id, stage="build", reason=None)
+            self.assertEqual((self.job(job_id)["stage"], self.job(job_id)["stalled"]), ("build", True))
+            self.assertEqual(self.job(job_id)["reason"], "stalled: session exited while the job was still in build.")
+            # the respawned resume run's `B set --unpause stage=build reason=` drops `stalled`, then it exits too
+            self.edit_job(job_id, stage="build", reason=None, stalled=None)
             serve.RUNS[key]["proc"].poll.return_value = 0
             serve.watchdog_tick()
             self.assertEqual(len(calls()), 1, "the auto-respawn happens only once")
-        self.assertEqual(self.job(job_id)["stage"], "needs-human")
-        self.assertTrue(self.job(job_id)["reason"].startswith("stalled in build: session exited"))
+        self.assertEqual((self.job(job_id)["stage"], self.job(job_id)["stalled"]), ("build", True))
+        self.assertEqual(self.job(job_id)["reason"], "stalled: session exited while the job was still in build.")
+        self.assertNotIn(mock.call(board.sound("needs-human")), play.call_args_list, "a stall plays no sound")
 
 
     def held_after_exit(self, line, now):
@@ -134,9 +135,9 @@ class ExitedRunTest(unittest.TestCase):
         logs = text.split("## Log\n")[1].strip().splitlines()
         self.assertEqual(len(logs), 3)
         self.assertRegex(logs[1] if "P1 S1" in logs[1] else logs[2], r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} P1 S1 stopped: "
-                         r"017-step-job stalled in build: session exited while the job was still in build\. ")
+                         r"017-step-job stalled: session exited while the job was still in build\.$")
         self.assertRegex(logs[2] if "P1 S2" in logs[2] else logs[1], r"^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} P1 S2 stopped: "
-                         r"018-child-fix stalled in check: session exited while the job was still in check\. ")
+                         r"018-child-fix stalled: session exited while the job was still in check\.$")
 
 if __name__ == "__main__":
     unittest.main()
