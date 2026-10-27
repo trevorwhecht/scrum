@@ -685,13 +685,13 @@ class ServeTest(unittest.TestCase):
         """continue.py's {} brings back a job held in its stage on a usage limit (limitResetAt, no paused)."""
         b = self.serve.board
         held = b.cmd_new(self.root, "Held on a limit")
-        self.edit_job(held, stage="build", reason=None, limitResetAt=int(time.time()) + 3600)
+        held_at = int(time.time()) + 3600
+        self.edit_job(held, stage="build", reason=None, limitResetAt=held_at)
         with mock.patch.object(self.serve, "spawn") as spawn:
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{held}/resume", {}), (202, {"id": held, "action": "resume"}))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(held, "resume", f"/trevskills-scrum resume {held}")])
         job = self.stage_of(held)
-        self.assertEqual((job["stage"], job["reason"]), ("needs-human", "stalled in build: usage limit reset. Fix: click Resume."))
-        self.assertNotIn("limitResetAt", job)
+        self.assertEqual((job["stage"], job["reason"], job["limitResetAt"]), ("build", None, held_at))
         lil = b.cmd_new(self.root, "Held lilguy")
         self.edit_job(lil, lane="lilguy", stage="build", reason=None, limitResetAt=1_800_000_000)
         with mock.patch.object(self.serve, "spawn") as spawn:
@@ -5334,9 +5334,7 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual((live()["stage"], live()["limitResetAt"]), ("build", T))
         self.assertNotIn("p/held", s.AUTO_RESUME, "a refusal spends no try")
         self.assertEqual(at(T + 121), ["held"])
-        self.assertEqual((live()["stage"], live()["reason"]),
-                         ("needs-human", "stalled in build: usage limit reset. Fix: click Resume."))
-        self.assertNotIn("limitResetAt", live())
+        self.assertEqual((live()["stage"], live()["reason"], live()["limitResetAt"]), ("build", None, T))
         self.assertEqual(s.AUTO_RESUME["p/held"][0], 1)
         hold()
         s.AUTO_RESUME["p/held"] = [s.AUTO_RESUME_MAX, 0.0]

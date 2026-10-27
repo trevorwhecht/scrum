@@ -190,6 +190,16 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, job_id, ["stage=build"], unpause=True)
         self.assertNotIn("outcome", self.jobs()[0])  # a stage change drops it
 
+    def test_unpause_set_clears_limit_hold(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        with board.locked_board(self.root) as b:
+            board.find(b, job_id)["limitResetAt"] = 1_800_000_000
+        board.cmd_set(self.root, job_id, ["stage=build", "reason="])
+        self.assertEqual(self.jobs()[0]["limitResetAt"], 1_800_000_000)
+        board.cmd_set(self.root, job_id, ["stage=build", "reason="], unpause=True)
+        self.assertNotIn("limitResetAt", self.jobs()[0])
+
     def test_set_specwriter_field(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["specwriter=abc123"])

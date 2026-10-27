@@ -556,9 +556,8 @@ def auto_resume(project, root, jobs):
 
 
 def resume_held(project, root, job, jobs, now):
-    """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then flag it stalled (`resume` only
-    accepts that) and resume it; at AUTO_RESUME_MAX tries it is flagged for Trevor instead. True when it resumed the
-    job or still waits for the reset or a slot."""
+    """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
+    tries it is flagged for Trevor instead. True when it resumed the job or still waits for the reset or a slot."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
     if running(project, job["id"]):
@@ -571,8 +570,6 @@ def resume_held(project, root, job, jobs, now):
         return False
     if resume_refusal(project, root, job) or not take_room():
         return True  # a sibling or the tick's budget holds its slot: no try spent
-    if not flag_stalled(root, job, LIMIT_RESET):
-        return False  # the job moved on
     AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
     resume_job(project, root, job, jobs)
     return True
@@ -617,7 +614,6 @@ def cloud_tick(project, root, jobs, now=None):
 
 EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
 ORPHANED = "no session picked the job up in {stage}. Fix: click Resume."
-LIMIT_RESET = "usage limit reset. Fix: click Resume."
 
 
 def flag_stalled(root, job, msg):
@@ -3341,9 +3337,6 @@ class Handler(BaseHTTPRequestHandler):
             if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
                 if refusal := resume_refusal(project, root, job, manual=manual):
                     return refused(root, job_id, refusal)
-                if not flag_stalled(root, job, LIMIT_RESET):
-                    return 409, {"error": "job moved on"}
-                jobs = json.loads((root / "board.json").read_text())["jobs"]
                 resume_job(project, root, job, jobs, manual=manual)
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
