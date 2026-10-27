@@ -1,4 +1,4 @@
-import hashlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -4196,6 +4196,14 @@ print("stub err", file=sys.stderr)
         proc, _ = board.spawn(self.root, "999-not-a-job", action, prompt, model=model)
         proc.wait(timeout=10)
         return self.records()[0]["argv"]
+
+    def test_spawn_log_name_is_utc(self):
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        line = json.loads(self.cli("123-some-job", "start").stdout)
+        after = datetime.now(timezone.utc)
+        stamp = re.match(r"^runs/(\d{8}-\d{6})-", line["log"]).group(1)
+        got = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+        self.assertTrue(before <= got <= after, (before, got, after))
 
     def test_spawn_argv_log_and_env(self):
         out = self.cli("123-some-job", "start")

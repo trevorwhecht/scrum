@@ -1280,7 +1280,7 @@ class ContractTest(unittest.TestCase):
                        "next pick line for the same job", "unanswered", "3 or more times", "DEFAULT: <label>",
                        "(unanimous)", "branch names", "hashes", "jev.log", "## Builder model", "Sonnet-built",
                        "Opus-built", "promote", "avg fix rounds", "## Pipeline fit", "pipeline-fit.json",
-                       "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "## Stops",
+                       "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "UTC", "later than", "## Stops",
                        "`ask`", "`stall`", "`machine`", "`refused`", "`bigboy`", "Hard stop: agent rules", "stalled in build",
                        "swap used", "blocked on sibling", "| Cause | Count | Jobs | Picks | Automate |", "Automate",
                        "Jobs read: 0", "## Recurring blockers", '"blocker"', '"verdict"', '"kind"',
