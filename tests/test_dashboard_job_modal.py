@@ -152,8 +152,8 @@ class JobModal(unittest.TestCase):
                {"key": "a", "label": "Ship it", "command": "approve 020-q"},
                {"key": "b", "label": "Redo", "command": 'rework 020-q "again"'}]
     TODAY_ACTIONS = (
-        '<div class="stop" role="status"\n    data-agent-hint="This job stopped and needs Trevor. The first line is what is '
-        'wrong; then either the exact fix or the ways forward, the recommended one first.">\n    <b>Waiting on you</b>'
+        '<div class="stop" role="status"\n    data-agent-hint="This job stopped and needs Trevor. The first line is the agent\'s question in full, '
+        'or what went wrong; then either the exact fix or the buttons for the ways forward, the recommended one first.">\n    <b>Waiting on you</b>'
         '<p>CHANGES after 3 rounds.</p><p>Pick one.</p></div><form data-act="approve">\n      \n      <button class="btn primary" type="submit">Approve &amp; merge</button>'
         '</form><form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the '
         'builder change?" aria-label="Feedback for the builder"></textarea>\n      <button class="btn" type="submit" '
