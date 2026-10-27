@@ -3178,6 +3178,9 @@ def digest_auto(root, digest_id):
         refs = [x for x in absent if x["target"] in p["new"] and x["target"] not in p["old"]]
         if not refs:
             continue
+        if len(refs) > 1:  # one edit can't land in several skills' jobs, so it waits for none of them
+            held[p["id"]] = ", ".join(x["id"] for x in refs), False
+            continue
         repo = repo_of(p["target"])
         into = next((x for x in refs if repo and digest_skill_target(x["target"]) and repo_of(x["target"])[0] == repo[0]), None)
         held[p["id"]] = (into or refs[0])["id"], bool(into)
@@ -3189,7 +3192,8 @@ def digest_auto(root, digest_id):
             if folded:
                 queue(p, f"queued with skill {skill_pid}")
             else:
-                skip(p, f"references skill {skill_pid}, which does not exist yet")
+                many = "," in skill_pid
+                skip(p, f"references skill{'s' if many else ''} {skill_pid}, which do{'' if many else 'es'} not exist yet")
         elif p["kind"] == "backlog":
             try:
                 board.cmd_backlog_add(root, [p["backlog"]], priority=3)

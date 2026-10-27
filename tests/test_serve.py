@@ -5422,6 +5422,39 @@ class DigestTest(unittest.TestCase):
         [item] = [i["text"] for i in self.board.backlog_items(self.scrum)]
         self.assertEqual(item, "Create digest 001 p1 skill at skills/foo/SKILL.md: Seen in 001-a and 002-b (p1).")
 
+    def test_digest_auto_skips_edit_referencing_two_absent_skills(self):
+        self.git_repo(files=("agents/scrum-builder.md",))
+        runs = self.contract_tests()
+        a, b = self.reg / "skills" / "a" / "SKILL.md", self.reg / "skills" / "b" / "SKILL.md"
+        builder = self.reg / "agents" / "scrum-builder.md"
+        self.digest([self.skill("p1", a), self.skill("p2", b),
+                     self.prop("p3", builder, old="old line", new=f"new line {a} {b}")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["skipped"], [{"id": "p3", "target": str(builder),
+                                           "reason": "references skills p1, p2, which do not exist yet"}])
+        self.assertEqual([e["id"] for e in out["queued"]], ["p1", "p2"])
+        self.assertEqual(self.statuses(), ["queued", "queued", "skipped"])
+        self.assertEqual(builder.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(runs(), [])
+        self.assertEqual(self.jobs(), [])
+        items = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertEqual(len(items), 2)
+        self.assertFalse(any("p3" in i for i in items))
+
+    def test_digest_auto_folds_edit_when_other_skill_exists(self):
+        self.git_repo(files=("agents/scrum-builder.md", "skills/a/SKILL.md"))
+        self.contract_tests()
+        a, b = self.reg / "skills" / "a" / "SKILL.md", self.reg / "skills" / "b" / "SKILL.md"
+        builder = self.reg / "agents" / "scrum-builder.md"
+        self.digest([self.skill("p1", a), self.skill("p2", b),
+                     self.prop("p3", builder, old="old line", new=f"new line {a} {b}")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([(e["id"], e["reason"]) for e in out["queued"]], [("p2", "new skill"), ("p3", "queued with skill p2")])
+        self.assertEqual([(e["id"], e["reason"]) for e in out["skipped"]], [("p1", "skill already exists")])
+        self.assertEqual(builder.read_text(), "keep A\nold line\nkeep B\n")
+        [item] = [i["text"] for i in self.board.backlog_items(self.scrum)]
+        self.assertIn("apply digest 001 p3", item)
+
     def test_digest_auto_applies_paired_edit_when_skill_exists(self):
         self.git_repo(files=("agents/scrum-builder.md", "skills/foo/SKILL.md"))
         self.contract_tests()
