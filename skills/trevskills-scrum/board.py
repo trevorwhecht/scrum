@@ -1822,7 +1822,6 @@ CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
 DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
-DELETION_MIN_RATIO = 0.9
 
 
 def ui_globs(root):
@@ -1902,7 +1901,7 @@ def _incremental_since(prev, wt, base):
 
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
-    (incremental) or UI/UX (no UI file, or a deletion-dominated diff) and security skip files (full); never writes
+    (incremental) or UI/UX (no UI file) and security skip files (full); never writes
     board.json."""
     job = live(read_board(root), check_id(job_id))
     wt, base = job.get("worktree"), job.get("base")
@@ -1933,8 +1932,6 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         globs = ui_globs(root)
         if globs and not any(glob_match(f, globs) for f in files):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
-        elif _deletion_dominated((_route_diff(job) or ([], []))[0]):
-            skips.update(ui=DELETION_SKIP, ux=DELETION_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
         if skips:
@@ -1961,15 +1958,6 @@ def _route_diff(job):
         return None
     names = _names(wt, f"{base}...HEAD")
     return None if names is None else (rows, sorted(n for n in names if n))
-
-
-def _deletion_dominated(rows):
-    """True when at least DELETION_MIN_RATIO of the numstat rows' changed lines are deletions; False with no rows, a
-    binary row or no changed lines."""
-    if not rows or any(a is None for a, _, _ in rows):
-        return False
-    added, deleted = sum(a for a, _, _ in rows), sum(d for _, d, _ in rows)
-    return added + deleted > 0 and deleted / (added + deleted) >= DELETION_MIN_RATIO
 
 
 def _promote_trigger(rows, names):
