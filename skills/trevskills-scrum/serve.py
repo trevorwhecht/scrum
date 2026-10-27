@@ -3381,7 +3381,14 @@ def make_server(port):
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
+def drop_malloc_logging():
+    # macOS prints "can't turn off malloc stack logging" from every child Python that inherits these.
+    for k in ("MallocStackLogging", "MallocStackLoggingNoCompact"):
+        os.environ.pop(k, None)
+
+
 def main():
+    drop_malloc_logging()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
