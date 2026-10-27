@@ -172,12 +172,32 @@ def sound(kind):
     return str(p) if p.is_file() else fallback
 
 
+def volume_path():
+    """The dashboard's sound setting (POST /api/volume), JSON {"level": 0-100, "muted": bool}; SCRUM_VOLUME overrides."""
+    return Path(os.environ.get("SCRUM_VOLUME") or Path.home() / ".claude" / "trevskills-scrum" / "volume")
+
+
+def volume() -> tuple[int, bool]:
+    """(level, muted) from volume_path(); a missing, unreadable or malformed file, or a bad level, is (100, False)."""
+    try:
+        v = json.loads(volume_path().read_text())
+        level, muted = v["level"], v.get("muted")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return 100, False
+    if type(level) is not int or not 0 <= level <= 100:
+        return 100, False
+    return level, muted is True
+
+
 def play(path):
-    """Fire-and-forget afplay; never blocks or breaks the board. SCRUM_MUTE (tests) silences it."""
+    """Fire-and-forget afplay at the dashboard's volume(); never blocks or breaks the board. SCRUM_MUTE (tests) silences it."""
     if os.environ.get("SCRUM_MUTE"):
         return
+    level, muted = volume()
+    if muted or not level:
+        return
     try:
-        subprocess.Popen(["afplay", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        subprocess.Popen(["afplay", "-v", str(level / 100), path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except OSError:
         pass
