@@ -2362,6 +2362,31 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(job[key], before[key], key)
         self.assertEqual((self.root / "jobs" / job_id / "build.md").read_text(), "STATUS: READY\n")
 
+    def test_pause_after_auto_play_sets_hold_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        with board.locked_board(self.root) as b:
+            b["jobs"][0]["autoPlayed"] = True
+        board.cmd_pause(self.root, job_id)
+        self.assertIs(self.jobs()[0].get("holdPause"), True)
+
+    def test_pause_without_auto_play_sets_no_hold_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        board.cmd_pause(self.root, job_id)
+        self.assertNotIn("holdPause", self.jobs()[0])
+
+    def test_resume_clears_hold_pause(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build"])
+        with board.locked_board(self.root) as b:
+            b["jobs"][0]["autoPlayed"] = True
+        board.cmd_pause(self.root, job_id)
+        board.cmd_set(self.root, job_id, ["stage=build"], unpause=True)
+        job = self.jobs()[0]
+        self.assertNotIn("holdPause", job)
+        self.assertNotIn("paused", job)
+
     def test_pause_refuses_job_not_in_progress(self):
         for stage in ("waiting", "done", "needs-human", "aborted"):
             job_id = board.cmd_new(self.root, f"x {stage}")

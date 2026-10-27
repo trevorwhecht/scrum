@@ -1019,10 +1019,11 @@ def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
             return False
         if refusal:
             continue
-        if not job.get("children"):  # the `stalled in <stage>` prefix lets the resume session re-enter that stage
-            with board.locked_board(root) as b:
-                board.find(b, job["id"]).update(reason=f"{board.STALLED}{job['stage']}: {AUTO_PLAYED}",
-                                                updatedAt=board.now())
+        with board.locked_board(root) as b:  # autoPlayed: a later Pause is deliberate (cmd_pause sets holdPause)
+            live = board.find(b, job["id"])
+            live["autoPlayed"] = True
+            if not job.get("children"):  # the `stalled in <stage>` prefix lets the resume session re-enter that stage
+                live.update(reason=f"{board.STALLED}{job['stage']}: {AUTO_PLAYED}", updatedAt=board.now())
         resume_job(project, root, job, jobs)
         if job.get("children") and not board.find(board.read_board(root), job["id"]).get("reason"):
             board.cmd_set(root, job["id"], [f"reason={AUTO_PLAYED}"], expect="running")
@@ -1073,7 +1074,7 @@ def watchdog_tick():
                 pending = pending or resumed
                 candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
                                and j["stage"] not in ("done", "aborted") and not running(project, j["id"])
-                               and not by_id.get(j.get("parent"), {}).get("paused")]
+                               and not j.get("holdPause") and not by_id.get(j.get("parent"), {}).get("paused")]
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     finally:
