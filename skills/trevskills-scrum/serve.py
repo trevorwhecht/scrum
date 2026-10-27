@@ -555,6 +555,47 @@ def auto_resume(project, root, jobs):
     return busy
 
 
+MAIN_FF = "waiting: main fast-forward"  # a BigBoy parent's final review waits for the main checkout (bigboy.md step 7)
+MAIN_FF_TRIED: dict[str, str] = {}  # "project/id" -> updatedAt it was last resumed at
+# ponytail: in-memory, like ORPHAN_RESPAWN; a serve.py restart allows one more try per job
+
+
+def main_ready(repo, branch) -> bool:
+    """The main checkout is on branch, has no tracked changes, and `git pull --ff-only` succeeded (Merge step 7's
+    guard). A git error or a 60 s timeout is not ready."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+    try:
+        head = git("symbolic-ref", "--short", "HEAD")
+        if head.returncode or head.stdout.strip() != branch:
+            return False
+        status = git("status", "--porcelain", "--untracked-files=no")
+        return not status.returncode and not status.stdout.strip() and git("pull", "--ff-only").returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def main_ff_tick(project, repo, root, jobs) -> bool:
+    """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and that has no tracked run, once main is
+    ready (main_ready) and resume_refusal and take_room let it: once per job and updatedAt (MAIN_FF_TRIED), so a
+    resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned."""
+    spawned = False
+    for job in jobs:
+        key = f"{project}/{job['id']}"
+        if job.get("lane") != "bigboy" or job.get("stage") != "running" or job.get("paused") \
+                or not (job.get("reason") or "").startswith(MAIN_FF) or running(project, job["id"]) \
+                or MAIN_FF_TRIED.get(key) == job.get("updatedAt"):
+            continue
+        branch = (job.get("base") or "main").removeprefix("origin/")
+        if not main_ready(repo, branch) or resume_refusal(project, root, job) or not take_room():
+            continue
+        MAIN_FF_TRIED[key] = job.get("updatedAt")
+        resume_job(project, root, job, jobs)
+        spawned = True
+    return spawned
+
+
 def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
     tries it is flagged for Trevor instead. True when it resumed the job or still waits for the reset or a slot."""
@@ -1031,7 +1072,8 @@ def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
-       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project.
+       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project. Then resume
+       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick).
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
@@ -1066,6 +1108,7 @@ def watchdog_tick():
                     RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
                 resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
                 resumed = auto_resume(project, root, jobs) or resumed
+                resumed = main_ff_tick(project, repo, root, jobs) or resumed
                 busy[project] = resumed or busy[project]
                 pending = pending or resumed
                 candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
