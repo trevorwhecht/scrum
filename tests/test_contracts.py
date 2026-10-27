@@ -1562,8 +1562,23 @@ class ContractTest(unittest.TestCase):
         s5 = s5[:s5.index("Record the returned agent id")]
         self.assertLess(s5.index('git -C "$WT" merge "$BASE" --no-edit'), s5.index("spawn `scrum-builder`"))
         self.assertIn('git -C "$WT" merge --abort', s5)
-        self.assertIn("never `git merge` except the conflict step in **Merge** and the pre-build sync in **New job**", text)
+        self.assertIn("never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job** "
+                      "and the retry sync in **approve**", text)
+        self.assertNotIn("conflict step in **Merge** and the pre-build sync", text)
         self.assertNotIn("the one sanctioned", text)
+
+    def test_approve_retry_syncs_branch_before_merge(self):
+        approve = next(l for l in self.lane("commands").splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
+        run_merge = approve.rindex("run **Merge**")
+        fetch = approve.index('git -C "$WT" fetch origin')
+        merge = approve.index('git -C "$WT" merge "origin/$DEFAULT" --no-edit')
+        self.assertLess(fetch, merge)
+        self.assertLess(merge, run_merge)
+        self.assertIn('git -C "$WT" merge --abort', approve)
+        sentence = next(s for s in approve.split(". ") if 'merge "origin/$DEFAULT" --no-edit' in s)
+        self.assertIn("reason starting `retry:`", sentence)
+        sync = approve[approve.index("reason starting `retry:`"):run_merge]
+        self.assertIn("no `B ask`", sync)
 
     def test_skill_pulls_and_restarts_after_merge(self):
         text = skill_text()
