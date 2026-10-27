@@ -21,7 +21,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - Every new tappable control is at least 44 px in both directions at 390 px wide, even when its siblings are smaller (UB-15).
    - In every route file your diff touches, a 500 response returns a fixed generic message, never `error.message`, `details` or a stack, even on lines already there; log the error server-side and add a route test for it.
    - In every route file your diff touches, a malformed JSON body or a field of the wrong type returns 400 with a plain message before any DB call, never a 500 from `req.json()` or Prisma; add a route test for it.
-   - Writes from one request that change the same row and its child rows (an order and its lines) run in one transaction, so a failure leaves none of them applied.
+   - Writes from one request that change the same row and its child rows (an order and its lines) run in one transaction, so a failure leaves none of them applied; when a read decides a money write (a balance, a refunded total), that transaction first locks the parent row with `SELECT ... FOR UPDATE`.
    - An update matches an existing row by its id, never by a display field such as a description or a name.
    - A read-modify-write of shared state (board.json, proposals.json, a file another request may write) re-reads and re-checks the live state under the lock right before the write, never trusting a snapshot taken earlier.
 3. For each acceptance criterion: if the repo has a test runner, work red-green: write the test, run it and see it fail for the expected reason, implement, and see it pass. Put the RED and GREEN result lines in build.md. If there is no test runner, verify it another way (a command, a script, a build) and record how.

@@ -1104,7 +1104,9 @@ class ContractTest(unittest.TestCase):
         b6 = ("   - When you move code to another file, grep the tests for the old file path; retarget any "
               "test that reads that source file to the new path and change no `expect`.")
         b8 = ("   - Writes from one request that change the same row and its child rows (an order "
-              "and its lines) run in one transaction, so a failure leaves none of them applied.")
+              "and its lines) run in one transaction, so a failure leaves none of them applied; when a "
+              "read decides a money write (a balance, a refunded total), that transaction first locks "
+              "the parent row with `SELECT ... FOR UPDATE`.")
         b9 = ("   - An update matches an existing row by its id, never by a display field such as a "
               "description or a name.")
         code_map = ("   - When the change touches `skills/trevskills-scrum/board.py`, `serve.py` or "
