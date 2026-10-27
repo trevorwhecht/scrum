@@ -5195,8 +5195,6 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(existing.read_text(), "old line\n")
         self.assertEqual(snap(), before)
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AutoResumeTest(unittest.TestCase):
@@ -6986,3 +6984,24 @@ class HeavyWaitTest(unittest.TestCase):
             self.low()
             s.auto_continue_tick({"repo": False})
         self.assertEqual([c.args[2:4] for c in self.spawn.call_args_list], [("run-all", "run-all")])
+
+
+class DropMallocLoggingTest(unittest.TestCase):
+    def test_drop_malloc_logging(self):
+        import serve
+        with mock.patch.dict(os.environ, {"MallocStackLogging": "1", "MallocStackLoggingNoCompact": "1", "KEEP_ME": "x"}):
+            serve.drop_malloc_logging()
+            self.assertNotIn("MallocStackLogging", os.environ)
+            self.assertNotIn("MallocStackLoggingNoCompact", os.environ)
+            self.assertEqual(os.environ["KEEP_ME"], "x")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("MallocStackLogging", None)
+            serve.drop_malloc_logging()
+
+    def test_main_drops_malloc_logging(self):
+        import serve
+        src = inspect.getsource(serve.main)
+        self.assertLess(src.index("drop_malloc_logging()"), src.index("add_argument"))
+
+if __name__ == "__main__":
+    unittest.main()
