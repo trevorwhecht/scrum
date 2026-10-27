@@ -440,7 +440,7 @@ const setupWait = job => job.stage === "waiting" && job.setup === "pending";
 // A job Trevor paused (board.py cmd_pause): it keeps its stage column until he clicks Play in its panel.
 const heldByTrevor = job => !!job.paused;
 // A stalled job whose Resume the machine guard queued (serve.py play_queued): nothing left for Trevor to do.
-const playQueued = job => job.stage === "needs-human" && !!job.play_queued;
+const playQueued = job => (job.stage === "needs-human" || !!job.stalled) && !!job.play_queued;
 const kidOf = (job, id) => jobs.find(j => j.key === `${job.project}/${id}`);
 const needsYou = kid => !!kid && ((kid.stage === "needs-human" && !playQueued(kid)) || heldByTrevor(kid) || setupWait(kid));
 // board.py WAITING_ON: a running parent whose children wait on Trevor. Only ids still waiting on him are kept.
@@ -536,7 +536,8 @@ function card(job) {
   // A job held in its stage until the usage limit resets (serve.py's limitResetAt) waits on the clock, so it is not stale.
   const held = !human && job.limitResetAt, hold = heldByTrevor(job);
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
-  const stale = !human && !hold && !held && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
+  // A job stalled in its own stage (board `stalled`) is already flagged and waits for Resume, so it is not stale either.
+  const stale = !human && !hold && !held && !job.stalled && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
     ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${hold ? '<span class="badge">paused</span>' : ""}${held ? `<span class="badge">waiting for reset ${esc(when(job.limitResetAt))}</span>` : ""}
@@ -814,7 +815,7 @@ const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? ""
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
 // When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
 // what blocks it, except for a paused job with no waitingOn: it says "Paused by you", so a note gives the refusal.
-const RESUMABLE = ["stalled in ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
+const RESUMABLE = ["stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = job => {
   const reason = job.reason || "";
@@ -822,8 +823,8 @@ const resumeForm = job => {
   if (job.resumeRefusal) return !job.paused || job.waitingOn ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
   return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 };
-// A paused job keeps its stage, so its panel takes the not-needs-human branch: Play goes there in place of Pause.
-const playForm = job => heldByTrevor(job) ? resumeForm(job) : "";
+// A paused or stalled-in-its-stage job keeps its stage, so its panel takes the not-needs-human branch: Play or Resume goes there.
+const playForm = job => heldByTrevor(job) || job.stalled ? resumeForm(job) : "";
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
     <button class="btn primary tall" type="submit">Setup done</button></form>`;
@@ -910,7 +911,7 @@ function actionsHtml(job, err) {
   if (run?.alive && run.action !== "discuss") return banner + kids + now + pauseForm(job) + moreMenu(job) + err;
   const last = run && !run.alive ? `<p class="note">Last ${esc(run.action)} run ${run.exit === 0 ? "finished" : run.exit < 0 ? `stopped by ${PAUSED_RE.test(reason) ? "Pause" : "Abort"}` : `failed (exit ${esc(run.exit)})`}${log}</p>` : now;
   const why = job.stage === "aborted" && reason ? `<p class="note">${esc(reason)}</p>` : "";
-  if (job.stage !== "needs-human") { const held = heldByTrevor(job);  // Play and Reopen never show together, so err can follow both
+  if (job.stage !== "needs-human") { const held = heldByTrevor(job) || !!job.stalled;  // Play and Reopen never show together, so err can follow both
     return banner + kids + why + last + setupForm(job) + playForm(job) + reopenForm(job) + (held ? err : "") + pauseForm(job) + moreMenu(job) + (held ? "" : err); }
   // An obsolete job has nothing to rework; a BigBoy parent has no worktree or builder (its children do the work),
   // except off track, where Send back re-runs the tracker with Trevor's decision.

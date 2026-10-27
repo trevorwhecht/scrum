@@ -1,6 +1,6 @@
 """A job Trevor paused (board `paused` true) stays in its stage column: red outline, a `paused` badge, no stale text,
 and Play instead of Pause in its panel."""
-import re, unittest
+import json, re, unittest
 
 from test_dashboard_job_modal import DASHBOARD, run
 
@@ -34,6 +34,16 @@ class PausedCard(unittest.TestCase):
         self.assertEqual(run('playForm({stage: "build", reason: "stalled in build: paused by Trevor. Fix: click Play."})'), "")
         body = section("function renderActions(job)", '$("actions").addEventListener("submit"')
         self.assertIn("playForm(job) + reopenForm(job)", body)
+
+    def test_new_shape_stalled_card_not_stale(self):
+        from test_dashboard_play_queued import run as render_run
+        job = {"key": "p/030-n", "project": "p", "id": "030-n", "title": "New stall", "stage": "build", "stalled": True,
+               "reason": "stalled: no live session", "updatedAt": "2026-01-01T00:00:00Z"}
+        html, = render_run(f"out(card({json.dumps(job)}));")
+        self.assertNotIn("human", re.search(r'<button class="([^"]*)"', html).group(1).split())
+        self.assertNotIn("stale since", html)
+        old, = render_run(f"out(card({json.dumps({**job, 'stalled': False})}));")
+        self.assertIn("stale since", old)  # the contrast: the same job unflagged is stale
 
     def test_paused_child_waits_on_trevor(self):
         self.assertTrue(run('needsYou({stage: "build", paused: true})'))

@@ -98,6 +98,12 @@ class PlayQueued(unittest.TestCase):
             out(needsYou(jobs[1])); out(needsYou(jobs[2])); out(waitingOn(jobs[0]));""")
         self.assertEqual(got, [False, True, ["201-s"]])
 
+    def test_play_queued_new_shape_stalled(self):
+        stall = {"stage": "build", "stalled": True, "reason": "stalled: no live session"}
+        got = run(f"""out(playQueued({json.dumps({**stall, "play_queued": "2026-10-25T10:00:00Z"})}));
+            out(playQueued({json.dumps(stall)})); out(playQueued({json.dumps({"stage": "build", "play_queued": "x"})}));""")
+        self.assertEqual(got, [True, False, False])
+
     def test_missing_job_file_tab_hidden(self):
         job = {**STUCK, "files": ["feature.md", "plan.md"]}
         notfound = 'fetchImpl = async url => url.endsWith("feature.md") ? {ok: false, status: 404, text: async () => "nope"} : {ok: true, status: 200, text: async () => "# plan"};'

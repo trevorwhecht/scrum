@@ -221,8 +221,10 @@ def resume_job(project, root, job, jobs, manual=False):
 
 
 def resumable(job):
-    """Paused by Trevor (Play), or needs-human for a reason whose card offers Resume (RESUMABLE)."""
-    return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE))
+    """Paused by Trevor (Play), stalled in either shape (board.stalled), or needs-human for a reason whose card offers
+    Resume (RESUMABLE)."""
+    return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE)
+                or board.stalled(job))
 
 
 def limit_held(job):
@@ -501,14 +503,12 @@ def auto_resume(project, root, jobs):
     from the tick's budget (take_room); with none left the job waits on a slot without spending a try."""
     now, busy = time.time(), False
     for job in jobs:
-        reason = job.get("reason") or ""
         if job.get("paused"):
             continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
             busy = resume_held(project, root, job, jobs, now) or busy
             continue
-        if job["stage"] != "needs-human" or not reason.startswith(board.STALLED) \
-                or board.lilguy_in_checkout(job) or running(project, job["id"]):
+        if not board.stalled(job) or board.lilguy_in_checkout(job) or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
@@ -526,9 +526,9 @@ def auto_resume(project, root, jobs):
                         AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
                         resume_job(project, root, job, jobs)
                 continue
-            m = re.match(rf"{board.STALLED}(\w+):", reason)
+            m = board.stall_stage(job)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
-            once_key = f"{key}/{m.group(1) if m else ''}"
+            once_key = f"{key}/{m or ''}"
             run_child = parent and parent.get("stage") == "running" and not parent.get("paused") \
                 and parent.get("lane") in ("runall", "bigboy")
             if m and (run_child or not job.get("parent")) \
@@ -540,10 +540,10 @@ def auto_resume(project, root, jobs):
                 resume_job(project, root, job, jobs)
             continue
         busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
-        stage = re.match(rf"{board.STALLED}(\w+):", reason)
-        if stage and stage.group(1) in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
+        stage = board.stall_stage(job)
+        if stage in board.WATCHED:  # a reset already past (or none named) waits AUTO_RESUME_EVERY
             hold_limited(root, job, int(reset) if reset and reset + 120 > now else int(now) + AUTO_RESUME_EVERY,
-                         stage.group(1), fixed=fixed)
+                         stage, fixed=fixed)
             continue
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
@@ -689,6 +689,7 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
             if not live or live.get("stage") != job["stage"] or live.get("paused"):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
+            live.pop("stalled", None)  # a new-shape stall is now a limit hold in the same stage
     except board._Gone:
         return False
     return True
@@ -710,7 +711,7 @@ def respawn_exited(project, root):
     for key, run in runs:
         job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
         if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or board.lilguy_in_checkout(job) \
-                or job.get("paused"):
+                or job.get("paused") or job.get("stalled"):
             run["handled"] = True
             continue
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
@@ -759,7 +760,7 @@ def respawn_orphans(project, root, p, kids, alive):
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
-                or kid.get("paused") \
+                or kid.get("paused") or kid.get("stalled") \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
                 or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
             continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick
@@ -2026,7 +2027,8 @@ def board_with_activity(root, project):
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
     Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
     waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
-    board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip)."""
+    board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
+    `nextRetryAt` (epoch seconds, or None)."""
     data = json.loads((root / "board.json").read_text())
     stage = {j.get("id"): j.get("stage") for j in data.get("jobs", [])}
     title = {j.get("id"): j.get("title") or "" for j in data.get("jobs", [])}
@@ -2042,6 +2044,10 @@ def board_with_activity(root, project):
             refusal = resume_refusal(project, root, job, manual=not job.get("play_queued"))
             job["resumeRefusal"] = str(refusal) if refusal else None
             job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
+        if board.stalled(job) or limit_held(job):  # when auto_resume tries it next: its own retry, else the limit reset
+            retry = AUTO_RESUME.get(f"{project}/{job.get('id')}")
+            job["nextRetryAt"] = retry[1] if retry and retry[0] < AUTO_RESUME_MAX and retry[1] > time.time() \
+                else job["limitResetAt"] + 120 if limit_held(job) else None
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
