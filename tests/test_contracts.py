@@ -415,6 +415,13 @@ class ContractTest(unittest.TestCase):
     def section(self, text, start, end):
         return text[text.index(start):text.index(end, text.index(start))]
 
+    def test_check_gate_deletes_next_types(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        rule = 'when `$WT/.next/types` exists, run `rm -rf "$WT/.next/types"`'
+        self.assertIn(rule, check)
+        self.assertLess(check.index(rule), check.index("Typecheck"))
+        self.assertNotIn('"$WT/.next/"', check)
+
     def test_check_gate_settles_flaky_tests_outside_diff(self):
         check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
         for phrase in (
