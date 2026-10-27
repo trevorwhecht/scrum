@@ -675,7 +675,7 @@ class ContractTest(unittest.TestCase):
         for body in (self.section(text, "## Approve", "## Migrate"), merge, self.lane("bigboy"), self.lane("cloud")):
             self.assertTrue("jev-gate.py rank" in body or "**Rank**" in body, body[:80])
         self.assertIn("jev-gate.py dupe", merge)
-        self.assertEqual(self.lane("bigboy").count("**Rank**"), 3)
+        self.assertEqual(self.lane("bigboy").count("**Rank**"), 4)
         self.assertIn("--setup='<Human setup value>' [--priority N]", text)
 
     def test_skill_rank_backlog_after_backlog_spec(self):
