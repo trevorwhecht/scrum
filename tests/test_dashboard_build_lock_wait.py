@@ -13,7 +13,7 @@ def status(job):
     src = pick("const paused = ", "const setupWait = ", "const playQueued = ", "const WATCHED = ", "const isStalled = ",
                "const limitHeld = ")
     src += "\n" + text[text.index("const noPaths = "):text.index("// A needs-human job's closed question")]
-    script = f"{src}\nconsole.log(JSON.stringify(statusLine({json.dumps(job)})));"
+    script = f"const runs = {{}};\n{src}\nconsole.log(JSON.stringify(statusLine({json.dumps(job)})));"
     return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
 
 
