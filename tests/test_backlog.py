@@ -116,6 +116,44 @@ class BacklogTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             board.cmd_next(self.root, index=0)  # done item
 
+    def add_cli(self, *args):
+        """B backlog-add in process, so no detached estimate spawns; returns (exit code, stderr)."""
+        err = io.StringIO()
+        with mock.patch.object(board, "spawn_estimates"), redirect_stderr(err):
+            try:
+                board.main(["--dir", str(self.root), "backlog-add", *args])
+            except SystemExit as e:
+                return (e.code if isinstance(e.code, int) else 1), err.getvalue() + (e.code if isinstance(e.code, str) else "")
+        return 0, err.getvalue()
+
+    def claim(self):
+        with mock.patch.object(board, "cooling_down", return_value=False):
+            return board.cmd_next(self.root)["feature"]
+
+    def test_backlog_add_top_is_claimed_next(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.add_cli("--top", "X"), (0, ""))
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5}\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.claim(), "X")
+
+    def test_newest_top_wins(self):
+        (self.root / "backlog.md").write_text("# Backlog\nnote above\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        board.cmd_backlog_add(self.root, ["X"], top=True)
+        board.cmd_backlog_add(self.root, ["Y"], top=True)
+        self.assertEqual(self.text(), "# Backlog\nnote above\n- [ ] Y {p:5}\n- [ ] X {p:5}\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.claim(), "Y")
+        self.assertEqual(self.claim(), "X")
+
+    def test_backlog_add_top_empty_and_conflict(self):
+        (self.root / "backlog.md").write_text("# Backlog\n")
+        board.cmd_backlog_add(self.root, ["X"], top=True)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5}\n")
+        before = self.text()
+        code, err = self.add_cli("--top", "--priority", "3", "Z")
+        self.assertNotEqual(code, 0)
+        self.assertIn("--top and --priority cannot be combined", err)
+        self.assertEqual(self.text(), before)
+
     def test_backlog_item_text_cap_2000(self):
         board.backlog_op(self.root, "add", text="a" * 1999)
         self.assertEqual(board.backlog_items(self.root)[-1]["text"], "a" * 1999)

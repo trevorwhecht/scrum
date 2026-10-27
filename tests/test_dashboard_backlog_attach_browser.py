@@ -68,11 +68,11 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     got.afterText = await page.evaluate(() => ({proj: window.__proj, value: document.querySelector("#blAdd textarea[name=text]").value,
       blError: document.getElementById("blError").textContent}));
     await page.selectOption("#blAdd select[name=points]", "8");
-    got.pickedClass = await page.evaluate(() => document.querySelector("#blAdd select").className);
+    got.pickedClass = await page.evaluate(() => document.querySelector("#blAdd select[name=points]").className);
     await page.click("#blAdd button[type=submit]");
     await page.waitForFunction(() => document.querySelector("#blAdd textarea[name=text]").value === "");
-    got.afterAdd = await page.evaluate(() => ({points: document.querySelector("#blAdd select").value,
-      cls: document.querySelector("#blAdd select").className, blError: document.getElementById("blError").textContent}));
+    got.afterAdd = await page.evaluate(() => ({points: document.querySelector("#blAdd select[name=points]").value,
+      cls: document.querySelector("#blAdd select[name=points]").className, blError: document.getElementById("blError").textContent}));
     // A rejected upload (empty image, server 400) frees both controls and shows the error.
     await page.evaluate(() => { window.__proj = []; });
     await drop([], "empty.png", "image/png");
@@ -141,7 +141,7 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
 
     def check(self, got):
         shot = self.repo / "scrum" / "attachments" / f"{PNG_HASH}.png"
-        self.assertEqual(got["layout"]["tags"], ["SELECT", "TEXTAREA", "BUTTON"], got)
+        self.assertEqual(got["layout"]["tags"], ["SELECT", "SELECT", "TEXTAREA", "BUTTON"], got)
         self.assertEqual(got["layout"]["options"], ["?", "1", "2", "3", "5", "8", "13"], got)
         self.assertEqual(got["layout"]["value"], "", got)
         self.assertTrue(got["pngPrevented"], got)
