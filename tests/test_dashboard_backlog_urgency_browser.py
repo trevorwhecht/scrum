@@ -86,7 +86,7 @@ class DashboardBacklogUrgencyBrowserTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
-        for name, value in (("estimate", None), ("spawn", None), ("heavy_refusal", None)):
+        for name, value in (("estimate", None), ("spawn", None)):
             p = mock.patch.object(serve, name, return_value=value)
             setattr(self, name, p.start())
             self.addCleanup(p.stop)

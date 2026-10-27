@@ -195,7 +195,7 @@ class ReadyPacingTest(unittest.TestCase):
         parent, (a, b, c) = self.runall(3)
         for k in (a, b, c):
             self.spec(k, "x")
-        board.cmd_set(self.root, b, ["lane=fast"])  # light: at >= 90 % used a heavy kid waits for the reset (job 340)
+        board.cmd_set(self.root, b, ["lane=fast"])
         for k in held:
             job = {"A": a, "C": c}[k]
             board.cmd_set(self.root, job, ["stage=build", "round=1", "builder=claude"])
