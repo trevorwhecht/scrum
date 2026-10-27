@@ -29,5 +29,6 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 
 ## dashboard.html (`skills/trevskills-scrum/dashboard.html`)
 - One static file served by serve.py. Locate code by grepping element ids, CSS classes or function names, never line numbers.
+- A new per-job field on a card: serve.py `board_with_activity` adds it (per-project data goes through `/api/projects`), dashboard.html `card`, `statusLine` or `tag` renders it, and a node-evaluated `tests/test_dashboard_<topic>.py` pins the render.
 - The UI rules in `/Users/trevorhecht/Developer/repos/.claude/rules/ui-behaviour.md` apply to it.
 
