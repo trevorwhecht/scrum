@@ -1220,8 +1220,10 @@ class ContractTest(unittest.TestCase):
                        "Cheapest lane:", "trevskills-scrum/projects.json", "scrum/runs/", "resume", "## Stops",
                        "`ask`", "`stall`", "`machine`", "`refused`", "`bigboy`", "Hard stop: agent rules", "stalled in build",
                        "swap used", "blocked on sibling", "| Cause | Count | Jobs | Picks | Automate |", "Automate",
-                       "Jobs read: 0"):
+                       "Jobs read: 0", "## Recurring blockers", '"blocker"', '"verdict"', '"kind"',
+                       "2 or more different jobs", "empty `blocker`"):
             self.assertIn(phrase, reader, phrase)
+        self.assertLess(reader.index("    ## Repeated questions"), reader.index("    ## Recurring blockers"))
         for phrase in ("## Local routing", "insights/<id>.md", "(fallback: <n>)", "local background worker"):
             self.assertNotIn(phrase, reader, phrase)
         self.assertIn("DIGEST_DIR/windows.json", reader)
@@ -1236,7 +1238,7 @@ class ContractTest(unittest.TestCase):
                        "## Repeated questions", "DEFAULT: <label>", "makes that pick the default", "## Pipeline fit",
                        "count toward the at-most-8 cap", "threshold or routing edits", "skipped, and so is one whose `old` text is stale",
                        "## Stops", '"kind": "backlog"', '"backlog":', "--priority 3", "**Usage windows.**",
-                       "## Usage windows"):
+                       "## Usage windows", "## Recurring blockers", "Recurring blockers:"):
             self.assertIn(phrase, digester, phrase)
         for phrase in ('"obvious"', '"obvious_reason"', '"obvious": false', "obvious_reason", "(unanimous)", "pick not unanimous",
                        "auto-approves", "Trevor decides", "Trevor approves", "**Obvious.**"):

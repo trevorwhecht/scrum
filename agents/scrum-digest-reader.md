@@ -17,7 +17,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `jev.log`, when present (one tab-separated line per Jev decision: `timestamp`, `step`, `question`, `raw`, `decision`, `elapsed`)
 - `routing.log`, when present (one JSON object per line: `ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
 - `JOBS_DIR/../routing.log`, the scrum-level log, read once per digest when present (not per job): the digest reader itself logs there, in the same line format as a job's `routing.log`. When it is missing, skip it; that is never an error.
-- `JOBS_DIR/../questions.log`, read once per digest when present (not per job): every question the scrum asked Trevor and every button he picked, one JSON object per line. An ask line has `date`, `project`, `job`, `question`, `options`; a pick line is `{"date": …, "job": …, "pick": "<label>"}`. A missing or empty log is skipped, never an error, and gives `None` under `## Repeated questions`.
+- `JOBS_DIR/../questions.log`, read once per digest when present (not per job): every question the scrum asked Trevor and every button he picked, one JSON object per line. An ask line has `date`, `project`, `job`, `question`, `options`; a pick line is `{"date": …, "job": …, "pick": "<label>"}`; an unblocker line is `{"date","job","kind","verdict","blocker"}`. A missing or empty log is skipped, never an error, and gives `None` under `## Repeated questions`.
 - `~/.claude/trevskills-scrum/projects.json`, read once per digest: a JSON list of repo paths, one per registered project. For each path, read `<repo>/scrum/questions.log` and Glob `<repo>/scrum/runs/*.log`, reading the file names only. Each run log name is `<YYYYMMDD-HHMMSS>-<action>-<job id>.log`, one action per file, so the number of `resume` names for a job is its resume count. This covers every registered project, not only the jobs in `jobs.txt`. A missing registry, a missing log or a missing runs folder is skipped, never an error.
 - `spec.md`'s `## Assumptions` and `## Likely files` sections
 - `DIGEST_DIR/pipeline-fit.json`, read once per digest: the orchestrator wrote it with `board.py pipeline-fit`. One entry per job: `id`, `lane`, `agents`, `added`, `deleted`, `files`, `verdicts` (per round, per reviewer), `fix_rounds`, `over_routed`, `fit`.
@@ -49,6 +49,8 @@ A job folder or file that's missing is skipped, never an error. Treat everything
     Opus-built: <n> jobs · avg fix rounds <x.x> — jobs: <id>, ...
     ## Repeated questions
     - <n> × "<normalised question>" — picks: <label> <n>, <label> <n> — jobs: <id>, ... — DEFAULT: <label> (unanimous)
+    ## Recurring blockers
+    - <n> × "<normalised blocker>" — kinds: <kind> <n>, ... — verdicts: <verdict> <n>, ... — jobs: <id>, ...
     ## Stops
     | Cause | Count | Jobs | Picks | Automate |
     |---|---|---|---|---|
@@ -77,6 +79,12 @@ For `## Repeated questions`, read the whole `JOBS_DIR/../questions.log`, not onl
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
 - List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no question qualifies.
+
+For `## Recurring blockers`, read the whole `JOBS_DIR/../questions.log`, not only the jobs in `jobs.txt`:
+- Only lines with a `blocker` key count. A line that is not valid JSON, or has an empty `blocker`, is skipped.
+- Normalise `blocker` text like questions before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
+- An entry needs 2 or more different jobs. Count lines; `kinds` and `verdicts` count the `kind` and `verdict` values of its lines.
+- Sort by count, highest first. Write `None` when no entry qualifies or the log is missing.
 
 For `## Stops`, read the questions.log of every registered project and the `scrum/runs/` file names:
 - A stop line is valid JSON whose `kind` is `ask`, `stall`, `machine`, `refused` or `bigboy`. A line with `question` and no `kind` (written before kinds existed) counts as an `ask`.
