@@ -3471,11 +3471,12 @@ def parked_waiting(job) -> bool:
                 and not job.get("paused") and job.get("depends_on"))
 
 
-def wake_waiting(root, room=None) -> dict:
+def wake_waiting(root, room=None, hold=None) -> dict:
     """Claim (stage -> spec) up to room (None = no cap) parentless waiting jobs whose depends_on are all done; park one
     whose dependency was aborted or is gone with cmd_ask. A BigBoy/Run-all child is left to cmd_ready. A `wake` job
     (cmd_wait_on then=, child or not) is never claimed into spec: it goes back to needs-human with Try again, counts
-    against room and is listed under "retry" (only when any is). Returns {"ready", "lost"[, "retry"]}."""
+    against room and is listed under "retry" (only when any is), unless `hold(job_id)` is truthy (a sibling blocks the
+    restart): then it stays waiting with its wake, outside room. Returns {"ready", "lost"[, "retry"]}."""
     ready, lost, retry = [], {}, []
     if not any(map(parked_waiting, read_board(root)["jobs"])):  # nothing parked: never rewrite board.json each tick
         return {"ready": ready, "lost": []}
@@ -3487,6 +3488,8 @@ def wake_waiting(root, room=None) -> dict:
             if gone:
                 lost[j["id"]] = (gone[0], j.pop("wake", None))
             elif all(stage[d] == "done" for d in deps) and (room is None or len(ready) + len(retry) < room):  # rest wait a tick
+                if j.get("wake") and hold and hold(j["id"]):  # inside the lock: resume_blocker reads lock-free
+                    continue
                 if j.get("wake"):  # no sound: serve.py spawns the retry right away, the card only covers a dead session
                     q = f"retry: {deps[0]} is done, so this job tries again."
                     j.update(stage="needs-human", question=q, reason=q, updatedAt=now(), options=[

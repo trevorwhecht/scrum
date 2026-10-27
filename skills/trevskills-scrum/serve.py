@@ -184,7 +184,7 @@ def wake_waiting(project, root):
     allow = board.usage_allowance(board.read_usage(), time.time(), live)
     if allow is not None:
         room = min(room, max(0, allow - live))
-    out = board.wake_waiting(root, room)
+    out = board.wake_waiting(root, room, hold=lambda i: board.resume_blocker(root, i, live_ids(project)))
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
     for job_id in out.get("retry", []):
