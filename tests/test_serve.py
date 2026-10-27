@@ -5019,6 +5019,27 @@ class DigestTest(unittest.TestCase):
         self.assertEqual((job["lane"], job["stage"], job.get("reason") or ""), ("lilguy", "done", ""))
         self.assertEqual(self.statuses(), ["applied", "applied"])
 
+    def test_digest_apply_queues_symlink_escape(self):
+        self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
+        outside = Path(self.tmp.name) / "outside.md"
+        outside.write_text("keep A\nold line\nkeep B\n")
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        x.unlink()
+        x.symlink_to(outside)  # absolute link, only on origin: the main checkout below still has the regular file
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "link")
+        self.git("push", "-q")
+        self.git("reset", "-q", "--hard", "HEAD~1")  # main behind origin, not ahead
+        self.contract_tests()
+        self.digest([self.prop("p1", x), self.prop("p2", y)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(outside.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual([e["id"] for e in out["applied"]], ["p2"])
+        self.assertEqual([(e["id"], e["reason"]) for e in out["queued"]], [("p1", "target escapes worktree")])
+        self.assertEqual(self.statuses(), ["queued", "applied"])
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual(len(self.git("worktree", "list").splitlines()), 1)
+
     def test_digest_auto_queues_when_push_fails(self):
         self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))
         hook = self.origin / "hooks" / "pre-receive"
