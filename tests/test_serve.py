@@ -1872,7 +1872,7 @@ class ServeTest(unittest.TestCase):
             jobs = self.board_jobs()
         self.assertEqual(jobs[queued]["resumeRefusal"],
                          "waiting: CPU busy 95% (> 90%). Fix: click Resume once memory or disk frees up.")
-        self.assertEqual(jobs[queued]["activity"]["text"], "waiting for CPU/RAM")
+        self.assertEqual(jobs[queued]["activity"]["text"], "queued, starts next")
         self.assertIsNone(jobs[unqueued]["resumeRefusal"], "Trevor's click skips the CPU check")
         self.assertEqual(jobs[unqueued]["activity"]["text"], "waiting on you")
 
@@ -2570,6 +2570,16 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
         self.serve.board.cmd_set(self.root, job_id, ["stage=done"])
         self.assertIsNone(self.activity_of(job_id))
+
+    def test_activity_line_play_queued(self):
+        job_id = self.job("queued", "stage=needs-human")
+        self.assertEqual(self.activity_of(job_id)["text"], "waiting on you")
+        self.edit_job(job_id, play_queued="2026-10-25T10:00:00+00:00")
+        self.assertEqual(self.activity_of(job_id)["text"], "queued, starts next")
+        self.serve.board.cmd_set(self.root, job_id, ["pr=https://x/1"], internal=True)
+        self.assertEqual(self.activity_of(job_id)["text"], "queued, starts next")
+        self.edit_job(job_id, play_queued=None)
+        self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
 
     def test_activity_line_waiting_wins(self):
         job_id = self.job("paused", "stage=review", "waiting=question: Which lane?")
