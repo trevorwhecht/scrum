@@ -10,8 +10,8 @@
                                    the job at needs-human with a closed question (command: approve|resume|abort <id>
                                    [--requeue|--cascade], rework <id> "<text>", shell: <cmd>), log it to questions.log;
                                    --title (a STOP_TITLES key) is stored as stopTitle; --recommend stores {"key","why"},
-                                   the option the agent advises; both are cleared with the question. With [--kind K] (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked
-                                   for K) the job is not parked: it keeps its stage, the unblock is logged and
+                                   the option the agent advises; both are cleared with the question. With [--kind K]
+                                   (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked for K) the job is not parked: it keeps its stage, the unblock is logged and
                                    {"unblock": true, "n": N} is printed; else it parks and prints {"unblock": false}
                                    (lanes/unblock.md)
   board.py wait-on <id> <blocker> [--then "approve <id>"]
