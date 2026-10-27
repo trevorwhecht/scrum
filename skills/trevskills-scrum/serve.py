@@ -2012,10 +2012,10 @@ def activity(root, job):
     if wt and (t := worktree_mtime(wt)):
         events.append((t, "files changed"))
     text = STAGE_TEXT.get(job["stage"], job["stage"])
-    if job["stage"] == "needs-human" and job.get("play_queued"):  # the machine guard queued Trevor's Play
-        text = "waiting for CPU/RAM"
     if job.get("pr") and job["stage"] in ("merging", "needs-human"):
         text = "CI running" if job["stage"] == "merging" else "PR ready"
+    if job.get("play_queued"):  # Trevor already clicked Play: beats the stage text and "PR ready"
+        text = PLAY_QUEUED
     try:
         events.append((datetime.fromisoformat(job["updatedAt"]).timestamp(), text))
     except (KeyError, TypeError, ValueError):

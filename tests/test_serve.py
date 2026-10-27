@@ -2571,6 +2571,16 @@ class ServeTest(unittest.TestCase):
         self.serve.board.cmd_set(self.root, job_id, ["stage=done"])
         self.assertIsNone(self.activity_of(job_id))
 
+    def test_activity_line_play_queued(self):
+        job_id = self.job("queued", "stage=needs-human")
+        self.assertEqual(self.activity_of(job_id)["text"], "waiting on you")
+        self.edit_job(job_id, play_queued="2026-10-25T10:00:00+00:00")
+        self.assertEqual(self.activity_of(job_id)["text"], "queued, starts next")
+        self.serve.board.cmd_set(self.root, job_id, ["pr=https://x/1"], internal=True)
+        self.assertEqual(self.activity_of(job_id)["text"], "queued, starts next")
+        self.edit_job(job_id, play_queued=None)
+        self.assertEqual(self.activity_of(job_id)["text"], "PR ready")
+
     def test_activity_line_waiting_wins(self):
         job_id = self.job("paused", "stage=review", "waiting=question: Which lane?")
         self.touch(f"{job_id}/round-1/review-ui.md", "VERDICT: PASS\n", 60)  # newer than updatedAt
