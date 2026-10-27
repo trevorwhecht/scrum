@@ -434,6 +434,9 @@ class ContractTest(unittest.TestCase):
             "passes on `$BASE` makes `CHECK: FAIL`",
             "E2E: pre-existing, <spec> passes alone",
             "same `E2E_PORT`",
+            "symlink the untracked .env* files",
+            "`npx prisma generate` in `$WT-base` when `$WT-base/prisma/schema.prisma` exists",
+            "a setup error is `CHECK: FAIL` like an Install failure, never `fails on $BASE`",
         ):
             self.assertIn(phrase, check, phrase)
         self.assertGreaterEqual(check.count("the approver still adds its Follow-up"), 3)
