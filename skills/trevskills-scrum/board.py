@@ -110,8 +110,9 @@
                                    board), print {"log","pid"}
   board.py hook                    Claude Code hook: read one event from stdin, set or clear `waiting` on this tty's job
   board.py fable-ok <id> <planner|spec-writer>  print the Agent model override (claude-fable-5-1) or none: the planner, or
-                                   the spec-writer of a big_ticket job on lane standard (or unset), gets Fable while
-                                   fable_state is ok or warn; each such call appends a line to jobs/<id>/fable.log
+                                   the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
+                                   in feature.md, else spec.md) gets Fable only while fable_state is ok; each such call
+                                   appends a line to jobs/<id>/fable.log
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -123,8 +124,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REVIEWERS = ("security", "ux", "ui", "code")
-FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and big standard-ticket spec-writers, while usage allows
-FABLE_WARN_5H_PCT = 65  # used % at which the dashboard warns Fable is near its limit (Fable still runs)
+FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and standard spec-writers of complex jobs, in the ok band only
+FABLE_WARN_5H_PCT = 65  # used % at which Fable is near its limit: fable-ok answers none, the weekly digest keeps Fable
 FABLE_WARN_7D_PCT = 75
 FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
 FABLE_SWITCH_7D_PCT = 85
@@ -1555,8 +1556,8 @@ SCHEMA_RE = re.compile(r"(^|/)prisma/(schema\.prisma|migrations/)|\.sql$")  # SK
 ENV_RE = re.compile(r"(^|/)\.env")
 SENSITIVE_RE = re.compile(r"(^|/)(middleware|proxy)\.[cm]?[jt]sx?$|auth|session|login|signin|signup|password|permission"
                           r"|payment|billing|checkout|stripe|webhook|secret|credential", re.I)  # SKILL.md Fast lane
-FAST_MAX_LINES, FAST_MAX_FILES = 100, 3
-LILGUY_MAX_LINES, LILGUY_MAX_FILES = 30, 3
+FAST_MAX_LINES, FAST_MAX_FILES = 100, 10
+LILGUY_MAX_LINES, LILGUY_MAX_FILES = 30, 10
 
 
 # --- review-plan: SKILL.md Review step 2 minus the Jev gate. Decides incremental vs full and writes the carried-forward
@@ -1802,15 +1803,39 @@ def _jev_model(folder: Path) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
+LANES = ("fast", "standard", "debug", "bigboy", "lilguy")  # the words a feature.md `Lane:` header line may pin
+
+
+def header_value(path: Path, key: str, words: tuple[str, ...]) -> str | None:
+    """The lowercased first word after `<key>:` on a line above path's first `## ` heading, when it is one of words;
+    None for a missing or unreadable file or no such line."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(rf"^{key}:\s*({'|'.join(words)})\b", re.split(r"^## ", text, maxsplit=1, flags=re.M)[0], re.M | re.I)
+    return m[1].lower() if m else None
+
+
+def job_complex(root: Path, job_id: str) -> bool:
+    """True only when feature.md's header `Complex:` is yes, or, with no such line there, spec.md's is."""
+    d = Path(root) / "jobs" / job_id
+    return (header_value(d / "feature.md", "Complex", ("yes", "no"))
+            or header_value(d / "spec.md", "Complex", ("yes", "no"))) == "yes"
+
+
 def cmd_lilguy_fit(root, job_id: str) -> dict:
-    """{"fit", "why"}: fit only for a job on no lane (or lilguy) that is tiny by backlog points or by Jev, with no
-    LILGUY_HARD_STOP_RE word in its feature.md."""
+    """{"fit", "why"}: a job already on another lane never fits; then a feature.md header `Lane:` line decides (lilguy
+    fits, any other lane doesn't); else fit only when tiny by backlog points or by Jev, with no LILGUY_HARD_STOP_RE word
+    in its feature.md."""
     job = find(read_board(root), check_id(job_id))
     lane = job.get("lane")
     if lane and lane != "lilguy":
         return {"fit": False, "why": f"already on {lane} lane"}
     folder = Path(root) / "jobs" / job_id
     feature = folder / "feature.md"
+    if pinned := header_value(feature, "Lane", LANES):
+        return {"fit": pinned == "lilguy", "why": f"feature.md Lane: {pinned}"}
     if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
         return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
     item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
@@ -4245,23 +4270,23 @@ def big_ticket(root: Path, job_id: str) -> bool:
 
 
 def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
-    """fable-ok: FABLE_MODEL or "none" for a new planner or spec-writer spawn. The spec-writer is eligible only for a
-    big_ticket job whose board lane is missing, empty or standard. Each eligible call appends a tab-separated line to
-    jobs/<id>/fable.log (skipped when that dir is missing); an ineligible one writes nothing."""
+    """fable-ok: FABLE_MODEL or "none" for a new planner or spec-writer spawn. Only a job_complex job on the board is
+    eligible, and its spec-writer only when the board lane is missing, empty or standard. An eligible call gets Fable
+    only while fable_state is ok, and appends a tab-separated line to jobs/<id>/fable.log (skipped when that dir is
+    missing); an ineligible one writes nothing."""
     if role not in ("planner", "spec-writer"):
         raise SystemExit(f"fable-ok: role must be planner or spec-writer, not {role!r}")
     check_id(job_id)
-    if role == "spec-writer":
-        try:
-            lane = find(read_board(root), job_id).get("lane")
-        except SystemExit:  # not on the board, or a broken board.json
-            return "none"
-        if lane not in (None, "", "standard") or not big_ticket(root, job_id):
-            return "none"
+    try:
+        lane = find(read_board(root), job_id).get("lane")
+    except SystemExit:  # not on the board, or a broken board.json
+        return "none"
+    if not job_complex(root, job_id) or role == "spec-writer" and lane not in (None, "", "standard"):
+        return "none"
     now = time.time()
     usage = read_usage()
     state = fable_state(usage, now)
-    model = FABLE_MODEL if state in ("ok", "warn") else "none"
+    model = FABLE_MODEL if state == "ok" else "none"
     job = Path(root) / "jobs" / job_id
     if job.is_dir():
         pct = {k: "—" if v is None else f"{round(v)}%" for k, v in fable_used(usage, now).items()}

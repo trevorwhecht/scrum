@@ -853,7 +853,7 @@ class ServeTest(unittest.TestCase):
         esc = next(l for l in text.splitlines() if l.startswith("const esc = "))
         start = text.index("const specHeader = ")
         src = text[start:text.index("async function show(job, file)", start)]
-        spec = "# Title\nUI surface: yes\nHard stops: schema, auth\nHuman setup: <b>x</b>\nLane: standard\n\n## Problem\nLane: inside\n"
+        spec = "# Title\nUI surface: yes\nHard stops: schema, auth\nHuman setup: <b>x</b>\nLane: standard\nComplex: yes\n\n## Problem\nLane: inside\n"
         cases = [spec, "# T\nLane: weird\n\n## Problem\n", "# T\n\n## Problem\nLane: x"]
         out = subprocess.run([node, "-e", f"{esc}\n{src}\nconsole.log(JSON.stringify({json.dumps(cases)}.map(specHeader)))"],
                              capture_output=True, text=True, check=True).stdout
@@ -861,10 +861,12 @@ class ServeTest(unittest.TestCase):
         for phrase in ('<dl class="facts">', "<dt>Changes the UI</dt><dd>yes</dd>",
                        "<dt>Needs Trevor's sign-off for</dt><dd>database schema, login</dd>",
                        "<dt>Manual setup</dt><dd>&lt;b&gt;x&lt;/b&gt;</dd>",
-                       '<dt>Track</dt><dd title="the full build, check and review pipeline">full</dd>'):
+                       '<dt>Track</dt><dd title="the full build, check and review pipeline">full</dd>',
+                       "<dt>Complex</dt><dd>yes</dd>"):
             self.assertIn(phrase, head)
         self.assertIn("## Problem", rest)
         self.assertNotIn("UI surface:", rest)
+        self.assertNotIn("Complex:", rest)
         self.assertIn("Lane: inside", rest)  # a header-like line inside a section stays in the markdown
         self.assertIn("<dt>Track</dt><dd>weird</dd>", weird)
         self.assertEqual((none, plain), ("", "# T\n\n## Problem\nLane: x"))
