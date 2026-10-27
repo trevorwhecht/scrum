@@ -24,6 +24,12 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - An entry with no `DEFAULT:` gets no proposal.
 - It counts toward the at-most-8 cap.
 
+**Recurring blockers.** From `notes.md`'s `## Recurring blockers` section:
+- Each entry becomes at most one proposal whose `why` starts `Recurring blockers:` and names the entry's count and job ids.
+- It proposes the one-sentence edit (builder, spec-writer or `SKILL.md` text) that would stop that blocker.
+- An entry no text edit would fix gets no proposal.
+- It counts toward the at-most-8 cap.
+
 **Pipeline fit.** From `notes.md`'s `## Pipeline fit` section, you may propose threshold or routing edits (a lane-size limit, a routing rule in `SKILL.md`) when its over-routed jobs show a pattern. Cite their ids and `fit`. They count toward the at-most-8 cap.
 
 **Usage windows.** From `notes.md`'s `## Usage windows` section, you may propose usage-efficiency edits (a routing, lane or reviewer rule) when the windows show high wasted or over-routed spend or a low cache hit rate. Cite the window names. They count toward the at-most-8 cap.
