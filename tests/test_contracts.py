@@ -787,6 +787,8 @@ class ContractTest(unittest.TestCase):
         skill = self.rules()
         step1 = self.section(skill, "1. **Plan.**", "2. **Child specs")
         self.assertIn("spec.md", step1)
+        self.assertIn("exactly one `Exposure: yes` ticket and it is the last ticket", step1)
+        self.assertNotIn("depends on every other", step1)
 
     def test_planner_depends_only_on_real_output(self):
         text = (ROOT / "agents" / "scrum-planner.md").read_text()
