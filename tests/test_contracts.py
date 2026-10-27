@@ -421,7 +421,7 @@ class ContractTest(unittest.TestCase):
             "re-run only those files once",
             "Test: pre-existing, <file> passes alone",
             'worktree add --detach "$WT-base" "$BASE"',
-            'worktree remove --force "$WT-base"',
+            'worktree remove -f "$WT-base"',
             "Test: pre-existing, <file> fails on $BASE",
             "every failing test file is outside that diff",
             "passes on `$BASE` makes `CHECK: FAIL`",
