@@ -39,7 +39,7 @@ class ResumeOutcomeTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "Merge stopped on the main checkout guard")
         board.cmd_ask(self.root, job_id, DIRTY_Q,
                       [f"Keep my changes and carry on=resume {job_id}", f"Remove this job=abort {job_id} --cascade"],
-                      recommend=("a", "the change is Trevor's own"))
+                      title="UNCOMMITTED_CHANGES", recommend=("a", "the change is Trevor's own"))
         return job_id
 
     def run_resume(self, job_id, script):
@@ -71,7 +71,7 @@ class ResumeOutcomeTest(unittest.TestCase):
         new_q = "Unpushed commits in repo: the main copy has commits that are not on GitHub."
         self.run_resume(job_id, "")
         board.cmd_ask(self.root, job_id, new_q, [f"Carry on=resume {job_id}", f"Remove this job=abort {job_id} --cascade"],
-                      recommend=("a", "push first"))
+                      title="MERGE_BLOCKED", recommend=("a", "push first"))
         self.assertEqual(serve.record_outcomes("repo", self.root), [])
         job = self.job(job_id)
         self.assertEqual(job["stage"], "needs-human")

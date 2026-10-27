@@ -35,7 +35,7 @@ class RunOutcomeTest(unittest.TestCase):
 
     def parked(self, reason="SKILL.md is over its size budget"):
         job_id = board.cmd_new(self.root, "Parked job")
-        board.cmd_ask(self.root, job_id, reason, [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, reason, [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         return job_id
 
     def exited(self, job_id, action, code, log_text, reason="SKILL.md is over its size budget"):
@@ -89,7 +89,7 @@ class RunOutcomeTest(unittest.TestCase):
 
     def test_new_blocker_or_moved_job_gets_no_outcome(self):
         new_reason, moved, aborted, stopped = (self.parked() for _ in range(4))
-        board.cmd_ask(self.root, new_reason, "A different blocker", [f"A=approve {new_reason}", f"B=abort {new_reason}"])
+        board.cmd_ask(self.root, new_reason, "A different blocker", [f"A=approve {new_reason}", f"B=abort {new_reason}"], title="MERGE_CONFLICT")
         board.cmd_set(self.root, moved, ["stage=done"])
         board.cmd_abort(self.root, aborted, False)
         for job_id in (new_reason, moved, aborted):
@@ -130,7 +130,7 @@ class BoardGetAndDiscussTest(unittest.TestCase):
 
     def test_board_get_writes_outcome(self):
         job_id = board.cmd_new(self.root, "Parked job")
-        board.cmd_ask(self.root, job_id, "Blocked", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Blocked", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         proc = mock.Mock()
         proc.poll.return_value = 0
         with serve.RUNS_LOCK:
@@ -142,7 +142,7 @@ class BoardGetAndDiscussTest(unittest.TestCase):
 
     def test_discuss_listed_while_process_alive(self):
         job_id = board.cmd_new(self.root, "Talk it over")
-        board.cmd_ask(self.root, job_id, "Which way?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Which way?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         others = mock.patch.dict(serve.DISCUSSES, clear=True)  # another test's Discuss click must not trigger ps here
         others.start()
         self.addCleanup(others.stop)

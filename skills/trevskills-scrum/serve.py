@@ -3099,7 +3099,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
         if r.returncode:
             applied, queued = undo(f"{step} failed: {first(r)}")
             board.cmd_ask(scrum, job_id, f"digest apply: git {step} failed: {first(r)}",
-                          [f"Retry=resume {job_id}", f"Abort=abort {job_id}"])
+                          [f"Retry=resume {job_id}", f"Abort=abort {job_id}"], title="DIGEST")
             return applied, queued, job_id
         # the commit is on origin: re-check the Merge guard on the live checkout, then fast-forward it; never stash or reset
         not_live = None
@@ -3303,7 +3303,8 @@ def weekly_ask(digest_id: str) -> dict:
         (d / "feature.md").write_text(f"# {title}\n\n{p['why'].strip()}\n\nFrom weekly digest {digest_id}.\n", encoding="utf-8")
         (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel), encoding="utf-8")
         board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to {rel} in {project}: {why}. "
-                      "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"])
+                      "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"],
+                      title="DIGEST")
         out["asked"].append({"id": p["id"], "project": project, "job": job_id})
         weekly_set_status(path, p["id"], "queued", f"asked: {project} {job_id}")
     return out

@@ -194,11 +194,11 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["outcome=  Approve refused \n at 4:21 PM" + "z" * 400])
         self.assertEqual(self.jobs()[0]["outcome"], "Approve refused at 4:21 PM" + "z" * 274)
-        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         board.cmd_set(self.root, job_id, ["outcome=Approve refused. Nothing changed."])
-        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Blocked?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         self.assertEqual(self.jobs()[0]["outcome"], "Approve refused. Nothing changed.")  # same reason keeps it
-        board.cmd_ask(self.root, job_id, "New blocker?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "New blocker?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         self.assertNotIn("outcome", self.jobs()[0])  # a new reason drops it
         board.cmd_set(self.root, job_id, ["outcome=Rework refused. Nothing changed."])
         board.cmd_set(self.root, job_id, ["reason=still here"])
@@ -266,7 +266,7 @@ class BoardTest(unittest.TestCase):
 
     def test_ask_parks_job_with_question_and_options(self):
         job_id = board.cmd_new(self.root, "x")
-        out = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        out = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id} --requeue"], title="MERGE_CONFLICT")
         want = [{"key": "a", "label": "Approve", "command": f"approve {job_id}"},
                 {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}]
         self.assertEqual(out, want)
@@ -280,7 +280,8 @@ class BoardTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             board.main(["--dir", str(self.root), "ask", job_id, "Which?", "--a", f"Approve=approve {job_id}",
-                        "--b", f"Abort=abort {job_id} --requeue", "--c", f"Resume=resume {job_id}"])
+                        "--b", f"Abort=abort {job_id} --requeue", "--c", f"Resume=resume {job_id}",
+                        "--title", "MERGE_CONFLICT"])
         self.assertEqual(buf.getvalue(), "")
         self.assertEqual(self.jobs()[0]["options"][2], {"key": "c", "label": "Resume", "command": f"resume {job_id}"})
         self.assertEqual(len(self.jobs()[0]["options"]), 3)
@@ -291,18 +292,18 @@ class BoardTest(unittest.TestCase):
                     "abort 012-other-job --requeue", "abort 012-other-job --cascade", "resume 012-other-job",
                     "shell: git status"):
             with self.subTest(cmd=cmd):
-                out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"])
+                out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
                 self.assertEqual(out[0]["command"], cmd)
 
     def test_ask_splits_on_first_equals(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
         self.assertEqual(self.jobs()[0]["options"][0],
                          {"key": "a", "label": "Rework", "command": f'rework {job_id} "a=b"'})
 
     def test_ask_rejects_bad_options(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "First?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "First?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         gone = board.cmd_new(self.root, "y")
         board.cmd_abort(self.root, gone, False)
         ok = f"B=abort {job_id}"
@@ -329,7 +330,7 @@ class BoardTest(unittest.TestCase):
             with self.subTest(name):
                 before = (self.root / "board.json").read_bytes()
                 with self.assertRaises(SystemExit) as e:
-                    board.cmd_ask(self.root, jid, q, opts)
+                    board.cmd_ask(self.root, jid, q, opts, title="MERGE_CONFLICT")
                 self.assertTrue(str(e.exception.code))
                 if name in ("cascade and requeue", "misspelt cascade"):
                     self.assertIn(allowed, str(e.exception.code))
@@ -339,27 +340,27 @@ class BoardTest(unittest.TestCase):
     def test_ask_recommend_stored_and_logged(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
-                      recommend=("b", "  safest\n path "))
+                      recommend=("b", "  safest\n path "), title="MERGE_CONFLICT")
         self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "safest path"})
         self.assertEqual(self.log_lines()[-1]["recommend"], {"key": "b", "why": "safest path"})
 
     def test_ask_cli_recommend(self):
         job_id = board.cmd_new(self.root, "x")
         board.main(["--dir", str(self.root), "ask", job_id, "Q?", "--a", f"A=approve {job_id}",
-                    "--b", f"B=resume {job_id}", "--recommend", "b", "it is the safest path"])
+                    "--b", f"B=resume {job_id}", "--title", "MERGE_CONFLICT", "--recommend", "b", "it is the safest path"])
         self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "it is the safest path"})
         self.assertEqual(self.log_lines()[-1]["recommend"], {"key": "b", "why": "it is the safest path"})
 
     def test_ask_without_recommend_has_no_field(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], title="MERGE_CONFLICT")
         self.assertNotIn("recommend", self.jobs()[0])
         self.assertNotIn("recommend", self.log_lines()[-1])
 
     def test_reask_drops_stale_recommend(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("a", "why"))
-        board.cmd_ask(self.root, job_id, "Q2?", [f"A=approve {job_id}", f"B=resume {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("a", "why"), title="MERGE_CONFLICT")
+        board.cmd_ask(self.root, job_id, "Q2?", [f"A=approve {job_id}", f"B=resume {job_id}"], title="MERGE_CONFLICT")
         self.assertNotIn("recommend", self.jobs()[0])
         self.assertNotIn("recommend", self.log_lines()[-1])
 
@@ -370,7 +371,7 @@ class BoardTest(unittest.TestCase):
                 before = (self.root / "board.json").read_bytes()
                 with self.assertRaises(SystemExit) as e:
                     board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
-                                  recommend=(key, "because"))
+                                  recommend=(key, "because"), title="MERGE_CONFLICT")
                 self.assertIn("bad recommend key", str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertFalse((self.root / "questions.log").exists())
@@ -382,14 +383,14 @@ class BoardTest(unittest.TestCase):
                 before = (self.root / "board.json").read_bytes()
                 with self.assertRaises(SystemExit) as e:
                     board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"],
-                                  recommend=("a", why))
+                                  recommend=("a", why), title="MERGE_CONFLICT")
                 self.assertIn("recommend needs a reason", str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertFalse((self.root / "questions.log").exists())
 
     def test_recommend_cleared_after_answer_moves_job(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("b", "safe"))
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=resume {job_id}"], recommend=("b", "safe"), title="MERGE_CONFLICT")
         picked = board.cmd_answer(self.root, job_id, "b")
         self.assertEqual(picked, {"key": "b", "label": "B", "command": f"resume {job_id}"})
         self.assertEqual(self.jobs()[0]["recommend"], {"key": "b", "why": "safe"})  # still asked until it moves
@@ -402,14 +403,63 @@ class BoardTest(unittest.TestCase):
     def test_ask_rejects_without_creating_log(self):
         job_id = board.cmd_new(self.root, "x")
         with self.assertRaises(SystemExit):
-            board.cmd_ask(self.root, job_id, "Q?", [f"Merge=merge {job_id}", f"B=abort {job_id}"])
+            board.cmd_ask(self.root, job_id, "Q?", [f"Merge=merge {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_requires_catalog_title(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=build", "reason=working"])
+        before = (self.root / "board.json").read_text()
+        argv = ["--dir", str(self.root), "ask", job_id, "Q?", "--a", f"A=approve {job_id}", "--b", f"B=abort {job_id}"]
+        for extra in ([], ["--title", "merge_conflict"], ["--title", "NOPE"], ["--title", "MERGE CONFLICT"]):
+            with self.subTest(extra=extra):
+                out = run_board(*argv, *extra)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertIn("UNCOMMITTED_CHANGES", out.stderr)
+                self.assertIn("MERGE_CONFLICT", out.stderr)
+                self.assertIn("DIGEST", out.stderr)
+        for title in (None, "merge_conflict", "NOPE"):
+            with self.subTest(title=title), self.assertRaises(SystemExit) as e:
+                board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title=title)
+            self.assertIn("MD_CONTRADICTION", str(e.exception))
+        with self.assertRaises(TypeError):  # keyword-only and required
+            board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        with self.assertRaises(SystemExit):  # checked before the unblock-kind branch
+            board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], kind="round-limit",
+                          title="nope")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertFalse((self.root / "questions.log").exists())
+
+    def test_ask_stores_and_clears_stop_title(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.main(["--dir", str(self.root), "ask", job_id, "Q?", "--a", f"A=approve {job_id}",
+                    "--b", f"B=abort {job_id}", "--title", "MERGE_CONFLICT"])
+        self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["stopTitle"]), ("needs-human", "MERGE_CONFLICT"))
+        self.assertEqual(self.log_lines()[-1]["stopTitle"], "MERGE_CONFLICT")
+        board.cmd_ask(self.root, job_id, "Q2?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="CHECKS_FAILING")
+        self.assertEqual(self.jobs()[0]["stopTitle"], "CHECKS_FAILING")
+        self.assertEqual(self.log_lines()[-1]["stopTitle"], "CHECKS_FAILING")
+        board.cmd_set(self.root, job_id, ["stage=build", "reason="])
+        job = self.jobs()[0]
+        for key in ("question", "options", "stopTitle"):
+            self.assertNotIn(key, job)
+        # the stall branch: a missing-agent-types ask stalls the job in its stage and stores no title
+        q = "scrum-builder is not loaded as agent types in this session"
+        self.assertEqual(board.cmd_ask(self.root, job_id, q, [f"A=approve {job_id}", f"B=abort {job_id}"],
+                                       title="BUILDER_BLOCKED"), {"stalled": True})
+        self.assertNotIn("stopTitle", self.jobs()[0])
+        # migrate_paused: a legacy stalled needs-human job loses its title with its question
+        legacy = {"id": "009-z", "stage": "needs-human", "reason": "stalled in build: died", "question": "q",
+                  "options": [], "stopTitle": "MERGE_CONFLICT"}
+        board.migrate_paused({"jobs": [legacy]})
+        self.assertEqual(legacy["stage"], "build")
+        self.assertNotIn("stopTitle", legacy)
 
     def test_ask_appends_questions_log(self):
         job_id = board.cmd_new(self.root, "x")
-        opts = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id}"])
+        opts = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
         [line] = self.log_lines()
-        self.assertEqual(set(line), {"date", "project", "job", "question", "options", "kind", "reason"})
+        self.assertEqual(set(line), {"date", "project", "job", "question", "options", "kind", "reason", "stopTitle"})
         self.assertEqual((line["kind"], line["reason"]), ("ask", "Ship it?"))
         self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual(line["project"], Path(self.tmp.name).name)
@@ -420,8 +470,8 @@ class BoardTest(unittest.TestCase):
 
     def test_ask_twice_overwrites_and_logs_twice(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "One?", [f"A=approve {job_id}", f"B=abort {job_id}"])
-        board.cmd_ask(self.root, job_id, "Two?", [f"R=resume {job_id}", "S=shell: ls"])
+        board.cmd_ask(self.root, job_id, "One?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
+        board.cmd_ask(self.root, job_id, "Two?", [f"R=resume {job_id}", "S=shell: ls"], title="MERGE_CONFLICT")
         job = self.jobs()[0]
         self.assertEqual((job["question"], job["reason"]), ("Two?", "Two?"))
         self.assertEqual([o["label"] for o in job["options"]], ["R", "S"])
@@ -441,7 +491,7 @@ class BoardTest(unittest.TestCase):
                     board.find(b, job_id).update(question="Old?", options=[{"key": "a"}], recommend={"key": "a"})
                 before = len(self.log_lines())
                 with mock.patch.object(board, "play") as play:
-                    self.assertEqual(board.cmd_ask(self.root, job_id, q, opts(job_id)), {"stalled": True})
+                    self.assertEqual(board.cmd_ask(self.root, job_id, q, opts(job_id), title="MERGE_CONFLICT"), {"stalled": True})
                 play.assert_not_called()
                 job = next(j for j in self.jobs() if j["id"] == job_id)
                 self.assertEqual((job["stage"], job["reason"], job["stalled"]), (stage, want, True))
@@ -454,7 +504,7 @@ class BoardTest(unittest.TestCase):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, [f"stage={stage}"])
                 with mock.patch.object(board, "play") as play:
-                    board.cmd_ask(self.root, job_id, q, opts(job_id))
+                    board.cmd_ask(self.root, job_id, q, opts(job_id), title="MERGE_CONFLICT")
                 play.assert_called_once()
                 job = next(j for j in self.jobs() if j["id"] == job_id)
                 self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
@@ -466,7 +516,7 @@ class BoardTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             board.main(["--dir", str(self.root), "ask", job_id, question, "--kind", kind,
-                        "--a", f"Approve=approve {job_id}", "--b", f"Abort=abort {job_id}"])
+                        "--a", f"Approve=approve {job_id}", "--b", f"Abort=abort {job_id}", "--title", "BUILDER_BLOCKED"])
         return json.loads(buf.getvalue())
 
     def test_ask_eligible_kind_unblocks_without_parking(self):
@@ -522,7 +572,7 @@ class BoardTest(unittest.TestCase):
         for kind, opts in (("Round-Limit", ok), ("-x", ok), ("ci fail", ok), ("", ok), ("ci-fail", [f"A=merge {job_id}", ok[1]])):
             with self.subTest(kind=kind):
                 with self.assertRaises(SystemExit) as e:
-                    board.cmd_ask(self.root, job_id, "Q?", opts, kind=kind)
+                    board.cmd_ask(self.root, job_id, "Q?", opts, kind=kind, title="MERGE_CONFLICT")
                 self.assertTrue(str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertFalse((self.root / "questions.log").exists())
@@ -567,7 +617,7 @@ class BoardTest(unittest.TestCase):
 
     def test_stage_change_clears_question(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         board.cmd_set(self.root, job_id, ["stage=build"])
         job = self.jobs()[0]
         self.assertNotIn("question", job)
@@ -575,7 +625,7 @@ class BoardTest(unittest.TestCase):
 
     def test_abort_clears_question(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         board.cmd_abort(self.root, job_id, False)
         job = self.jobs()[0]
         self.assertEqual(job["stage"], "aborted")
@@ -584,7 +634,7 @@ class BoardTest(unittest.TestCase):
 
     def test_set_keeping_needs_human_keeps_question(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         board.cmd_set(self.root, job_id, ["waiting=asked"])
         job = self.jobs()[0]
         self.assertEqual(job["question"], "Q?")
@@ -592,7 +642,7 @@ class BoardTest(unittest.TestCase):
 
     def test_answer_prints_option_and_logs_pick(self):
         job_id = board.cmd_new(self.root, "x")
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"Abort=abort {job_id} --requeue"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"Abort=abort {job_id} --requeue"], title="MERGE_CONFLICT")
         before = self.jobs()[0]
         want = {"key": "b", "label": "Abort", "command": f"abort {job_id} --requeue"}
         self.assertEqual(board.cmd_answer(self.root, job_id, "b"), want)
@@ -612,7 +662,7 @@ class BoardTest(unittest.TestCase):
         job_id = board.cmd_new(self.root, "x")
         with self.assertRaises(SystemExit):
             board.cmd_answer(self.root, job_id, "a")  # spec stage, never asked
-        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"])
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
         with self.assertRaises(SystemExit):
             board.cmd_answer(self.root, job_id, "c")  # not on a 2-option question
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
@@ -945,7 +995,7 @@ class BoardTest(unittest.TestCase):
                          {"job": parent, "kind": "bigboy", "reason": "merged + gaps: review unreadable"})
         other = board.cmd_new(self.root, "y")
         for q in ("bigboy review: main not updated; merge it?", "bigboy blocked: 009-x. Resume?", "bigboy off track?"):
-            board.cmd_ask(self.root, other, q, [f"R=resume {other}", f"A=abort {other}"])
+            board.cmd_ask(self.root, other, q, [f"R=resume {other}", f"A=abort {other}"], title="MERGE_CONFLICT")
         asks = self.log_lines()[2:]
         self.assertEqual([(l["kind"], l["reason"], l["question"]) for l in asks],
                          [("bigboy", "bigboy review: main not updated; merge it?",
@@ -966,6 +1016,7 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("needs-human", "bigboy blocked: 003-part-2. Fix: click Resume to "
                          "skip the children that depend on them and run the final review."))
+        self.assertEqual(p["stopTitle"], "BIGBOY_BLOCKED")
         self.assertNotIn("Abort", p["reason"])
         # Resume aborts the waiting dependents; every child is then done or aborted, so all_merged is true.
         board.cmd_abort(self.root, c4, requeue=False)
@@ -973,6 +1024,7 @@ class BoardTest(unittest.TestCase):
         out = run_board("--dir", str(self.root), "ready", parent)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual((json.loads(out.stdout)["all_merged"], json.loads(out.stdout)["merged"]), (True, 2))
+        self.assertNotIn("stopTitle", self.child(parent))
         # One aborted child plus one needs-human child: the parent keeps running and names the needs-human one.
         parent, (d1, d2, d3, d4, d5) = self.five()
         board.cmd_ready(self.root, parent)
@@ -2835,6 +2887,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(job["title"], "Pipeline health: codex-review")
         self.assertEqual(job["stage"], "needs-human")
         self.assertEqual(job["question"], "pipeline health: codex-review failed in 6 of 10 jobs in digest 001, 60 min lost")
+        self.assertEqual(job["stopTitle"], "DIGEST")
         self.assertEqual(job["options"], [
             {"key": "a", "label": "Got it", "command": f"abort {created}"},
             {"key": "b", "label": "Add a fix to the backlog", "command": f"abort {created} --requeue"}])
@@ -4064,6 +4117,7 @@ class BoardTest(unittest.TestCase):
             {"key": "b", "label": "Remove this job", "command": "abort 002-second --cascade"}])
         self.assertEqual(third["question"],
                          "blocked: 009-missing was aborted or removed, so this job has nothing to wait for.")
+        self.assertEqual((second["stopTitle"], third["stopTitle"]), ("DEPENDENCY", "DEPENDENCY"))
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
 
     def test_wake_waiting_asks_when_dependency_aborted_while_held(self):
@@ -4122,7 +4176,7 @@ class BoardTest(unittest.TestCase):
         for job_id, dep in (("002-second", "001-first"), ("005-kid", "006-sib")):
             job = next(j for j in self.jobs() if j["id"] == job_id)
             q = f"retry: {dep} is done, so this job tries again."
-            self.assertEqual((job["stage"], job["question"], job["reason"]), ("needs-human", q, q))
+            self.assertEqual((job["stage"], job["question"], job["reason"], job["stopTitle"]), ("needs-human", q, q, "DEPENDENCY"))
             self.assertEqual(job["options"], [
                 {"key": "a", "label": "Try again", "command": f"approve {job_id}"},
                 {"key": "b", "label": "Remove this job", "command": f"abort {job_id} --cascade"}])
@@ -4149,7 +4203,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": ["002-second"]})
         job = self.jobs()[1]
         q = "retry: 001-first was aborted or removed, so this job no longer waits on it."
-        self.assertEqual((job["stage"], job["question"]), ("needs-human", q))
+        self.assertEqual((job["stage"], job["question"], job["stopTitle"]), ("needs-human", q, "DEPENDENCY"))
         self.assertNotIn("waiting on", job["reason"])
         self.assertEqual(job["options"], [
             {"key": "a", "label": "Try again", "command": "approve 002-second"},
