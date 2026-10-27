@@ -969,6 +969,7 @@ class ContractTest(unittest.TestCase):
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
         self.assertIn("(a lilguy job with a worktree: **Lilguy lane**)", resume)
         self.assertNotIn("A lilguy job re-runs its", resume)
+        self.assertIn("sit in a WATCHED stage held by `limitResetAt` (not paused): accept it and re-enter that stage like `stalled in <stage>`", resume)
         self.assertIn("run the **Lilguy lane** instead", step3)
         self.assertNotIn("Worktree mode", step3)
         self.assertIn("lilguy-fit", self.lane("runall"))

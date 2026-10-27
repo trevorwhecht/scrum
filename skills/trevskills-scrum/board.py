@@ -3294,6 +3294,7 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
         if unpause and "stage" in given:
             job.pop("holdPause", None)  # Trevor's Play: a later overload pause may be auto-played again
             job.pop("paused", None)  # resume and rework re-enter a stage; spawn bookkeeping keeps the pause
+            job.pop("limitResetAt", None)  # resume re-enters the same stage, so the stage-change drop below never runs
         if job["stage"] != was and "outcome" not in given:
             job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
         if "tty" in given:
