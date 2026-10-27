@@ -101,9 +101,9 @@
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
-  board.py watchdog                flag jobs stuck 30+ min in spec/build/check/review/approve with no live session
-                                   needs-human (reason "stalled in <stage>: ..."), print {"flagged"}; a stuck spec
-                                   job with no feature.md is an orphaned claim: aborted and requeued, never flagged
+  board.py watchdog                flag jobs stuck 30+ min in spec/build/check/review/approve with no live session:
+                                   kept in their stage with `stalled` true (reason "stalled: ..."), print {"flagged"};
+                                   a stuck spec job with no feature.md is an orphaned claim: aborted and requeued, never flagged
   board.py cloud-sync              move each stage-cloud job whose [scrum <id>] PR finished (one gh REST pulls call):
                                    MERGED -> done, CLOSED -> aborted + requeued, open + scrum:needs-human -> needs-human with
                                    the PR comment's reason and a fetched worktree (a requeue:/obsolete:/looks already
@@ -3367,8 +3367,19 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None):
                                  "kind": kind, "unblock": n, "question": question})
             return {"unblock": True, "n": n}
         was = job["stage"]
-        # a session that did not load the scrum agent types is a session fault: stalled, so auto_resume retries it
-        reason = f"{STALLED}{was}: {question}" if was in WATCHED and AGENT_TYPES_RE.search(question) else question
+        # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
+        # auto_resume retries it; not a human stop, so no question and no sound
+        if was in WATCHED and AGENT_TYPES_RE.search(question):
+            reason = f"{STALL}{question}"
+            if job.get("reason") != reason:
+                job.pop("outcome", None)
+            for k in ("question", "options", "recommend"):
+                job.pop(k, None)
+            job.update(stalled=True, reason=reason, updatedAt=now())
+            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                                 "question": question, "reason": reason, "kind": "stall"})
+            return {"stalled": True}
+        reason = question
         if job.get("reason") != reason:
             job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
         job.update(stage="needs-human", reason=reason, question=question, options=parsed, updatedAt=now())
@@ -3845,7 +3856,7 @@ def cmd_hook(event, tty, pid=None):
         pass
 
 
-# --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it needs-human ---
+# --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it stalled in that stage ---
 WATCHED = ("spec", "build", "check", "review", "approve", "merging")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
@@ -3882,14 +3893,26 @@ def stall_stage(job: dict) -> str | None:
     return m and m.group(1)
 
 
+LEGACY_STALL_RE = re.compile(rf"^{STALLED}(\w+): (.*)$", re.S)
+
+
 def migrate_paused(board: dict) -> list[str]:
-    """Rewrite each legacy paused job (needs-human with a PAUSED_RE reason) to its stage plus `paused`, keeping the
-    reason. Returns the migrated ids; a second run finds none."""
+    """Rewrite each legacy needs-human job in place: a PAUSED_RE reason to its stage plus `paused`, keeping the
+    reason; any other `stalled in <WATCHED stage>: <rest>` (not paused) to that stage plus `stalled`, reason
+    `stalled: <rest>`, with no question. A non-WATCHED stage stays legacy (stalled() reads `stalled` only in WATCHED).
+    Returns the migrated ids; a second run finds none."""
     out = []
     for job in board["jobs"]:
-        m = job.get("stage") == "needs-human" and PAUSED_RE.match(job.get("reason") or "")
-        if m:
+        if job.get("stage") != "needs-human":
+            continue
+        reason = job.get("reason") or ""
+        if m := PAUSED_RE.match(reason):
             job.update(stage=m.group(1), paused=True)
+            out.append(job["id"])
+        elif (m := LEGACY_STALL_RE.match(reason)) and m.group(1) in WATCHED and not job.get("paused"):
+            for k in ("question", "options", "recommend"):
+                job.pop(k, None)
+            job.update(stage=m.group(1), stalled=True, reason=f"{STALL}{m.group(2)}")
             out.append(job["id"])
     return out
 
@@ -3972,7 +3995,8 @@ def job_dir_idle(root, job_id, cutoff):
 
 
 def cmd_watchdog(root, alive=None):
-    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session.
+    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
+    its stage with `stalled` true and a STALL reason, and plays no sound.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
@@ -3993,8 +4017,8 @@ def cmd_watchdog(root, alive=None):
                         continue
                     live_idle = True
                 if live_idle:
-                    job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board or job-dir "
-                               f"change for {IDLE_HOURS} h (session alive but idle). Fix: click Resume.")
+                    job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board or job-dir "
+                               f"change for {IDLE_HOURS} h (session alive but idle)")
                     log_stop(root, job["id"], "stall", job["reason"])
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
@@ -4003,8 +4027,8 @@ def cmd_watchdog(root, alive=None):
                     abort_job(root, job, True, ORPHANED)  # nothing to resume: put the item back, no human needed
                     requeued.append(job["id"])
                 else:
-                    job.update(stage="needs-human", updatedAt=now(), reason=f"{STALLED}{job['stage']}: no board update "
-                               f"for {STALL_MINUTES} min and no live session. Fix: click Resume.")
+                    job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board update "
+                               f"for {STALL_MINUTES} min and no live session")
                     log_stop(root, job["id"], "stall", job["reason"])
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
@@ -4012,9 +4036,7 @@ def cmd_watchdog(root, alive=None):
                 raise _Gone
     except _Gone:
         pass
-    if flagged:
-        play(sound("needs-human"))
-    return flagged
+    return flagged  # no sound: a stall is not a human stop, serve.py resumes it
 
 
 # --- roadmap.md: ordered phases of bigboy/standard steps; the orchestrator's resume doc ---
@@ -4085,7 +4107,7 @@ def roadmap_show(root):
     blocker = None
     if cur and cur[1]["job"]:
         job_id, jobs = cur[1]["job"], read_board(root)["jobs"]
-        stopped = lambda j: j.get("stage") == "needs-human" or j.get("paused")
+        stopped = lambda j: j.get("stage") == "needs-human" or j.get("paused") or stalled(j)
         hit = next((j for j in jobs if j.get("id") == job_id and stopped(j)), None) \
             or next((j for j in jobs if j.get("parent") == job_id and stopped(j)), None)
         blocker = hit and {"job": hit["id"], "reason": hit.get("reason") or ""}
@@ -4206,7 +4228,8 @@ def roadmap_stop_locked(root, job_id, reason, parent=None):
 
 
 def roadmap_stall_locked(root, job):
-    """A stalled job (just flagged needs-human) stops its roadmap step; a roadmap problem never undoes the flag."""
+    """A stalled job (just flagged `stalled` in its stage) stops its roadmap step; a roadmap problem never undoes the
+    flag."""
     try:
         roadmap_stop_locked(root, job["id"], f"{job['id']} {job['reason']}", job.get("parent"))
     except SystemExit as e:

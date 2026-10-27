@@ -79,7 +79,7 @@ def running(project, job_id):
 
 
 def live_ids(project):
-    """Ids of the project's jobs with a live dashboard session. A just-spawned resume still reads needs-human on the
+    """Ids of the project's jobs with a live dashboard session. A just-spawned resume still reads stalled on the
     board, so the cap checks count these as in progress too."""
     with RUNS_LOCK:
         return {key.split("/", 1)[1] for key, run in RUNS.items()
@@ -205,14 +205,14 @@ def resume_job(project, root, job, jobs, manual=False):
             if not kid or not kid.get("paused") or running(project, k):
                 continue
             if resume_refusal(project, root, kid, manual=manual):
-                with board.locked_board(root) as b:  # not cmd_set: it never parks at needs-human, and plays a sound
+                with board.locked_board(root) as b:  # not cmd_set: it plays a sound, and a stall is not a human stop
                     live = board.find(b, k)
                     live.pop("paused", None)
                     if board.lilguy_in_checkout(kid) and kid["stage"] == "spec" and int(kid.get("round") or 0) == 0:
                         live.update(stage="waiting", reason=None, updatedAt=board.now())
                     else:
-                        live.update(stage="needs-human", updatedAt=board.now(), reason=f"{board.STALLED}{kid['stage']}: "
-                                    "waiting for a free slot after Play. Fix: click Resume.")
+                        live.update(stalled=True, updatedAt=board.now(),
+                                    reason=f"{board.STALL}waiting for a free slot after Play")
             else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
         start_ready(project, root, job_id)
@@ -598,7 +598,8 @@ def main_ff_tick(project, repo, root, jobs) -> bool:
 
 def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
-    tries it is flagged for Trevor instead. True when it resumed the job or still waits for the reset or a slot."""
+    tries it is left stalled in its stage, silently, and auto_resume skips it at the cap. True when it resumed the job
+    or still waits for the reset or a slot."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
     if running(project, job["id"]):
@@ -606,8 +607,7 @@ def resume_held(project, root, job, jobs, now):
     if now < job["limitResetAt"] + 120:
         return True
     if tries >= AUTO_RESUME_MAX:
-        if flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes. Fix: click Resume."):
-            board.play(board.sound("needs-human"))
+        flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes")
         return False
     if resume_refusal(project, root, job) or not take_room():
         return True  # a sibling or the tick's budget holds its slot: no try spent
@@ -653,21 +653,20 @@ def cloud_tick(project, root, jobs, now=None):
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 
 
-EXITED = "session exited while the job was still in {stage}. Fix: click Resume."
-ORPHANED = "no session picked the job up in {stage}. Fix: click Resume."
+EXITED = "session exited while the job was still in {stage}."
+ORPHANED = "no session picked the job up in {stage}."
 
 
 def flag_stalled(root, job, msg):
-    """Under the board lock, move job from its WATCHED stage to needs-human `stalled in <stage>: <msg>` (msg may use
-    {stage}), so a `resume` session accepts it. False when the job is gone or its stage moved on meanwhile."""
+    """Under the board lock, keep job in its WATCHED stage with `stalled` true and reason `stalled: <msg>` (msg may use
+    {stage}), so a `resume` session accepts it. False when the job is gone, its stage moved on or it was paused."""
     stage = job["stage"]
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
             if not live or live.get("stage") != stage or live.get("paused"):  # paused meanwhile: Trevor holds it
                 raise board._Gone
-            live.update(stage="needs-human", reason=f"{board.STALLED}{stage}: {msg.format(stage=stage)}",
-                        updatedAt=board.now())
+            live.update(stalled=True, reason=f"{board.STALL}{msg.format(stage=stage)}", updatedAt=board.now())
             live.pop("limitResetAt", None)
             board.roadmap_stall_locked(root, live)
             job.update(live)
@@ -686,7 +685,9 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
-            if not live or live.get("stage") != job["stage"] or live.get("paused"):
+            # a legacy needs-human snapshot whose live job locked_board just migrated to `stage` + `stalled` still holds
+            if not live or live.get("paused") or live.get("stage") != job["stage"] \
+                    and not (stage and live.get("stage") == stage and board.stalled(live)):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
             live.pop("stalled", None)  # a new-shape stall is now a limit hold in the same stage
@@ -729,8 +730,7 @@ def respawn_exited(project, root):
             continue
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(project, root, job):
-            board.play(board.sound("needs-human"))
-            continue
+            continue  # left stalled for auto_resume; no sound, a stall is not a human stop
         STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
         resume_job(project, root, job, jobs)
         with RUNS_LOCK:
@@ -765,7 +765,7 @@ def respawn_orphans(project, root, p, kids, alive):
                 or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
             continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick
         action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
-        if action == "resume":  # `resume` only accepts a needs-human job with a stalled reason
+        if action == "resume":  # `resume` only accepts a stalled job
             if not flag_stalled(root, kid, ORPHANED):
                 continue
             STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
@@ -814,7 +814,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
         if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive):
-            continue  # a child was just respawned (a resumed one now reads needs-human, i.e. idle): not idle this tick
+            continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
             if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
                     and not board.chain_lock_live(root, p["id"]) and claim:
