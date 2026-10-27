@@ -6052,6 +6052,31 @@ class WatchdogIdleParentTest(unittest.TestCase):
                          "no longer needed. Fix: click Pause to hold it again.")
         self.assertEqual((self.job("011-new")["paused"], self.job("011-new")["reason"]), (True, self.PAUSED))
 
+    def test_auto_play_stamps_auto_played(self):
+        self.two_paused()
+        with self.ps_file(""):
+            self.tick()
+        self.assertIs(self.job("010-old").get("autoPlayed"), True)
+        self.assertNotIn("autoPlayed", self.job("011-new"))
+
+    def test_watchdog_tick_no_auto_play_of_held_pause(self):
+        self.queue_board({"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "holdPause": True, "autoPlayed": True})
+        with self.ps_file(""):
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args[3] for c in spawn.call_args_list if c.args[3] == "resume"], [])
+        self.assertEqual((self.job("010-old")["paused"], self.job("010-old")["reason"]), (True, self.PAUSED))
+
+    def test_watchdog_tick_auto_play_skips_held_for_next(self):
+        self.queue_board({"id": "011-new", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "updatedAt": "2026-10-25T10:00:00+00:00"},
+                         {"id": "010-old", "stage": "build", "paused": True, "reason": self.PAUSED,
+                          "holdPause": True, "updatedAt": "2026-10-25T09:00:00+00:00"})
+        with self.ps_file(""):
+            spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2] for c in spawn.call_args_list if c.args[3] == "resume"], ["011-new"])
+        self.assertEqual(self.job("010-old")["reason"], self.PAUSED)
+
     def test_watchdog_tick_no_auto_play_with_live_session(self):
         self.two_paused()
         with self.ps_file("claude -p /trevskills-scrum start 9-x\n"):

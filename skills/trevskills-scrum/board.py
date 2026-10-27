@@ -3292,6 +3292,7 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
                 value = clean(value, 300)
             job[key] = int(value) if key in ("round", "limit") else (value or None)
         if unpause and "stage" in given:
+            job.pop("holdPause", None)  # Trevor's Play: a later overload pause may be auto-played again
             job.pop("paused", None)  # resume and rework re-enter a stage; spawn bookkeeping keeps the pause
         if job["stage"] != was and "outcome" not in given:
             job.pop("outcome", None)  # the last dashboard run's outcome describes the stage it left
@@ -3893,6 +3894,8 @@ def cmd_pause(root, job_id):
             j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
             j.pop("play_queued", None)  # a pause cancels a queued Play
+            if j.get("autoPlayed"):
+                j["holdPause"] = True  # re-paused after an auto-play: deliberate, so the watchdog leaves it paused
         return [j["id"] for j in hit]
 
 
