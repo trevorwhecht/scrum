@@ -141,6 +141,7 @@ class PlayQueued(unittest.TestCase):
         job = {**STUCK, "files": ["feature.md", "plan.md"]}
         notfound = 'fetchImpl = async url => url.endsWith("feature.md") ? {ok: false, status: 404, text: async () => "nope"} : {ok: true, status: 200, text: async () => "# plan"};'
         tabs, doc, seen = run(f"""{notfound}
+            el("viewer").dataset.key = "p/201-s";
             els.tabs.innerHTML = '<button data-file="feature.md" aria-pressed="false">feature.md</button><button data-file="plan.md" aria-pressed="false">plan.md</button>';
             await show({json.dumps(job)}, "feature.md"); await new Promise(r => setTimeout(r, 20));
             out(els.tabs.kids.map(b => b.dataset.file)); out(els.doc.innerHTML); out(fetched);""")
@@ -150,6 +151,7 @@ class PlayQueued(unittest.TestCase):
         self.assertEqual(seen, ["p/p/jobs/201-s/feature.md", "p/p/jobs/201-s/plan.md"])
         # The only tab gone: the empty note.
         tabs, doc = run(f"""{notfound}
+            el("viewer").dataset.key = "p/201-s";
             els.tabs.innerHTML = '<button data-file="feature.md" aria-pressed="false">feature.md</button>';
             await show({json.dumps(job)}, "feature.md"); await new Promise(r => setTimeout(r, 20));
             out(els.tabs.kids.map(b => b.dataset.file)); out(els.doc.innerHTML);""")
@@ -161,12 +163,32 @@ class PlayQueued(unittest.TestCase):
                 ('async () => ({ok: false, status: 404, text: async () => ""})', {"key": "p#roadmap", "project": "p", "id": "roadmap", "base": "p/p/"},
                  "Couldn't load feature.md (404).")):
             with self.subTest(want=want, roadmap="base" in doc_job):
-                tabs, doc = run(f"""fetchImpl = {fetch_impl};
+                tabs, doc = run(f"""fetchImpl = {fetch_impl}; el("viewer").dataset.key = {json.dumps(doc_job["key"])};
                     els.tabs.innerHTML = '<button data-file="feature.md" aria-pressed="false">feature.md</button>';
                     await show({json.dumps(doc_job)}, "feature.md"); await new Promise(r => setTimeout(r, 20));
                     out(els.tabs.kids.map(b => b.dataset.file)); out(els.doc.innerHTML);""")
                 self.assertEqual(tabs, ["feature.md"])
                 self.assertEqual(doc, f'<p class="empty">{want}</p>')
+
+    def test_show_ignores_late_response_for_other_job(self):
+        job = {**STUCK, "files": ["feature.md"]}
+        tabs = '<button data-file="feature.md" aria-pressed="false">feature.md</button><button data-file="b.md" aria-pressed="false">b.md</button>'
+        late = {"200": '{ok: true, status: 200, text: async () => "# A"}',
+                "404": '{ok: false, status: 404, text: async () => "nope"}',
+                "reject": None}
+        for name, resp in late.items():
+            with self.subTest(late=name):
+                settle = f"release({resp})" if resp else 'fail(new Error("network"))'
+                tabs_out, doc = run(f"""let release, fail;
+                    fetchImpl = () => new Promise((ok, no) => {{ release = ok; fail = no; }});
+                    el("viewer").dataset.key = "p/201-s";
+                    els.tabs.innerHTML = '{tabs}';
+                    const p = show({json.dumps(job)}, "feature.md");
+                    el("viewer").dataset.key = "p/B"; el("doc").innerHTML = "B doc";
+                    {settle}; await p; await new Promise(r => setTimeout(r, 20));
+                    out(els.tabs.kids.map(b => b.dataset.file)); out(els.doc.innerHTML);""")
+                self.assertEqual(tabs_out, ["feature.md", "b.md"])
+                self.assertEqual(doc, "B doc")
 
 
 if __name__ == "__main__":
