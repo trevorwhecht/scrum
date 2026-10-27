@@ -1,4 +1,4 @@
-import hashlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+import hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
