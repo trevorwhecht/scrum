@@ -5713,6 +5713,19 @@ class MoveRatioTest(unittest.TestCase):
 class RouteCheckTest(unittest.TestCase):
     """board.py route-check: the Fast lane promotion, Review clean-round and Approve model decisions."""
 
+    @classmethod
+    def setUpClass(cls):
+        """The committed worktree, built once: each setUp copies it (git init + commit per test cost seconds under load)."""
+        cls.base_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.base_tmp.cleanup)
+        cls.base_wt = Path(cls.base_tmp.name) / "wt"
+        cls.base_wt.mkdir()
+        (cls.base_wt / "README.md").write_text("readme\n")
+        for args in (("init", "-q", "-b", "main"), ("add", "README.md"), ("commit", "-q", "-m", "base"),
+                     ("checkout", "-q", "-b", "work")):
+            subprocess.run(["git", "-C", str(cls.base_wt), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                           capture_output=True)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
@@ -5721,12 +5734,7 @@ class RouteCheckTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(base / "no-usage.json")})
         env.start()
         self.addCleanup(env.stop)
-        self.wt.mkdir()
-        (self.wt / "README.md").write_text("readme\n")
-        self.git("init", "-q", "-b", "main")
-        self.git("add", "README.md")
-        self.git("commit", "-q", "-m", "base")
-        self.git("checkout", "-q", "-b", "work")
+        shutil.copytree(self.base_wt, self.wt, symlinks=True)
         self.job = board.cmd_new(self.root, "Route me")
         self.jd = self.root / "jobs" / self.job
         board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main"])
