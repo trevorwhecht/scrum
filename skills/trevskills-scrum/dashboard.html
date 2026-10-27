@@ -189,6 +189,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 .md{border-top:1px solid var(--line)}
 #aiScope{flex:1 1 160px;min-width:0;max-width:420px;min-height:44px;text-overflow:ellipsis}
 #aiSettings>.error{padding:10px 20px 0}
+#checkoutAlert{padding:0 16px 12px;overflow-wrap:anywhere}
 #aiBody{display:grid;grid-template-columns:220px minmax(0,1fr);align-items:start}
 #aiCats{display:grid;gap:4px;padding:14px 10px}
 #aiCats button{display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left}
@@ -244,6 +245,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="digestBtn" type="button">Digest</button>
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
+<p class="error" id="checkoutAlert" role="alert" hidden></p>
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -674,6 +676,16 @@ function renderMachine(m) {
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "");
 }
 
+// Every project's board.checkoutAlert (its live checkout cannot go live), one per line, whatever the project filter.
+function renderCheckoutAlert(boards) {
+  const el = $("checkoutAlert");
+  if (!el) return;
+  const alerts = boards.map(b => b && b.checkoutAlert).filter(Boolean);
+  const html = alerts.map(esc).join("<br>");
+  if (el.innerHTML !== html) el.innerHTML = html;  // unchanged text is not rewritten, so role=alert does not re-announce it
+  el.hidden = !alerts.length;
+}
+
 async function poll() {
   getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
   missed = 0;
@@ -692,6 +704,7 @@ async function poll() {
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
       getJson("api/runs", []),
       Promise.all(projects.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
+    renderCheckoutAlert(boards);
     roadmaps = Object.fromEntries(projects.map((p, i) => [p, roadmapList[i]]));
     const all = boards.flatMap((b, i) => (b.jobs || []).map(j => ({...j, project: projects[i], key: `${projects[i]}/${j.id}`})));
     roadmapSteps = roadmapLookup(all);

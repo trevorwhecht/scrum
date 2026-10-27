@@ -2095,13 +2095,47 @@ def cached_backlog_items(root):
     return items
 
 
+CHECKOUT_ALERT_EVERY = 60  # seconds between one repo's checkout_alert git checks
+CHECKOUT_ALERT: dict[str, tuple[float, str | None]] = {}  # str(repo) -> (checked at, ahead-alert or None)
+
+
+def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
+    """The board-wide alert when repo's live checkout cannot go live, else None. First: its current branch has commits
+    missing from the last fetched origin/<branch> (no fetch here; that git check runs once per repo every
+    CHECKOUT_ALERT_EVERY seconds). A detached HEAD, no origin/<branch> ref or a failed git call gives no ahead-alert.
+    Else: the newest done job (highest updatedAt) has a reason starting `merged, not live: fast-forward failed`."""
+    hit = CHECKOUT_ALERT.get(str(repo))
+    now = time.time()
+    if hit and now - hit[0] < CHECKOUT_ALERT_EVERY:
+        alert = hit[1]
+    else:
+        alert = None
+        branch = git_run(repo, "symbolic-ref", "--short", "HEAD")
+        name = branch.stdout.strip()
+        if not branch.returncode and name:
+            ahead = git_run(repo, "rev-list", "--count", f"origin/{name}..HEAD")
+            n = int(ahead.stdout.strip()) if not ahead.returncode and ahead.stdout.strip().isdigit() else 0
+            if n:
+                alert = (f"{Path(repo).name} main checkout has {n} commit(s) not on origin/{name}, "
+                         "so merges cannot go live. Push or fix it by hand.")
+        CHECKOUT_ALERT[str(repo)] = (now, alert)
+    if alert:
+        return alert
+    done = [j for j in jobs if j.get("stage") == "done"]
+    newest = max(done, key=lambda j: j.get("updatedAt") or "", default=None)
+    if newest and (newest.get("reason") or "").startswith("merged, not live: fast-forward failed"):
+        return f"{newest.get('id')} merged, not live: fast-forward failed. Fix the main checkout, then clear the reason."
+    return None
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
     Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
     waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
-    `nextRetryAt` (epoch seconds, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    `nextRetryAt` (epoch seconds, or None). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
+    cannot go live, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -2130,6 +2164,7 @@ def board_with_activity(root, project):
             job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
+    data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
     return data
 
 
