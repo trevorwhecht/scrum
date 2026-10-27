@@ -4603,7 +4603,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
-    log = logs / f"{datetime.now():%Y%m%d-%H%M%S}-{action}-{job_id}.log"
+    log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
     argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
     with open(log, "w") as fh:
         proc = subprocess.Popen(argv, cwd=root.parent,
