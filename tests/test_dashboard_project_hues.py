@@ -73,7 +73,7 @@ class ProjectHues(unittest.TestCase):
                    "return ['trevskills-scrum', 'onewitharts', 'a<b'].map(tagButton); })())")
         self.assertEqual(got, ['<button type="button" class="tag" data-project="trevskills-scrum" style="--h:90" aria-label="Change trevskills-scrum colour">trevskills-scrum</button>',
                                '<button type="button" class="tag" data-project="onewitharts" style="--h:150;--c:#a1b2c3" aria-label="Change onewitharts colour">onewitharts</button>',
-                               '<button type="button" class="tag" data-project="a&lt;b" style="--h:210" aria-label="Change a&lt;b colour">a&lt;b</button>'])
+                               '<button type="button" class="tag" data-project="a&lt;b" style="--h:300" aria-label="Change a&lt;b colour">a&lt;b</button>'])
 
     def test_tag_hit_area_is_44px(self):
         text = DASHBOARD.read_text()
