@@ -147,15 +147,16 @@ STOP_TITLES = {
                     "on origin",
     "MERGE_CONFLICT": "the branch still conflicts with the default branch after two tries",
     "CHECKS_FAILING": "tests or CI still fail after the allowed fix attempts (debug fixes included)",
-    "MERGE_BLOCKED": "GitHub will not take the merge: the PR was closed, the merge or done step was refused, or the "
-                     "GitHub CLI is missing or signed out",
+    "MERGE_BLOCKED": "GitHub will not take the merge (the PR was closed, the merge or done step was refused, or the "
+                     "GitHub CLI is missing or signed out)",
     "DATABASE_CHANGE": "the job changes the database structure, and the migrate needs an OK or it stopped",
     "ROUND_LIMIT": "the approver asked for a second round of fixes, and a job only gets one",
-    "BUILDER_BLOCKED": "the builder, debugger or approver could not go on",
-    "REVIEW_ESCALATED": "the approver escalated for another reason, or its output could not be read",
+    "BUILDER_BLOCKED": "the builder, debugger or approver could not go on (blocked:, debug: blocked, Hard stop: blocked)",
+    "REVIEW_ESCALATED": "the approver escalated for another reason (Hard stop: render, any other decision line, or "
+                        "output that could not be read)",
     "BIGBOY_OFF_TRACK": "the tracker says the remaining tickets no longer reach the goal",
-    "BIGBOY_BLOCKED": "a multi-ticket job cannot start its next ticket: the chain lock is held or its children are "
-                      "blocked",
+    "BIGBOY_BLOCKED": "a multi-ticket job cannot start its next ticket, because the chain lock is held or its "
+                      "children are blocked",
     "DEPENDENCY": "a job this one waited on finished, was aborted or was removed",
     "MD_CONTRADICTION": "a knowledge-save job found a fact that contradicts the target .md or the code",
     "DIGEST": "a weekly digest proposal, a digest edit that failed to apply, or a pipeline-health finding",
