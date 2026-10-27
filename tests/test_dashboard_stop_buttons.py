@@ -82,6 +82,9 @@ class StopBox(unittest.TestCase):
         question, = js(f'jobs = [{json.dumps({**ASKED, "question": "Keep the column?", "options": OPTIONS})}]; out(stopBox(jobs[0]));')
         self.assertIn("<p>Keep the column?</p>", question)
         self.assertNotIn("drops a column", question)
+        # The agent's question shows verbatim: no prefix cut, no path stripping ("T1/T2" stays, "and/or" stays).
+        verbatim, = js(f'jobs = [{json.dumps({**ASKED, "question": "Merge T1/T2 and/or skip: yes/no?", "options": OPTIONS})}]; out(stopBox(jobs[0]));')
+        self.assertIn("<p>Merge T1/T2 and/or skip: yes/no?</p>", verbatim)
 
     def test_stop_buttons_recommended_order(self):
         job = {**ASKED, "options": OPTIONS, "recommend": {"key": "b", "why": "Small fix"}}
