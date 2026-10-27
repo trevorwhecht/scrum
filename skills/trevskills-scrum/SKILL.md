@@ -37,7 +37,7 @@ The session running this skill **is the orchestrator**. It spawns every agent, m
 **Headless sessions block.** In a `claude -p` session (a dashboard or nohup run), ending the turn exits the process and kills everything it spawned: background agents, pending SendMessage replies, ScheduleWakeup/cron/loop timers. So the orchestrator never ends its turn while an agent or subprocess it spawned is still running; it waits for every one to return or exit, a "background" spawn included. It never relies on a later notification, a SendMessage reply or a `ScheduleWakeup`/cron/loop timer to continue, because those die with the process.
 
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
-- never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge** and the pre-build sync in **New job**
+- never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job** and the retry sync in **approve**
 - never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
 - never push `main`/`master`
 - never `--auto` or `--admin`
