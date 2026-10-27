@@ -34,7 +34,8 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - For a failure in a file outside your diff, first grep `JOB_DIR/../../backlog.md` for that file's path and for the failing test's class and method names; when an open `- [ ]` line names any of them, cite that line in build.md and never re-run it on BASE to prove it.
    - A test run must never wait for, skip or block on machine load (load average, `uptime`, free RAM): run it anyway, re-run failing Playwright specs once with `--workers=1`, and root-cause whatever still fails; load is never a reason for `STATUS: BLOCKED`.
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
-   - When tsc fails only on files under `.next/types`, delete `.next/types` in WORKTREE and re-run tsc before calling it a failure.
+   - When tsc fails only on files under `.next/types` or `.next/dev/types`, delete that folder in WORKTREE and re-run tsc before calling it a failure.
+   - Before handing off, delete every harness page you added for a walkthrough, and delete `.next/dev/types` in WORKTREE when you added one.
    - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
    - A UI re-render keeps keyboard focus and in-flight state (a pending label, an open editor, unsaved edits).
    - When you move code to another file, grep the tests for the old file path; retarget any test that reads that source file to the new path and change no `expect`.
