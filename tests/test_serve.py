@@ -1476,9 +1476,12 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(h["routes"], {"GET /a": {"p95_ms": 3000, "count": 5}, "GET /c": {"p95_ms": 1900, "count": 20},
                                            "GET /e": {"p95_ms": 20, "count": 1}})
             self.assertEqual((h["worst"], h["slow"]), ("GET /a", True))
+            sv.record_request("GET /sparse", 9000)
+            self.assertEqual(sv.server_health()["worst"], "GET /a", "a 1-sample route cannot hide sustained slowness")
             clock.return_value = 1301.0
-            self.assertEqual(sv.server_health(), {"routes": {"GET /e": {"p95_ms": 20, "count": 1}}, "disconnects": 0,
-                                                  "slow": False, "worst": "GET /e"}, "samples older than 300 s drop out")
+            self.assertEqual(sv.server_health(), {"routes": {"GET /e": {"p95_ms": 20, "count": 1}, "GET /sparse": {"p95_ms": 9000, "count": 1}},
+                                                  "disconnects": 0, "slow": False, "worst": "GET /sparse"},
+                             "samples older than 300 s drop out; with no 5-sample route the worst is the overall max")
             for _ in range(250):
                 sv.record_request("GET /f", 5)
             self.assertEqual(sv.server_health()["routes"]["GET /f"]["count"], 200, "at most 200 samples per route")
