@@ -1355,6 +1355,12 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("UI surface:", fast_rule)
         self.assertIn("Hard stops:", fast_rule)
 
+    def test_new_job_lane_feature_header_wins(self):
+        step = next(l for l in skill_text().splitlines() if l.strip().startswith("3c. **Lane:**"))
+        for phrase in ("feature.md", "above its first", "## ", "`lilguy` counts as `fast`",
+                       "else from `spec.md`", "is ignored"):
+            self.assertIn(phrase, step, phrase)
+
     def test_skill_fast_lane_ui_reviewer(self):
         text = skill_text()
         fast = self.section(text, "## Fast lane", "## Debug lane")
