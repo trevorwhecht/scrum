@@ -68,6 +68,8 @@ class ServeTest(unittest.TestCase):
         ttl = mock.patch.object(self.serve, "MACHINE_TTL", 0)  # each /api/machine here reads its own env
         ttl.start()
         self.addCleanup(ttl.stop)
+        self.serve.HEALTH["routes"].clear()  # each test starts with no latency samples or disconnects
+        self.serve.HEALTH["disconnects"].clear()
 
     @classmethod
     def tearDownClass(cls):
@@ -1347,14 +1349,15 @@ class ServeTest(unittest.TestCase):
 
     def test_api_machine(self):
         keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct",
-                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "sessions",
-                "swap_pct", "usage", "verdict"]
+                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "server",
+                "sessions", "swap_pct", "usage", "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
         self.addCleanup(cores.stop)
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="3", SCRUM_FREE_DISK_GB="50"):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
+        out.pop("server")
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -1362,7 +1365,7 @@ class ServeTest(unittest.TestCase):
                                "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
-            self.assertEqual(self.req("GET", "/api/machine")[1],
+            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k != "server"},
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -1382,6 +1385,7 @@ class ServeTest(unittest.TestCase):
                 mock.patch.object(self.serve.board.shutil, "disk_usage",
                                   side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
             code, out = self.req("GET", "/api/machine")
+        out.pop("server")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -1389,6 +1393,94 @@ class ServeTest(unittest.TestCase):
                                              "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 150}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
+
+    def test_route_key_normalizes(self):
+        rk = self.serve.route_key
+        self.assertEqual(rk("GET", "/api/p/a%2Fb/backlog?x=1"), "GET /api/p/*/backlog")
+        self.assertEqual(rk("GET", "/p/proj/board.json"), "GET /p/*/board.json")
+        self.assertEqual(rk("GET", "/p/proj/jobs/1-x/spec.md"), "GET /p/*/file")
+        self.assertEqual(rk("GET", "/p/a%2Fb/board.json"), "GET /p/*/board.json")
+        self.assertEqual(rk("POST", "/api/p/proj/jobs/12-x/rework"), "POST /api/p/*/jobs/*/rework")
+        self.assertEqual(rk("POST", "/api/p/proj/digests/007/apply"), "POST /api/p/*/digests/*")
+        self.assertEqual(rk("GET", "/api/p/proj/digests?brief=1"), "GET /api/p/*/digests")
+        self.assertEqual(rk("POST", "/api/p/proj/backlog/run-all"), "POST /api/p/*/backlog/run-all")
+        self.assertEqual(rk("POST", "/api/agents/scrum-builder/skills"), "POST /api/agents/*/skills")
+        self.assertEqual(rk("GET", "/api/machine"), "GET /api/machine")
+        for i in range(64):
+            self.serve.record_request(f"GET /k{i}", 1)
+        self.serve.record_request("GET /k64", 1)
+        self.serve.record_request("GET /k0", 1)
+        routes = self.serve.server_health()["routes"]
+        self.assertNotIn("GET /k64", routes, "a 65th distinct key is not added")
+        self.assertEqual((routes["other"]["count"], routes["GET /k0"]["count"], len(routes)), (1, 2, 65))
+
+    def test_server_health_counts_disconnects(self):
+        self.assertEqual(self.serve.server_health()["disconnects"], 0)
+        with mock.patch.object(self.serve.Handler, "send", side_effect=BrokenPipeError("client went away")), \
+                mock.patch.object(self.server, "handle_error") as handled:
+            with self.assertRaises(Exception):
+                self.req("GET", "/api/projects")
+        health = self.serve.server_health()
+        self.assertEqual(health["disconnects"], 1)
+        self.assertEqual(health["routes"]["GET /api/projects"]["count"], 1, "the dropped request is still timed")
+        self.assertTrue(health["slow"])
+        self.assertEqual(handled.call_count, 1, "re-raised, so the server's own error handling still runs")
+        self.assertEqual(self.req("GET", "/api/projects")[0], 200)
+
+    def test_api_machine_server_health(self):
+        sv = self.serve
+        empty = {"routes": {}, "disconnects": 0, "slow": False, "worst": None}
+        self.assertEqual(sv.server_health(), empty, "a fresh server never warns")
+        with mock.patch.object(sv.time, "monotonic", return_value=1000.0) as clock:
+            for _ in range(4):
+                sv.record_request("GET /a", 3000)
+            self.assertEqual(sv.server_health(), {"routes": {"GET /a": {"p95_ms": 3000, "count": 4}}, "disconnects": 0,
+                                                  "slow": False, "worst": "GET /a"}, "fewer than 5 slow samples")
+            sv.record_request("GET /a", 3000)
+            self.assertTrue(sv.server_health()["slow"], "5 samples at p95 3000 ms")
+            for i in range(1, 21):
+                sv.record_request("GET /c", i * 100 + 0.4)
+            clock.return_value = 1200.0
+            sv.record_request("GET /e", 20)
+            h = sv.server_health()
+            self.assertEqual(h["routes"], {"GET /a": {"p95_ms": 3000, "count": 5}, "GET /c": {"p95_ms": 1900, "count": 20},
+                                           "GET /e": {"p95_ms": 20, "count": 1}})
+            self.assertEqual((h["worst"], h["slow"]), ("GET /a", True))
+            clock.return_value = 1301.0
+            self.assertEqual(sv.server_health(), {"routes": {"GET /e": {"p95_ms": 20, "count": 1}}, "disconnects": 0,
+                                                  "slow": False, "worst": "GET /e"}, "samples older than 300 s drop out")
+            for _ in range(250):
+                sv.record_request("GET /f", 5)
+            self.assertEqual(sv.server_health()["routes"]["GET /f"]["count"], 200, "at most 200 samples per route")
+            clock.return_value = 2000.0
+            sv.record_request("GET /d", 10, disconnected=True)
+            self.assertEqual(sv.server_health(), {"routes": {"GET /d": {"p95_ms": 10, "count": 1}}, "disconnects": 1,
+                                                  "slow": True, "worst": "GET /d"}, "one disconnect warns")
+            clock.return_value = 2360.0
+            self.assertEqual(sv.server_health(), empty, "a 6-minute-old disconnect alone does not warn")
+        ttl = mock.patch.object(sv, "MACHINE_TTL", 5)
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        sv.MACHINE_CACHE.clear()
+        first = self.req("GET", "/api/machine")[1]["server"]
+        sv.record_request("GET /z", 7)
+        second = self.req("GET", "/api/machine")[1]["server"]
+        self.assertNotIn("GET /z", first["routes"])
+        self.assertEqual(second["routes"]["GET /z"], {"p95_ms": 7, "count": 1}, "server is never read from MACHINE_CACHE")
+
+    def test_server_health_threadsafe(self):
+        def hammer(i):
+            for _ in range(100):
+                self.serve.record_request(f"GET /t{i}", 1)
+                self.serve.server_health()
+        threads = [threading.Thread(target=hammer, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        routes = self.serve.server_health()["routes"]
+        self.assertEqual(sum(r["count"] for k, r in routes.items() if k.startswith("GET /t")), 800)
+        self.assertIsInstance(self.serve.HEALTH_LOCK, type(threading.Lock()))
 
     def test_api_machine_usage(self):
         usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
@@ -1399,6 +1491,7 @@ class ServeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
+            self.assertEqual(sorted(out.pop("server")), ["disconnects", "routes", "slow", "worst"])
             self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
                                             "five_hour_resets_at": now + 7200, "allowance": 3,
                                             "fable": "paused"})  # 7 % left: rung 1
@@ -1784,6 +1877,10 @@ class ServeTest(unittest.TestCase):
         ttl.start()
         self.addCleanup(ttl.stop)
         self.serve.MACHINE_CACHE.clear()
+        health = mock.patch.object(self.serve, "server_health", return_value={"routes": {}, "disconnects": 0, "slow": False,
+                                                                                "worst": None})  # live counts change every GET
+        health.start()
+        self.addCleanup(health.stop)
         job = self.serve.board.cmd_new(self.root, "Etag routed")
         self.addCleanup(self.edit_job, job, stage="aborted")
         log = self.root / "jobs" / job / "routing.log"

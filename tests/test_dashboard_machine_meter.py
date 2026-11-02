@@ -110,6 +110,38 @@ class MachineMeter(unittest.TestCase):
         self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU load 145% of 8 cores · busy — · limit 150%" '
                          'title="CPU load 145% of 8 cores · busy — · limit 150%">145%</span> CPU · <span class="ok">disk 100 GB</span>')
 
+    def test_machine_meter_server_slow(self):
+        text = DASHBOARD.read_text()
+        meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
+        self.assertIn("p95 over the last 5 minutes is 1000 ms or more", meter)
+        self.assertIn("p95", meter)
+        self.assertIn("1000 ms", meter)
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
+        slow_route = {"GET /p/*/board.json": {"p95_ms": 2400, "count": 9}, "GET /api/machine": {"p95_ms": 40, "count": 9}}
+        cases = [{"routes": slow_route, "disconnects": 0, "slow": True, "worst": "GET /p/*/board.json"},
+                 {"routes": {"GET /a": {"p95_ms": 30, "count": 2}}, "disconnects": 3, "slow": True, "worst": "GET /a"},
+                 {"routes": {"GET /<b>": {"p95_ms": 1500, "count": 6}}, "disconnects": 1, "slow": True, "worst": "GET /<b>"},
+                 {"routes": slow_route, "disconnects": 0, "slow": False, "worst": "GET /p/*/board.json"},
+                 None]
+        script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
+                  f"{fn_body(text, 'renderMachine')}\n"
+                  f"const s = {json.dumps(S)};\n"
+                  "globalThis.el = {hidden: false, innerHTML: ''};\n"
+                  f"console.log(JSON.stringify({json.dumps(cases)}.map(sv => {{\n"
+                  "  const m = {...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null};\n"
+                  "  if (sv) m.server = sv;\n"
+                  "  renderMachine(m); return el.innerHTML; })));")
+        out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        base = ('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · '
+                + CPU_NONE + ' · <span class="ok">disk 100 GB</span>')
+        self.assertEqual(out, [base + ' · <span class="danger">server slow: GET /p/*/board.json p95 2400 ms</span>',
+                               base + ' · <span class="danger">server slow: 3 dropped</span>',
+                               base + ' · <span class="danger">server slow: GET /&lt;b&gt; p95 1500 ms · 1 dropped</span>',
+                               base, base])
+
     def test_machine_meter_fable_text(self):
         node = shutil.which("node")
         if not node:
