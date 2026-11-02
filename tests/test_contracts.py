@@ -406,8 +406,11 @@ class ContractTest(unittest.TestCase):
         step = self.section(text, "**Prod check**", "**Mark done, only now**")
         for phrase in ("stage=deploying", "deployments?sha=", "## Prod runs", "prod.md", "--title PROD_CHECK_FAILED",
                        "Try again=resume $ID", "prod run command not allowed", "package.json", "no deploy, no prod runs",
-                       "https://"):
+                       "https://", "whether or not a Deploy URL is set", "nothing pending",
+                       "prod dry run still reports pending work", "prod run changes the schema", "db:push",
+                       "migrate", "prisma migrate", "prisma db push"):
             self.assertIn(phrase, step, phrase)
+        self.assertNotIn("Without a Deploy URL, the check is the last", step)
         self.assertLess(text.index("**Restart.**"), text.index("**Prod check**"))
         self.assertLess(text.index("**Prod check**"), text.index("**Mark done, only now**"))
         self.assertIn("- Deploy: <", self.lane("setup"))
