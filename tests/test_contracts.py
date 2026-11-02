@@ -1091,6 +1091,23 @@ class ContractTest(unittest.TestCase):
         self.assertIn("**Check gate** step 3 format", check)
         self.assertNotIn("step 4 above", check)
 
+    def test_new_job_parks_claude_dir_edits_when_headless(self):
+        step3 = self.section(skill_text(), "3. **Spec:**", "4. **Worktree:**")
+        for phrase in ("B claude-paths $ID", "--a \"Run it in a Terminal window=lilguy $ID\"", "--title BUILDER_BLOCKED",
+                       "Claude Code refuses those edits in a session that runs on its own"):
+            self.assertIn(phrase, step3, phrase)
+        self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
+
+    def test_lilguy_runs_existing_job_in_terminal(self):
+        lilguy = self.lane("lilguy")
+        for phrase in ("/trevskills-scrum lilguy <id>", "B set --unpause <id> stage=build reason=", "spec.md"):
+            self.assertIn(phrase, lilguy, phrase)
+        self.assertNotIn("this lane ignores it", lilguy)
+        build = self.section(lilguy, "2. **Build.**", "3. **Check.**")
+        self.assertIn("acceptance criteria", build)
+        commands = self.lane("commands")
+        self.assertIn("/trevskills-scrum lilguy <id>", commands)
+
     def test_new_job_routes_tiny_jobs_to_lilguy(self):
         text = skill_text()
         step3 = self.section(text, "3. **Spec:**", "4. **Worktree:**")
@@ -3027,6 +3044,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never loosen the check", "Look for duplication first", "Stay inside the spec",
                        "Write only `JOB_DIR/unblock-N.md`"):
             self.assertIn(phrase, text, phrase)
+
+    def test_unblocker_offers_terminal_for_claude_dir_denial(self):
+        text = (ROOT / "agents" / "scrum-unblocker.md").read_text()
+        rule = next(l for l in text.splitlines() if "refused an edit under `.claude/`" in l)
+        for phrase in ("`ESCALATE`", "Run it in a Terminal window where you can approve the edit=lilguy <id>", "allow rule"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertIn("`resume <id>`, `lilguy <id>` or `shell: <cmd>`", text)
 
     def test_skill_points_to_unblock_lane(self):
         text = skill_text()
