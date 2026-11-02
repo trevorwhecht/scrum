@@ -1,6 +1,6 @@
 # Digest
 
-Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never pushes, merges or opens a PR. It never edits an agent, skill, rule or memory file itself. It never asks Trevor: step 4 applies, queues or skips every proposal, then trims the digested job folders.
+Learns from finished jobs. It runs from the main checkout (Setup applies, but not the Prerequisites: it needs no remote and no `gh`), and it never opens a PR or merges a branch; its only push is step 4's applied repo edits to origin's default branch. It never edits an agent, skill, rule or memory file itself. It never asks Trevor: step 4 applies, queues or skips every proposal, then trims the digested job folders.
 
 Each registered project's questions.log holds stop lines: kind `ask`, `stall`, `machine`, `refused` or `bigboy`, each with `date`, `project`, `job`, `kind` and `reason`. A digest is also due once questions.log grows 15 lines since the last digest, so `B digest-start` can claim zero jobs. The reader writes a `## Stops` section from those lines, and a `backlog` proposal is queued by `--digest-auto` and reported under `applied`.
 

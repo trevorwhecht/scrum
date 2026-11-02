@@ -39,7 +39,7 @@ The session running this skill **is the orchestrator**. It spawns every agent, m
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job** and the retry sync in **approve**
 - never `git pull` except the one guarded fast-forward (`--ff-only`) of the main checkout in **Merge** step 7 (Clean up), which runs after every merge; never stash, merge, reset or switch branches in the main checkout
-- never push `main`/`master`
+- never push `main`/`master`, except **Digest** (`serve.py --digest-auto`), which pushes its applied repo edits to origin's default branch under a lilguy board job and fast-forwards the main checkout
 - never `--auto` or `--admin`
 - when `scrum/project.md` sets `Base branch:`, never open a PR into, merge into, or push the remote default branch; every job targets that base branch instead. Promoting it to `main` is Trevor's own merge commit, never squash, and no scrum command does it
 - never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from the **Migrate** step (run by **Merge**'s schema guard). Trevor chose this: schema changes migrate and merge unattended once the pipeline passes. Sub-agents never migrate
