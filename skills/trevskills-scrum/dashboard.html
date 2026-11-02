@@ -360,6 +360,12 @@ const getJson = (url, fallback, missing = fallback) => timed(url, {cache: "no-st
     : r.ok ? r.json().then(v => { const tag = r.headers?.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return (lastGood[url] = v); })
     : r.status === 404 ? (delete lastGood[url], delete etags[url], missing) : Promise.reject())
   .catch(() => { missed++; return url in lastGood ? lastGood[url] : fallback; });
+// Text twin of getJson for routing.log: prev is the stored text (undefined when none). Any failure forgets the ETag, so
+// the next call sends no If-None-Match and a 304 can never pin the blank "".
+const getText = (url, prev) => timed(url, {cache: "no-store", headers: etags[url] && prev !== undefined ? {"If-None-Match": etags[url]} : {}})
+  .then(r => r.status === 304 && prev !== undefined ? prev
+    : r.ok ? r.text().then(t => { const tag = r.headers?.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return t; }) : Promise.reject())
+  .catch(() => (delete etags[url], ""));
 // One run at a time: a call while the last is still in flight shares it, so slow polls never stack up behind
 // Chrome's 6 connections per host.
 const single = fn => { let p = null; return () => p || (p = fn().finally(() => { p = null; })); };
@@ -758,10 +764,8 @@ async function poll() {
     const final = j => ["done", "aborted"].includes(j.stage);
     await Promise.all(all.filter(j => j.routed && !(final(j) && routesFinal.has(j.key))).map(j => {
       const url = `p/${enc(j.project)}/jobs/${enc(j.id)}/routing.log`;
-      return timed(url, {cache: "no-store", headers: etags[url] && j.key in routes ? {"If-None-Match": etags[url]} : {}})
-        .then(r => r.status === 304 && j.key in routes ? routes[j.key]
-          : r.ok ? r.text().then(t => { const tag = r.headers.get("ETag"); if (tag) etags[url] = tag; else delete etags[url]; return t; }) : "")
-        .catch(() => "").then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); });
+      return getText(url, routes[j.key])
+        .then(t => { routes[j.key] = t; if (final(j)) routesFinal.add(j.key); });
     }));
     auditRunsChanged();
     const nextBacklogs = Object.fromEntries(ps.map((p, i) => [p, items[i]]));
