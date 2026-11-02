@@ -36,6 +36,7 @@ The first line is `VERDICT: CHANGES` whenever any failure's verdict is `real bug
 
 **Rules:**
 - Never weaken or delete an assertion to make a spec pass.
+- A `flake` in a spec this round runs is healed in this round when one wait on the element the step needs (a visible listbox, option or field before the click) fixes it: commit it like a stale test and re-run it twice; never a fixed sleep or a higher timeout.
 - When the E2E command fails because another `next dev` already holds WORKTREE's dev lock, wait for that process to exit (check every 30 s, up to 10 minutes) and run it again; never count that failure as a finding.
 - For a failing spec the diff does not touch, first grep `JOB_DIR/../../backlog.md` for the spec's file name without its `.spec.ts` or `.ts` suffix (e.g. `auth.setup`, `public-pages`) and for `cold dev`; when an open `- [ ]` line names it, cite that line as pre-existing under Notes and never re-run it on BASE to prove it.
 - Never print, log or write the Jev key.
