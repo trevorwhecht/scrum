@@ -104,6 +104,27 @@ class SmallFixesTest(unittest.TestCase):
         skipped = (self.root / "triage" / "001" / "report.md").read_text().split("## Skipped\n", 1)[1]
         self.assertEqual(skipped, '- merge "Alpha" + "Beta" — merged text is over 2000 characters\n')
 
+    def test_require_scrum_dir_refuses_repo_root(self):
+        for kind in ("dir", "file"):
+            repo = Path(self.tmp.name) / kind
+            repo.mkdir()
+            (repo / ".git").mkdir() if kind == "dir" else (repo / ".git").write_text("gitdir: x")
+            with self.assertRaises(SystemExit) as cm:
+                board.require_scrum_dir(repo)
+            self.assertEqual(str(cm.exception), f"--dir must be the project's scrum/ folder, not the repo root: {repo}")
+
+    def test_require_scrum_dir_accepts_scrum_folder(self):
+        for d in (self.root, Path(self.tmp.name) / "new" / "scrum"):
+            self.assertEqual(board.require_scrum_dir(d), d)
+
+    def test_main_refuses_repo_root_writes_nothing(self):
+        repo = Path(self.tmp.name) / "repo"
+        (repo / ".git").mkdir(parents=True)
+        for argv in (["spawn", "001", "build"], ["next", "1"]):
+            with self.assertRaises(SystemExit):
+                board.main(["--dir", str(repo)] + argv)
+        self.assertEqual(sorted(p.name for p in repo.iterdir()), [".git"])
+
 
 if __name__ == "__main__":
     unittest.main()

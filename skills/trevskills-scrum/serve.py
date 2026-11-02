@@ -3813,6 +3813,8 @@ def main():
     p.add_argument("--dir", type=Path, default=Path("scrum"),
                    help="the project's scrum/ folder, for --estimate, --digest-auto and --digest-skill-check")
     a = p.parse_args()
+    if a.digest_skill_check is not None or a.digest_auto is not None or a.estimate is not None:
+        board.require_scrum_dir(a.dir)
     if a.digest_skill_check is not None:
         res = digest_skill_check(a.dir.resolve(), *a.digest_skill_check)
         print(json.dumps(res))
