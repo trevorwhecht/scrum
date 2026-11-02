@@ -839,6 +839,70 @@ class ServeTest(unittest.TestCase):
             self.assertTrue(self.serve.play_queue_tick("repo", self.root, mine()))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
         self.assertNotIn("play_queued", self.stage_of(kid))
+        self.assertEqual(self.refused_lines(kid), [])
+
+    def refused_lines(self, job_id):
+        """questions.log's `refused` stops for this job."""
+        log = self.root / "questions.log"
+        return [l for l in map(json.loads, log.read_text().splitlines())
+                if l.get("job") == job_id and l.get("kind") == "refused"] if log.exists() else []
+
+    def sibling_pair(self, title, **kid_fields):
+        """A Run-all parent with a kid and an in-progress sibling (stage build) sharing src/shared.py. Returns
+        (parent, kid, sib, mine) where mine() reads those three jobs from board.json."""
+        b = self.serve.board
+        parent, kid, sib = (b.cmd_new(self.root, t) for t in (f"{title} parent", f"{title} kid", f"{title} sib"))
+        self.edit_job(parent, lane="runall", stage="running", children=[kid, sib])
+        self.edit_job(kid, parent=parent, parallel=True, **kid_fields)
+        self.edit_job(sib, parent=parent, parallel=True, stage="build")
+        for k, extra in ((kid, "src/kid.py"), (sib, "src/sib.py")):
+            (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/shared.py`: why\n- `{extra}`: why\n")
+        mine = lambda: [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in (parent, kid, sib)]
+        return parent, kid, sib, mine
+
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))
+    def test_sibling_blocked_answer_queues_without_refused_stop(self):
+        opts = [{"key": "a", "label": "Resume", "command": "resume 1"}, {"key": "b", "label": "Abort", "command": "abort 1"}]
+        _, kid, sib, mine = self.sibling_pair("Answer", stage="needs-human", question="Which way?", options=opts,
+                                              reason="blocked: pick one. Fix: click an option.")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{kid}/answer", {"key": "a"})
+            self.assertEqual((code, out), (202, {"id": kid, "action": "answer", "command": "resume", "queued": True,
+                                                 "message": "queued, starts next"}))
+            self.assertIn("play_queued", self.stage_of(kid))
+            self.assertFalse(self.serve.play_queue_tick("repo", self.root, mine()))
+        spawn.assert_not_called()
+        self.assertEqual(self.refused_lines(kid), [])
+        self.edit_job(sib, stage="done")
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve.board, "machine_ok", return_value=None):
+            self.assertTrue(self.serve.play_queue_tick("repo", self.root, mine()))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+        self.assertNotIn("play_queued", self.stage_of(kid))
+
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))
+    def test_limit_held_sibling_blocked_resume_queues(self):
+        for done_first in (None, "running", "stage-done"):
+            with self.subTest(done_first=done_first):
+                _, kid, sib, mine = self.sibling_pair("Held", stage="build", reason=None, limitResetAt=1_800_000_000)
+                with mock.patch.object(self.serve, "spawn") as spawn:
+                    code, out = self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {"manual": True})
+                    self.assertEqual((code, out), (202, {"id": kid, "action": "resume", "queued": True,
+                                                         "message": "queued, starts next"}))
+                    self.assertIn("play_queued", self.stage_of(kid))
+                    self.assertFalse(self.serve.play_queue_tick("repo", self.root, mine()))  # the sibling still blocks
+                    self.assertIn("play_queued", self.stage_of(kid))  # kept, though a held job is not resumable
+                spawn.assert_not_called()
+                self.assertEqual(self.refused_lines(kid), [])
+                self.edit_job(sib, stage="done")
+                if done_first == "stage-done":
+                    self.edit_job(kid, stage="done")
+                with mock.patch.object(self.serve, "spawn") as spawn, \
+                        mock.patch.object(self.serve.board, "machine_ok", return_value=None), \
+                        mock.patch.object(self.serve, "running", side_effect=lambda p, j: done_first == "running" and j == kid):
+                    self.assertEqual(self.serve.play_queue_tick("repo", self.root, mine()), done_first is None)
+                self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                                 [(kid, "resume", f"/trevskills-scrum resume {kid}")] if done_first is None else [])
+                self.assertNotIn("play_queued", self.stage_of(kid))
 
     def test_dashboard_has_bigboy_lane_option(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
