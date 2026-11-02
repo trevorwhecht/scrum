@@ -7781,6 +7781,72 @@ class DropMallocLoggingTest(unittest.TestCase):
         self.assertLess(src.index("drop_malloc_logging()"), src.index("add_argument"))
 
 
+class RotateServeLogTest(unittest.TestCase):
+    SRV = str(Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum")
+
+    def run_child(self, log, code, stdout=True):
+        env = {**os.environ, "SCRUM_SERVE_LOG": str(log)}
+        prog = f"import sys; sys.path.insert(0, {self.SRV!r}); import serve; {code}"
+        if stdout:
+            with open(log, "ab") as f:
+                return subprocess.run([sys.executable, "-c", prog], stdout=f, stderr=f, env=env, check=True)
+        return subprocess.run([sys.executable, "-c", prog], capture_output=True, env=env, check=True)
+
+    def test_rotate_serve_log_rotates(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "serve.log"
+            log.write_text("old\n")
+            self.run_child(log, "print('out', flush=True); serve.rotate_serve_log(); "
+                                "print('new-out', flush=True); print('new-err', file=sys.stderr, flush=True)")
+            self.assertEqual((Path(d) / "serve.log.1").read_text(), "old\nout\n")
+            self.assertEqual(log.read_text(), "new-out\nnew-err\n")
+
+    def test_rotate_serve_log_keeps_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "serve.log"
+            (Path(d) / "serve.log.1").write_text("ancient\n")
+            log.write_text("old\n")
+            self.run_child(log, "serve.rotate_serve_log()")
+            self.assertEqual((Path(d) / "serve.log.1").read_text(), "old\n")
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["serve.log", "serve.log.1"])
+
+    def test_rotate_serve_log_noop_pipe_and_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "serve.log"
+            log.write_text("keep\n")
+            self.run_child(log, "serve.rotate_serve_log()", stdout=False)  # pipe
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["serve.log"])
+            other = Path(d) / "other.log"
+            other.write_text("")
+            env = {**os.environ, "SCRUM_SERVE_LOG": str(log)}
+            with open(other, "ab") as f:  # regular file, different inode
+                subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {self.SRV!r}); import serve; serve.rotate_serve_log()"],
+                               stdout=f, env=env, check=True)
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["other.log", "serve.log"])
+            log.unlink()  # log missing
+            with open(other, "ab") as f:
+                subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {self.SRV!r}); import serve; serve.rotate_serve_log()"],
+                               stdout=f, env=env, check=True)
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["other.log"])
+
+    def test_rotate_serve_log_called_early(self):
+        import serve
+        src = inspect.getsource(serve.main)
+        self.assertLess(src.index("drop_malloc_logging()"), src.index("rotate_serve_log()"))
+        self.assertLess(src.index("rotate_serve_log()"), src.index("add_argument"))
+
+    def test_rotate_serve_log_oserror_ignored(self):
+        import serve
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "serve.log"
+            log.write_text("x")
+            with mock.patch.dict(os.environ, {"SCRUM_SERVE_LOG": str(log)}), \
+                    mock.patch.object(serve.os, "fstat", return_value=os.stat(log)), \
+                    mock.patch.object(serve.os, "replace", side_effect=OSError("boom")):
+                serve.rotate_serve_log()
+            self.assertEqual(log.read_text(), "x")
+
+
 class CheckoutAlertTest(unittest.TestCase):
     """board.json's checkoutAlert: the live checkout has commits not on origin/<branch>, else the newest done job is
     `merged, not live: fast-forward failed`; None otherwise."""
