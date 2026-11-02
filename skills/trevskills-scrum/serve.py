@@ -1449,7 +1449,8 @@ def record_request(key, ms, disconnected=False):
 
 def server_health():
     """GET /api/machine "server": nearest-rank p95 and count per route over HEALTH_WINDOW, disconnects in it, the worst
-    route by p95, and slow when that route has p95 >= SLOW_P95_MS over 5+ samples or any client dropped a connection."""
+    route by p95 among routes with 5+ samples (all routes when none has), and slow when that route has p95 >= SLOW_P95_MS
+    or any client dropped a connection."""
     with HEALTH_LOCK:
         _prune_health(time.monotonic())
         routes = {}
@@ -1457,8 +1458,9 @@ def server_health():
             ms = sorted(s[1] for s in samples)
             routes[key] = {"p95_ms": round(ms[math.ceil(0.95 * len(ms)) - 1]), "count": len(ms)}
         disconnects = len(HEALTH["disconnects"])
-    worst = max(routes, key=lambda k: routes[k]["p95_ms"], default=None)
-    slow = bool(worst and routes[worst]["p95_ms"] >= SLOW_P95_MS and routes[worst]["count"] >= 5) or disconnects >= 1
+    eligible = [k for k in routes if routes[k]["count"] >= 5]  # a 1-sample slow route must not outrank sustained slowness
+    worst = max(eligible or routes, key=lambda k: routes[k]["p95_ms"], default=None)
+    slow = bool(eligible and routes[worst]["p95_ms"] >= SLOW_P95_MS) or disconnects >= 1
     return {"routes": routes, "disconnects": disconnects, "slow": slow, "worst": worst}
 
 
