@@ -49,6 +49,13 @@ class DashboardMobile390Css(unittest.TestCase):
         self.assertIn("min-height:44px", decls(phone, "#colPick"))
         self.assertIn("display:none", decls(outside, "#colPick"))
 
+    def test_header_desktop_unchanged(self):
+        outside, phone = split(css())
+        base = decls(outside, "header")
+        self.assertIn("display:flex;align-items:baseline;gap:12px;padding:16px", base)
+        self.assertNotIn("padding:6px", base)
+        self.assertIn("padding:6px12px", decls("".join(phone), "header"))
+
     def test_backlog_row_buttons_44px(self):
         row = decls(split(css())[0], "#blList .btn")
         self.assertIn("min-height:44px", row)
