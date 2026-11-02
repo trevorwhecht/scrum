@@ -7526,6 +7526,12 @@ class ProdOkTest(unittest.TestCase):
     def write(self, *records):
         self.prod.write_text("## Runs\n" + "".join(records))
 
+    def test_error_line_past_tail_fails_record(self):
+        tail = "".join(f"    row {i}\n" for i in range(20))
+        self.write("- run: npm run backfill:x exit 0\n" + tail + "    error found in output: Error: boom\n",
+                   "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n")
+        self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
+
     def test_prod_needs_dev_dry_and_apply(self):
         dry = "- run: npm run backfill:x exit 0\n    would update 3 rows\n"
         apply = "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n"
