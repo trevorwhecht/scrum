@@ -315,7 +315,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div id="aiBody"><nav id="aiCats" aria-label="Categories"></nav><article id="aiList"></article></div>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "cloud", "stalled", "needs-human", "done"];
+const STAGES = ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud", "stalled", "needs-human", "done"];
 // Aborted jobs are finished too: they sit, dimmed, in the done column rather than a column of their own.
 // A stalled or limit-held job (queued Play included) waits on its retry in the stalled column.
 const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled" : playQueued(job) ? "waiting" : job.stage;
@@ -436,7 +436,7 @@ const roundRow = (r, i) => `<span class="row"><b>R${i + 1}</b>${chip(r.check || 
 function progress(job) {
   const rounds = job.rounds || [], last = rounds[rounds.length - 1] || {};
   const reviewed = REVIEWERS.filter(([k]) => last[k] && last[k] !== "pending").length;
-  const table = {spec: 5, build: 15, check: 30, review: 45 + 30 * reviewed / 4, approve: 80, merging: 90,
+  const table = {spec: 5, build: 15, check: 30, review: 45 + 30 * reviewed / 4, approve: 80, merging: 90, deploying: 95,
                  "needs-human": rounds.length ? 85 : 10, done: 100};
   if (!Object.hasOwn(table, job.stage)) return null;
   let pct = table[job.stage];
@@ -469,7 +469,7 @@ const setupWait = job => job.stage === "waiting" && job.setup === "pending";
 const heldByTrevor = job => !!job.paused;
 // board.py WATCHED and stalled(): stalled and not paused, legacy (needs-human, reason "stalled in <stage>: ") or new
 // (its own WATCHED stage with board `stalled` true); a leftover `stalled` on another stage is ignored.
-const WATCHED = ["spec", "build", "check", "review", "approve", "merging"];
+const WATCHED = ["spec", "build", "check", "review", "approve", "merging", "deploying"];
 const isStalled = job => !job.paused && (job.stalled ? WATCHED.includes(job.stage) : job.stage === "needs-human" && (job.reason || "").startsWith("stalled in "));
 // serve.py limit_held(): held in its stage until the usage limit resets.
 const limitHeld = job => !!job.limitResetAt && WATCHED.includes(job.stage) && !job.paused;
@@ -918,7 +918,7 @@ const abortForm = job => ["done", "aborted"].includes(job.stage) ? "" : `<form d
 // The one More menu: Abort sits behind it so it is never a top-level button.
 const moreMenu = job => { const a = abortForm(job); return a ? `<details class="more" data-key="${esc(job.key)}"><summary>More</summary>${a}</details>` : ""; };
 // Pause stops the job's session and holds it in its stage (board.py PAUSABLE); Play is the resume form below.
-const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "plan", "running"];
+const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "deploying", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
 // When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
@@ -948,7 +948,7 @@ const noPaths = text => text.replace(/\S*\//g, "");
 const STOP_PREFIX = /^(stalled in \w+: )?(Hard stop: [^—]+ — |[a-z][\w ]{0,30}: )/;
 const stopIssue = text => noPaths(String(text || "").replace(STOP_PREFIX, "").split(" Fix: ")[0]).trim() || "No reason recorded.";
 const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check: "Checking", review: "Reviewing", approve: "Approving",
-  merging: "Merging", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
+  merging: "Merging", deploying: "Deploying", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
 // waitingOn(job) helper above; its titles run parallel to ids. A Play the machine guard queued names the reading it waits
 // on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/".

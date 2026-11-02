@@ -132,11 +132,11 @@ FABLE_WARN_5H_PCT = 65  # used % at which Fable is near its limit: fable-ok answ
 FABLE_WARN_7D_PCT = 75
 FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
 FABLE_SWITCH_7D_PCT = 85
-STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "done", "needs-human",
+STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done", "needs-human",
           "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
           "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
-ACTIVE = ("spec", "build", "check", "review", "approve", "merging")  # stages an interactive session can pause in
+ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
@@ -153,6 +153,8 @@ STOP_TITLES = {
     "CHECKS_FAILING": "tests or CI still fail after the allowed fix attempts (debug fixes included)",
     "MERGE_BLOCKED": "GitHub will not take the merge (the PR was closed, the merge or done step was refused, or the "
                      "GitHub CLI is missing or signed out)",
+    "PROD_CHECK_FAILED": "the change merged, but the production deploy, a production data run or the production check "
+                         "failed",
     "DATABASE_CHANGE": "the job changes the database structure, and the migrate needs an OK or it stopped",
     "ROUND_LIMIT": "the approver asked for a second round of fixes, and a job only gets one",
     "BUILDER_BLOCKED": "the builder, debugger or approver could not go on (blocked:, debug: blocked, Hard stop: blocked)",
@@ -3707,7 +3709,7 @@ def cmd_hook(event, tty, pid=None):
 
 
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it stalled in that stage ---
-WATCHED = ("spec", "build", "check", "review", "approve", "merging")
+WATCHED = ("spec", "build", "check", "review", "approve", "merging", "deploying")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
@@ -3717,7 +3719,7 @@ AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
 # existing resume path.
-PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "plan", "running")
+PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "deploying", "plan", "running")
 PAUSED = "paused by Trevor"
 PAUSED_RE = re.compile(rf"^{STALLED}(\w+): {PAUSED}")
 ORPHANED = "requeue: orphaned claim, the session died before writing feature.md"

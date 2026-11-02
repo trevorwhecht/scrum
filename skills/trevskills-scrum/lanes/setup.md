@@ -19,6 +19,7 @@
 - Lint: <command|none>
 - Build: <command|none>
 - Dev command: <command|none>
+- Deploy: <GitHub deployment environment> <production URL>|none
 - Has UI: <yes|no>
 - UI globs: <space-separated globs|none>
 - Conventions to read: <absolute paths of every CLAUDE.md / AGENTS.md / rules file found>
@@ -26,6 +27,8 @@
 ```
 
    `- Base branch: <branch>` is an optional line Trevor adds by hand to make every job target `<branch>` instead of `origin/HEAD` (see **New job** step 2). First-run setup never writes it.
+
+   `- Deploy: <environment> <https://url>` names the GitHub deployment environment that deploys the default branch to production (Vercel posts `Production`) and the production URL, for **Merge** step 7 **Prod check**. First-run setup writes `- Deploy: none`; Trevor fills it in by hand. A missing line means `none`: no deploy wait and no production URL check.
 
    `- Orchestrator model: <model>` is an optional, hand-added line: the `--model` for headless orchestrator sessions, meaning only the headless `start` and `resume` sessions (BigBoy children started by **BigBoy lane** step 3, and the dashboard's Run now, reopen, Resume and Play). It defaults to `sonnet`. `inherit` (any case) passes no `--model`, so the session keeps its default model. A blank or malformed value (not `^[A-Za-z0-9._-]+$`) also gives `sonnet`. Interactive sessions, approve, rework, digest, research and agent `model:` pins ignore it. First-run setup never writes it.
 

@@ -295,6 +295,15 @@ class BoardTest(unittest.TestCase):
                 out = board.cmd_ask(self.root, job_id, "Q?", [f"Go={cmd}", f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
                 self.assertEqual(out[0]["command"], cmd)
 
+    def test_ask_accepts_prod_check_title(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.main(["--dir", str(self.root), "ask", job_id, "prod check: the deploy failed.",
+                    "--a", f"Try again=resume {job_id}", "--b", f"Stop tracking this job=abort {job_id}",
+                    "--title", "PROD_CHECK_FAILED", "--recommend", "a", "the deploy may have been flaky"])
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["question"]), ("needs-human", "prod check: the deploy failed."))
+        self.assertEqual(job["stopTitle"], "PROD_CHECK_FAILED")
+
     def test_ask_splits_on_first_equals(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
@@ -3262,6 +3271,20 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [merging])
         self.assertEqual((self.get(merging)["stage"], self.get(merging)["stalled"]), ("merging", True))
         self.assertEqual(self.get(merging)["reason"], "stalled: no board update for 30 min and no live session")
+
+    def test_deploying_stage_is_set_and_watched(self):
+        """Merge step 7 Prod check waits on the production deploy in `deploying`; a session that dies there is
+        flagged like a dead merge session."""
+        for name in ("STAGES", "ACTIVE", "WATCHED", "PAUSABLE"):
+            stages = list(getattr(board, name))
+            self.assertEqual(stages[stages.index("merging") + 1], "deploying", name)
+        moved = self.aged("Moved", 1, stage="merging")
+        board.cmd_set(self.root, moved, ["stage=deploying"])
+        self.assertEqual(self.get(moved)["stage"], "deploying")
+        deploying = self.aged("Deploying", 31, stage="deploying")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [deploying])
+        self.assertEqual((self.get(deploying)["stage"], self.get(deploying)["stalled"]), ("deploying", True))
+        self.assertEqual(self.get(deploying)["reason"], "stalled: no board update for 30 min and no live session")
 
     def test_limit_hold_cleared_on_stage_change_and_pause(self):
         def held(title):

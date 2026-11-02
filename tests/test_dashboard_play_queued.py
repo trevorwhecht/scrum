@@ -127,7 +127,7 @@ class PlayQueued(unittest.TestCase):
             self.assertEqual(column_of(html, f"p/30{i}-x"), col)
         sections = re.findall(r'<section class="([^"]*)" data-col="([^"]+)">', html)
         self.assertEqual([c for _, c in sections],
-                         ["spec", "build", "check", "review", "approve", "merging", "cloud", "stalled", "needs-human", "done", "waiting"])
+                         ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud", "stalled", "needs-human", "done", "waiting"])
         self.assertEqual(dict((c, k) for k, c in sections)["stalled"], "col")  # no human class
         self.assertIn('data-col="stalled"><h2><span>stalled</span> <span>· 3</span></h2>', html)
 

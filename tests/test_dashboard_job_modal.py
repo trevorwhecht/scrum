@@ -91,7 +91,7 @@ class JobModal(unittest.TestCase):
 
     def test_pause_and_play_buttons_render(self):
         pause = '<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>'
-        for stage in ("spec", "build", "check", "review", "approve", "merging", "plan", "running"):
+        for stage in ("spec", "build", "check", "review", "approve", "merging", "deploying", "plan", "running"):
             self.assertEqual(run(f'pauseForm({{stage: "{stage}"}})'), pause, stage)
         for stage in ("waiting", "needs-human", "done", "aborted"):
             self.assertEqual(run(f'pauseForm({{stage: "{stage}"}})'), "", stage)
