@@ -364,14 +364,15 @@ class ContractTest(unittest.TestCase):
 
     def test_nextjs_ui_rules_in_agents(self):
         once = ("**Next.js UI rules.**", "trevskills-nextjs-ui/SKILL.md",
-                "lists `next` under `dependencies` or `devDependencies`", "never the whole file")
+                "lists `next` under `dependencies` or `devDependencies`", "never the whole skill")
         for name in ("scrum-spec-writer", "scrum-builder", "scrum-review-ui", "scrum-review-ux"):
             text = (ROOT / "agents" / f"{name}.md").read_text()
             for phrase in once:
                 self.assertEqual(text.count(phrase), 1, f"{name}: {phrase}")
             para = next(l for l in text.splitlines() if "**Next.js UI rules.**" in l)
-            for phrase in once + ("grep -n '^#' $HOME/.claude/skills/trevskills-nextjs-ui/SKILL.md", "`### Tables`",
-                                  "where a section disagrees with `ui-behaviour.md`, `ui-behaviour.md` wins",
+            for phrase in once + ("grep -n '^#' $HOME/.claude/skills/trevskills-nextjs-ui/SKILL.md", "read the `## Index` of",
+                                  "`references/*.md` file(s) its Index names", "`references/tables.md`",
+                                  "has no `## Index`", "where a section disagrees with `ui-behaviour.md`, `ui-behaviour.md` wins",
                                   "skip this step when the skill file or package.json is missing",
                                   "does not list `next`", "no blocked status", "`dashboard.html`"):
                 self.assertIn(phrase, para, f"{name}: {phrase}")
