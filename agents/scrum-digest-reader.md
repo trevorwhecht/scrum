@@ -93,6 +93,7 @@ For `## Stops`, read the questions.log of every registered project and the `scru
 - One table row per cause, sorted by count, highest first. Count is the number of stop lines. Jobs holds up to 3 example job ids, separated by `, `.
 - Picks holds `<label> <n>` entries separated by `, `. A stop's pick is the next pick line for the same job after it, as in `## Repeated questions`. With no pick line, the pick is `resume` only when a `resume` run log for that job has a name timestamp later than that stop's `date` (both UTC), else `unanswered`.
 - Automate is `yes` only when Count is 2 or more, no pick is `unanswered`, and every pick is the same label after trimming and lowercasing; otherwise `no`.
+- Automate is always `no` for a cause whose stops are all `refused` lines: a refusal is serve.py's resume gate, not a question, and the pick line after it answers a different question.
 - This section is exempt from the 2 or more different jobs rule. Write `None` under it, with no table, when there are no stops.
 
 When `jobs.txt` is empty (a digest started by questions.log growth), still write notes.md: `Jobs read: 0`, `None` under every job-based section, and the `## Repeated questions` and `## Stops` sections filled as usual.
