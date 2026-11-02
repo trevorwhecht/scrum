@@ -2926,17 +2926,27 @@ def read_proposals(path):
     return data, raw if isinstance(raw, list) else []
 
 
-def digests(project, root, brief=False):
-    """Every digest with its valid proposals; brief leaves out each proposal's old and new (the board poll needs neither)."""
-    d, out = root / "digests", []
+def digest_entries(d, brief):
+    """Every digest directory under d, newest first, with its valid proposals; brief leaves out each proposal's old and new."""
+    out = []
     for p in sorted((x for x in d.iterdir() if x.is_dir() and board.DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
         jobs = (p / "jobs.txt").read_text().split() if (p / "jobs.txt").is_file() else []
         error = (p / "error.md").read_text(errors="replace").strip().splitlines() if (p / "error.md").is_file() else []
         out.append({"id": p.name, "jobs": jobs, "error": error[0] if error else None, "trimmed": (p / "trimmed").exists(),
                     "proposals": [{k: v[k] for k in v if not brief or k not in ("old", "new")}
                                   for x in read_proposals(p / "proposals.json")[1] if (v := valid_proposal(x))]})
+    return out
+
+
+def digests(project, root, brief=False):
+    """Every digest with its valid proposals; brief leaves out each proposal's old and new and the cross-project weekly list
+    (the board poll needs neither)."""
     due = board.cmd_digest_due(root)
-    return {"running": running(project, "digest"), "undigested": due["undigested"], "due": due["due"], "digests": out}
+    out = {"running": running(project, "digest"), "undigested": due["undigested"], "due": due["due"],
+           "digests": digest_entries(root / "digests", brief)}
+    if not brief:
+        out["weekly"] = digest_entries(board.weekly_dir(), brief)
+    return out
 
 
 def digest_now(project, root):

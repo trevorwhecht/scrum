@@ -4591,7 +4591,7 @@ class DigestTest(unittest.TestCase):
         return f
 
     def test_digests_list_skips_malformed_proposals(self):
-        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "due": False, "digests": []}))
+        self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "due": False, "digests": [], "weekly": []}))
         a = self.done_job()
         self.done_job("two")
         rule = self.rule()
@@ -4616,6 +4616,37 @@ class DigestTest(unittest.TestCase):
         (self.scrum / "digests" / "003").mkdir()  # the reader hasn't written proposals.json yet
         self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
         self.assertEqual(self.get("/api/p/nope/digests")[0], 404)
+
+    def weekly_digest(self, proposals, digest_id="001", jobs=()):
+        d = self.serve.board.weekly_dir() / digest_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        (d / "proposals.json").write_text(proposals if isinstance(proposals, str) else json.dumps({"proposals": proposals}))
+        return d
+
+    def test_digests_list_includes_weekly(self):
+        rule = self.rule()
+        self.weekly_digest([self.prop("p1", rule, status="queued", reason="needs a human")], "001", jobs=["001-a"])
+        self.weekly_digest([], "002")
+        (self.serve.board.weekly_dir() / "notes").mkdir()
+        weekly = self.get("/api/p/reg/digests")[1]["weekly"]
+        self.assertEqual([d["id"] for d in weekly], ["002", "001"])
+        self.assertEqual(weekly[1], {"id": "001", "jobs": ["001-a"], "error": None, "trimmed": False, "proposals": [
+            {"id": "p1", "target": str(rule), "why": "Seen in 001-a and 002-b (p1).", "old": "old line", "new": "new line",
+             "status": "queued", "reason": "needs a human", "kind": "edit"}]})
+
+    def test_weekly_malformed_proposals_skipped(self):
+        rule = self.rule()
+        self.weekly_digest("{not json", "001")
+        self.weekly_digest([{"id": "p1", "target": str(rule), "why": "missing old", "new": "x"}, "nope",
+                            self.prop("p2", rule, old="same", new="same")], "002")
+        weekly = self.get("/api/p/reg/digests")[1]["weekly"]
+        self.assertEqual([(d["id"], d["error"], d["proposals"]) for d in weekly], [("002", None, []), ("001", None, [])])
+
+    def test_digests_brief_omits_weekly(self):
+        self.weekly_digest([self.prop("p1", self.rule())])
+        self.assertNotIn("weekly", self.get("/api/p/reg/digests?brief=1")[1])
+        self.assertEqual(len(self.get("/api/p/reg/digests")[1]["weekly"]), 1)
 
     def test_digest_now_spawns_and_refuses_when_empty_or_running(self):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:

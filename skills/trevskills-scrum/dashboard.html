@@ -1339,13 +1339,13 @@ let digestData = null, digestText = "";
 const dgProject = () => $("dgProject").value;
 const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</span><pre>${esc(old)}</pre></div><div><span class="note">New</span><pre>${esc(now)}</pre></div></div>`;
 // One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
-const propRow = (digestId, p) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
+const propRow = (digestId, p, readOnly = false) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
     <span class="id">${esc(p.id)} <span class="chip ${esc(p.status)}">${esc(p.status)}</span></span>
     ${p.kind === "backlog" ? "" : `<span class="path">${esc(p.target)}</span>`}<span>${esc(p.why)}</span>
     ${p.kind === "backlog" ? `<span>${esc(p.backlog)}</span>` : ""}
     ${["skipped", "queued"].includes(p.status) && p.reason ? `<span class="note">${esc(p.reason)}</span>` : ""}
     ${p.kind === "backlog" ? "" : diffHtml(p.old ?? "", p.new ?? "")}
-    ${p.status === "applied" && p.kind !== "backlog" ? `<div class="acts"><button class="btn" type="button" data-revert data-agent-hint="Puts the old text back through the path that applied it: a repo file gets its own commit after the contract tests, any other file is restored after a backup. It stays applied when the file has changed since.">Revert</button></div>` : ""}
+    ${!readOnly && p.status === "applied" && p.kind !== "backlog" ? `<div class="acts"><button class="btn" type="button" data-revert data-agent-hint="Puts the old text back through the path that applied it: a repo file gets its own commit after the contract tests, any other file is restored after a backup. It stays applied when the file has changed since.">Revert</button></div>` : ""}
     <p class="error" role="alert"></p></div>`;
 
 function renderDigests() {
@@ -1355,9 +1355,11 @@ function renderDigests() {
   $("dgNow").disabled = !d || d.running || !(d.undigested || d.due);
   $("dgNow").textContent = d?.running ? "Digesting…" : "Digest now";
   if (!d) return $("dgList").innerHTML = '<p class="empty">loading…</p>';
-  $("dgList").innerHTML = d.digests.map(g => `<section class="dg"><h3>Digest ${esc(g.id)} · ${g.jobs.length} job${g.jobs.length === 1 ? "" : "s"}</h3>
-      ${g.error ? `<p class="error">${esc(g.error)}</p>` : g.proposals.map(p => propRow(g.id, p)).join("") || '<p class="empty">No proposals</p>'}</section>`).join("")
-    || '<p class="empty">No digests</p>';
+  const section = (g, readOnly) => `<section class="dg"><h3>Digest ${esc(g.id)} · ${g.jobs.length} job${g.jobs.length === 1 ? "" : "s"}</h3>
+      ${g.error ? `<p class="error">${esc(g.error)}</p>` : g.proposals.map(p => propRow(g.id, p, readOnly)).join("") || '<p class="empty">No proposals</p>'}</section>`;
+  const weekly = (d.weekly || []).map(g => section(g, true));  // read-only: no Revert
+  $("dgList").innerHTML = (d.digests.map(g => section(g, false)).join("") || '<p class="empty">No digests</p>')
+    + (weekly.length ? `<h3 class="dg">Weekly digests</h3>${weekly.join("")}` : "");
 }
 
 async function loadDigests() {
