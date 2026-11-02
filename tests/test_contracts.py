@@ -2974,6 +2974,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "delete that folder in WORKTREE and re-run tsc", "A criterion that needs the running app"):
             self.assertIn(phrase, step4, phrase)
         self.assertIn("run PROJECT's install command before the typecheck.", builder)
+        self.assertNotIn("a script, a build", builder)
+        self.assertIn("other than PROJECT's `Build`", builder)
 
     def test_check_gate_runtime_file_rule(self):
         check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
@@ -3010,7 +3012,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("`*.test.tsx`", mapping)
         replay = self.section(body, "## 3. Replay", "## 4. Cover changed UI")
         for phrase in ("Specs run: 0 — none", "appended to it, keeping any env prefix such as `E2E_PORT=...`",
-                       "only when no base is given"):
+                       "only when no base is given", "For any other `E2E:` command, run `npx playwright test <spec files>`"):
             self.assertIn(phrase, replay, phrase)
         agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
         self.assertIn("never the whole suite", agent)
