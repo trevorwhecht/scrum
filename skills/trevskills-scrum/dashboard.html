@@ -92,7 +92,8 @@ body:has(dialog[open]){overflow:hidden}
 .btn.more{width:100%}
 .btn.icon{min-width:32px;padding:6px 8px}
 #filter{margin-left:auto}
-#filter,#laneFilter,#blProject,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
+#colPick{display:none}
+#filter,#laneFilter,#colPick,#blProject,#aiScope,#dgProject{font:inherit;font-size:13px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:32px}
 .lanechip,.badge{display:inline-block;font:600 10px system-ui,sans-serif;padding:0 5px;border-radius:4px;margin-right:6px;white-space:nowrap}
 .lanechip{color:var(--muted);border:1px solid var(--line)}
 .badge{color:var(--changes);border:1px solid var(--changes)}
@@ -227,7 +228,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 @media (max-width:640px){#colour,#agents,#aiSettings,#digest,#backlog,#viewer,#usage,#rank{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#viewer{height:100dvh}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article,#usage article,#rank article,#colour article{padding-inline:12px}
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
-  header>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}#filter{margin-left:0}.col.none{display:none}
+  header>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}#filter{margin-left:0}
+  #colPick{display:block;width:calc(100% - 32px);margin:0 16px 12px;min-height:44px;font-size:16px}.col:not(.pick){display:none}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
@@ -250,6 +252,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="agentsBtn" type="button">Pipelines</button>
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <p class="error" id="checkoutAlert" role="alert" hidden></p>
+<select id="colPick" aria-label="Show stage"></select>
 <main id="board"></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
@@ -358,7 +361,7 @@ const getJson = (url, fallback, missing = fallback) => fetch(url, {cache: "no-st
 const single = fn => { let p = null; return () => p || (p = fn().finally(() => { p = null; })); };
 const SLOW = "Server is slow: showing the last good data.";
 
-let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane");
+let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane"), colPick = store.get("scrum.col");
 // No lane key = standard; a promoted fast job is standard too.
 const laneOf = job => job.lane || "standard";
 const shown = () => jobs.filter(j => (!filter || j.project === filter) && (!laneFilter || (laneFilter === "roadmap" ? !!roadmapSteps[j.key] : laneOf(j) === laneFilter)));
@@ -605,6 +608,17 @@ function render() {
   const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length;
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
   $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  // On a phone only the picked column shows: the stored pick while it is still a column, else needs-human when it holds a
+  // card, else the first column holding one, else the first column. Options rebuild only when a label changes.
+  const pick = cols.includes(colPick) ? colPick : count("needs-human") ? "needs-human" : cols.find(count) || cols[0];
+  const sel = $("colPick"), labels = cols.map(s => `${s} (${count(s)})`);
+  if (sel) {
+    if (sel.dataset.list !== labels.join("\n")) {
+      sel.dataset.list = labels.join("\n");
+      sel.innerHTML = cols.map((s, i) => `<option value="${esc(s)}">${esc(labels[i])}</option>`).join("");
+    }
+    if (sel.value !== pick) sel.value = pick;
+  }
   const moreFocused = !!document.activeElement?.matches?.("#board [data-more]");
   const kidsFocused = document.activeElement?.matches?.("#board [data-kids-more]") && document.activeElement.dataset.kidsMore;
   const rmFocused = document.activeElement?.matches?.("#board [data-roadmap]") && document.activeElement.dataset.roadmap;
@@ -612,8 +626,7 @@ function render() {
     const all = list.filter(j => colOf(j) === stage).sort(newestFirst);
     const inCol = stage === "done" ? all.slice(0, doneShown) : all;
     const more = inCol.length < all.length ? `<button class="btn tall more" type="button" data-more>Load more</button>` : "";
-    // On a phone an empty column hides (.none) while any column holds a card; an all-empty board keeps every column.
-    return `<section class="col${stage === "needs-human" ? " human" : ""}${!count(stage) && cols.some(count) ? " none" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
+    return `<section class="col${stage === "needs-human" ? " human" : ""}${stage === pick ? " pick" : ""}" data-col="${esc(stage)}"><h2><span>${esc(stage)}</span> <span>· ${count(stage)}</span></h2>
       ${rIn(stage).join("") + inCol.map(j => card(j) + kidsMore(j)).join("") + more || '<p class="empty">—</p>'}</section>`;
   }).join("");
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
@@ -772,6 +785,7 @@ $("filter").addEventListener("change", e => { filter = e.target.value; store.set
 $("laneFilter").value = laneFilter;
 if ($("laneFilter").value !== laneFilter) laneFilter = "";  // a stored value that is no longer an option
 $("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; store.set("scrum.lane", laneFilter); render(); });
+$("colPick").addEventListener("change", e => { colPick = e.target.value; store.set("scrum.col", colPick); render(); });
 
 // spec.md's header lines (UI surface, Hard stops, Human setup, Lane) above the first "## " as plain labelled rows:
 // [head HTML, the markdown without those lines]. No header lines: ["", md] unchanged. Unknown values pass through.

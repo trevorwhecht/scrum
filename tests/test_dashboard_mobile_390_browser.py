@@ -47,8 +47,29 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       console.log(JSON.stringify({card, modal, fit}));
       return;
     }
+    if (mode === "picker") {  // the phone stage picker: one visible column, labelled options, a pick that survives reload
+      const state = () => page.evaluate(() => { const p = document.getElementById("colPick"), r = p.getBoundingClientRect();
+        const shown = [...document.querySelectorAll("#board .col")].filter(c => c.getClientRects().length);
+        return {value: p.value, labels: [...p.options].map(o => o.textContent), height: r.height, bottom: r.bottom,
+                boardTop: document.getElementById("board").getBoundingClientRect().top, scrollWidth: document.documentElement.scrollWidth,
+                shown: shown.map(c => c.dataset.col), cards: shown.flatMap(c => [...c.querySelectorAll(".card[data-key]")].map(k => k.dataset.key)),
+                empty: shown.map(c => !!c.querySelector(".empty")), focused: document.activeElement === p};
+      });
+      const first = await state();
+      if (process.env.ONLY_FIRST) { console.log(JSON.stringify({first})); return; }
+      await page.focus("#colPick");
+      await page.selectOption("#colPick", "build");
+      const picked = await state();
+      await page.reload();
+      await page.waitForFunction(() => document.getElementById("colPick").options.length);
+      const reloaded = await state();
+      console.log(JSON.stringify({first, picked, reloaded}));
+      return;
+    }
     if (mode === "kids") {  // a 12-child parent: its card's Load more, empty columns hidden, then the modal's own Load more
       const key = process.env.PARENT, sel = `.card[data-key="${key}"]`;
+      await page.selectOption("#colPick", "running");
+      await page.waitForSelector(sel);
       const state = () => page.evaluate(s => {
         const more = document.querySelector("#board [data-kids-more]");
         return {lines: document.querySelectorAll(`${s} .meta.kid`).length, more: !!more,
@@ -80,7 +101,8 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       const tabs = document.getElementById("tabs"), close = tabs.querySelector(".close"), c = close.getBoundingClientRect();
       return {overflow: tabs.scrollWidth > tabs.clientWidth, paddingRight: getComputedStyle(tabs).paddingRight,
               marginLeft: getComputedStyle(close).marginLeft, position: getComputedStyle(close).position,
-              tabsRight: tabs.getBoundingClientRect().right, build: document.querySelector('[data-col="build"]').getClientRects().length, close: {width: c.width, height: c.height, right: c.right},
+              tabsRight: tabs.getBoundingClientRect().right, build: document.querySelector('[data-col="build"]').getClientRects().length,
+              picker: document.getElementById("colPick").getClientRects().length, close: {width: c.width, height: c.height, right: c.right},
               actions: [...document.querySelectorAll("#actions .btn, #actions summary")].filter(b => b.checkVisibility())
                 .map(b => { const r = b.getBoundingClientRect(); return {text: b.textContent.trim(), height: r.height, width: r.width}; })};
     });
@@ -180,6 +202,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertGreater(float(m["marginLeft"].removesuffix("px")), 0, m)  # margin-left:auto pushes the ✕ right
         self.assertAlmostEqual(m["close"]["right"], m["tabsRight"] - 10, delta=1, msg=m)  # 10 px padding after the ✕
         self.assertGreater(m["build"], 0, m)  # an empty column stays visible above 640 px
+        self.assertEqual(m["picker"], 0, m)  # the stage picker is phone-only
 
     def test_parent_card_load_more_390(self):
         board = json.loads(self.board_path.read_text())
@@ -199,6 +222,32 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         before, after = got["modal"]
         self.assertEqual((before["rows"], before["more"]), (5, True), got)
         self.assertEqual((after["rows"], after["more"], after["open"], after["key"]), (10, True, True, key), got)
+
+    def add_running(self, keep_human=True):
+        board = json.loads(self.board_path.read_text())
+        board["jobs"] = (board["jobs"] if keep_human else []) + [{"id": "030-run", "title": "Running job", "stage": "running", "files": ["feature.md"]}]
+        self.board_path.write_text(json.dumps(board))
+        (self.board_path.parent / "jobs" / "030-run").mkdir()
+        (self.board_path.parent / "jobs" / "030-run" / "feature.md").write_text("# feature\n")
+
+    def test_stage_picker_390(self):
+        self.add_running()
+        got = self.browse("picker")
+        first, picked, reloaded = got["first"], got["picked"], got["reloaded"]
+        self.assertEqual(first["labels"], ["spec (0)", "build (0)", "check (0)", "review (0)", "approve (0)", "merging (0)", "cloud (0)",
+                                           "stalled (0)", "needs-human (1)", "done (0)", "running (1)"], got)
+        self.assertEqual((first["value"], first["shown"], first["cards"]), ("needs-human", ["needs-human"], [f"{PROJECT}/007-human"]), got)
+        self.assertLessEqual(first["bottom"], first["boardTop"], got)  # the picker sits above the board
+        self.assertGreaterEqual(first["height"], 44, got)
+        self.assertLessEqual(first["scrollWidth"], 390, got)
+        self.assertEqual((picked["value"], picked["shown"], picked["empty"], picked["cards"], picked["focused"]),
+                         ("build", ["build"], [True], [], True), got)
+        self.assertEqual((reloaded["value"], reloaded["shown"]), ("build", ["build"]), got)
+
+    def test_stage_picker_falls_back_to_first_busy_column(self):
+        self.add_running(keep_human=False)
+        first = self.browse("picker", ONLY_FIRST="1")["first"]
+        self.assertEqual((first["value"], first["shown"], first["cards"]), ("running", ["running"], [f"{PROJECT}/030-run"]), first)
 
     def test_option_buttons_390px(self):
         board = json.loads(self.board_path.read_text())
