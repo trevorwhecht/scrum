@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
+import argparse, base64, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -3655,8 +3655,25 @@ def drop_malloc_logging():
         os.environ.pop(k, None)
 
 
+def rotate_serve_log():
+    # The launcher appends stdout/stderr to serve.log forever; at startup move it to serve.log.1 (one old file kept).
+    try:
+        log = Path(os.environ.get("SCRUM_SERVE_LOG") or Path.home() / ".claude" / "trevskills-scrum" / "serve.log")
+        fd = os.fstat(1)
+        if not stat.S_ISREG(fd.st_mode) or os.stat(log).st_ino != fd.st_ino:
+            return
+        os.replace(log, str(log) + ".1")
+        new = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        os.dup2(new, 1)
+        os.dup2(new, 2)
+        os.close(new)
+    except OSError:
+        pass
+
+
 def main():
     drop_malloc_logging()
+    rotate_serve_log()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
