@@ -421,7 +421,12 @@ def answer_job(project, root, job, jobs, key, note=None):
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
 SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a hold on a bare clock time is capped here
-STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's one non-limit resume per stage
+STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's non-limit resumes per stage (STALL_RESUMES)
+STALL_RESUMES = {"check": 2}  # resumes allowed per stage (default 1); re-running the check gate costs no builder work
+def stall_spent(key, stage):
+    return sum(f"{key}/{stage}{n}" in STALL_RESUMED for n in ("", "#2")) >= STALL_RESUMES.get(stage, 1)
+def stall_mark(key, stage):
+    STALL_RESUMED.add(f"{key}/{stage}" if f"{key}/{stage}" not in STALL_RESUMED else f"{key}/{stage}#2")
 LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
 NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
@@ -518,15 +523,14 @@ def auto_resume(project, root, jobs):
                 continue
             m = board.stall_stage(job)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
-            once_key = f"{key}/{m or ''}"
             run_child = parent and parent.get("stage") == "running" and not parent.get("paused") \
                 and parent.get("lane") in ("runall", "bigboy")
             if m and (run_child or not job.get("parent")) \
-                    and once_key not in STALL_RESUMED and resume_refusal(project, root, job) is None:
+                    and not stall_spent(key, m) and resume_refusal(project, root, job) is None:
                 busy = True
                 if not take_room():
                     continue
-                STALL_RESUMED.add(once_key)  # a Run-all/BigBoy child or a standalone job gets one non-limit retry per stage
+                stall_mark(key, m)  # a Run-all/BigBoy child or a standalone job gets one non-limit retry per stage
                 resume_job(project, root, job, jobs)
             continue
         busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
@@ -721,7 +725,7 @@ def respawn_exited(project, root):
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(project, root, job):
             continue  # left stalled for auto_resume; no sound, a stall is not a human stop
-        STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
+        stall_mark(key, stage)  # this is the stage's one non-limit resume; auto_resume skips it
         resume_job(project, root, job, jobs)
         with RUNS_LOCK:
             new = RUNS.get(key)
@@ -758,7 +762,7 @@ def respawn_orphans(project, root, p, kids, alive):
         if action == "resume":  # `resume` only accepts a stalled job
             if not flag_stalled(root, kid, ORPHANED):
                 continue
-            STALL_RESUMED.add(f"{key}/{stage}")  # this is the stage's one non-limit resume; auto_resume skips it
+            stall_mark(key, stage)  # this is the stage's one non-limit resume; auto_resume skips it
         ORPHAN_RESPAWN[key] = stage
         spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
         spawned = True

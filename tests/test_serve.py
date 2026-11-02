@@ -5844,8 +5844,9 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), [], "same stage: once only")
         self.jobs[0]["reason"] = "stalled in check: no board update for 30 min and no live session. Fix: click Resume."
         self.assertEqual(self.sweep(), ["solo"], "a new stage earns one more")
+        self.assertEqual(self.sweep(), ["solo"], "check earns a second")
         self.assertEqual(self.sweep(), [])
-        self.assertEqual(self.serve.STALL_RESUMED, {"p/solo/build", "p/solo/check"})
+        self.assertEqual(self.serve.STALL_RESUMED, {"p/solo/build", "p/solo/check", "p/solo/check#2"})
 
     def test_auto_resume_standalone_stall_waits_for_machine(self):
         s = self.serve
@@ -5878,6 +5879,7 @@ class AutoResumeTest(unittest.TestCase):
                 self.assertEqual(self.sweep(), [], "same stage: once only")
                 self.jobs[1]["reason"] = "stalled in check: no board update for 30 min and no live session. Fix: x"
                 self.assertEqual(self.sweep(), ["kid"], "a new stage earns one more")
+                self.assertEqual(self.sweep(), ["kid"], "check earns a second")
                 self.assertEqual(self.sweep(), [])
                 self.assertNotIn("p/kid", self.serve.AUTO_RESUME, "the limit schedule is untouched")
 
