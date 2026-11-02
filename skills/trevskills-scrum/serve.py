@@ -968,6 +968,9 @@ def prune_worktrees(repo: Path, jobs: list[dict]) -> None:
                 shutil.rmtree(wt / name, ignore_errors=True)
 
 
+OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
+
+
 def outcome_line(root, run, code):
     """`Approve refused at 4:21 PM: <first log line>. Nothing changed.` (exit > 0: `failed (exit N)`)."""
     log = root / run["log"]
@@ -975,7 +978,7 @@ def outcome_line(root, run, code):
         text, at = log.read_text(errors="replace"), log.stat().st_mtime  # the log's last write is the run's end
     except OSError:
         text, at = "", time.time()
-    first = next((l for l in text.splitlines() if l.strip()), "")
+    first = next((l for l in text.splitlines() if l.strip() and not l.lstrip("#*- \t").startswith(OUTCOME_SKIP)), "")
     msg = first.lstrip("#*- \t").rstrip().rstrip(".")[:160]
     how = "refused" if code == 0 else f"failed (exit {code})"
     return f"{run['action'].capitalize()} {how} at {datetime.fromtimestamp(at):%-I:%M %p}{': ' + msg if msg else ''}. Nothing changed."
