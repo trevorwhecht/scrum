@@ -1718,6 +1718,25 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.session_ages(), [474, 93784, 10 ** 9])
             self.assertEqual(board.live_sessions(), 3)
 
+    def test_session_ages_ps_timeout_fails_closed(self):
+        """Job 520 (2026-10-25, load 15 on 8 cores): a slow or failing ps never blocks or crashes its callers
+        (machine_ok, ram_room, the serve.py watchdog); unknown counts as a full machine."""
+        real_run = subprocess.run
+        for exc in (subprocess.TimeoutExpired(["ps"], 10), OSError("ps failed")):
+            timeouts = []
+
+            def fake_run(cmd, *a, **kw):
+                if list(cmd[:2]) == ["ps", "-Ao"]:
+                    timeouts.append(kw.get("timeout"))
+                    raise exc
+                return real_run(cmd, *a, **kw)
+            with self.subTest(exc=type(exc).__name__), mock.patch.dict(os.environ, SCRUM_PS=""), \
+                    mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(board.session_ages(), [10 ** 9] * 14)
+                self.assertEqual(timeouts, [10])
+                self.assertEqual(board.live_sessions(), 14)
+                self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "14 sessions running (ceiling 14)")
+
     def test_ram_room_reserves_young_sessions(self):
         """Two projects claiming within a minute both saw healthy free RAM: a session takes a while to grow into it."""
         ps = Path(self.tmp.name) / "ps.txt"

@@ -1,4 +1,4 @@
-import inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import errno, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -7247,6 +7247,14 @@ class AutoContinueTest(unittest.TestCase):
         with mock.patch.object(self.board, "machine_ok", side_effect=lambda path, **kw: next(answers)):
             self.assertEqual(self.tick(), self.started("a"), "b fails the guard: neither b nor c starts")
 
+    def test_auto_continue_holds_under_heavy_load_healthy_ram(self):
+        """Job 520, the 2026-10-25 scenario: load 15 on 8 cores with free RAM healthy holds automatic starts."""
+        root = self.project("a", n=1)
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="60", SCRUM_CPU_LOAD_PCT="187.5"), \
+                mock.patch.object(self.board.os, "cpu_count", return_value=8):
+            self.assertEqual(self.tick(), [])
+            self.assertEqual(self.board.machine_ok(root, claim=True), "CPU load 188% of 8 cores (> 150%)")
+
     def test_auto_continue_disk_refusal_tries_next_project(self):
         self.project("a", n=1); self.project("b", n=2)
         full = self.base / "a" / "scrum"
@@ -7493,6 +7501,54 @@ class MainFocusMigrationTest(unittest.TestCase):
                 mock.patch("sys.stdout", new=io.StringIO()):
             serve.main()
         self.assertEqual(calls, ["migrate", "watchdog", "serve"])
+
+
+class WatchdogResilienceTest(unittest.TestCase):
+    """Job 520: one bad watchdog tick never ends the thread; a second serve.py on a taken port exits with one line."""
+
+    def test_watchdog_loop_survives_a_failing_tick(self):
+        import serve
+        ticks, sleeps = [], []
+
+        def tick():
+            ticks.append(1)
+            if len(ticks) == 1:
+                raise RuntimeError("ps blew up")
+
+        def sleep(_):
+            sleeps.append(1)
+            if len(sleeps) == 2:
+                raise KeyboardInterrupt
+        with mock.patch.object(serve, "watchdog_tick", side_effect=tick), \
+                mock.patch.object(serve, "reload_if_changed"), mock.patch.object(serve.time, "sleep", side_effect=sleep), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err, self.assertRaises(KeyboardInterrupt):
+            serve.watchdog_loop()
+        self.assertEqual(len(ticks), 2)
+        self.assertTrue(err.getvalue().startswith("watchdog: tick: ps blew up"), err.getvalue())
+
+    def run_main(self, exc):
+        """main() with make_server raising exc: (the exception main let out, stderr, the threads it built)."""
+        import serve
+        threads = []
+        with mock.patch.object(sys, "argv", ["serve.py", "--port", "8799"]), \
+                mock.patch.object(serve, "make_server", side_effect=exc), \
+                mock.patch.object(serve, "tailnet_host", return_value=""), \
+                mock.patch.object(serve.threading, "Thread", side_effect=lambda **kw: threads.append(kw) or mock.Mock()), \
+                mock.patch("sys.stdout", new=io.StringIO()), mock.patch("sys.stderr", new=io.StringIO()) as err:
+            with self.assertRaises(BaseException) as cm:
+                serve.main()
+        return cm.exception, err.getvalue(), threads
+
+    def test_main_port_in_use_exits_cleanly(self):
+        out, err, threads = self.run_main(OSError(errno.EADDRINUSE, "Address already in use"))
+        self.assertIsInstance(out, SystemExit)
+        self.assertEqual(out.code, 1)
+        self.assertEqual(err, "serve.py: port 8799 already in use (another serve.py is running)\n")
+        self.assertEqual(threads, [], "the watchdog thread never starts")
+        out, err, threads = self.run_main(OSError(errno.EACCES, "Permission denied"))
+        self.assertNotIsInstance(out, SystemExit)
+        self.assertEqual(out.errno, errno.EACCES, "any other OSError still raises")
+        self.assertEqual(threads, [])
 
 
 class ParkedParentTest(unittest.TestCase):

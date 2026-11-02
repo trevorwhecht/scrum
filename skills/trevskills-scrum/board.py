@@ -2781,10 +2781,17 @@ ETIME_RE = re.compile(r"\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+) (.*)")  # ps etime:
 def session_ages():
     """Age in seconds of every headless `/trevskills-scrum <action>` session (start, resume, approve, run-all, ...) on
     this machine, any project and any launcher (ps sees them all; serve.py's RUNS only knows its own). SCRUM_PS names
-    a file read in place of ps's output; its lines may start with an etime token, and a line without one is old."""
+    a file read in place of ps's output; its lines may start with an etime token, and a line without one is old.
+    A ps that times out or fails counts as a full machine: MAX_SESSIONS old sessions."""
     fake = os.environ.get("SCRUM_PS")
-    out = Path(fake).read_text() if fake else \
-        subprocess.run(["ps", "-Ao", "etime=,command="], capture_output=True, text=True).stdout
+    if fake:
+        out = Path(fake).read_text()
+    else:
+        try:
+            out = subprocess.run(["ps", "-Ao", "etime=,command="], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            # ponytail: unknown counts as full (fails closed, like session_alive_fn); a slow ps is itself heavy load
+            return [10 ** 9] * MAX_SESSIONS
     ages = []
     for line in out.splitlines():
         m = ETIME_RE.match(line)
