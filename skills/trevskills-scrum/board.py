@@ -116,6 +116,9 @@
                                    the spec-writer on lane standard (or unset), of a complex job (header `Complex: yes`
                                    in feature.md, else spec.md) gets Fable only while fable_state is ok; each such call
                                    appends a line to jobs/<id>/fable.log
+  board.py prod-ok <id> '<bullet>'  gate one decision.md `## Prod runs` bullet: print dev or ok, else exit non-zero
+                                   (schema/deploy/fixture scripts always; a :prod run without a passing dev dry run
+                                   and apply recorded in jobs/<id>/prod.md)
   board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
@@ -4195,6 +4198,9 @@ def main(argv=None):
     fo = sub.add_parser("fable-ok")
     fo.add_argument("id")
     fo.add_argument("role")
+    po = sub.add_parser("prod-ok")
+    po.add_argument("id")
+    po.add_argument("bullet")
     pa = sub.add_parser("plan-apply")
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
@@ -4321,6 +4327,8 @@ def main(argv=None):
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
+    elif a.cmd == "prod-ok":
+        print(cmd_prod_ok(a.dir, a.id, a.bullet))
     elif a.cmd == "spawn":
         proc, log = spawn(a.dir, a.id, a.action, a.prompt, model=a.model)
         print(json.dumps({"log": log, "pid": proc.pid}))
@@ -4393,6 +4401,79 @@ def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
             fh.write(f"{datetime.now().isoformat(timespec='seconds')}\t{role}\t{'opus' if model == 'none' else 'fable'}"
                      f"\t5h {pct['5h']}\t7d {pct['7d']}\t{state}\n")
     return model
+
+
+PROD_TOKEN_RE = re.compile(r"[A-Za-z0-9=_.:/-]+")
+PROD_DENY_RE = re.compile(r"(?i)prisma|vercel|migrate|db:push|accept-data-loss|force-reset|\b(e2e|fixtures?|test)\b")
+PROD_RUN_RE = re.compile(r"- run: (.+) exit (-?\d+)")
+
+
+def prod_bullet(bullet: str):
+    """(script, args) of a `npm run <script>[ -- <args>]` bullet, or SystemExit("prod-ok: ...")."""
+    m = re.fullmatch(r"npm run (\S+)(?: -- (\S+(?: \S+)*))?", bullet)
+    args = m[2].split(" ") if m and m[2] else []
+    if not m or m[1].startswith("-") or not all(PROD_TOKEN_RE.fullmatch(t) for t in [m[1], *args]):
+        raise SystemExit(f"prod-ok: not an npm run bullet: {bullet!r}")
+    return m[1], args
+
+
+def prod_records(path: Path):
+    """[(script, args, passed)] for each `- run: <bullet> exit <code>` record in prod.md; a record passes when its
+    code is 0 and no output line (up to the next `- run:` line or `## ` heading) has the word error."""
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):  # no prod.md: no records
+        return []
+    out, cur = [], None
+    for line in lines:
+        m = PROD_RUN_RE.fullmatch(line)
+        if m:
+            try:
+                script, args = prod_bullet(m[1])
+            except SystemExit:
+                cur = None
+                continue
+            cur = [script, args, m[2] == "0"]
+            out.append(cur)
+        elif line.startswith("## "):
+            cur = None
+        elif cur is not None and re.search(r"(?i)\berror\b", line):
+            cur[2] = False
+    return out
+
+
+def cmd_prod_ok(root: Path, job_id: str, bullet: str) -> str:
+    """prod-ok: gate one decision.md `## Prod runs` bullet before Merge's Prod check runs it. Refuses (SystemExit
+    "prod-ok: ...") a malformed bullet, a script missing from the repo's package.json, and any schema, deploy or
+    fixture script (PROD_DENY_RE over name, args and command). "dev" for a non-prod run; a prod run (name ends
+    `:prod`, or its command reads .env.prod*) is "ok" only when jobs/<id>/prod.md holds a passing dev dry run (args
+    without --apply) and dev apply (same args plus --apply) of the script with `:prod` stripped."""
+    check_id(job_id)
+    script, args = prod_bullet(bullet)
+    try:
+        scripts = json.loads((Path(root).parent / "package.json").read_text()).get("scripts")
+    except (OSError, ValueError, AttributeError):
+        raise SystemExit("prod-ok: cannot read scripts from package.json")
+    if not isinstance(scripts, dict) or script not in scripts:
+        raise SystemExit(f"prod-ok: {script} is not a package.json script")
+    command = str(scripts[script])
+    m = PROD_DENY_RE.search(" ".join([script, *args, command]))
+    if m:
+        raise SystemExit(f"prod-ok: refused {bullet!r}: matches {m[0]!r}")
+    if not script.endswith(":prod") and ".env.prod" not in command:
+        return "dev"
+    if not script.endswith(":prod"):
+        raise SystemExit(f"prod-ok: no dev script for {script}")
+    dev = script[:-len(":prod")]
+    base = [a for a in args if a != "--apply"]
+    records = prod_records(Path(root) / "jobs" / job_id / "prod.md")
+    dry = any(s == dev and a == base and ok for s, a, ok in records)
+    applied = any(s == dev and "--apply" in a and [x for x in a if x != "--apply"] == base and ok for s, a, ok in records)
+    missing = [f"npm run {dev}" + (f" -- {' '.join(want)}" if want else "")
+               for want, have in ((base, dry), (base + ["--apply"], applied)) if not have]
+    if missing:
+        raise SystemExit("prod-ok: " + "; ".join(f"no passing dev run of {b!r} in prod.md" for b in missing))
+    return "ok"
 
 
 def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:

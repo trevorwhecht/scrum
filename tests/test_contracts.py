@@ -406,7 +406,7 @@ class ContractTest(unittest.TestCase):
         step = self.section(text, "**Prod check**", "**Mark done, only now**")
         for phrase in ("stage=deploying", "deployments?sha=", "## Prod runs", "prod.md", "--title PROD_CHECK_FAILED",
                        "Try again=resume $ID", "prod run command not allowed", "package.json", "no deploy, no prod runs",
-                       "https://"):
+                       "https://", "B prod-ok $ID", "prod run refused", "- run: <bullet> exit <code>"):
             self.assertIn(phrase, step, phrase)
         self.assertLess(text.index("**Restart.**"), text.index("**Prod check**"))
         self.assertLess(text.index("**Prod check**"), text.index("**Mark done, only now**"))
