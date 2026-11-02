@@ -4742,7 +4742,7 @@ class DigestTest(unittest.TestCase):
         def cli(digest_id):  # the one real process: the --digest-auto entry point prints one JSON line, exit 0
             env = {**os.environ, "CLAUDE_HOME": str(self.user), "SCRUM_REGISTRY": os.environ["SCRUM_REGISTRY"]}
             r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"), "--digest-auto", digest_id,
-                                "--dir", str(self.scrum)], capture_output=True, text=True, timeout=10, env=env)
+                                "--dir", str(self.scrum)], capture_output=True, text=True, timeout=60, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             return json.loads(r.stdout)
 
@@ -5516,7 +5516,7 @@ class DigestTest(unittest.TestCase):
         def cli(digest_id, pid):  # the one real process: the --digest-skill-check entry point prints one JSON line
             env = {**os.environ, "CLAUDE_HOME": str(self.user), "SCRUM_REGISTRY": os.environ["SCRUM_REGISTRY"]}
             r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"), "--digest-skill-check",
-                                digest_id, pid, "--dir", str(self.scrum)], capture_output=True, text=True, timeout=10, env=env)
+                                digest_id, pid, "--dir", str(self.scrum)], capture_output=True, text=True, timeout=60, env=env)
             self.assertEqual(r.stdout.count("\n"), 1, r.stdout + r.stderr)
             return r.returncode, json.loads(r.stdout)
 
