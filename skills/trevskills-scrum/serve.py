@@ -978,6 +978,126 @@ def prune_worktrees(repo: Path, jobs: list[dict]) -> None:
                 shutil.rmtree(wt / name, ignore_errors=True)
 
 
+KEEP_PORTS = (3001, 8765)  # Trevor's prod-env dev port and serve.py itself: never stopped
+DOCKER_IDLE_WAIT = 600  # seconds every Docker project stays idle before Docker Desktop is quit
+DOCKER_IDLE_SINCE: float | None = None  # first tick on which every Docker project was idle; a restart resets it
+TMP_SCRUM = ("/tmp/scrum-", "/private/tmp/scrum-")
+
+
+def listeners() -> list[tuple[int, int, str]]:
+    """(pid, port, realpath cwd) of every listening TCP socket this user owns: one lsof for the sockets, one for their
+    cwds. lsof missing, failing or timing out (5 s) gives [], so nothing is killed."""
+    def lsof(*args):
+        out = subprocess.run(["lsof", *args], capture_output=True, text=True, timeout=5)
+        if out.returncode:
+            raise OSError(out.stderr.strip())
+        return out.stdout.splitlines()
+    try:
+        ports, pid = [], None
+        for line in lsof("-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"):
+            if line[:1] == "p":
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None and (pid, int(line.rsplit(":", 1)[1])) not in ports:
+                ports.append((pid, int(line.rsplit(":", 1)[1])))
+        if not ports:
+            return []
+        cwds, pid = {}, None
+        for line in lsof("-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(p) for p in dict.fromkeys(p for p, _ in ports))):
+            if line[:1] == "p":
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None:
+                cwds[pid] = os.path.realpath(line[1:])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    return [(p, port, cwds[p]) for p, port in ports if p in cwds]
+
+
+def stop_dev_servers(idle: dict[str, Path], listening: list[tuple[int, int, str]]) -> list[int]:
+    """SIGTERM each listener whose cwd is inside <repo>/.claude/worktrees/ of a project in idle, and, when no headless
+    session runs and every registered project is idle, each one under /tmp/scrum-*. Never a pid that also listens on
+    a KEEP_PORTS port, never serve.py itself, never a main checkout or anywhere else. Returns the pids signalled."""
+    bases = tuple(os.path.realpath(repo / ".claude" / "worktrees") + os.sep for repo in idle.values())
+    if board.live_sessions() == 0 and set(board.projects()) <= set(idle):
+        bases += TMP_SCRUM
+    keep = {pid for pid, port, _ in listening if port in KEEP_PORTS} | {os.getpid()}
+    killed = []
+    for pid, _, cwd in listening:
+        if pid in keep or pid in killed or not bases or not cwd.startswith(bases):  # strictly inside
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
+def docker_projects() -> dict[str, Path]:
+    """Registered projects whose scrum/project.md mentions docker (any case)."""
+    found = {}
+    for name, repo in board.projects().items():
+        try:
+            if "docker" in (repo / "scrum" / "project.md").read_text(errors="replace").lower():
+                found[name] = repo
+        except OSError:
+            pass
+    return found
+
+
+def docker_tick(idle: dict[str, Path], listening: list[tuple[int, int, str]], now: float | None = None) -> bool:
+    """Quit Docker Desktop once every Docker project (docker_projects) has been idle for DOCKER_IDLE_WAIT and no
+    listener runs inside one of their repos (Trevor's own dev server uses the DB). Stops running containers first.
+    Docker not running: no docker command beyond `docker info`. True when it quit Docker."""
+    global DOCKER_IDLE_SINCE
+    projects = docker_projects()
+    if not projects:
+        return False
+    repos = tuple(os.path.realpath(repo) + os.sep for repo in projects.values())
+    if any(name not in idle for name in projects) or any((cwd + os.sep).startswith(repos) for _, _, cwd in listening):
+        DOCKER_IDLE_SINCE = None
+        return False
+    now = time.time() if now is None else now
+    if DOCKER_IDLE_SINCE is None:
+        DOCKER_IDLE_SINCE = now
+    if now - DOCKER_IDLE_SINCE < DOCKER_IDLE_WAIT:
+        return False
+    docker = lambda *args, timeout: subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    try:
+        if docker("info", "--format", "{{.ServerVersion}}", timeout=10).returncode:
+            return False
+    except (OSError, subprocess.SubprocessError):
+        return False
+    try:
+        ids = docker("ps", "-q", timeout=30).stdout.split()
+        if ids:
+            docker("stop", *ids, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:  # Docker Desktop's own stop still ends the containers
+        print(f"watchdog: docker stop: {e}", file=sys.stderr, flush=True)
+    try:
+        quit_ok = docker("desktop", "stop", timeout=120).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        quit_ok = False
+    if not quit_ok:
+        try:
+            subprocess.run(["osascript", "-e", 'quit app "Docker"'], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"watchdog: quit Docker: {e}", file=sys.stderr, flush=True)
+    DOCKER_IDLE_SINCE = None
+    return True
+
+
+def idle_cleanup(busy: dict[str, bool]) -> None:
+    """Idle projects: in busy as False (a project missing from busy is never idle) with no live dashboard session.
+    Stop their leaked dev servers (stop_dev_servers), then let docker_tick quit Docker Desktop.
+    SCRUM_IDLE_CLEANUP=0 turns it off (the tests set it, so a test tick never signals a real process)."""
+    if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
+        return
+    idle = {name: repo for name, repo in board.projects().items() if not busy.get(name, True) and not live_ids(name)}
+    listening = listeners()
+    killed = stop_dev_servers(idle, listening)
+    docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
+
+
 OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
 
 
@@ -1088,6 +1208,7 @@ def watchdog_tick():
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
        tick.
+    Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
@@ -1152,6 +1273,10 @@ def watchdog_tick():
             prune_worktrees(repo, jobs)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+    try:
+        idle_cleanup(busy)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: idle cleanup: {e}", file=sys.stderr, flush=True)
     if claim:
         try:
             auto_continue_tick(busy)

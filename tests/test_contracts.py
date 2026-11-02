@@ -1982,6 +1982,15 @@ class ContractTest(unittest.TestCase):
         self.assertIn("deletes UI JSX", para)
         self.assertIn("absent", para)
 
+    def test_db_agents_start_docker_desktop(self):
+        for name in ("scrum-review-ui", "scrum-review-ux", "scrum-builder", "scrum-review-e2e"):
+            text = (ROOT / "agents" / f"{name}.md").read_text()
+            for phrase in ("docker desktop start --detach", "poll `docker info` every 5 s for up to 2 minutes"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+        for name in ("scrum-review-ui", "scrum-review-ux"):
+            para = (ROOT / "agents" / f"{name}.md").read_text().split("**Database.**", 1)[1].split("\n\n", 1)[0]
+            self.assertIn("Docker still not ready after 2 minutes counts as", para, name)
+
     def test_review_ui_db_not_a_block(self):
         text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
         para = next(l for l in text.splitlines() if l.startswith("**Database.**"))

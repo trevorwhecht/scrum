@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
@@ -8456,6 +8457,207 @@ class WeeklyTest(unittest.TestCase):
                              capture_output=True, text=True, timeout=60)
         self.assertEqual((out.returncode, json.loads(out.stdout)), (0, {"asked": [], "skipped": []}), out.stderr)
 
+
+
+class IdleCleanupTest(unittest.TestCase):
+    """Job 562: the watchdog stops leaked worktree dev servers of idle projects and quits Docker Desktop once every
+    Docker project has been idle 10 minutes. lsof and docker are faked; os.kill is patched, so nothing real is hit."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.DOCKER_IDLE_SINCE = None
+        self.addCleanup(setattr, serve, "DOCKER_IDLE_SINCE", None)
+        self.base = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.calls = []
+
+    def repo(self, name, project_md="- Stack: Python\n"):
+        (self.base / name / "scrum").mkdir(parents=True)
+        (self.base / name / "scrum" / "project.md").write_text(project_md)
+        return self.base / name
+
+    def fake_run(self, answers):
+        """subprocess.run that records argv and answers from {argv[0:2] tuple or argv[0]: CompletedProcess|exception}."""
+        def run(argv, **kw):
+            self.calls.append((list(argv), kw.get("timeout")))
+            ans = answers.get(tuple(argv[:2]), answers.get(argv[0]))
+            if isinstance(ans, BaseException):
+                raise ans
+            return ans or subprocess.CompletedProcess(argv, 0, "", "")
+        return mock.patch.object(self.serve.subprocess, "run", side_effect=run)
+
+    def test_listeners_parses_lsof(self):
+        ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
+        sockets = "p101\nf8\nn*:3000\nf9\nn[::1]:3000\np202\nf5\nn127.0.0.1:8765\np303\nf7\nn*:5173\n"
+        cwds = "p101\nfcwd\nn/tmp/scrum-base-ui-7\np202\nfcwd\nn/Users/t/r\np303\nfcwd\nn/Users/t/r/.claude/worktrees/w\n"
+        with self.fake_run({("lsof", "-nP"): ok(sockets), ("lsof", "-a"): ok(cwds)}):
+            got = self.serve.listeners()
+        self.assertEqual(got, [(101, 3000, os.path.realpath("/tmp/scrum-base-ui-7")), (202, 8765, "/Users/t/r"),
+                               (303, 5173, "/Users/t/r/.claude/worktrees/w")])
+        self.assertEqual(self.calls, [(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"], 5),
+                                      (["lsof", "-a", "-d", "cwd", "-Fpn", "-p", "101,202,303"], 5)])
+
+    def test_listeners_lsof_failure_kills_nothing(self):
+        for failure in (FileNotFoundError("lsof"), subprocess.TimeoutExpired("lsof", 5),
+                        subprocess.CompletedProcess([], 1, "", "lsof: boom")):
+            with self.subTest(failure=type(failure).__name__), self.fake_run({"lsof": failure}):
+                self.assertEqual(self.serve.listeners(), [])
+        with self.fake_run({("lsof", "-nP"): subprocess.CompletedProcess([], 0, "p55\nn*:3000\n", ""),
+                            ("lsof", "-a"): subprocess.TimeoutExpired("lsof", 5)}):
+            self.assertEqual(self.serve.listeners(), [], "the cwd lookup failing also gives nothing")
+        a = self.repo("a")
+        with mock.patch.object(self.serve.board, "projects", return_value={"a": a}), \
+                mock.patch.object(self.serve.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            self.assertEqual(self.serve.stop_dev_servers({"a": a}, []), [])
+        kill.assert_not_called()
+
+    def stop(self, idle, listening, projects=None, live=1):
+        projects = idle if projects is None else projects
+        with mock.patch.object(self.serve.board, "projects", return_value=projects), \
+                mock.patch.object(self.serve.board, "live_sessions", return_value=live), \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            got = self.serve.stop_dev_servers(idle, listening)
+        return got, [c.args for c in kill.call_args_list]
+
+    def test_kills_worktree_server_of_idle_project(self):
+        a = self.repo("a")
+        wt = str(a / ".claude" / "worktrees" / "scrum-188-x")
+        got, kills = self.stop({"a": a}, [(31466, 3000, wt), (31467, 3002, wt + "/sub")])
+        self.assertEqual(got, [31466, 31467])
+        self.assertEqual(kills, [(31466, 15), (31467, 15)])
+        with mock.patch.object(self.serve.board, "projects", return_value={"a": a}), \
+                mock.patch.object(self.serve.board, "live_sessions", return_value=1), \
+                mock.patch.object(self.serve.os, "kill", side_effect=[ProcessLookupError, PermissionError]):
+            self.assertEqual(self.serve.stop_dev_servers({"a": a}, [(1, 3000, wt), (2, 3002, wt)]), [],
+                             "a gone or foreign process is skipped quietly")
+
+    def test_never_kills_main_checkout_or_reserved_ports(self):
+        a = self.repo("a")
+        wt = str(a / ".claude" / "worktrees" / "scrum-1")
+        listening = [(11, 3001, wt), (12, 8765, wt), (os.getpid(), 3000, wt), (14, 3000, str(a)),
+                     (15, 3000, str(a / "web")), (16, 3000, str(a / ".claude" / "worktrees")), (17, 3000, "/Users/x/other"),
+                     (18, 3000, str(a) + "-copy/.claude/worktrees/w"), (19, 5000, "/tmp/scrum-base-ui-1")]
+        got, kills = self.stop({"a": a}, listening, live=0)
+        self.assertEqual(got, [19], "only the /tmp/scrum-* server (everything idle, no session)")
+        self.assertEqual(kills, [(19, 15)])
+        got, _ = self.stop({"a": a}, [(21, 3000, wt), (21, 3001, wt)])
+        self.assertEqual(got, [], "a pid that also holds 3001 is kept")
+
+    def test_busy_project_servers_untouched(self):
+        a, b = self.repo("a"), self.repo("b")
+        wa, wb = str(a / ".claude/worktrees/w1"), str(b / ".claude/worktrees/w2")
+        got, kills = self.stop({"a": a}, [(1, 3000, wa), (2, 3002, wb)], projects={"a": a, "b": b})
+        self.assertEqual((got, kills), ([1], [(1, 15)]))
+
+    def test_tmp_scrum_only_when_everything_idle(self):
+        a, b = self.repo("a"), self.repo("b")
+        listening = [(1, 4000, "/tmp/scrum-base-ui-9"), (2, 4001, "/private/tmp/scrum-x"), (3, 4002, "/tmp/other")]
+        self.assertEqual(self.stop({"a": a}, listening, projects={"a": a, "b": b}, live=0)[0], [], "b is busy")
+        self.assertEqual(self.stop({"a": a, "b": b}, listening, live=2)[0], [], "a headless session runs")
+        self.assertEqual(self.stop({"a": a, "b": b}, listening, live=0)[0], [1, 2])
+
+    def test_watchdog_tick_calls_idle_cleanup(self):
+        s = self.serve
+        projects = {}
+        for name in ("broken", "quiet"):
+            (self.repo(name) / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+            projects[name] = self.base / name
+        def watchdog(root):
+            if root.parent.name == "broken":
+                raise RuntimeError("bad board")
+            return []
+        with mock.patch.object(s.board, "projects", return_value=projects), \
+                mock.patch.object(s.board, "cmd_watchdog", side_effect=watchdog), \
+                mock.patch.object(s, "idle_cleanup") as clean, mock.patch("sys.stderr", new=io.StringIO()):
+            s.watchdog_tick()
+        self.assertEqual([c.args for c in clean.call_args_list], [({"quiet": False},)])
+        with mock.patch.object(s.board, "projects", return_value={"quiet": projects["quiet"]}), \
+                mock.patch.object(s, "idle_cleanup", side_effect=RuntimeError("lsof broke")), \
+                mock.patch.object(s, "weekly_tick") as weekly, mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.watchdog_tick()
+        self.assertIn("watchdog: idle cleanup: lsof broke\n", err.getvalue())
+        weekly.assert_called_once()
+
+    def test_missing_project_never_idle(self):
+        s = self.serve
+        projects = {n: self.repo(n) for n in ("a", "b", "c", "d")}
+        listening = [(7, 3000, "/x")]
+        with mock.patch.dict(os.environ, SCRUM_IDLE_CLEANUP="1"), \
+                mock.patch.object(s.board, "projects", return_value=projects), \
+                mock.patch.object(s, "live_ids", side_effect=lambda p: {"009-x"} if p == "d" else set()), \
+                mock.patch.object(s, "listeners", return_value=listening) as ls, \
+                mock.patch.object(s, "stop_dev_servers", return_value=[7]) as stop, \
+                mock.patch.object(s, "docker_tick") as dock:
+            s.idle_cleanup({"a": False, "b": True, "d": False})
+        self.assertEqual(ls.call_count, 1)
+        self.assertEqual([c.args for c in stop.call_args_list], [({"a": projects["a"]}, listening)])
+        self.assertEqual([c.args for c in dock.call_args_list], [({"a": projects["a"]}, [])])
+
+    def docker(self, idle, listening, now, info=None, desktop=None, projects=None):
+        answers = {("docker", "info"): info, ("docker", "ps"): subprocess.CompletedProcess([], 0, "c1\nc2\n", ""),
+                   ("docker", "desktop"): desktop}
+        with mock.patch.object(self.serve.board, "projects", return_value=projects or self.docker_repos), \
+                self.fake_run(answers):
+            return self.serve.docker_tick(idle, listening, now=now)
+
+    def docker_setup(self):
+        self.docker_repos = {"bpc": self.repo("bpc", "- Notes: Docker Postgres boisepartyco-pg on 5433\n"),
+                             "plain": self.repo("plain")}
+
+    def test_docker_quit_after_idle_wait(self):
+        self.docker_setup()
+        idle = dict(self.docker_repos)
+        self.assertFalse(self.docker(idle, [], now=1000))
+        self.assertEqual(self.serve.DOCKER_IDLE_SINCE, 1000)
+        self.assertEqual(self.calls, [], "no docker command before the wait")
+        self.assertTrue(self.docker(idle, [], now=1600))
+        self.assertEqual(self.calls, [(["docker", "info", "--format", "{{.ServerVersion}}"], 10),
+                                      (["docker", "ps", "-q"], 30), (["docker", "stop", "c1", "c2"], 120),
+                                      (["docker", "desktop", "stop"], 120)])
+        self.assertIsNone(self.serve.DOCKER_IDLE_SINCE)
+        for failure in (subprocess.CompletedProcess([], 1, "", "no desktop cli"), FileNotFoundError("docker")):
+            with self.subTest(failure=type(failure).__name__):
+                self.calls.clear()
+                self.serve.DOCKER_IDLE_SINCE = 0
+                self.assertTrue(self.docker(idle, [], now=600, desktop=failure))
+                self.assertEqual(self.calls[-1], (["osascript", "-e", 'quit app "Docker"'], 30))
+
+    def test_docker_left_running_while_project_busy(self):
+        self.docker_setup()
+        self.serve.DOCKER_IDLE_SINCE = 0
+        self.assertFalse(self.docker({"plain": self.docker_repos["plain"]}, [], now=5000))
+        self.assertIsNone(self.serve.DOCKER_IDLE_SINCE, "a busy Docker project resets the wait")
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.docker({}, [], now=5000, projects={"plain": self.docker_repos["plain"]}))
+        self.assertEqual(self.calls, [], "no Docker project: nothing runs")
+        self.assertIsNone(self.serve.DOCKER_IDLE_SINCE)
+
+    def test_docker_not_quit_before_wait(self):
+        self.docker_setup()
+        self.assertFalse(self.docker(dict(self.docker_repos), [], now=1000))
+        self.assertFalse(self.docker(dict(self.docker_repos), [], now=1599))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.serve.DOCKER_IDLE_SINCE, 1000)
+
+    def test_docker_not_running_does_nothing(self):
+        self.docker_setup()
+        for failure in (subprocess.CompletedProcess([], 1, "", "Cannot connect"), FileNotFoundError("docker"),
+                        subprocess.TimeoutExpired("docker", 10)):
+            with self.subTest(failure=type(failure).__name__):
+                self.calls.clear()
+                self.serve.DOCKER_IDLE_SINCE = 0
+                self.assertFalse(self.docker(dict(self.docker_repos), [], now=700, info=failure))
+                self.assertEqual(self.calls, [(["docker", "info", "--format", "{{.ServerVersion}}"], 10)])
+
+    def test_docker_kept_for_main_checkout_server(self):
+        self.docker_setup()
+        self.serve.DOCKER_IDLE_SINCE = 0
+        main = [(900, 3000, str(self.docker_repos["bpc"]))]
+        self.assertFalse(self.docker(dict(self.docker_repos), main, now=5000))
+        self.assertIsNone(self.serve.DOCKER_IDLE_SINCE)
+        self.assertEqual(self.calls, [])
 
 if __name__ == "__main__":
     unittest.main()
