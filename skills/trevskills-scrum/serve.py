@@ -3860,7 +3860,6 @@ def rotate_serve_log():
 
 def main():
     drop_malloc_logging()
-    rotate_serve_log()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--estimate", metavar="TEXT", help="estimate this backlog item (board.py backlog-add runs this) and exit")
@@ -3894,6 +3893,7 @@ def main():
             raise
         print(f"serve.py: port {a.port} already in use (another serve.py is running)", file=sys.stderr)
         sys.exit(1)
+    rotate_serve_log()  # only once the port is ours, so a duplicate start never moves the live log
     try:
         board.migrate_focus()  # one-time: `- Focus: yes` projects become the top of the rank
     except (OSError, SystemExit) as e:
