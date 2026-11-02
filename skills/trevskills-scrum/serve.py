@@ -800,7 +800,8 @@ def parked_parent(project, root, job, by_id, alive):
 def sweep_parents(project, root, jobs, alive=None, claim=True):
     """A Run-all/BigBoy run only moves when a child's session runs its chaining step. For each running runall/bigboy
     parent: respawn its orphaned children (respawn_orphans) unless a chaining session holds the lock. Then, with no
-    child in progress: close a runall whose children all finished (a bigboy is left for its own final review), else
+    child in progress: close a runall whose children all finished (a finished bigboy idle past ORPHAN_MINUTES, with no live chain
+    lock, session or cool-down, gets the MAIN_FF reason so main_ff_tick resumes its final review), else
     mark a parent parked on Trevor (parked_parent) with the WAITING_ON reason and one needs-human sound, else start its
     waiting children when no child session is alive and no chaining session holds the lock. A runall with a child
     still in progress tops up its free slots each tick, unless a chaining session holds the lock. claim=False (this
@@ -820,6 +821,13 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                 start_ready(project, root, p["id"])  # top up free slots: cmd_ready applies the caps and file clashes
             continue
         if finished_bigboy(p, by_id):
+            # backstop for a missed chain-back: mark it MAIN_FF once it sits idle, so main_ff_tick resumes its final review
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
+            fam = [p, *kids]
+            if not (p.get("reason") or "").startswith(MAIN_FF) and not board.cooling_down() \
+                    and not board.chain_lock_live(root, p["id"]) and all(board.stalled_since(j, cutoff) for j in fam) \
+                    and not any(running(project, j["id"]) for j in fam) and not any(alive()(j) for j in fam):
+                board.cmd_set(root, p["id"], [f"reason={MAIN_FF}"], expect="running")
             continue
         if all(k.get("stage") in ("done", "aborted") for k in kids):
             if p["lane"] == "runall":
