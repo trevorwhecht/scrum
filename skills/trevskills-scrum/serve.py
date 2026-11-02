@@ -261,14 +261,14 @@ def unqueue(root, job):
 
 
 def play_queue_tick(project, root, jobs) -> bool:
-    """Start the Play clicks the machine guard queued, oldest first, before any other start this tick. A job no
-    longer resumable (or already running) is dropped from the queue; another kind of refusal keeps it queued and
-    moves on; a machine-guard refusal or a spent resume budget (take_room) stops here and keeps it and every later one
-    queued. True when it started one or one waits on a slot."""
+    """Start the Play clicks the machine guard or a sibling queued, oldest first, before any other start this tick. A
+    job no longer resumable, limit-held (a sibling-blocked click) or answered, or already running, is dropped from the
+    queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
+    (take_room) stops here and keeps it and every later one queued. True when it started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
         answered = job["stage"] == "needs-human" and job.get("options")  # a resume pick answer_job queued
-        if running(project, job["id"]) or not (resumable(job) or answered):
+        if running(project, job["id"]) or not (resumable(job) or limit_held(job) or answered):
             unqueue(root, job)
             continue
         refusal = resume_refusal(project, root, job)
@@ -3604,9 +3604,13 @@ class Handler(BaseHTTPRequestHandler):
             if not job or running(project, job_id) or not resumable(job) and not limit_held(job):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
-            if limit_held(job):  # held on a usage limit: never queued, play_queue_tick drops a non-resumable job
+            if limit_held(job):  # held on a usage limit: only a sibling refusal is queued, never the machine guard
                 if refusal := resume_refusal(project, root, job, manual=manual):
-                    return refused(root, job_id, refusal)
+                    if not getattr(refusal, "blocker", None):
+                        return refused(root, job_id, refusal)
+                    with board.locked_board(root) as b:  # play_queue_tick starts it once the sibling finishes
+                        board.find(b, job_id).setdefault("play_queued", board.now())
+                    return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
                 resume_job(project, root, job, jobs, manual=manual)
                 return 202, {"id": job_id, "action": action}
             if refusal := resume_refusal(project, root, job, manual=manual):
