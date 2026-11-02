@@ -27,7 +27,8 @@ class CheckoutAlert(unittest.TestCase):
         self.assertEqual(render([{"jobs": [], "checkoutAlert": None}, {"jobs": []}]), {"innerHTML": "", "hidden": True})
 
     def test_element_sits_between_header_and_board(self):
-        self.assertIn('</header>\n<p class="error" id="checkoutAlert" role="alert" hidden></p>\n<main id="board">',
+        self.assertIn('</header>\n<p class="error" id="checkoutAlert" role="alert" hidden></p>\n'
+                      '<select id="colPick" aria-label="Show stage"></select>\n<main id="board">',
                       DASHBOARD.read_text())
 
 
