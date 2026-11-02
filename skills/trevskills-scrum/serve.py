@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
+import argparse, base64, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1289,7 +1289,10 @@ def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
 
 def watchdog_loop():
     while True:
-        watchdog_tick()
+        try:
+            watchdog_tick()
+        except Exception as e:  # one bad tick never ends the watchdog thread
+            print(f"watchdog: tick: {e}", file=sys.stderr, flush=True)
         reload_if_changed()
         time.sleep(60)
 
@@ -3678,7 +3681,13 @@ def main():
     global TAILNET
     tn = tailnet_host(a.tailnet_host)
     TAILNET = {tn} if tn else set()
-    server = make_server(a.port)
+    try:
+        server = make_server(a.port)
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        print(f"serve.py: port {a.port} already in use (another serve.py is running)", file=sys.stderr)
+        sys.exit(1)
     try:
         board.migrate_focus()  # one-time: `- Focus: yes` projects become the top of the rank
     except (OSError, SystemExit) as e:
