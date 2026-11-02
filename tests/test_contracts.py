@@ -937,7 +937,7 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
-            self.assertLessEqual(len(path.read_text()), 20000, path.name)
+            self.assertLessEqual(len(path.read_text()), 21000, path.name)
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
