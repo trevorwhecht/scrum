@@ -7471,5 +7471,110 @@ class WeeklyStartTest(unittest.TestCase):
             self.assertFalse((root / "digests").exists(), root)
 
 
+class ProdOkTest(unittest.TestCase):
+    """board.cmd_prod_ok / prod-ok: the gate before every decision.md `## Prod runs` bullet."""
+    SCRIPTS = {"backfill:x": "tsx scripts/backfill.ts", "backfill:x:prod": "dotenv -e .env.prod -- tsx scripts/backfill.ts",
+               "report": "tsx scripts/report.ts", "report:live": "dotenv -e .env.production -- tsx scripts/report.ts",
+               "migrate:prod": "tsx scripts/m.ts", "db:push:prod": "tsx scripts/p.ts", "deploy:prod": "vercel --prod",
+               "e2e:seed:prod": "tsx scripts/seed.ts", "seed:prod": "dotenv -e .env.prod -- prisma db seed",
+               "load:fixtures": "tsx scripts/load.ts", "unit": "node scripts/unit.js", "-x": "echo"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        (self.root / "jobs" / "001-a").mkdir(parents=True)
+        (Path(self.tmp.name) / "package.json").write_text(json.dumps({"scripts": self.SCRIPTS}))
+        self.prod = self.root / "jobs" / "001-a" / "prod.md"
+
+    def ok(self, bullet):
+        return board.cmd_prod_ok(self.root, "001-a", bullet)
+
+    def refused(self, bullet):
+        with self.assertRaises(SystemExit) as cm:
+            self.ok(bullet)
+        msg = str(cm.exception)
+        self.assertTrue(msg.startswith("prod-ok: "), msg)
+        return msg
+
+    def test_rejects_malformed_and_unknown_script(self):
+        for bad in ("", "npm run", "npm  run report", "npm run report;rm", "npm run report -- a b'", "npm run report --",
+                    "npm run report -- ", "npm run report -- a  b", "yarn report", "npm run report && ls", " npm run report",
+                    "npm run -x", "npm run report -- $(id)", "npm run repört", "npm run report\n"):
+            self.refused(bad)
+        self.assertIn("not a package.json script", self.refused("npm run nope"))
+        (Path(self.tmp.name) / "package.json").unlink()
+        self.assertIn("package.json", self.refused("npm run report"))
+        with self.assertRaises(SystemExit):
+            board.cmd_prod_ok(self.root, "../x", "npm run report")
+
+    def test_refuses_schema_deploy_and_fixture_scripts(self):
+        for bullet, word in (("npm run migrate:prod", "migrate"), ("npm run db:push:prod", "db:push"),
+                             ("npm run deploy:prod", "vercel"), ("npm run e2e:seed:prod", "e2e"),
+                             ("npm run seed:prod", "prisma"), ("npm run load:fixtures", "fixtures"),
+                             ("npm run backfill:x -- --accept-data-loss", "accept-data-loss"),
+                             ("npm run report -- --force-reset", "force-reset"), ("npm run report -- test", "test")):
+            self.assertIn(f"'{word}'", self.refused(bullet), bullet)
+        self.assertEqual(self.ok("npm run unit -- testing"), "dev", "testing is not the word test")
+
+    def test_dev_bullet_passes(self):
+        self.assertEqual(self.ok("npm run backfill:x"), "dev")
+        self.assertEqual(self.ok("npm run backfill:x -- --apply --limit=5"), "dev")
+        self.assertEqual(self.ok("npm run report"), "dev")
+        self.assertFalse(self.prod.exists())
+
+    def write(self, *records):
+        self.prod.write_text("## Runs\n" + "".join(records))
+
+    def test_prod_needs_dev_dry_and_apply(self):
+        dry = "- run: npm run backfill:x exit 0\n    would update 3 rows\n"
+        apply = "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n"
+        need_dry = "no passing dev run of 'npm run backfill:x' in prod.md"
+        need_apply = "no passing dev run of 'npm run backfill:x -- --apply' in prod.md"
+        msg = self.refused("npm run backfill:x:prod")
+        self.assertIn(need_dry, msg, "missing prod.md")
+        self.assertIn(need_apply, msg, "missing prod.md")
+        self.write(dry, apply)
+        self.assertEqual(self.ok("npm run backfill:x:prod"), "ok")
+        self.assertEqual(self.ok("npm run backfill:x:prod -- --apply"), "ok")
+        self.write(dry)
+        msg = self.refused("npm run backfill:x:prod -- --apply")
+        self.assertIn(need_apply, msg)
+        self.assertNotIn(need_dry, msg)
+        self.write(dry, "- run: npm run backfill:x -- --apply exit 1\n    boom\n")
+        self.assertIn(need_apply, self.refused("npm run backfill:x:prod"))
+        self.write(dry, "- run: npm run backfill:x -- --apply exit 0\n    Error: row 4 failed\n")
+        self.assertIn(need_apply, self.refused("npm run backfill:x:prod"))
+        self.write("- run: npm run backfill:x exit 0\n    0 errors\n", apply)
+        self.assertEqual(self.ok("npm run backfill:x:prod"), "ok", "errors is not the word error")
+        self.write(dry, "## Deploy\n    Error: later section\n", apply)
+        self.assertEqual(self.ok("npm run backfill:x:prod"), "ok", "a ## heading ends the record")
+        self.write(dry, apply)
+        msg = self.refused("npm run backfill:x:prod -- --limit=5")
+        self.assertIn("no passing dev run of 'npm run backfill:x -- --limit=5' in prod.md", msg)
+        self.assertIn("no passing dev run of 'npm run backfill:x -- --limit=5 --apply' in prod.md", msg)
+        self.write("- run: npm run backfill:x -- --limit=5 exit 0\n    ok\n",
+                   "- run: npm run backfill:x -- --apply --limit=5 exit 0\n    ok\n")
+        self.assertEqual(self.ok("npm run backfill:x:prod -- --limit=5 --apply"), "ok")
+        self.assertIn("no dev script for report:live", self.refused("npm run report:live"))
+
+    def test_cli_exit_codes(self):
+        self.write("- run: npm run backfill:x exit 0\n", "- run: npm run backfill:x -- --apply exit 0\n")
+
+        def cli(bullet):
+            return subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "prod-ok", "001-a", bullet],
+                                  capture_output=True, text=True, timeout=30)
+        out = cli("npm run backfill:x:prod")
+        self.assertEqual((out.returncode, out.stdout), (0, "ok\n"), out.stderr)
+        out = cli("npm run report")
+        self.assertEqual((out.returncode, out.stdout), (0, "dev\n"), out.stderr)
+        out = cli("npm run deploy:prod")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("prod-ok: ", out.stderr)
+        self.write()
+        self.assertNotEqual(cli("npm run backfill:x:prod").returncode, 0)
+        self.assertIn("board.py prod-ok <id> '<bullet>'", BOARD_PY.read_text().split('"""')[1])
+
+
 if __name__ == "__main__":
     unittest.main()

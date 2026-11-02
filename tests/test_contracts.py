@@ -408,7 +408,8 @@ class ContractTest(unittest.TestCase):
                        "Try again=resume $ID", "prod run command not allowed", "package.json", "no deploy, no prod runs",
                        "https://", "whether or not a Deploy URL is set", "nothing pending",
                        "prod dry run still reports pending work", "prod run changes the schema", "db:push",
-                       "migrate", "prisma migrate", "prisma db push"):
+                       "migrate", "prisma migrate", "prisma db push",
+                       "B prod-ok $ID", "prod run refused", "- run: <bullet> exit <code>"):
             self.assertIn(phrase, step, phrase)
         self.assertNotIn("Without a Deploy URL, the check is the last", step)
         self.assertLess(text.index("**Restart.**"), text.index("**Prod check**"))
