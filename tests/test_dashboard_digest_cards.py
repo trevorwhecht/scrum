@@ -38,6 +38,13 @@ class DigestLogTest(unittest.TestCase):
         load = text[text.index("async function loadDigests()"):]
         self.assertIn("getJson(`api/p/${enc(p)}/digests`, null, STALE)", load[:load.index("\n}\n")])
 
+    def test_prop_row_read_only_has_no_revert(self):
+        p = {"id": "p1", "target": "/r/x.md", "why": "w", "old": "a", "new": "b", "kind": "edit", "status": "applied"}
+        editable, frozen = prop_rows([["004", p], ["004", p, True]])
+        self.assertIn("data-revert", editable)
+        self.assertNotIn("data-revert", frozen)
+        self.assertIn('<span class="chip applied">applied</span>', frozen)
+
     def test_prop_row_parts(self):
         statuses = ["applied", "queued", "skipped", "reverted", "pending", "rejected", "odd<x>"]
         base = {"target": "/r/agents/scrum-x.md", "why": "Seen in 001-a & 002-b.", "old": "old <line>", "new": "new line", "kind": "edit"}
