@@ -8046,11 +8046,25 @@ class RotateServeLogTest(unittest.TestCase):
                                stdout=f, env=env, check=True)
             self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["other.log"])
 
-    def test_rotate_serve_log_called_early(self):
+    def test_rotate_serve_log_after_bind(self):
         import serve
         src = inspect.getsource(serve.main)
-        self.assertLess(src.index("drop_malloc_logging()"), src.index("rotate_serve_log()"))
-        self.assertLess(src.index("rotate_serve_log()"), src.index("add_argument"))
+        self.assertLess(src.index("make_server(a.port)"), src.index("rotate_serve_log()"))
+
+    def test_duplicate_startup_does_not_rotate(self):
+        import socket
+        with tempfile.TemporaryDirectory() as d, socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            log = Path(d) / "serve.log"
+            log.write_text("live\n")
+            env = {**os.environ, "SCRUM_SERVE_LOG": str(log)}
+            with open(log, "ab") as f:
+                r = subprocess.run([sys.executable, str(Path(self.SRV) / "serve.py"), "--port", str(s.getsockname()[1])],
+                                   stdout=f, stderr=f, env=env)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("live\n", log.read_text())
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["serve.log"])
 
     def test_rotate_serve_log_oserror_ignored(self):
         import serve
