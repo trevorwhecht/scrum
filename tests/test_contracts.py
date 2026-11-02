@@ -1056,7 +1056,7 @@ class ContractTest(unittest.TestCase):
         skill_md = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         for phrase in ("Lilguy lane step", "Worktree mode", "commitpush invoked"):
             self.assertNotIn(phrase, skill_md, phrase)
-        self.assertIn("- never push `main`/`master`\n", skill_md)
+        self.assertIn("- never push `main`/`master`, except **Digest**", skill_md)
         self.assertIn("\n## Migrate (Merge's schema guard)\n", skill_md)
         self.assertNotIn("In the Lilguy lane skip both", skill_md)
         description = frontmatter(ROOT / "skills" / "trevskills-scrum" / "SKILL.md")["description"]
