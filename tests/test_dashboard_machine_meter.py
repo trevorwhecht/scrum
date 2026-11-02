@@ -32,7 +32,7 @@ class MachineMeter(unittest.TestCase):
         self.assertNotRegex(ra, r'role="alert">[^<]*queued')
         poll = fn_body(text, "poll")
         self.assertIn('getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); })', poll)
-        self.assertLess(poll.index('api/machine'), poll.index('fetch("api/projects"'),
+        self.assertLess(poll.index('api/machine'), poll.index('timed("api/projects"'),
                         "fetched before anything that can return early, on every poll")
         render = fn_body(text, "renderMachine")
         self.assertIn("el.hidden = !m", render, "a failed or 404 fetch (null) hides the meter")

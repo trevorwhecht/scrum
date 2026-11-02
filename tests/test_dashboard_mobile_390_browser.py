@@ -21,6 +21,20 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
   try {
     const mode = process.env.MODE, wide = mode === "desktop";
     const page = await browser.newPage({viewport: wide ? {width: 1280, height: 800} : {width: +process.env.WIDTH || 390, height: 844}});
+    if (mode === "hang") {  // job 501: hung api/projects requests time out, show the server message, and a later tick recovers
+      await page.addInitScript(() => { const t = AbortSignal.timeout.bind(AbortSignal); AbortSignal.timeout = ms => t(ms === 15000 ? 300 : ms); });
+      let requests = 0, answered = 0;
+      // Hold the bare first poll() and the first single(poll) tick; a third request only comes if that tick's run ended.
+      await page.route("**/api/projects", route => { if (++requests > 2) { answered++; route.continue(); } });
+      await page.goto(process.env.DASH_URL);
+      await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Can't reach the dashboard server"));
+      const before = {status: await page.textContent("#status"), requests, answered};
+      await page.waitForSelector(".card[data-key]", {timeout: 20000});
+      const after = await page.evaluate(() => ({options: document.getElementById("colPick").options.length,
+        shown: [...document.querySelectorAll("#board .col")].filter(c => c.getClientRects().length).length}));
+      console.log(JSON.stringify({before, after: {...after, requests, answered}}));
+      return;
+    }
     await page.goto(process.env.DASH_URL);
     await page.waitForSelector(".card[data-key]");
     if (mode === "header") {
@@ -243,6 +257,15 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertEqual((picked["value"], picked["shown"], picked["empty"], picked["cards"], picked["focused"]),
                          ("build", ["build"], [True], [], True), got)
         self.assertEqual((reloaded["value"], reloaded["shown"]), ("build", ["build"]), got)
+
+    def test_first_poll_hang_recovers(self):
+        got = self.browse("hang")
+        before, after = got["before"], got["after"]
+        self.assertTrue(before["status"].startswith("Can't reach the dashboard server ("), got)
+        self.assertEqual(before["answered"], 0, got)
+        self.assertGreaterEqual(after["requests"], 3, got)  # a new poll ran after the hung single(poll) tick
+        self.assertGreater(after["options"], 0, got)
+        self.assertEqual(after["shown"], 1, got)
 
     def test_stage_picker_falls_back_to_first_busy_column(self):
         self.add_running(keep_human=False)
