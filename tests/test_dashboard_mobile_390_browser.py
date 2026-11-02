@@ -258,7 +258,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.add_running()
         got = self.browse("picker")
         first, picked, reloaded = got["first"], got["picked"], got["reloaded"]
-        self.assertEqual(first["labels"], ["spec (0)", "build (0)", "check (0)", "review (0)", "approve (0)", "merging (0)", "cloud (0)",
+        self.assertEqual(first["labels"], ["spec (0)", "build (0)", "check (0)", "review (0)", "approve (0)", "merging (0)", "deploying (0)", "cloud (0)",
                                            "stalled (0)", "needs-human (1)", "done (0)", "running (1)"], got)
         self.assertEqual((first["value"], first["shown"], first["cards"]), ("needs-human", ["needs-human"], [f"{PROJECT}/007-human"]), got)
         self.assertLessEqual(first["bottom"], first["boardTop"], got)  # the picker sits above the board

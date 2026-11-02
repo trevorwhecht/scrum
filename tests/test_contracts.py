@@ -390,15 +390,27 @@ class ContractTest(unittest.TestCase):
 
     def test_spec_writer_requires_prod_run_for_real_data(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
-        for phrase in ("real business data", "never lists its prod run under Out", "test fixtures"):
+        for phrase in ("real business data", "never lists its prod run under Out", "test fixtures", "## Prod runs"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual(text.count("real business data"), 1)
 
     def test_approver_requires_prod_run_for_real_data(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
-        for phrase in ("real business data", "prod run", "backlog-add", "REWORK", "test fixtures"):
+        for phrase in ("real business data", "prod run", "REWORK", "test fixtures", "## Prod runs", "Prod check:"):
             self.assertIn(phrase, text, phrase)
+        self.assertNotIn("Follow-up for the prod run", text)
         self.assertEqual(text.count("real business data"), 1)
+
+    def test_merge_prod_check_before_done(self):
+        text = self.lane("merge")
+        step = self.section(text, "**Prod check**", "**Mark done, only now**")
+        for phrase in ("stage=deploying", "deployments?sha=", "## Prod runs", "prod.md", "--title PROD_CHECK_FAILED",
+                       "Try again=resume $ID", "prod run command not allowed", "package.json", "no deploy, no prod runs",
+                       "https://"):
+            self.assertIn(phrase, step, phrase)
+        self.assertLess(text.index("**Restart.**"), text.index("**Prod check**"))
+        self.assertLess(text.index("**Prod check**"), text.index("**Mark done, only now**"))
+        self.assertIn("- Deploy: <", self.lane("setup"))
 
     def test_triager_bundles_low_rated(self):
         text = (ROOT / "agents" / "scrum-triager.md").read_text()
@@ -2156,7 +2168,7 @@ class ContractTest(unittest.TestCase):
             ({"stage": "check"}, 30), ({"stage": "review", "rounds": [r()]}, 45),
             ({"stage": "review", "rounds": [r(security="FAIL", ux="PASS"), r(ux="PASS", ui="CHANGES")]}, 60),
             ({"stage": "review", "rounds": [r(security="PASS", ux="PASS", ui="PASS", code="CHANGES")]}, 75),
-            ({"stage": "approve"}, 80), ({"stage": "merging"}, 90),
+            ({"stage": "approve"}, 80), ({"stage": "merging"}, 90), ({"stage": "deploying"}, 95),
             ({"stage": "needs-human", "rounds": [r()]}, 85), ({"stage": "needs-human", "rounds": []}, 10),
             ({"stage": "build", "round": 1, "limit": 2}, 40),
         ]
@@ -2228,7 +2240,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertTrue(span.endswith("--recommend <key> '<why>'"), span)
-        self.assertEqual(len(board.STOP_TITLES), 14)
+        self.assertEqual(len(board.STOP_TITLES), 15)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
@@ -2289,7 +2301,8 @@ class ContractTest(unittest.TestCase):
             for label, _, command in options:
                 self.assertNotIn(label, ("Abort", "Keep", "Discard", "Requeue", "Approve & merge", "Retry", "Resume",
                                          "Send back"), span)
-                if command.startswith("abort ") and name != "lilguy":
+                # A merged job whose prod check failed has nothing to requeue or cascade: a plain abort stops tracking it.
+                if command.startswith("abort ") and name != "lilguy" and "--title PROD_CHECK_FAILED" not in span:
                     self.assertTrue(command.endswith((" --cascade", " --requeue")), span)
                 if command.endswith(" --cascade"):
                     self.assertEqual(label, "Remove this job", span)
@@ -3365,7 +3378,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_dashboard_shows_cloud_stage_and_link(self):
         text = DASHBOARD.read_text()
-        self.assertIn('"merging", "cloud", "stalled", "needs-human"', text)
+        self.assertIn('"merging", "deploying", "cloud", "stalled", "needs-human"', text)
+        self.assertIn('deploying: "Deploying"', text)
         self.assertIn("Cloud session ↗", text)
 
     # --- Human setup for any lane ---
