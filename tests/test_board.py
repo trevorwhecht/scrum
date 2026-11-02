@@ -991,12 +991,15 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((line["project"], line["job"], line["kind"], line["reason"]),
                          (Path(self.tmp.name).name, parent, "bigboy", blocked))
         board.cmd_set(self.root, parent, ["stage=done", "reason=merged + gaps: review unreadable"])
-        self.assertEqual({k: self.log_lines()[1][k] for k in ("job", "kind", "reason")},
-                         {"job": parent, "kind": "bigboy", "reason": "merged + gaps: review unreadable"})
+        job = next(j for j in self.jobs() if j["id"] == parent)
+        self.assertEqual((job["stage"], job["reason"]), ("done", "merged + gaps: review unreadable"))
+        self.assertEqual(self.log_lines(), [line])  # step 7 filed the gaps: no stop line
+        board.cmd_set(self.root, parent, ["stage=done", "reason=merged + gaps: review unreadable"])  # job 206 ran it twice
+        self.assertEqual(self.log_lines(), [line])
         other = board.cmd_new(self.root, "y")
         for q in ("bigboy review: main not updated; merge it?", "bigboy blocked: 009-x. Resume?", "bigboy off track?"):
             board.cmd_ask(self.root, other, q, [f"R=resume {other}", f"A=abort {other}"], title="MERGE_CONFLICT")
-        asks = self.log_lines()[2:]
+        asks = self.log_lines()[1:]
         self.assertEqual([(l["kind"], l["reason"], l["question"]) for l in asks],
                          [("bigboy", "bigboy review: main not updated; merge it?",
                            "bigboy review: main not updated; merge it?"),
@@ -6669,10 +6672,11 @@ class WindowReportTest(unittest.TestCase):
 
     def test_window_report_yield_routing_escapes(self):
         R = self.R
-        self.board(("401-r", "done", R - 100), ("402-p", "done", R - 100, {"lane": "bigboy"}),
+        self.board(("401-r", "done", R - 100), ("402-p", "done", R - 100, {"lane": "bigboy", "reason": "merged + gaps: two gaps"}),
                    ("403-d", "running", R - 100, {"lane": "debug"}), ("404-q", "done", R - 5000),
                    ("405-d", "done", R - 100, {"lane": "debug"}), ("406-s", "done", R - 50),
-                   ("407-d", "done", R - 100, {"lane": "debug"}))
+                   ("407-d", "done", R - 100, {"lane": "debug"}), ("408-b", "done", R - 100, {"lane": "bigboy"}),
+                   ("409-o", "done", R - 20000, {"lane": "bigboy", "reason": "merged + gaps: old"}))
         self.put("401-r/round-1/review-code.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] a\n2. [minor] b\n"
                  "not a finding\n## Notes\n3. [minor] not counted\n", mtime=R - 100)
         self.put("401-r/round-1/review-ux.md", "VERDICT: PASS\nSkipped by orchestrator: fast lane.\n## Findings\n"
@@ -6685,7 +6689,7 @@ class WindowReportTest(unittest.TestCase):
                                                  rl(R - 700, "skip", "ok"), rl(R - 600, "local", "fail"),
                                                  rl(R - 20000, "local", "ok"), "bad line"]) + "\n")
         self.questions(
-            {"date": self.at(R - 300), "job": "402-p", "kind": "bigboy", "reason": "merged + gaps: two gaps"},
+            {"date": self.at(R - 300), "job": "401-r", "kind": "bigboy", "reason": "merged + gaps: in window"},
             {"date": self.at(R - 250), "job": "401-r", "kind": "bigboy", "reason": "bigboy review: main not updated"},
             {"date": self.at(R - 20000), "job": "401-r", "kind": "bigboy", "reason": "merged + gaps: old"})
         self.put("403-d/feature.md", "Regression from job 404 in the header\n", mtime=R - 100)

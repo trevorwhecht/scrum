@@ -1450,10 +1450,10 @@ def _scorecard(root, e, t, board, questions):
     routed = [d for p in root.glob("jobs/*/routing.log") for d in _json_lines(p) if within(_epoch(d.get("ts")))]
     # escapes: merged-with-gaps bigboy parents, and done jobs a later debug-lane job names
     escaped, escapes = set(), 0
-    for q in questions:
-        if q.get("kind") == "bigboy" and within(q["_ts"]) and str(q.get("reason") or "").startswith("merged + gaps"):
+    for i in done:  # one per parent from board.json; step 7 files the gaps, so no questions.log line
+        if jobs[i].get("lane") == "bigboy" and str(jobs[i].get("reason") or "").startswith("merged + gaps"):
             escapes += 1
-            escaped.add(q.get("job"))
+            escaped.add(i)
     all_done = {i: _epoch(j.get("updatedAt")) for i, j in jobs.items() if j.get("stage") == "done"}
     for i, j in jobs.items():
         f = root / "jobs" / i / "feature.md"
@@ -3107,8 +3107,6 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             job.pop("stalled", None)  # so does a stall in that stage
         job["files"], job["diverged"] = files, div
         job["updatedAt"] = now()
-        if given.get("stage") == "done" and (given.get("reason") or "").startswith("merged + gaps"):
-            log_stop(root, job["id"], "bigboy", job["reason"])
     if job["stage"] != was and job["stage"] in ("done", "needs-human"):
         play(sound(job["stage"]))
 
