@@ -39,6 +39,7 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - When the fix is an agent or lane rule, write a normal kind `edit` proposal.
 - Otherwise write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`. The `backlog` line names the cause, its count and the pipeline change in board.py, serve.py or the dashboard.
 - A row with Automate `no` gets no proposal.
+- Skip a row when `scrum/backlog.md` already holds an open `- [ ]` item for its cause (read it first), and skip a `bigboy review: main not updated` row: `lanes/bigboy.md` step 7 (`waiting: main fast-forward`, which serve.py resumes) already self-heals it.
 
 **New skill.** From `notes.md`'s `## Rediscovery` section only, you may propose a new skill: a short reference an agent reads up front so it stops re-deriving the same facts.
 - Propose a skill only from a `## Rediscovery` entry. When that section is `None`, propose no skill.
