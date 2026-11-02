@@ -106,6 +106,42 @@ console.log(JSON.stringify([a, b, c, sent.map(s => s[1])]));""")
         self.assertEqual(got, [[1], "STALE", [2], [None, '"one"', None]])
 
 
+class RouteText(unittest.TestCase):
+    """Job 534: a failed routing.log fetch forgets its ETag so the next poll refetches instead of getting a 304."""
+    T = ('(b, tag) => () => Promise.resolve({ok: true, status: 200, headers: {get: h => h === "ETag" ? tag : null}, '
+         'text: () => Promise.resolve(b)})')
+    NM = '() => Promise.resolve({ok: false, status: 304, headers: {get: () => null}})'
+
+    def test_304_keeps_previous_text(self):
+        got = run(f"""
+const t = {self.T}, nm = {self.NM};
+replies = [t("log1", '"a"'), nm];
+const a = await getText("u", undefined);
+const b = await getText("u", a);
+console.log(JSON.stringify([a, b, sent]));""")
+        self.assertEqual(got, ["log1", "log1", [["u", None], ["u", '"a"']]])
+
+    def test_failure_forgets_etag(self):
+        got = run(f"""
+const t = {self.T};
+replies = [t("old", '"tag"'), () => Promise.reject(new TypeError("reset")), t("new", '"t2"')];
+const a = await getText("u", undefined);
+const b = await getText("u", a);
+const c = await getText("u", b);
+console.log(JSON.stringify([a, b, c, sent.map(s => s[1])]));""")
+        self.assertEqual(got, ["old", "", "new", [None, '"tag"', None]])
+
+    def test_404_forgets_etag(self):
+        got = run(f"""
+const t = {self.T};
+replies = [t("old", '"tag"'), () => Promise.resolve({{ok: false, status: 404}}), t("new", '"t2"')];
+const a = await getText("u", undefined);
+const b = await getText("u", a);
+const c = await getText("u", b);
+console.log(JSON.stringify([a, b, c, sent.map(s => s[1])]));""")
+        self.assertEqual(got, ["old", "", "new", [None, '"tag"', None]])
+
+
 class SingleFlight(unittest.TestCase):
     def test_overlapping_ticks_share_one_run(self):
         got = run("""
