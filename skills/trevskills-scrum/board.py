@@ -4107,6 +4107,13 @@ def cmd_roadmap_stop(root, job_id, reason):
         roadmap_stop_locked(root, job_id, reason)
 
 
+def require_scrum_dir(d: Path) -> Path:
+    """Refuse a git checkout root: .board.lock and runs/ would land in the repo (a worktree has a .git file)."""
+    if (d / ".git").exists():
+        raise SystemExit(f"--dir must be the project's scrum/ folder, not the repo root: {d}")
+    return d
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dir", type=Path, default=Path("scrum"))
@@ -4224,6 +4231,7 @@ def main(argv=None):
             line = ""
         print(line)
         return 0
+    require_scrum_dir(a.dir)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title, a.id))
     elif a.cmd == "set":

@@ -3852,6 +3852,17 @@ class AiSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(server, '{' + line + '}', confirm=True)[0], 200)
         self.assertEqual(json.loads(mcp.read_text()), {"mcpServers": {"s": {"type": "http", "command": "p", "env": {"K": "w"}}}})
 
+class ServeMainRepoRootTest(unittest.TestCase):
+    def test_serve_main_refuses_repo_root(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / ".git").mkdir()
+            r = subprocess.run([sys.executable, str(ROOT / "skills" / "trevskills-scrum" / "serve.py"),
+                                "--digest-auto", "001", "--dir", t], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("--dir must be the project's scrum/ folder, not the repo root", r.stderr)
+            self.assertEqual([p.name for p in Path(t).iterdir()], [".git"])
+
+
 class AiSecurityTest(unittest.TestCase):
     """Page 3: the Security scan, on the same fake home as AiSettingsTest."""
     setUp, get = AiSettingsTest.setUp, AiSettingsTest.get
