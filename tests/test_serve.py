@@ -1238,6 +1238,36 @@ class ServeTest(unittest.TestCase):
         run.assert_not_called()
         popen.assert_not_called()
 
+    def test_option_command_lilguy(self):
+        self.assertEqual(self.serve.option_command("lilguy 012"), ("lilguy", None))
+        self.assertIsNone(self.serve.option_command("lilguy 012 x"))
+        self.assertIsNone(self.serve.option_command("lilguy"))
+
+    def test_answer_dispatch_lilguy_opens_terminal(self):
+        job_id = self.asked("lilguy 77", "abort 77 --cascade")
+        tries = []
+        with mock.patch.object(self.serve, "run_terminal",
+                               side_effect=lambda t: tries.append(t) or (200, {"message": "Opened in a new Terminal window."})):
+            code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Run it", "command": "lilguy 77"})
+        self.assertEqual((code, out), (200, {"message": "Opened in a new Terminal window."}))
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        self.assertEqual(tries, [[(["osascript", "-e", self.serve.NEW_WINDOW_SCRIPT, str(self.root.resolve().parent), "env",
+                                    "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum lilguy {job_id}"],
+                                   "Opened in a new Terminal window.")]])
+        for name in ("spawn", "stop", "abort", "resume"):
+            m[name].assert_not_called()
+
+    def test_answer_lilguy_terminal_failure_keeps_question(self):
+        job_id = self.asked("lilguy 77", "abort 77 --cascade")
+        with mock.patch.object(self.serve, "run_terminal", return_value=(500, {"error": "couldn't open the terminal"})), \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a"})
+        self.assertEqual((code, out), (500, {"error": "couldn't open the terminal"}))
+        spawn.assert_not_called()
+        job = self.stage_of(job_id)
+        self.assertEqual((job["stage"], job["question"], [o["command"] for o in job["options"]]),
+                         ("needs-human", "Which way?", ["lilguy 77", "abort 77 --cascade"]))
+
     def test_answer_resume_refusal(self):
         lil = self.asked("resume 1", lane="lilguy")
         code, out, m = self.answer(lil, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})

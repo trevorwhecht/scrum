@@ -350,7 +350,7 @@ def abort_job(project, root, job_id, requeue, cascade=False):
 
 def option_command(command):
     """(verb, arg) for a closed-question option's command (board.py ask), or None when it is none of
-    approve/rework/abort/resume/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
+    approve/rework/abort/resume/lilguy/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
     command."""
     if not isinstance(command, str):
         return None
@@ -361,7 +361,7 @@ def option_command(command):
         words = shlex.split(command)
     except ValueError:
         return None
-    if len(words) == 2 and words[0] in ("approve", "resume"):
+    if len(words) == 2 and words[0] in ("approve", "resume", "lilguy"):
         return words[0], None
     if len(words) == 3 and words[0] == "rework" and board.clean(words[2]):
         return "rework", words[2]
@@ -404,6 +404,9 @@ def answer_job(project, root, job, jobs, key, note=None):
     if not parsed:
         return 409, {"error": f"unknown option command: {picked.get('command')}"}
     verb, arg = parsed
+    if verb == "lilguy":  # Trevor approves each .claude/ edit in the window; a failed launch leaves the question open
+        return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
+                                             f"/trevskills-scrum lilguy {job_id}"), "Opened in a new Terminal window.")])
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
     if verb == "approve":

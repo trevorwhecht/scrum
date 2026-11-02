@@ -76,6 +76,9 @@
   board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
                                    answer score < 1.5 at confidence >= 0.7) with no hard-stop word in feature.md
                                    (SKILL.md New job step 3's Lilguy route)
+  board.py claude-paths <id>       print {"paths","headless"}: the project .claude/ files spec.md's Likely files name, and
+                                   whether this session is unattended (claude -p, or no claude ancestor found)
+                                   (lanes/newjob.md step 3c)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
                                    Fast or Lilguy Worktree mode promotion trigger (or null), whether a PASS round is a clean round, and
                                    whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
@@ -164,7 +167,7 @@ STOP_TITLES = {
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
-ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume|lilguy) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
                             r'|shell: \S.*)'
                             .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
@@ -1810,6 +1813,9 @@ LILGUY_HARD_STOP_RE = re.compile(
     r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
     r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
 LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
+# A repo-relative .claude/ path (not ~/.claude, $HOME/.claude, an absolute path or a job worktree): Claude Code refuses
+# edits there in an unattended session, so such a job never takes the unattended Lilguy route.
+CLAUDE_DIR_RE = re.compile(r"(?<![\w~/.$}])\.claude/(?!worktrees/)")
 
 
 def _jev_model(folder: Path) -> dict | None:
@@ -1849,7 +1855,8 @@ def job_complex(root: Path, job_id: str) -> bool:
 
 
 def cmd_lilguy_fit(root, job_id: str) -> dict:
-    """{"fit", "why"}: a job already on another lane never fits; then a feature.md header `Lane:` line decides (lilguy
+    """{"fit", "why"}: a job already on another lane never fits, nor one whose feature.md or spec.md names a
+    repo-relative `.claude/` path (CLAUDE_DIR_RE); then a feature.md header `Lane:` line decides (lilguy
     fits, any other lane doesn't); else fit only when tiny by backlog points or by Jev, with no LILGUY_HARD_STOP_RE word
     in its feature.md."""
     job = find(read_board(root), check_id(job_id))
@@ -1858,6 +1865,9 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
         return {"fit": False, "why": f"already on {lane} lane"}
     folder = Path(root) / "jobs" / job_id
     feature = folder / "feature.md"
+    for f in (feature, folder / "spec.md"):
+        if f.is_file() and CLAUDE_DIR_RE.search(f.read_text(encoding="utf-8", errors="replace")):
+            return {"fit": False, "why": "names a .claude/ path"}
     if pinned := header_value(feature, "Lane", LANES):
         return {"fit": pinned == "lilguy", "why": f"feature.md Lane: {pinned}"}
     if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
@@ -3156,7 +3166,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             raise SystemExit(f"bad option {raw!r}; expected label=command")
         if not ASK_COMMAND_RE.fullmatch(command):
             raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
-                             "abort <id> [--requeue|--cascade], resume <id>, shell: <command>")
+                             "abort <id> [--requeue|--cascade], resume <id>, lilguy <id>, shell: <command>")
         parsed.append({"key": key, "label": label, "command": command})
     if recommend is not None:
         rkey, why = recommend[0].strip(), clean(recommend[1])
@@ -3602,6 +3612,32 @@ def caller_claude_pid():
     except (OSError, subprocess.SubprocessError):
         pass
     return None
+
+
+def caller_headless() -> bool:
+    """True when the nearest claude ancestor runs with `-p`/`--print` (unattended), and also when none is found or ps
+    fails (fail closed: an unattended session can't approve a `.claude/` edit)."""
+    pid = caller_claude_pid()
+    if pid is None:
+        return True
+    try:
+        toks = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=2).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return not toks or "-p" in toks or "--print" in toks
+
+
+def cmd_claude_paths(root, job_id: str) -> dict:
+    """{"paths", "headless"}: spec.md's `## Likely files` backticked paths under `.claude/` (not `.claude/worktrees/`),
+    in file order, [] for a missing spec or section; headless from caller_headless (lanes/newjob.md step 3c)."""
+    try:
+        text = (Path(root) / "jobs" / check_id(job_id) / "spec.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    found = re.findall(r"`([^`\s]+)`", md_section(text, "Likely files") or "")
+    paths = [p for p in dict.fromkeys(found) if p.startswith(".claude/") and not p.startswith(".claude/worktrees/")]
+    return {"paths": paths, "headless": caller_headless()}
 
 
 ACTION_NEEDED_RE = re.compile(r"[\s*_>•-]*action needed[\s*_:–—-]*(.*)", re.I)
@@ -4125,6 +4161,7 @@ def main(argv=None):
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
+    sub.add_parser("claude-paths").add_argument("id")
     rc = sub.add_parser("route-check")
     rc.add_argument("id")
     rc.add_argument("--check-fails", type=int, default=0)
@@ -4229,6 +4266,8 @@ def main(argv=None):
         return 1 if out.get("ok") is False else 0
     elif a.cmd == "lilguy-fit":
         print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
+    elif a.cmd == "claude-paths":
+        print(json.dumps(cmd_claude_paths(a.dir, a.id)))
     elif a.cmd == "route-check":
         print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":

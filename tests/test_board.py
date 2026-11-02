@@ -323,7 +323,8 @@ class BoardTest(unittest.TestCase):
             "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
         }
         allowed = ('allowed: approve <id>, rework <id> "<text>", abort <id> [--requeue|--cascade], resume <id>, '
-                   "shell: <command>")
+                   "lilguy <id>, shell: <command>")
+        cases["lilguy extra word"] = (job_id, "Q?", [f"Go=lilguy {job_id} now", ok])
         cases["cascade and requeue"] = (job_id, "Q?", [f"Go=abort {job_id} --cascade --requeue", ok])
         cases["misspelt cascade"] = (job_id, "Q?", [f"Go=abort {job_id} --cascad", ok])
         for name, (jid, q, opts) in cases.items():
@@ -332,7 +333,7 @@ class BoardTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as e:
                     board.cmd_ask(self.root, jid, q, opts, title="MERGE_CONFLICT")
                 self.assertTrue(str(e.exception.code))
-                if name in ("cascade and requeue", "misspelt cascade"):
+                if name in ("cascade and requeue", "misspelt cascade", "lilguy extra word"):
                     self.assertIn(allowed, str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertEqual(len(self.log_lines()), 1)
@@ -6066,6 +6067,24 @@ class LilguyFitTest(unittest.TestCase):
                 (self.jd / "feature.md").write_text(text + "\n")
                 self.assertIs(self.fit()["fit"], False)
 
+    def test_lilguy_fit_claude_path_fails(self):
+        self.points(1)
+        for text in ("Edit `.claude/skills/scrum-code-map/SKILL.md`", ".claude/settings.json gets a line"):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(f"# Tweak\nLane: lilguy — tiny\n\n{text}\n")
+                self.assertEqual(self.fit(), {"fit": False, "why": "names a .claude/ path"})
+        (self.jd / "feature.md").write_text("Tweak the label\n")
+        (self.jd / "spec.md").write_text("## Likely files\n- `.claude/rules/x.md`\n")
+        self.assertEqual(self.fit(), {"fit": False, "why": "names a .claude/ path"})
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+
+    def test_lilguy_fit_home_claude_path_passes(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Edit ~/.claude/CLAUDE.md, $HOME/.claude/x, ${HOME}/.claude/y, "
+                                            "/Users/t/.claude/z, foo.claude/a, x/.claude/b and .claude/worktrees/c\n")
+        self.assertEqual(self.fit(), {"fit": True, "why": "backlog item is 1 point"})
+
     def test_lilguy_fit_feature_lane_lilguy_overrides(self):
         self.points(2)
         (self.jd / "feature.md").write_text("# Show the payment total\n\nLane: lilguy — one label\n\nShow the Payment total\n")
@@ -6112,6 +6131,72 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIn("999-nope", r.stderr)
         with self.assertRaises(SystemExit):
             board.cmd_lilguy_fit(self.root, "999-nope")
+
+
+class ClaudePathsTest(unittest.TestCase):
+    """board.py claude-paths: the project .claude/ files a job's spec names, and whether this session is unattended."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.job = board.cmd_new(self.root, "Edit a skill")
+        self.spec = self.root / "jobs" / self.job / "spec.md"
+
+    def ps(self, command, pid=4242):
+        """Patch caller_claude_pid to pid and ps to print command for it; returns the run mock."""
+        out = subprocess.CompletedProcess([], 0, stdout=command + "\n", stderr="")
+        for p in (mock.patch.object(board, "caller_claude_pid", return_value=pid),
+                  mock.patch.object(board.subprocess, "run", return_value=out)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def paths(self):
+        return board.cmd_claude_paths(self.root, self.job)["paths"]
+
+    def test_lists_claude_paths_from_likely_files(self):
+        self.spec.write_text("# Spec\n## Likely files\n- `src/a.py`\n- `.claude/skills/b/SKILL.md`: the digest\n"
+                             "- `.claude/rules/c.md` and `.claude/skills/b/SKILL.md`\n## Assumptions\n- none\n")
+        self.ps("claude -p --permission-mode acceptEdits")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "claude-paths", self.job])
+        self.assertIn(code, (0, None))
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"paths": [".claude/skills/b/SKILL.md", ".claude/rules/c.md"], "headless": True})
+
+    def test_ignores_worktrees_and_other_sections(self):
+        self.spec.write_text("## Scope\n- `.claude/skills/x/SKILL.md`\n## Likely files\n- `.claude/worktrees/scrum-1/a.py`\n"
+                             "- `~/.claude/scrum-map.md`\n- `skills/.claude/x`\n- .claude/no-backticks.md\n"
+                             "## Assumptions\n- `.claude/rules/y.md`\n")
+        self.assertEqual(self.paths(), [])
+
+    def test_missing_spec_gives_empty(self):
+        self.assertEqual(self.paths(), [])
+        self.spec.write_text("# Spec\n## Scope\n- `.claude/skills/x/SKILL.md`\n")
+        self.assertEqual(self.paths(), [])
+
+    def test_headless_from_print_flag(self):
+        for command, want in (("claude -p hi", True), ("/opt/bin/claude --print --verbose", True),
+                              ("claude --permission-mode acceptEdits", False), ("claude", False),
+                              ("claude --resume abc-p", False)):
+            with self.subTest(command):
+                out = subprocess.CompletedProcess([], 0, stdout=command + "\n", stderr="")
+                with mock.patch.object(board, "caller_claude_pid", return_value=4242), \
+                        mock.patch.object(board.subprocess, "run", return_value=out) as run:
+                    self.assertIs(board.caller_headless(), want)
+                self.assertEqual(run.call_args.args[0], ["ps", "-o", "command=", "-p", "4242"])
+
+    def test_headless_when_no_claude_ancestor(self):
+        with mock.patch.object(board, "caller_claude_pid", return_value=None):
+            self.assertIs(board.caller_headless(), True)
+        with mock.patch.object(board, "caller_claude_pid", return_value=4242), \
+                mock.patch.object(board.subprocess, "run", side_effect=OSError("no ps")):
+            self.assertIs(board.caller_headless(), True)
+        gone = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        with mock.patch.object(board, "caller_claude_pid", return_value=4242), \
+                mock.patch.object(board.subprocess, "run", return_value=gone):
+            self.assertIs(board.caller_headless(), True)
 
 
 class RunAllLilguyTest(unittest.TestCase):
