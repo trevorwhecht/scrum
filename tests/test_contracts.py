@@ -955,6 +955,15 @@ class ContractTest(unittest.TestCase):
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
             self.assertLessEqual(len(path.read_text()), 21000, path.name)
 
+    def test_review_agents_base_render_before_additive(self):
+        agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
+        phrase = "is never called additive"
+        for name, text in agents.items():
+            self.assertEqual(text.count(phrase), 1, name)
+            para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
+            self.assertIn(phrase, para, name)
+            self.assertLessEqual(len(text), 20000, name)
+
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
 
