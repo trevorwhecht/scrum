@@ -1450,7 +1450,7 @@ class ContractTest(unittest.TestCase):
                        "write `$W/error.md` containing the one line `fable unavailable` and stop",
                        "Never respawn it without the override", "once more with the same override",
                        "`digester produced no valid proposals`", "serve.py --weekly-ask <NNN>", "`W=<weekly_dir>/<NNN>`",
-                       '{"asked": [{"id", "project", "job"}], "skipped": [{"id", "reason"}]}'):
+                       '{"asked": [{"id", "project", "job"}], "skipped": [{"id", "reason"}]}', "**Apply it**"):
             self.assertIn(phrase, weekly, phrase)
         import importlib.util
         spec = importlib.util.spec_from_file_location("board_weekly", BOARD_PY)
@@ -1472,7 +1472,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, digester, phrase)
         flow = (ROOT / ".claude" / "skills" / "scrum-digest-flow" / "SKILL.md").read_text()
         self.assertIn("\n## Weekly\n", flow)
-        for name in ("cmd_weekly_start", "weekly_tick", "weekly_ask", "WEEKLY_LATE_SECS"):
+        for name in ("cmd_weekly_start", "weekly_tick", "weekly_ask", "WEEKLY_LATE_SECS", "weekly_apply"):
             self.assertIn(name, flow, name)
 
     def test_digest_stops_table_parses(self):

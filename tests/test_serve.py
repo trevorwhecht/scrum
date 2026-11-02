@@ -8249,7 +8249,7 @@ class WeeklyTest(unittest.TestCase):
         (self.reg / "CLAUDE.md").write_text("old line\nold line\n")
         (self.reg / ".claude" / "settings.json").write_text("old line\n")
         path = self.weekly_digest([
-            self.prop("p1", self.rule()),
+            self.prop("p1", self.loose()),
             self.prop("p2", self.reg / ".claude" / "settings.json"),
             self.prop("p3", self.reg / "skills" / "new" / "SKILL.md", old="", new="---\nname: new\n---\n", kind="skill"),
             {"id": "p4", "kind": "backlog", "why": "a stop", "backlog": "fix the stop"},
@@ -8258,7 +8258,7 @@ class WeeklyTest(unittest.TestCase):
             self.prop("p7", self.reg / "CLAUDE.md", status="applied"),
         ])
         out = self.serve.weekly_ask("001")
-        want = [("p1", "target outside every registered repo"), ("p2", "settings or hooks target"),
+        want = [("p1", "target is not editable"), ("p2", "settings or hooks target"),
                 ("p3", "weekly takes edits only"), ("p4", "weekly takes edits only"), ("p5", "old text found 0 times"),
                 ("p6", "old text found 2 times")]
         self.assertEqual(out, {"asked": [], "skipped": [{"id": i, "reason": r} for i, r in want]})
@@ -8269,7 +8269,7 @@ class WeeklyTest(unittest.TestCase):
         rule = self.rule()
         (self.reg / "CLAUDE.md").write_text("keep\nold line\n")
         self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md"), self.prop("p2", rule)])
-        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 1)
+        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 2)
         self.assertEqual((self.reg / "CLAUDE.md").read_text(), "keep\nold line\n")
         self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
         self.assertEqual(self.backups(), [])
@@ -8277,16 +8277,102 @@ class WeeklyTest(unittest.TestCase):
 
     def test_ask_rerun_creates_no_duplicates(self):
         (self.reg / "CLAUDE.md").write_text("old line\n")
-        path = self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md")])
-        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 1)
+        path = self.weekly_digest([self.prop("p1", self.reg / "CLAUDE.md"), self.prop("p2", self.rule())])
+        self.assertEqual(len(self.serve.weekly_ask("001")["asked"]), 2)
         self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": []})
         data = json.loads(path.read_text())
-        data["proposals"][0]["status"] = "pending"  # a crash between the ask and the status write
+        for p in data["proposals"]:
+            p["status"] = "pending"  # a crash between the ask and the status write
         path.write_text(json.dumps(data))
-        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": [{"id": "p1", "reason": "already asked"}]})
+        self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": [{"id": "p1", "reason": "already asked"},
+                                                                                {"id": "p2", "reason": "already asked"}]})
         jobs = self.board.read_board(self.scrum)["jobs"]
-        self.assertEqual([(j["id"], j["stage"]) for j in jobs], [("001-weekly-digest-001-p1-claude-md", "needs-human")])
-        self.assertEqual(self.entries(path), [("p1", "skipped", "already asked")])
+        self.assertEqual([j["stage"] for j in jobs], ["needs-human", "needs-human"])
+        self.assertEqual(jobs[0]["id"], "001-weekly-digest-001-p1-claude-md")
+        self.assertEqual(self.entries(path), [("p1", "skipped", "already asked"), ("p2", "skipped", "already asked")])
+
+    def loose(self):
+        """A file outside every repo and every AI-Settings scope."""
+        f = Path(self.tmp.name) / "loose.md"
+        f.write_text("old line\n")
+        return f
+
+    def ask_global(self):
+        """weekly_ask on one global rule edit: (rule path, proposals path, the parked job)."""
+        rule = self.rule()
+        path = self.weekly_digest([self.prop("p1", rule)])
+        self.serve.weekly_ask("001")
+        return rule, path, self.board.read_board(self.scrum)["jobs"][0]
+
+    def answer(self, job, key="a"):
+        jobs = self.board.read_board(self.scrum)["jobs"]
+        live = next(j for j in jobs if j["id"] == job["id"])
+        return self.serve.answer_job("reg", self.scrum, live, jobs, key)
+
+    def test_option_command_apply(self):
+        self.assertEqual(self.serve.option_command("apply 012"), ("apply", None))
+        self.assertIsNone(self.serve.option_command("apply 012 x"))
+
+    def test_ask_global_without_research_home_is_skipped(self):
+        path = self.weekly_digest([self.prop("p1", self.rule())])
+        with mock.patch.object(self.serve, "research_home", lambda: None):
+            out = self.serve.weekly_ask("001")
+        self.assertEqual(out, {"asked": [], "skipped": [{"id": "p1", "reason": "the trevskills-scrum repo is not registered"}]})
+        self.assertEqual(self.entries(path), [("p1", "skipped", "the trevskills-scrum repo is not registered")])
+
+    def test_ask_parks_global_edit_with_apply(self):
+        rule, path, job = self.ask_global()
+        shown = self.serve.home_short(str(rule))
+        title = f"Weekly digest 001 p1: {shown}"[:60]
+        self.assertEqual((job["title"], job["stage"], job["stopTitle"], job["lane"]), (title, "needs-human", "DIGEST", "lilguy"))
+        self.assertEqual(job["reason"], f"Weekly digest 001 p1 proposes an edit to the global file {shown}: Seen in reg and other "
+                                        "(p1). Apply it writes it now after a backup, Skip it drops it.")
+        jid = job["id"]
+        self.assertEqual([(o["label"], o["command"]) for o in job["options"]], [("Apply it", f"apply {jid}"), ("Skip it", f"abort {jid}")])
+        jd = self.scrum / "jobs" / jid
+        self.assertEqual(json.loads((jd / "weekly.json").read_text()), {"digest": "001", "pid": "p1", "target": str(rule)})
+        self.assertEqual((jd / "feature.md").read_text(), f"# {title}\n\nSeen in \"reg\" and `other` (p1).\n\nFrom weekly digest 001.\n")
+        self.assertFalse((jd / "spec.md").exists())
+        self.assertEqual(self.entries(path), [("p1", "queued", f"asked: reg {jid}")])
+        self.assertEqual(rule.read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.backups(), [])
+
+    def test_apply_writes_global_file_and_finishes_job(self):
+        rule, path, job = self.ask_global()
+        code, out = self.post(f"/api/p/reg/jobs/{job['id']}/answer", {"key": "a"})
+        self.assertEqual((code, out), (200, {"id": job["id"], "action": "answer", "command": "apply"}))
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(len(self.backups()), 1)
+        self.assertEqual(self.entries(path), [("p1", "applied", f"applied: reg {job['id']}")])
+        live = self.board.read_board(self.scrum)["jobs"][0]
+        self.assertEqual((live["stage"], live["reason"]), ("done", f"applied to {self.serve.home_short(str(rule))}"))
+
+    def test_apply_stale_old_text_leaves_job_waiting(self):
+        rule, path, job = self.ask_global()
+        rule.write_text("keep A\nchanged\nkeep B\n")
+        self.assertEqual(self.answer(job), (409, {"error": "old text found 0 times"}))
+        self.assertEqual(rule.read_text(), "keep A\nchanged\nkeep B\n")
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.entries(path), [("p1", "queued", f"asked: reg {job['id']}")])
+        live = self.board.read_board(self.scrum)["jobs"][0]
+        self.assertEqual((live["stage"], live["reason"]), ("needs-human", job["reason"]))
+        self.assertEqual(self.answer(job, "b")[0], 200)  # Skip it still works
+        self.assertEqual(self.entries(path), [("p1", "queued", f"asked: reg {job['id']}")])
+
+    def test_apply_twice_writes_once(self):
+        rule, path, job = self.ask_global()
+        self.assertEqual(self.answer(job)[0], 200)
+        self.assertEqual(self.answer(job)[0], 409)  # done: answer_job's needs-human check
+        self.board.cmd_ask(self.scrum, job["id"], "Again?", [f"Apply it=apply {job['id']}", f"Skip it=abort {job['id']}"],
+                           title="DIGEST")
+        self.assertEqual(self.answer(job), (409, {"error": "proposal is no longer waiting"}))
+        self.assertEqual(rule.read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_apply_needs_weekly_json(self):
+        job_id = self.board.cmd_new(self.scrum, "plain")
+        self.board.cmd_ask(self.scrum, job_id, "Q?", [f"Apply it=apply {job_id}", f"Skip it=abort {job_id}"], title="DIGEST")
+        self.assertEqual(self.answer({"id": job_id}), (409, {"error": "not a weekly global job"}))
 
     def test_ask_malformed_proposals_is_empty(self):
         self.assertEqual(self.serve.weekly_ask("001"), {"asked": [], "skipped": []}, "no folder")
