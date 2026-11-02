@@ -7271,12 +7271,37 @@ class WatchdogIdleParentTest(unittest.TestCase):
         spawn.assert_not_called()
 
     def test_finished_bigboy_parent_left_alone(self):
-        self.write("running", {"002-done": "done", "003-gone": "aborted"}, lane="bigboy")
-        before = (self.root / "board.json").read_text()
-        spawn, ready, _ = self.tick()
-        self.assertEqual((self.root / "board.json").read_text(), before)
-        spawn.assert_not_called()
-        ready.assert_not_called()
+        """The finished-parent backstop (sweep_parents) marks nothing while any guard holds."""
+        old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat(timespec="seconds")
+        lock = self.root / "jobs" / "001-par" / ".chain.lock"
+        cases = [("just written", {"fresh": ("001-par", "002-done", "003-gone")}, {}),
+                 ("fresh parent", {"fresh": ("001-par",)}, {}), ("fresh child", {"fresh": ("003-gone",)}, {}),
+                 ("chain lock", {"lock": True}, {}),
+                 ("running parent", {}, {"running": lambda p, j: j == "001-par"}),
+                 ("running child", {}, {"running": lambda p, j: j == "002-done"}),
+                 ("alive parent", {}, {"alive": lambda job: job["id"] == "001-par"}),
+                 ("alive child", {}, {"alive": lambda job: job["id"] == "003-gone"}),
+                 ("paused", {"paused": True}, {}), ("cooling down", {"cool": True}, {}),
+                 ("already marked", {"reason": "waiting: main fast-forward"}, {})]
+        for name, shape, kw in cases:
+            with self.subTest(name):
+                self.write("running", {"002-done": "done", "003-gone": "aborted"}, lane="bigboy")
+                data = json.loads((self.root / "board.json").read_text())
+                for j in data["jobs"]:
+                    if j["id"] not in shape.get("fresh", ()):
+                        j["updatedAt"] = old
+                data["jobs"][0].update(paused=shape.get("paused", False), holdPause=shape.get("paused", False),
+                                       reason=shape.get("reason"))  # holdPause: auto_play leaves it paused
+                (self.root / "board.json").write_text(json.dumps(data))
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_text("x") if shape.get("lock") else lock.unlink(missing_ok=True)
+                before = (self.root / "board.json").read_text()
+                with mock.patch.object(self.serve, "main_ready", return_value=False), \
+                        mock.patch.object(self.board, "cooling_down", return_value=shape.get("cool", False)):
+                    spawn, ready, _ = self.tick(**kw)
+                self.assertEqual((self.root / "board.json").read_text(), before)
+                spawn.assert_not_called()
+                ready.assert_not_called()
 
     def orphan(self, parent_lane="runall", parent="running", minutes=4, **fields):
         """A parent with child 002-claimed in spec, updatedAt `minutes` old, plus `fields`, and sibling 003-wait."""
