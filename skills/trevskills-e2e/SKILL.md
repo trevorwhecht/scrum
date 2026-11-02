@@ -26,7 +26,7 @@ Then find the saved specs that cover each target route: the spec files in the E2
 
 ## 3. Replay the saved suite first
 
-Replay needs no AI and runs once. With a base, run only the saved specs that cover the target routes: `npx playwright test <spec files>`. When the `E2E:` command is an `npm run` script or a `playwright test` command, the spec files are appended to it, keeping any env prefix such as `E2E_PORT=...`; an `npm run` script takes them after `--`. When no changed file maps to a route and section 4 adds no spec, nothing runs and the report says `Specs run: 0 — none`. Run the whole command only when no base is given. Record each spec file run under `Specs run:`. Passing specs need no further reading.
+Replay needs no AI and runs once. With a base, run only the saved specs that cover the target routes: `npx playwright test <spec files>`. When the `E2E:` command is an `npm run` script or a `playwright test` command, the spec files are appended to it, keeping any env prefix such as `E2E_PORT=...`; an `npm run` script takes them after `--`. For any other `E2E:` command, run `npx playwright test <spec files>` with that command's env prefix kept. When no changed file maps to a route and section 4 adds no spec, nothing runs and the report says `Specs run: 0 — none`. Run the whole command only when no base is given. Record each spec file run under `Specs run:`. Passing specs need no further reading.
 
 ## 4. Cover changed UI that has no spec
 
