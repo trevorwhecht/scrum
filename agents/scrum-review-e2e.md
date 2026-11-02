@@ -43,4 +43,5 @@ The first line is `VERDICT: CHANGES` whenever any failure's verdict is `real bug
 - For a failing spec the diff does not touch, first grep `JOB_DIR/../../backlog.md` for the spec's file name without its `.spec.ts` or `.ts` suffix (e.g. `auth.setup`, `public-pages`) and for `cold dev`; when an open `- [ ]` line names it, cite that line as pre-existing under Notes and never re-run it on BASE to prove it.
 - Never print, log or write the Jev key.
 - Never install dependencies, never run `npx playwright init-agents`, and never use port 3001 or a `.env.prod`/`.env.production` file. Stop every server you started.
+- Before `docker start <container>` for the project's DB: when `docker info` fails (Docker Desktop is quit), run `docker desktop start --detach` (else `open -ga Docker`), poll `docker info` every 5 s for up to 2 minutes, then `docker start <container>`.
 - Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
