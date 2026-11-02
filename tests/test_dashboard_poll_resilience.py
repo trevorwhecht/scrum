@@ -6,14 +6,14 @@ DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scru
 
 def run(scenario):
     """Run dashboard.html's getJson block (lastGood .. single) in node with a stubbed fetch, then `scenario`; return its JSON.
-    `sent` holds each fetch's [url, If-None-Match or null]."""
+    `sent` holds each fetch's [url, If-None-Match or null]; each reply is called with the fetch's opts."""
     node = shutil.which("node")
     if not node:
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
     start = text.index("const lastGood = {}, etags = {};")
     block = text[start:text.index("\n", text.index("const single = "))]
-    script = f"let replies = [], sent = [];\nconst fetch = (url, opts) => (sent.push([url, opts?.headers?.['If-None-Match'] ?? null]), replies.shift()());\n{block}\n(async () => {{ {scenario} }})();"
+    script = f"let replies = [], sent = [];\nconst fetch = (url, opts) => (sent.push([url, opts?.headers?.['If-None-Match'] ?? null]), replies.shift()(opts));\n{block}\n(async () => {{ {scenario} }})();"
     out = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout
     return json.loads(out)
 
@@ -72,6 +72,28 @@ replies = [() => Promise.reject(new TypeError("reset")), ok([1]), ok([2]), tagge
 for (let i = 0; i < 6; i++) await getJson("u", []);
 console.log(JSON.stringify(sent.map(s => s[1])));""")
         self.assertEqual(got, [None, None, None, None, '"t3"', '"t3"'])
+
+    def test_hung_request_times_out_to_last_good(self):
+        # Job 501: a request that never settles is aborted by its timeout signal and counts as a miss.
+        got = run(f"""
+const ok = {OK}, seen = [];
+const hang = opts => new Promise((_, rej) => {{
+  const fail = () => rej(new DOMException("signal timed out", "TimeoutError"));
+  if (opts?.signal?.aborted) fail(); else opts?.signal?.addEventListener("abort", fail);
+}});
+AbortSignal.timeout = ms => (seen.push(ms), AbortSignal.abort());
+replies = [ok({{jobs: [5]}}), hang];
+const a = await getJson("h", {{jobs: []}});
+const b = await getJson("h", {{jobs: []}});
+console.log(JSON.stringify([a, b, missed, seen]));""")
+        self.assertEqual(got, [{"jobs": [5]}, {"jobs": [5]}, 1, [15000, 15000]])
+
+    def test_poll_fetches_are_timed(self):
+        text = DASHBOARD.read_text()
+        start = text.index("async function poll()")
+        body = text[start:text.index("\n}\n", start)]
+        self.assertNotRegex(body, r"(?<![\w.])fetch\(")
+        self.assertIn('timed("api/projects"', body)
 
     def test_404_forgets_etag(self):
         got = run(f"""
