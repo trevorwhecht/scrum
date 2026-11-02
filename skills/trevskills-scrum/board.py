@@ -132,8 +132,8 @@ FABLE_WARN_5H_PCT = 65  # used % at which Fable is near its limit: fable-ok answ
 FABLE_WARN_7D_PCT = 75
 FABLE_SWITCH_5H_PCT = 80  # used % at which fable-ok answers none (frontmatter Opus) until the window resets
 FABLE_SWITCH_7D_PCT = 85
-STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done", "needs-human",
-          "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
+STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
+          "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
           "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
