@@ -2450,7 +2450,7 @@ class ContractTest(unittest.TestCase):
                       "aborted sibling", resume)
         self.assertIn("If none do, run `B ask <id> '<its reason>' --a \"Carry on=resume <id>\" "
                       "--b \"Remove this job=abort <id> --cascade\" --title BIGBOY_BLOCKED --recommend <key> '<why>'`", resume)
-        self.assertEqual(resume.count("same question, options, `--title` and --recommend"), 2)
+        self.assertEqual(resume.count("same question, options, `--title` and --recommend"),1)
         self.assertNotIn("after Trevor picks Throw away the changes", resume)
         for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",
                        "find the step whose `B ask` wrote the question"):
