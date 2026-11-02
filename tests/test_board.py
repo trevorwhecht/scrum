@@ -323,7 +323,7 @@ class BoardTest(unittest.TestCase):
             "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
         }
         allowed = ('allowed: approve <id>, rework <id> "<text>", abort <id> [--requeue|--cascade], resume <id>, '
-                   "lilguy <id>, shell: <command>")
+                   "lilguy <id>, apply <id>, shell: <command>")
         cases["lilguy extra word"] = (job_id, "Q?", [f"Go=lilguy {job_id} now", ok])
         cases["cascade and requeue"] = (job_id, "Q?", [f"Go=abort {job_id} --cascade --requeue", ok])
         cases["misspelt cascade"] = (job_id, "Q?", [f"Go=abort {job_id} --cascad", ok])
@@ -337,6 +337,8 @@ class BoardTest(unittest.TestCase):
                     self.assertIn(allowed, str(e.exception.code))
                 self.assertEqual((self.root / "board.json").read_bytes(), before)
                 self.assertEqual(len(self.log_lines()), 1)
+        board.cmd_ask(self.root, job_id, "Apply?", [f"A=apply {job_id}", ok], title="DIGEST")
+        self.assertEqual(self.jobs()[0]["options"][0]["command"], f"apply {job_id}")
 
     def test_ask_recommend_stored_and_logged(self):
         job_id = board.cmd_new(self.root, "x")

@@ -167,7 +167,7 @@ STOP_TITLES = {
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
-ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume|lilguy) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume|lilguy|apply) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
                             r'|shell: \S.*)'
                             .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
@@ -3167,7 +3167,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             raise SystemExit(f"bad option {raw!r}; expected label=command")
         if not ASK_COMMAND_RE.fullmatch(command):
             raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
-                             "abort <id> [--requeue|--cascade], resume <id>, lilguy <id>, shell: <command>")
+                             "abort <id> [--requeue|--cascade], resume <id>, lilguy <id>, apply <id>, shell: <command>")
         parsed.append({"key": key, "label": label, "command": command})
     if recommend is not None:
         rkey, why = recommend[0].strip(), clean(recommend[1])

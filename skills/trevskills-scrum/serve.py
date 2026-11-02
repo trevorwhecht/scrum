@@ -350,7 +350,7 @@ def abort_job(project, root, job_id, requeue, cascade=False):
 
 def option_command(command):
     """(verb, arg) for a closed-question option's command (board.py ask), or None when it is none of
-    approve/rework/abort/resume/lilguy/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
+    approve/rework/abort/resume/lilguy/apply/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
     command."""
     if not isinstance(command, str):
         return None
@@ -361,7 +361,7 @@ def option_command(command):
         words = shlex.split(command)
     except ValueError:
         return None
-    if len(words) == 2 and words[0] in ("approve", "resume", "lilguy"):
+    if len(words) == 2 and words[0] in ("approve", "resume", "lilguy", "apply"):
         return words[0], None
     if len(words) == 3 and words[0] == "rework" and board.clean(words[2]):
         return "rework", words[2]
@@ -399,6 +399,8 @@ def answer_job(project, root, job, jobs, key, note=None):
             if (live := board.find(b, job_id))["stage"] == "needs-human":
                 live.setdefault("play_queued", board.now())
         return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
+    if option_command(opt.get("command"))[0] == "apply":  # writes the global file itself, then records the pick
+        return weekly_apply(project, root, job_id, key)
     picked = board.cmd_answer(root, job_id, key)
     parsed = option_command(picked.get("command"))
     if not parsed:
@@ -3378,25 +3380,59 @@ def digest_auto(root, digest_id):
     return out
 
 
-def weekly_set_status(path: Path, pid: str, status: str, reason: str) -> None:
-    """Set one weekly proposal's status and reason while it is still pending: re-read under DIGEST_LOCK, tmp +
-    os.replace."""
+def weekly_set_status(path: Path, pid: str, status: str, reason: str, from_status: str = "pending") -> None:
+    """weekly_set_status_locked under DIGEST_LOCK."""
     with DIGEST_LOCK:
-        data, raw = read_proposals(path)
-        hit = [e for e in raw if (v := valid_proposal(e)) and v["id"] == pid and v["status"] == "pending"]
-        for entry in hit:
-            entry.update(status=status, reason=reason)
-        if hit:
-            tmp = path.with_name("proposals.json.tmp")
-            tmp.write_text(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp, path)
+        weekly_set_status_locked(path, pid, status, reason, from_status)
+
+
+def weekly_set_status_locked(path: Path, pid: str, status: str, reason: str, from_status: str) -> None:
+    """Set one weekly proposal's status and reason while it is still from_status: re-read, tmp + os.replace. The caller
+    holds DIGEST_LOCK."""
+    data, raw = read_proposals(path)
+    hit = [e for e in raw if (v := valid_proposal(e)) and v["id"] == pid and v["status"] == from_status]
+    for entry in hit:
+        entry.update(status=status, reason=reason)
+    if hit:
+        tmp = path.with_name("proposals.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+
+
+def home_short(target: str) -> str:
+    """target with a leading home folder shown as ~."""
+    home = str(Path.home())
+    return "~" + target[len(home):] if target.startswith(home + os.sep) else target
+
+
+def weekly_apply(project: str, root: Path, job_id: str, key: str) -> tuple[int, dict]:
+    """Trevor picked Apply it on a weekly global-edit job: write the proposal through digest_write_global while it is
+    still the one this job asked, mark it applied, then record the pick and finish the job. A refusal (stale old text,
+    not editable, write failed) writes nothing and leaves the job waiting, so Skip it still works."""
+    meta = as_dict(load_json(Path(root) / "jobs" / job_id / "weekly.json"))
+    digest_id, pid = meta.get("digest"), meta.get("pid")
+    if not (isinstance(digest_id, str) and board.DIGEST_RE.fullmatch(digest_id)
+            and isinstance(pid, str) and PROPOSAL_ID_RE.fullmatch(pid)):
+        return 409, {"error": "not a weekly global job"}
+    path = board.weekly_dir() / digest_id / "proposals.json"
+    with DIGEST_LOCK:
+        entry = next((v for x in read_proposals(path)[1] if (v := valid_proposal(x)) and v["id"] == pid), None)
+        if not entry or entry["status"] != "queued" or entry.get("reason") != f"asked: {project} {job_id}":
+            return 409, {"error": "proposal is no longer waiting"}
+        if why := digest_write_global(entry):
+            return 409, {"error": why}
+        weekly_set_status_locked(path, pid, "applied", f"applied: {project} {job_id}", from_status="queued")
+    board.cmd_answer(root, job_id, key)
+    board.cmd_set(root, job_id, ["stage=done", f"reason=applied to {home_short(entry['target'])}"])
+    return 200, {"id": job_id, "action": "answer", "command": "apply"}
 
 
 def weekly_ask(digest_id: str) -> dict:
-    """Turn each pending proposal of weekly digest NNN (board.weekly_dir()) into one needs-human job on its target
-    repo's board, with a pre-written spec and Build it / Skip it options; no target file is written. Only an edit to a
-    registered repo's file, not settings or hooks, whose old text occurs once, is asked; every other proposal is
-    skipped with its reason. A re-run passes over non-pending proposals, and an open job with the same title skips it."""
+    """Turn each pending proposal of weekly digest NNN (board.weekly_dir()) into one needs-human job; no target file is
+    written. An edit to a registered repo's file goes on that repo's board with a pre-written spec and Build it / Skip it;
+    an edit to an editable global file (editable_path) goes on the research home's board with Apply it (weekly_apply) /
+    Skip it. Either needs its old text to occur once and no settings or hooks target; every other proposal is skipped
+    with its reason. A re-run passes over non-pending proposals, and an open job with the same title skips it."""
     out = {"asked": [], "skipped": []}
     if not board.DIGEST_RE.fullmatch(digest_id):
         return out
@@ -3415,8 +3451,11 @@ def weekly_ask(digest_id: str) -> dict:
         if digest_denied(p["target"]):
             skip(p, "settings or hooks target")
             continue
-        if not where:
-            skip(p, "target outside every registered repo")
+        if not where and not (os.path.isabs(p["target"]) and editable_path(p["target"])):
+            skip(p, "target is not editable")
+            continue
+        if not where and not (home := research_home()):
+            skip(p, "the trevskills-scrum repo is not registered")
             continue
         try:
             text = Path(p["target"]).read_bytes().decode()
@@ -3425,8 +3464,11 @@ def weekly_ask(digest_id: str) -> dict:
         if (n := text.count(p["old"])) != 1:
             skip(p, f"old text found {n} times")
             continue
-        repo, rel = where
-        project, scrum = names.get(str(repo), repo.name), repo / "scrum"
+        if where:
+            repo, rel = where
+            project, scrum = names.get(str(repo), repo.name), repo / "scrum"
+        else:
+            (project, scrum), rel = home, home_short(p["target"])
         title = f"Weekly digest {digest_id} {p['id']}: {rel}"[:60]
         if not (job_id := board.cmd_new(scrum, title, unique=True)):
             skip(p, "already asked")
@@ -3434,10 +3476,17 @@ def weekly_ask(digest_id: str) -> dict:
         why = " ".join(p["why"].replace('"', "").replace("`", "").split()).rstrip(".")
         d = scrum / "jobs" / job_id
         (d / "feature.md").write_text(f"# {title}\n\n{p['why'].strip()}\n\nFrom weekly digest {digest_id}.\n", encoding="utf-8")
-        (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel), encoding="utf-8")
-        board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to {rel} in {project}: {why}. "
-                      "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"],
-                      title="DIGEST")
+        if where:
+            (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel), encoding="utf-8")
+            board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to {rel} in {project}: {why}. "
+                          "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"],
+                          title="DIGEST")
+        else:
+            board.cmd_set(scrum, job_id, ["lane=lilguy"])  # PR-less, so weekly_apply's done passes merge_refusal
+            (d / "weekly.json").write_text(json.dumps({"digest": digest_id, "pid": p["id"], "target": p["target"]}) + "\n")
+            board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to the global file {rel}: {why}. "
+                          "Apply it writes it now after a backup, Skip it drops it.", [f"Apply it=apply {job_id}", f"Skip it=abort {job_id}"],
+                          title="DIGEST")
         out["asked"].append({"id": p["id"], "project": project, "job": job_id})
         weekly_set_status(path, p["id"], "queued", f"asked: {project} {job_id}")
     return out
