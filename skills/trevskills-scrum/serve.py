@@ -2066,6 +2066,53 @@ def worktree_mtime(wt):
     return newest
 
 
+COMMIT_CACHE = {}  # (worktree, branch) -> (ref stat key, (ct, subject)); no lock, a race only forks twice
+
+
+def git_common_dir(wt):
+    """The repo's common git dir for worktree wt, from <wt>/.git, or None when that is missing or unreadable."""
+    g = Path(wt) / ".git"
+    try:
+        if g.is_dir():
+            return g
+        target = g.read_text().strip()
+        if not target.startswith("gitdir:"):
+            return None
+        gd = Path(wt, target[7:].strip())  # absolute targets replace wt
+        try:
+            return Path(gd, (gd / "commondir").read_text().strip())
+        except FileNotFoundError:
+            return gd
+    except OSError:
+        return None
+
+
+def last_commit(wt, branch):
+    """(ct, subject) of the branch's newest commit, or None. Reused while the branch's loose ref and packed-refs keep their stat."""
+    common = git_common_dir(wt)
+    key = None
+    if common:
+        try:
+            key = (file_key(common / "refs" / "heads" / branch), file_key(common / "packed-refs"))
+        except OSError:
+            common = None
+    hit = COMMIT_CACHE.get((wt, branch))
+    if common and hit and hit[0] == key:
+        return hit[1]
+    try:
+        out = subprocess.run(["git", "-C", wt, "log", "-1", "--format=%s|%ct", branch, "--"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    subject, _, ct = out.rpartition("|")
+    if not ct.isdigit():
+        return None
+    result = (int(ct), subject)
+    if common:
+        COMMIT_CACHE[(wt, branch)] = (key, result)
+    return result
+
+
 def activity(root, job):
     """{"text", "at"} for what happened last on an active job: the stage, the job folder's files, the branch's last
     commit, the run log, the worktree's files, the PR. The newest event wins; on a tie the more specific (earlier in the list) one does."""
@@ -2096,14 +2143,8 @@ def activity(root, job):
         events.append((t, "CI failed, builder fixing"))
     wt = job.get("worktree")
     if wt and os.path.isdir(wt):
-        try:
-            out = subprocess.run(["git", "-C", wt, "log", "-1", "--format=%s|%ct", f"scrum/{job['id']}"],
-                                 capture_output=True, text=True, timeout=2).stdout.strip()
-            subject, _, ct = out.rpartition("|")
-            if ct.isdigit():
-                events.append((int(ct), f"builder committed: {subject}"))
-        except (subprocess.SubprocessError, OSError):
-            pass
+        if last := last_commit(wt, f"scrum/{job['id']}"):
+            events.append((last[0], f"builder committed: {last[1]}"))
     if job.get("runlog") and (t := mtime(root / job["runlog"])):
         events.append((t, "run log updated"))
     if wt and (t := worktree_mtime(wt)):

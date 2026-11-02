@@ -2779,6 +2779,47 @@ class ServeTest(unittest.TestCase):
         self.serve.board.cmd_set(self.root, job_id, ["worktree=/nonexistent/wt"])  # missing worktree is ignored
         self.assertEqual(self.activity_of(job_id)["text"], "builder working")
 
+    def git_env(self):
+        return {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    def git(self, cwd, *args):
+        out = subprocess.run(["git", "-C", str(cwd), "-c", "commit.gpgsign=false", *args], capture_output=True, text=True, env=self.git_env())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_last_commit_cached_until_ref_moves(self):
+        self.serve.COMMIT_CACHE.clear()
+        wt = Path(self.tmp.name) / "wt-lc"
+        wt.mkdir()
+        self.git(wt, "init", "-q", "-b", "scrum/x")
+        self.git(wt, "commit", "-q", "--allow-empty", "-m", "one")
+        self.assertEqual(self.serve.last_commit(str(wt), "scrum/x")[1], "one")
+        with mock.patch.object(self.serve.subprocess, "run", wraps=subprocess.run) as run:
+            self.assertEqual(self.serve.last_commit(str(wt), "scrum/x")[1], "one")
+            self.assertEqual(run.call_count, 0)
+        self.git(wt, "commit", "-q", "--allow-empty", "-m", "two")
+        self.assertEqual(self.serve.last_commit(str(wt), "scrum/x")[1], "two")
+        self.git(wt, "pack-refs", "--all")
+        self.git(wt, "commit", "-q", "--allow-empty", "-m", "three")
+        self.assertEqual(self.serve.last_commit(str(wt), "scrum/x")[1], "three")
+        self.assertIsNone(self.serve.last_commit(str(wt), "scrum/missing"))
+        self.serve.COMMIT_CACHE.clear()
+        self.assertIsNone(self.serve.last_commit(str(wt) + "-nope", "scrum/x"))
+
+    def test_last_commit_linked_worktree(self):
+        self.serve.COMMIT_CACHE.clear()
+        main, wt = Path(self.tmp.name) / "lc-main", Path(self.tmp.name) / "lc-linked"
+        main.mkdir()
+        self.git(main, "init", "-q", "-b", "main")
+        self.git(main, "commit", "-q", "--allow-empty", "-m", "base")
+        self.git(main, "worktree", "add", "-q", "-b", "scrum/y", str(wt))
+        self.git(wt, "commit", "-q", "--allow-empty", "-m", "first")
+        self.assertEqual(self.serve.last_commit(str(wt), "scrum/y")[1], "first")
+        with mock.patch.object(self.serve.subprocess, "run", wraps=subprocess.run) as run:
+            self.assertEqual(self.serve.last_commit(str(wt), "scrum/y")[1], "first")
+            self.assertEqual(run.call_count, 0)
+        self.git(wt, "commit", "-q", "--allow-empty", "-m", "second")
+        self.assertEqual(self.serve.last_commit(str(wt), "scrum/y")[1], "second")
+
     def fake_agents_and_claude_home(self):
         """A temp agents dir and a fake CLAUDE_HOME with user skills and user- and project-scope plugins."""
         base = Path(self.tmp.name) / self.id().rsplit(".", 1)[1]
