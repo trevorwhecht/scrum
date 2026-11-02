@@ -670,7 +670,7 @@ class ContractTest(unittest.TestCase):
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("Dev command:", "UI globs", "not `none`", "round-$N/dev.log", "free port", "3001",
                        "round-$N/dev-url.txt", "unreachable: <why>", "200", "/api/", "DEV_URL=<url>",
-                       "kill", "-sTCP:LISTEN", 'exec env PORT=<port> nohup'):
+                       "kill", "-sTCP:LISTEN", 'exec env PORT=<port> NEXTAUTH_URL=http://localhost:<port> nohup'):
             self.assertIn(phrase, review, phrase)
         url = review.index("round-$N/dev-url.txt")
         self.assertIn("kill", review[url:])
@@ -680,10 +680,25 @@ class ContractTest(unittest.TestCase):
         text = skill_text()
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("serve.py --port <port>", 'HOME="$T" CLAUDE_HOME="$T/.claude"', "mktemp -d", "never 8765",
-                       "projects.json", "exec env PORT=<port> nohup"):
+                       "projects.json", "exec env PORT=<port> NEXTAUTH_URL=http://localhost:<port> nohup"):
             self.assertIn(phrase, review, phrase)
         self.assertIn("DEV_PID=<pid>", review[review.index("DEV_URL=<url>"):])
         self.assertIn('rm -rf "$T"', review[review.index("Stop the shared server"):])
+
+    def test_review_e2e_gets_shared_dev_url(self):
+        review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
+        step3 = self.section(review, "\n3. Spawn", "\n4. ")
+        sentences = re.split(r"(?<=\.)\s+", step3)
+        e2e = [s for s in sentences if "`scrum-review-e2e`" in s and "DEV_URL=<url>" in s]
+        self.assertTrue(e2e, "no step 3 sentence gives scrum-review-e2e DEV_URL=<url>")
+        self.assertIn("never `DEV_PID`", " ".join(e2e))
+        agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        for phrase in ("DEV_URL=<url>", "E2E_PORT=<port of DEV_URL>", "never stop", "stops answering"):
+            self.assertIn(phrase, agent, phrase)
+        wait = [s for s in re.split(r"(?<=\.)\s+", agent) if "up to 10 minutes" in s]
+        self.assertTrue(wait)
+        for s in wait:
+            self.assertIn("`DEV_URL` is absent", s)
 
     def test_review_code_has_security_checklist(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
