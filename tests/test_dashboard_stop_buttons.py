@@ -200,11 +200,11 @@ class StopBox(unittest.TestCase):
         self.assertNotIn("Human setup:", card)
         self.assertNotIn("esc(job.waiting)", card)
         actions = text[text.index("function renderActions(job)"):text.index("function actionsHtml(")]
-        self.assertIn("statusLine(", actions)
+        self.assertIn("modalStatus(", actions)
         dialog = next(l for l in text.splitlines() if '<dialog id="viewer"' in l)
         self.assertLess(dialog.index('id="viewerTitle"'), dialog.index('id="viewerStatus"'))
         status, = js(f"renderActions({json.dumps(ASKED)}); out(els.viewerStatus.textContent);")
-        self.assertEqual(status, "Waiting on you: The migration drops a column.")
+        self.assertEqual(status, "Waiting on you: your decision")
 
     def test_status_line_waiting_on_titles(self):
         queued = {"key": "p/229-m", "project": "p", "id": "229-m", "stage": "build", "stalled": True, "play_queued": "2026-01-01",
