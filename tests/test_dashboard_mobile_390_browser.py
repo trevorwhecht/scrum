@@ -39,12 +39,14 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     await page.waitForSelector(".card[data-key]");
     if (mode === "header") {
       await page.waitForFunction(() => { const r = document.getElementById("routing"); return !r.hidden && r.textContent; });
+      await page.waitForFunction(() => !document.getElementById("machine").hidden && !document.getElementById("cooldown").hidden);  // the tallest header
       const got = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,
         routing: document.getElementById("routing").textContent,
         options: [...document.getElementById("filter").options].map(o => o.textContent),
         children: [...document.querySelector("header").children].filter(el => el.getClientRects().length)
-          .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right}; })}));
+          .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right, top: r.top, height: r.height}; }),
+        height: document.querySelector("header").getBoundingClientRect().height}));
       console.log(JSON.stringify(got));
       return;
     }
@@ -185,11 +187,19 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertGreaterEqual(len(PROJECT), 30)
         self.assertLessEqual(got["scrollWidth"], 390, got)
         ids = [c["id"] for c in got["children"]]
-        for want in ("H1", "status", "routing", "filter", "laneFilter", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn"):
+        for want in ("H1", "status", "routing", "filter", "laneFilter", "rankBtn", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn"):
             self.assertIn(want, ids, got)
         for c in got["children"]:
             self.assertGreaterEqual(c["left"], 0, c)
             self.assertLessEqual(c["right"], 390, c)
+
+    def test_header_compact_390px(self):
+        got = self.browse("header")
+        self.assertLessEqual(got["height"], 210, got)  # 358 before job 550; 204 after
+        by = {c["id"]: c for c in got["children"]}
+        self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
+        for i in ("rankBtn", "cooldown"):
+            self.assertGreaterEqual(by[i]["height"], 44, got)
 
     def test_viewer_tabs_close_44_flush_right(self):
         got = self.browse("tabs")
