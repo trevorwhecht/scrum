@@ -259,6 +259,7 @@ def locked_board(root):
         path = root / "board.json"
         board = read_board(root)
         migrate_paused(board)
+        clear_heavy_wait(board)
         yield board
         for job in board["jobs"]:  # a question lives only while its job waits on Trevor, whoever moved it on
             if job.get("stage") != "needs-human":
@@ -3766,10 +3767,22 @@ def migrate_paused(board: dict) -> list[str]:
     return out
 
 
+def clear_heavy_wait(board: dict) -> list[str]:
+    """Drop the `reason` of each job still carrying the removed usage hold's text; returns the cleaned ids."""
+    out = []
+    for job in board["jobs"]:
+        if "heavy jobs" + " wait" in (job.get("reason") or ""):
+            del job["reason"]
+            out.append(job["id"])
+    return out
+
+
 def cmd_migrate_paused(root) -> list[str]:
-    """migrate_paused on board.json, written only when something migrated (locked_board migrates on every write)."""
-    ids = migrate_paused(read_board(root))  # a read first: most ticks find nothing and write nothing
-    if ids:
+    """migrate_paused on board.json, written only when something migrated or a stale heavy-wait reason needs
+    cleaning (locked_board does both on every write). Returns the migrated ids only."""
+    b = read_board(root)  # a read first: most ticks find nothing and write nothing
+    ids = migrate_paused(b)
+    if ids or clear_heavy_wait(b):
         with locked_board(root):
             pass
     return ids

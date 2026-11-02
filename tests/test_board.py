@@ -2677,6 +2677,29 @@ class BoardTest(unittest.TestCase):
             pass
         self.assertEqual((self.jobs()[0]["stage"], self.jobs()[0]["paused"]), ("review", True))
 
+    def test_clear_heavy_wait_strips_only_matching_reasons(self):
+        hw = "heavy jobs" + " wait"
+        b = {"jobs": [{"id": "1", "stage": "waiting", "reason": f"{hw}: usage 90%"},
+                      {"id": "2", "stage": "waiting", "reason": f"waiting: usage 91%, {hw} for 5h"},
+                      {"id": "3", "stage": "waiting", "reason": "waiting: other"},
+                      {"id": "4", "stage": "build"}]}
+        self.assertEqual(board.clear_heavy_wait(b), ["1", "2"])
+        self.assertEqual(b["jobs"], [{"id": "1", "stage": "waiting"}, {"id": "2", "stage": "waiting"},
+                                    {"id": "3", "stage": "waiting", "reason": "waiting: other"},
+                                    {"id": "4", "stage": "build"}])
+        self.assertEqual(board.clear_heavy_wait(b), [])
+
+    def test_locked_board_clears_stale_heavy_wait(self):
+        self.legacy_board({"id": "001-a", "stage": "waiting", "reason": "heavy jobs" + " wait" + ": usage"})
+        with board.locked_board(self.root):
+            pass
+        self.assertNotIn("reason", self.jobs()[0])
+
+    def test_migrate_paused_cleans_heavy_wait_on_idle_board(self):
+        self.legacy_board({"id": "001-a", "stage": "waiting", "reason": "heavy jobs" + " wait" + ": usage"})
+        self.assertEqual(board.cmd_migrate_paused(self.root), [])
+        self.assertNotIn("reason", self.jobs()[0])
+
     def test_migrate_paused_is_idempotent(self):
         self.legacy_board({"id": "001-a", "stage": "needs-human",
                            "reason": "stalled in check: paused by Trevor. Fix: click Play."})
@@ -7187,7 +7210,7 @@ class ReadyHighUsageTest(unittest.TestCase):
                 stage="running", reason="waiting: usage 7d 92% used, heavy jobs" + " wait for its reset at 09:00")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [kid])
         p = self.job(parent)
-        self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        self.assertEqual((p["stage"], p.get("reason")), ("running", None))
 
 
 class FableTest(unittest.TestCase):

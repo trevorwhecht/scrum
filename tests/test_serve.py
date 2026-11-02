@@ -2962,6 +2962,13 @@ class ServeTest(unittest.TestCase):
 SECRET = "sk-planted-secret-123"
 
 
+class HeavyWaitGoneTest(unittest.TestCase):
+    def test_sources_never_set_heavy_jobs_wait(self):
+        d = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum"
+        for f in ("serve.py", "board.py"):
+            self.assertNotIn("heavy jobs" + " wait", (d / f).read_text(), f)
+
+
 class LatestWindowsTest(unittest.TestCase):
     """serve.latest_windows and GET /api/p/<project>/windows, on ServeTest's registered "repo" and live server."""
     setUpClass = classmethod(ServeTest.setUpClass.__func__)
