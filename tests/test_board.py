@@ -6377,11 +6377,81 @@ class ClaudeBatchTest(unittest.TestCase):
         self.assertEqual(self.spec.read_text(), "# A\n## Likely files\n- `src/a.py`\n")
         self.assertEqual(len(board.read_board(self.root)["jobs"]), 1)
 
-    def test_batch_question_not_resumable(self):
+    def test_batch_question_not_resumable_or_legacy(self):
         self.assertIn("Claude Code refuses those edits in a session that runs on its own", board.TERMINAL_BATCH_QUESTION)
         self.assertFalse(board.TERMINAL_BATCH_QUESTION.startswith(board.RESUMABLE))
-        self.assertTrue("blocked: this job changes files in the project .claude folder, and Claude Code refuses"
-                        .startswith(board.RESUMABLE))
+        self.assertEqual(board.LEGACY_CLAUDE_PARK, "blocked: this job changes files in the project .claude folder")
+        self.assertFalse(board.TERMINAL_BATCH_QUESTION.startswith(board.LEGACY_CLAUDE_PARK))
+
+
+class ClaudeMigrateTest(unittest.TestCase):
+    """board.py claude-migrate: jobs parked on the old 3c question move into the Terminal batch once."""
+
+    OLD = ("blocked: this job changes files in the project .claude folder, and Claude Code refuses those edits in a "
+           "session that runs on its own, even with an allow rule; it needs a Terminal window where you can approve each edit.")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.mixed = self.parked("Mixed job", "- `src/a.py`\n- `.claude/rules/c.md`\n")
+        self.only = self.parked("Only claude", "- `.claude/skills/x/SKILL.md`\n")
+        self.other = board.cmd_new(self.root, "Unrelated")
+        board.cmd_ask(self.root, self.other, "blocked: something else", ["Carry on=resume " + self.other,
+                      "Remove=abort " + self.other], title="BUILDER_BLOCKED")
+
+    def parked(self, title, likely):
+        job_id = board.cmd_new(self.root, title)
+        (self.root / "jobs" / job_id / "spec.md").write_text(f"# {title}\n## Likely files\n{likely}")
+        board.cmd_ask(self.root, job_id, self.OLD, [f"Run it in a Terminal window=lilguy {job_id}",
+                      f"Remove this job=abort {job_id} --cascade"], title="BUILDER_BLOCKED")
+        return job_id
+
+    def migrate(self, *flags):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            board.main(["--dir", str(self.root), "claude-migrate", *flags])
+        return json.loads(out.getvalue())
+
+    def job(self, job_id):
+        return board.find(board.read_board(self.root), job_id)
+
+    def test_migrates_mixed_and_only_jobs(self):
+        out = self.migrate()
+        bid = "004-terminal-batch-project-claude-edits"
+        self.assertEqual(out, [{"id": self.mixed, "batch": bid, "only": False},
+                               {"id": self.only, "batch": bid, "only": True}])
+        mixed = self.job(self.mixed)
+        self.assertEqual((mixed["stage"], mixed["stalled"], mixed["reason"]),
+                         ("spec", True, f"stalled: .claude edits moved to Terminal batch {bid}"))
+        self.assertNotIn("question", mixed)
+        self.assertNotIn("options", mixed)
+        only = self.job(self.only)
+        self.assertEqual((only["stage"], only["reason"]), ("aborted", f"moved to Terminal batch {bid}"))
+        self.assertEqual(self.job(self.other)["stage"], "needs-human")
+        self.assertEqual(self.job(bid)["stage"], "needs-human")
+        feature = (self.root / "jobs" / bid / "feature.md").read_text()
+        self.assertIn(f"## From {self.mixed}: Mixed job\n- `.claude/rules/c.md`\n", feature)
+        self.assertIn(f"## From {self.only}: Only claude\n- `.claude/skills/x/SKILL.md`\n", feature)
+        self.assertIn(f"`{bid}`", (self.root / "jobs" / self.mixed / "spec.md").read_text())
+
+    def test_dry_run_writes_nothing(self):
+        before = (self.root / "board.json").read_text()
+        specs = {j: (self.root / "jobs" / j / "spec.md").read_text() for j in (self.mixed, self.only)}
+        self.assertEqual(self.migrate("--dry-run"), [{"id": self.mixed, "batch": None, "only": False},
+                                                      {"id": self.only, "batch": None, "only": True}])
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertEqual({j: (self.root / "jobs" / j / "spec.md").read_text() for j in specs}, specs)
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), sorted([self.mixed, self.only, self.other]))
+
+    def test_second_run_is_empty(self):
+        self.migrate()
+        board_json = self.root / "board.json"
+        before, mtime = board_json.read_text(), board_json.stat().st_mtime_ns
+        self.assertEqual(self.migrate(), [])
+        self.assertEqual(self.migrate("--dry-run"), [])
+        self.assertEqual(board_json.read_text(), before)
+        self.assertEqual(board_json.stat().st_mtime_ns, mtime)
 
 
 class RunAllLilguyTest(unittest.TestCase):

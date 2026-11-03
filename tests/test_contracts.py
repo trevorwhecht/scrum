@@ -1149,12 +1149,6 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, step3, phrase)
         self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
 
-    def test_resume_reenters_legacy_claude_park(self):
-        resume = next(l for l in self.lane("commands").splitlines()
-                      if l.startswith("- **`/trevskills-scrum resume <id>`**"))
-        entry = resume.split("**`blocked: this job changes files in the project .claude folder`**")[1]
-        self.assertIn("`B set <id> stage=spec reason=`, then **New job** from step 3", entry)
-
     def test_builder_skips_batched_claude_edits(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         rule = next(l for l in builder.splitlines() if "## Moved to Terminal batch" in l)

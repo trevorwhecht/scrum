@@ -923,7 +923,7 @@ const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? ""
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
 // When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
 // what blocks it; a paused or stalled job with no waitingOn also gets that refusal as a note in its panel.
-const RESUMABLE = ["stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch ", "blocked: this job changes files in the project .claude folder"];
+const RESUMABLE = ["stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
 const resumeForm = job => {
   const reason = job.reason || "";
