@@ -346,8 +346,8 @@ def cmd_new(root, title, job_id=None, unique=False):
 
 # --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} {by:t} → 003-id <!-- why -->"; points, the id,
 # priority (1-5, highest claimed first), needs, setup and source markers, the job and the estimate's reason are optional.
-# The source marker is {by:t} (Trevor's item) or {by:back} (Trevor's, back of the backlog); no marker means an agent item. An item's text excludes the markers, so its spec_path
-# never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
+# The source marker is {by:t} (Trevor's item) or {by:back} (Trevor's, back of the backlog); no marker means an agent item.
+# An item's text excludes the markers, so its spec_path never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{p:([1-5])\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
                      r"(?: \{setup: ([^{}]*)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
