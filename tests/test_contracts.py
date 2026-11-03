@@ -223,7 +223,7 @@ class ContractTest(unittest.TestCase):
 
     def test_code_reviewer_runs_codex_read_only(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
-        for phrase in ("codex exec review", "--base", "read-only", "approval_policy", "--ephemeral",
+        for phrase in ("codex exec review", "--base", "read-only", "approval_policy",
                        "codex-review.md", "(codex)", "codex: skipped", "never a pass", "never fails the round",
                        "~/.codex/AGENTS.md", "P0/P1 with confidence ≥ 0.8", "run_in_background", "never retry it",
                        'route.py" codex-review --job', 'route.py" record', "codex: skipped — <why>",
@@ -268,7 +268,7 @@ class ContractTest(unittest.TestCase):
             env = {**os.environ, "HOME": str(home), "PATH": f"{bindir}:{os.environ['PATH']}",
                    "WORKTREE": str(home), "BASE": "origin/main", "JOB_DIR": "/job", "ROUND": "1"}
             expected = ["codex", "exec", "review", "--base", "origin/main", "-m", "gpt-6.1-sol", "-c",
-                        'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "--ephemeral",
+                        'sandbox_mode="read-only"', "-c", 'approval_policy="never"',
                         "-o", "/job/round-1/codex-review.md"]
             outputs = {}
             for shell in ("bash", "zsh"):

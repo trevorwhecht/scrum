@@ -25,7 +25,7 @@ For `cloud`, fill in the values from your prompt and the line above, start this 
     ROUTE_RUNNER=cloud LOG_MODEL=gpt-6.1-sol
     cd "$WORKTREE" && export PATH="$PATH:/opt/homebrew/bin" && START=$(date +%s) && codex exec review --base "$BASE" -m gpt-6.1-sol \
       -c sandbox_mode='"read-only"' -c approval_policy='"never"' \
-      --ephemeral -o "$JOB_DIR/round-$ROUND/codex-review.md" </dev/null
+      -o "$JOB_DIR/round-$ROUND/codex-review.md" </dev/null
     OUTCOME=ok; [ -s "$JOB_DIR/round-$ROUND/codex-review.md" ] || OUTCOME=invalid-artifact
     python3 "$HOME/.claude/skills/trevskills-scrum/../../local/route.py" record "$JOB_DIR" codex-review \
       "$ROUTE_RUNNER" "$LOG_MODEL" $(( $(date +%s) - START )) "$OUTCOME"
