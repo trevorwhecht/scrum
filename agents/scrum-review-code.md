@@ -65,6 +65,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 **Rules:**
 - `## Out of scope` is optional and left out when there is nothing to report. It never affects the verdict. One bullet per real task outside this ticket's scope; not for nitpicks, and not for findings that belong in `## Findings`.
 - Only flag what the diff introduced. Pre-existing issues go in Notes labelled "pre-existing" and never block.
+- The generic-500 and malformed-JSON-400 changes the builder's rules require in every route file the diff touches are in scope; never flag them as beyond the spec.
 - A claim that the change breaks other code must name that code (file and symbol).
 - Each finding opens with the scenario or input that triggers it.
 - "No findings" is a valid outcome and better than weak findings.
