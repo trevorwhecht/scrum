@@ -830,6 +830,34 @@ class BoardTest(unittest.TestCase):
                          {"ready": [], "merged": 3, "total": 3, "in_progress": 0, "all_merged": True})
         self.assertEqual(self.child(parent)["stage"], "running")
 
+    def outside(self, parent, c1, dep_id=None):
+        out = board.cmd_new(self.root, "Outside")
+        with board.locked_board(self.root) as bd:
+            board.find(bd, c1)["depends_on"] = [dep_id or out]
+        return out
+
+    def test_ready_child_waits_on_outside_job(self):
+        parent, (c1, c2, c3) = self.three()
+        out = self.outside(parent, c1)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        board.cmd_set(self.root, c2, ["stage=done"])
+        board.cmd_set(self.root, c3, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", board.WAITING_ON + out))
+        board.cmd_set(self.root, out, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+
+    def test_ready_child_outside_dep_missing_still_blocked(self):
+        parent, (c1, c2, c3) = self.three()
+        self.outside(parent, c1, "999-gone")
+        board.cmd_set(self.root, c2, ["stage=done"])
+        board.cmd_set(self.root, c3, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        p = self.child(parent)
+        self.assertEqual(p["stage"], "needs-human")
+        self.assertTrue(p["reason"].startswith(board.BLOCKED), p["reason"])
+
     def test_ready_claims_once(self):
         parent, (c1, c2, c3) = self.three()
         self.spec(c1, "src/a.py")
@@ -6296,6 +6324,7 @@ class ClaudeBatchTest(unittest.TestCase):
         self.assertTrue(feature.startswith("Lane: lilguy\nComplex: no\n"), feature)
         self.assertEqual(board.header_value(self.root / "jobs" / bid / "feature.md", "Lane", board.LANES), "lilguy")
         self.assertIn(f"## From {self.job}: Edit a skill\n- `.claude/rules/c.md`: add the line `- Never X.`\n", feature)
+        self.assertNotIn("for the full requirements", feature)
         spec = self.spec.read_text()
         self.assertIn("## Moved to Terminal batch\n", spec)
         self.assertIn(f"`{bid}`", spec.split("## Moved to Terminal batch")[1])
@@ -6335,6 +6364,47 @@ class ClaudeBatchTest(unittest.TestCase):
         self.assertIn("- `.claude/rules/c.md`\n", section)
         self.assertIn("2. `.claude/rules/c.md` names the new rule (verify: grep)", section)
         self.assertNotIn("`src/a.py` returns 2", section)
+        self.assertTrue(section.rstrip("\n").endswith(
+            f"Read `{self.spec.resolve()}` for the full requirements."), section)
+
+    def dependents(self, only=True):
+        if only:
+            self.spec.write_text("# t\n## Likely files\n- `.claude/rules/c.md`\n")
+        a = board.cmd_new(self.root, "Dep a")
+        b = board.cmd_new(self.root, "Dep b")
+        c = board.cmd_new(self.root, "Dep c")
+        return a, b, c
+
+    def set_deps(self, deps_by_job):
+        with board.locked_board(self.root) as bd:
+            for jid, (stage, deps) in deps_by_job.items():
+                j = board.find(bd, jid)
+                j["stage"], j["depends_on"] = stage, deps
+
+    def test_only_job_redirects_dependents(self):
+        a, b, c = self.dependents()
+        bid = "005-terminal-batch-project-claude-edits"
+        self.set_deps({a: ("waiting", [self.job]), b: ("waiting", [self.job, bid]), c: ("done", [self.job])})
+        self.assertEqual(self.batch()["batch"], bid)
+        self.assertEqual(self.job_of(a)["depends_on"], [bid])
+        self.assertEqual(self.job_of(b)["depends_on"], [bid])
+        self.assertEqual(self.job_of(c)["depends_on"], [self.job])
+
+    def test_mixed_job_keeps_dependents(self):
+        a, b, c = self.dependents(only=False)
+        self.set_deps({a: ("waiting", [self.job])})
+        self.batch()
+        self.assertEqual(self.job_of(a)["depends_on"], [self.job])
+
+    def test_rerun_redirects_late_dependent(self):
+        a, b, c = self.dependents()
+        bid = self.batch()["batch"]
+        self.set_deps({a: ("waiting", [self.job])})
+        spec, feature = self.spec.read_text(), self.feature(bid)
+        self.assertEqual(self.batch(), {"batch": bid, "only": True, "created": False})
+        self.assertEqual(self.job_of(a)["depends_on"], [bid])
+        self.assertEqual(self.spec.read_text(), spec)
+        self.assertEqual(self.feature(bid), feature)
 
     def test_rerun_appends_nothing(self):
         bid = self.batch()["batch"]
@@ -6415,6 +6485,21 @@ class ClaudeMigrateTest(unittest.TestCase):
 
     def job(self, job_id):
         return board.find(board.read_board(self.root), job_id)
+
+    def test_only_job_dependents_follow_batch(self):
+        dep = board.cmd_new(self.root, "Dependent")
+        with board.locked_board(self.root) as bd:
+            j = board.find(bd, dep)
+            j["stage"], j["depends_on"] = "waiting", [self.only]
+        self.migrate()
+        bid = "005-terminal-batch-project-claude-edits"
+        self.assertEqual(self.job(dep)["depends_on"], [bid])
+        self.assertEqual(board.wake_waiting(self.root), {"ready": [], "lost": []})
+        self.assertEqual(self.job(dep)["stage"], "waiting")
+        with board.locked_board(self.root) as bd:
+            board.find(bd, bid)["stage"] = "done"
+        self.assertEqual(board.wake_waiting(self.root)["ready"], [dep])
+        self.assertEqual(self.job(dep)["stage"], "spec")
 
     def test_migrates_mixed_and_only_jobs(self):
         out = self.migrate()

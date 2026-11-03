@@ -81,7 +81,8 @@
                                    (lanes/newjob.md step 3c)
   board.py claude-batch <id>       print {"batch","only","created"}: move the job's project .claude/ edits into the open
                                    "Terminal batch: project .claude edits" job (else create and park one), mark spec.md
-                                   `## Moved to Terminal batch`; only = every Likely file is a .claude/ path (step 3c)
+                                   `## Moved to Terminal batch`; only = every Likely file is a .claude/ path (step 3c); on only,
+                                   it also moves its dependents' `depends_on` to the batch
   board.py claude-migrate [--dry-run]  move every job parked on the old 3c question into the Terminal batch (abort an
                                    only job, stall the rest in spec), print [{"id","batch","only"}] (serve.py watchdog)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
@@ -2914,7 +2915,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         kids = [find(board, k) for k in parent.get("children") or []]
         if not kids:
             raise SystemExit(f"job {parent_id} has no children")
-        stage = {k["id"]: k["stage"] for k in kids}
+        sibs = {k["id"] for k in kids}
+        stage = {j["id"]: j["stage"] for j in board["jobs"]}  # a non-sibling dep (a Terminal batch) counts by its stage
         runall = parent.get("lane") == "runall"  # aborted children count as finished
         reason = parent.get("reason") or ""
         # A legacy needs-human parent (blocked before WAITING_ON existed, or parked on the chain lock) is
@@ -2978,6 +2980,9 @@ def cmd_ready(root, parent_id, live=(), manual=False):
             human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
             waits = human or [k["id"] for k in kids
                            if k.get("setup") == "pending" and k["stage"] not in ("done", "aborted")]
+            waits = waits or list(dict.fromkeys(  # a live outside job a waiting child depends on; a missing one blocks
+                d for k in kids if k["stage"] == "waiting" for d in k.get("depends_on") or []
+                if d not in sibs and stage.get(d) not in (None, "done", "aborted")))
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
             if waits:  # every action is on a child, so the parent keeps running and names them
                 new = "running", WAITING_ON + ", ".join(waits)
@@ -3706,6 +3711,20 @@ def open_batch(board):
     return next((j for j in board["jobs"] if j["title"] == TERMINAL_BATCH_TITLE and j["stage"] == "needs-human"), None)
 
 
+def redirect_dependents(board, old_id: str, new_id: str) -> list[str]:
+    """Replace old_id with new_id (same position, duplicates dropped) in the depends_on of every job not done or aborted;
+    returns the ids changed. Caller holds the lock."""
+    changed = []
+    for j in board["jobs"]:
+        deps = j.get("depends_on") or []
+        if j["id"] == old_id or old_id not in deps or j["stage"] in ("done", "aborted"):
+            continue
+        j["depends_on"] = list(dict.fromkeys(new_id if d == old_id else d for d in deps))
+        j["updatedAt"] = now()
+        changed.append(j["id"])
+    return changed
+
+
 def claude_batch(root, board, job) -> tuple[dict, bool]:
     """cmd_claude_batch's body; caller holds the lock and plays the needs-human sound when the bool (a batch was
     created) is True."""
@@ -3714,6 +3733,8 @@ def claude_batch(root, board, job) -> tuple[dict, bool]:
     moved = md_section(spec, "Moved to Terminal batch")
     if moved is not None:
         m = re.search(r"`(\d{3,}-[a-z0-9-]+)`", moved)
+        if only and m:
+            redirect_dependents(board, job_id, m[1])
         return {"batch": m and m[1], "only": only, "created": False}, False
     batch, created = open_batch(board), False
     if batch is None:
@@ -3734,13 +3755,16 @@ def claude_batch(root, board, job) -> tuple[dict, bool]:
         if not body:
             criteria = [l.strip() for l in (md_section(spec, "Acceptance criteria") or "").splitlines()
                         if CLAUDE_DIR_RE.search(l)]
-            body = "\n".join([f"- `{p}`" for p in paths] + (["", "Criteria that name them:", *criteria] if criteria else []))
+            body = "\n".join([f"- `{p}`" for p in paths] + (["", "Criteria that name them:", *criteria] if criteria else [])
+                             + ["", f"Read `{(Path(root) / 'jobs' / job_id / 'spec.md').resolve()}` for the full requirements."])
         with open(feature_path, "a", encoding="utf-8") as f:
             f.write(f"\n## From {job_id}: {job.get('title', job_id)}\n{body}\n")
     marker = (f"\n## Moved to Terminal batch\nBatch job: `{bid}`. Paths: {', '.join(f'`{p}`' for p in paths)}.\n"
               "This job's diff makes none of those edits. A criterion only they meet is met by the batch job.\n")
     with open(Path(root) / "jobs" / job_id / "spec.md", "a", encoding="utf-8") as f:
         f.write(marker if spec.endswith("\n") or not spec else "\n" + marker)
+    if only:
+        redirect_dependents(board, job_id, bid)
     return {"batch": bid, "only": only, "created": created}, created
 
 
