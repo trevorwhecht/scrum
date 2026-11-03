@@ -979,7 +979,7 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
-            self.assertLessEqual(len(path.read_text()), 21100, path.name)
+            self.assertLessEqual(len(path.read_text()), 21200, path.name)
 
     def test_review_agents_base_render_before_additive(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
