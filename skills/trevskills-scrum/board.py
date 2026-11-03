@@ -28,13 +28,18 @@
   board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
-  board.py backlog-add [--setup "<step>; <step>"] [--priority N | --top] "<item>"...  append "- [ ] <item>" lines to backlog.md
+  board.py backlog-add [--setup "<step>; <step>"] [--priority N | --top] [--trevor | --back] [--critical] "<item>"...
+                                   append "- [ ] <item>" lines to backlog.md
                                    (--setup adds a " {setup: step; step}" marker: next and runall-start skip the item until
                                    Trevor clicks Setup done; --priority adds a " {p:N}" importance marker, N 1-5; --top
-                                   inserts above the first item with {p:5}, so next claims it first), then
+                                   inserts above the first item with {p:5}, so next claims it first, and implies --trevor;
+                                   --trevor marks Trevor's item " {by:t}" at p:4, p:5 with --priority 5; --back marks it
+                                   " {by:back}" at p:1; with neither it is an agent item, capped at p:3 unless --critical,
+                                   passed after jev-gate.py critical confirmed, makes it p:5), then
                                    estimate each in the background
-  board.py rank-backlog            one-off backfill: Jev rates each open backlog item with no {p:N} marker (jev-gate.py
-                                   rank, logged to jev.log), writes {p:N} where it gave one, print {"rated","unrated","skipped"}
+  board.py rank-backlog [--all]    Jev rates each open backlog item with no {p:N} marker, or every open item with --all
+                                   (jev-gate.py rank, plus critical for an agent "Critical:" item, logged to jev.log), writes
+                                   the source-capped {p:N} where it changed, print {"rated","unrated","skipped"}
   board.py manual-add "<item>"...  append "- [ ] <item>" lines to manual-checks.md (human-only checks; open duplicates
                                    and empty items are skipped), print the added texts as JSON
   board.py backlog-spec <id>       ingest jobs/<id>/followups/*.md: add or match backlog items, store each spec in
@@ -131,6 +136,7 @@ Verdicts are never typed in by hand: sync derives them from the first line of ea
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, tempfile, time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -338,12 +344,13 @@ def cmd_new(root, title, job_id=None, unique=False):
         return add_job(root, board, title, job_id)
 
 
-# --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} → 003-id <!-- why -->"; points, the id,
-# priority (1-5, highest claimed first), needs and setup markers, the job and the estimate's reason are optional. An item's text excludes the markers, so its spec_path
-# never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
+# --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} {by:t} → 003-id <!-- why -->"; points, the id,
+# priority (1-5, highest claimed first), needs, setup and source markers, the job and the estimate's reason are optional.
+# The source marker is {by:t} (Trevor's item) or {by:back} (Trevor's, back of the backlog); no marker means an agent item.
+# An item's text excludes the markers, so its spec_path never changes. A setup marker is a Human setup checklist: next and runall-start skip the item until Setup done. ---
 FIB = (1, 2, 3, 5, 8, 13)
 ITEM_RE = re.compile(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*?)(?: \{#([a-z0-9]{4})\})?(?: \{p:([1-5])\})?(?: \{needs((?: #[a-z0-9]{4})+)\})?"
-                     r"(?: \{setup: ([^{}]*)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
+                     r"(?: \{setup: ([^{}]*)\})?(?: \{by:(t|back)\})?(?: → (\d{3,}-[a-z0-9-]+))?(?: <!-- (.*?) -->)?\s*$")
 ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 KEEP = object()
 ITEM_MAX = 2000  # backlog item text; long enough that a triage merge keeps every original requirement
@@ -360,11 +367,11 @@ def read_backlog(root):
     items = []
     for n, line in enumerate(lines):
         if m := ITEM_RE.match(line):
-            done, pts, text, item_id, prio, needs, setup, job, why = m.groups()
+            done, pts, text, item_id, prio, needs, setup, by, job, why = m.groups()
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
                           "id": item_id, "priority": int(prio) if prio else None, "needs": needs.replace("#", "").split() if needs else [],
-                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else []})
+                          "setup": [s.strip() for s in setup.split(";") if s.strip()] if setup else [], "by": by})
     return lines, items
 
 
@@ -374,6 +381,7 @@ def format_item(item):
             + (f" {{p:{item['priority']}}}" if item.get("priority") else "")
             + (" {needs " + " ".join(f"#{n}" for n in item["needs"]) + "}" if item.get("needs") else "")
             + (" {setup: " + "; ".join(item["setup"]) + "}" if item.get("setup") else "")
+            + (f" {{by:{item['by']}}}" if item.get("by") else "")
             + (f" → {item['job']}" if item["job"] else "") + (f" <!-- {item['why']} -->" if item["why"] else ""))
 
 
@@ -436,15 +444,37 @@ def priority_key(item) -> float:
     return -(item.get("priority") or 2.5)
 
 
+def source_priority(by, n, critical=False, current=None):
+    """The priority an item may hold given its source: a back item 1; Trevor's item 4, or 5 when n or current is 5;
+    an agent item min(n, 3) (None stays None), or 5 when critical (the lane passes that after jev-gate.py critical)."""
+    if by == "back":
+        return 1
+    if by == "t":
+        return 5 if 5 in (n, current) else 4
+    return 5 if critical else None if n is None else min(n, 3)
+
+
+def check_source(by, priority, top, critical):
+    """Refuse the add flags that cannot go together."""
+    if top and priority is not None:
+        raise SystemExit("--top and --priority cannot be combined")
+    if by == "back" and (top or priority is not None):
+        raise SystemExit("--back cannot be combined with --top or --priority")
+    if critical and (by or top):
+        raise SystemExit("--critical is only for agent items")
+
+
 def check_points(points):
     if points is not None and (isinstance(points, bool) or points not in FIB):
         raise SystemExit(f"points must be one of {FIB} or null, got {points!r}")
 
 
-def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None, top=False):
+def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None, top=False,
+               by=None, critical=False):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker.
-    add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins)."""
+    add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins).
+    add's by ("t", "back" or None = agent; top implies "t") and critical set the priority through source_priority."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -453,9 +483,12 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             if points is not KEEP:
                 check_points(points)
             check_priority(priority)
-            line = format_item({"done": False, "points": None if points is KEEP else points, "priority": 5 if top else priority,
+            check_source(by, priority, top, critical)
+            by = "t" if top else by
+            line = format_item({"done": False, "points": None if points is KEEP else points,
+                                "priority": source_priority(by, 5 if top else priority, critical),
                                 "text": clean(text, ITEM_MAX), "job": None, "why": None,
-                                "setup": None if setup is None else setup_steps(setup)})
+                                "setup": None if setup is None else setup_steps(setup), "by": by})
             if top and items:
                 lines.insert(items[0]["line"], line)
             else:
@@ -515,31 +548,52 @@ def backlog_set_estimate(root, text, points, why):
     return False
 
 
-def cmd_rank_backlog(root) -> dict:
-    """Rate every open, unmarked backlog item with jev-gate's rank step, one Jev call at a time outside the lock, then
-    write each {p:N} under the lock on the first open, unmarked item with the exact same text (gone or edited = skip)."""
-    # jev-gate.py has a hyphen, so no plain import; loaded only for this one-off
+def cmd_rank_backlog(root, all_items=False) -> dict:
+    """Rate open backlog items with jev-gate's rank step (unmarked ones, or every one with all_items) outside the lock,
+    plus its critical step for an agent item whose text starts with "Critical:"; back items get no Jev call. Then, under
+    one lock, re-read backlog.md and write source_priority on the first open item with the same text and source (and
+    still unmarked without all_items), only when it changed. A none rank, or an item gone or edited meanwhile, is left
+    byte for byte."""
+    # jev-gate.py has a hyphen, so no plain import; loaded only here
     spec = importlib.util.spec_from_file_location("jev_gate", Path(__file__).resolve().with_name("jev-gate.py"))
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
+    log = Path(root) / "jev.log"
     items = [i for i in read_backlog(root)[1] if not i["done"]]
-    todo = [i["text"] for i in items if i["priority"] is None]
-    rated = []
-    for text in todo:
-        decision = gate.run("rank", lambda asked, t=text: gate.rank_ticket(t, Path(root), asked), Path(root) / "jev.log")
-        if m := re.fullmatch(r"p([1-5]) \S+", decision):
-            rated.append((text, int(m[1])))
+    picked = [i for i in items if all_items or i["priority"] is None]
+    todo = [(i["text"], i["by"]) for i in picked if i["by"] != "back"]
+
+    def rate(text, by):
+        decision = gate.run("rank", lambda asked: gate.rank_ticket(text, Path(root), asked), log)
+        if not (m := re.fullmatch(r"p([1-5]) \S+", decision)):
+            return None
+        critical = by is None and text.startswith("Critical:") and gate.run(
+            "critical", lambda asked: gate.critical_ticket(text, asked), log) == "critical"
+        return int(m[1]), critical
+
+    with ThreadPoolExecutor(max_workers=8 if all_items else 1) as pool:  # 1 worker keeps the one-off run in file order
+        ranks = list(pool.map(lambda t: rate(*t), todo))
+    rated = [(text, by, r) for (text, by), r in zip(todo, ranks) if r]
+    rated += [(i["text"], "back", None) for i in picked if i["by"] == "back"]
     written = 0
     if rated:
         with locked_board(root):
-            lines, items_now = read_backlog(root)
-            for text, n in rated:
-                item = next((i for i in items_now if not i["done"] and i["priority"] is None and i["text"] == text), None)
-                if item:
-                    item["priority"] = n
+            lines, now_items = read_backlog(root)
+            used, changed = set(), False
+            for text, by, r in rated:
+                item = next((i for i in now_items if not i["done"] and i["index"] not in used and i["text"] == text
+                             and i["by"] == by and (all_items or i["priority"] is None)), None)
+                if item is None:
+                    continue
+                used.add(item["index"])
+                written += by != "back"
+                n, critical = r or (None, False)
+                new = source_priority(by, n, critical, item["priority"])
+                if new != item["priority"]:
+                    item["priority"] = new
                     lines[item["line"]] = format_item(item)
-                    written += 1
-            if written:
+                    changed = True
+            if changed:
                 write_backlog(root, lines)
     return {"rated": written, "unrated": len(todo) - written, "skipped": len(items) - len(todo)}
 
@@ -837,18 +891,58 @@ def migrate_focus():
         return list(focused)
 
 
-def cmd_backlog_add(root, items, setup=None, priority=None, top=False):
+AGENT_TAG_RE = re.compile(r"from \d{3,}-[a-z0-9-]+\)|\(gap of |\(Phase 2 of |\(merged: digest|^(?:Apply|Create) digest \d")
+
+
+def migrate_backlog_sources():
+    """One-time source marking, per registered project with no scrum/backlog-sources.done: under its board lock, each
+    open item with no {by:…} marker is an agent item when AGENT_TAG_RE finds a tag (p:4/p:5 drop to p:3), else
+    Trevor's (gets {by:t} and p:4, or keeps p:5); then the sentinel is written. No Jev call. Returns the names migrated;
+    a second call finds none. A project whose lock or files fail is skipped and retried at the next start."""
+    done = []
+    for name, repo in projects().items():
+        root = repo / "scrum"
+        sentinel = root / "backlog-sources.done"
+        if sentinel.exists():
+            continue
+        try:
+            with locked_board(root):
+                if (root / "backlog.md").exists():
+                    lines, items = read_backlog(root)
+                    changed = False
+                    for item in items:
+                        if item["done"] or item["by"]:
+                            continue
+                        if AGENT_TAG_RE.search(item["text"]):
+                            new = 3 if (item["priority"] or 0) > 3 else item["priority"]
+                        else:
+                            item["by"], new = "t", source_priority("t", item["priority"])
+                        if new != item["priority"] or item["by"]:
+                            item["priority"] = new
+                            lines[item["line"]] = format_item(item)
+                            changed = True
+                    if changed:
+                        write_backlog(root, lines)
+                sentinel.write_text(now() + "\n")
+        except (OSError, SystemExit) as e:
+            print(f"backlog source migration skipped {name}: {e}", file=sys.stderr)
+            continue
+        done.append(name)
+    return done
+
+
+def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, critical=False):
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
-    texts as stored. An empty checklist adds nothing. top puts each item first with {p:5} (see backlog_op)."""
-    if top and priority is not None:
-        raise SystemExit("--top and --priority cannot be combined")
+    texts as stored. An empty checklist adds nothing. top puts each item first with {p:5}; by and critical set the
+    source and priority (see backlog_op)."""
+    check_source(by, priority, top, critical)
     if setup is not None:
         setup_steps(setup)
     check_priority(priority)
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item, setup=setup, priority=priority, top=top)
+            backlog_op(root, "add", text=item, setup=setup, priority=priority, top=top, by=by, critical=critical)
             added.append(clean(item, ITEM_MAX))
     return added
 
@@ -2053,7 +2147,8 @@ def cmd_triage_apply(root, triage_id):
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
                             "priority": max((i["priority"] for i in got if i["priority"]), default=None),
                             "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
-                            "setup": list(dict.fromkeys(st for i in got for st in i["setup"]))}  # still waits on setup
+                            "setup": list(dict.fromkeys(st for i in got for st in i["setup"])),  # still waits on setup
+                            "by": "t" if any(i["by"] == "t" for i in got) else "back" if any(i["by"] == "back" for i in got) else None}
                     merged.append(item)
                     remap.update((n, item) for n in own)
                     for i in got:
@@ -4328,9 +4423,13 @@ def main(argv=None):
     ba.add_argument("--setup", metavar="TEXT", help='Human setup checklist "step; step"')
     ba.add_argument("--priority", type=int, metavar="N", help="importance 1-5, highest claimed first")
     ba.add_argument("--top", action="store_true", help="insert first with {p:5}, so next claims it first")
+    src = ba.add_mutually_exclusive_group()
+    src.add_argument("--trevor", action="store_true", help="Trevor's item: {by:t}, p:4 (p:5 with --priority 5)")
+    src.add_argument("--back", action="store_true", help="Trevor's item for the back of the backlog: {by:back}, p:1")
+    ba.add_argument("--critical", action="store_true", help="agent item jev-gate.py critical confirmed: p:5")
     ba.add_argument("items", nargs="+")
     sub.add_parser("manual-add").add_argument("items", nargs="+")
-    sub.add_parser("rank-backlog")
+    sub.add_parser("rank-backlog").add_argument("--all", action="store_true", dest="all_items")
     sub.add_parser("roadmap-show")
     rl = sub.add_parser("roadmap-link")
     rl.add_argument("p", type=int)
@@ -4484,7 +4583,7 @@ def main(argv=None):
     elif a.cmd == "triage-apply":
         print(json.dumps(cmd_triage_apply(a.dir, a.triage)))
     elif a.cmd == "rank-backlog":
-        print(json.dumps(cmd_rank_backlog(a.dir)))
+        print(json.dumps(cmd_rank_backlog(a.dir, a.all_items)))
     elif a.cmd == "manual-add":
         print(json.dumps(cmd_manual_add(a.dir, a.items)))
     elif a.cmd == "plan-apply":
@@ -4517,7 +4616,8 @@ def main(argv=None):
         print(json.dumps(out))
         spawn_estimates(a.dir, out["added"])
     else:
-        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority, a.top))
+        spawn_estimates(a.dir, cmd_backlog_add(a.dir, a.items, a.setup, a.priority, a.top,
+                                                    "back" if a.back else "t" if a.trevor else None, a.critical))
 
 
 def spawn_estimates(root, texts):

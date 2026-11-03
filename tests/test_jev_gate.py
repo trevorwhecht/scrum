@@ -15,6 +15,7 @@ SECURITY_Q = "This diff needs a security review"
 UI_Q = "This diff needs a UI review"
 APPROVER_Q = "This diff changes payment, pricing, billing, authentication, session, role or permission logic"
 DUPE_Q = "Item {i} is the same task as the query"
+CRITICAL_Q = "This ticket reports data loss, wrong money or pricing, broken production, or a security hole"
 BACKLOG = ("# Backlog\n\n- [ ] [3] Add dark mode {#ab12} → 012-dark <!-- big -->\n- [x] Done thing\n"
            "- [ ] Fix login bug\n")
 
@@ -260,7 +261,7 @@ class JevGateTest(unittest.TestCase):
         cases = [((3.8, 2, 0.9, "bug"), "p5 bug"), ((0.2, 0.4, 0.9, "bug"), "p1 bug"),
                  ((2, 2, 0.2, "ui-polish"), "p2 ui-polish"), ((2, 2, 0.2, "feature"), "p3 feature"),
                  ((2, 0.5, 0.2, "dead-code-lint"), "p2 dead-code-lint"), ((4, 3, 0.1, "ux-a11y"), "p4 ux-a11y"),
-                 ((1, 3, 0.6, "ux-a11y"), "p2 ux-a11y")]
+                 ((1, 3, 0.6, "ux-a11y"), "p2 ux-a11y"), ((3.8, 0.3, 0.9, "bug"), "p1 bug")]
         for args, want in cases:
             with self.subTest(args=args):
                 self.assertEqual(self.gate("rank", "ticket", self.rank_ask(*args))[0], want)
@@ -305,6 +306,27 @@ class JevGateTest(unittest.TestCase):
         code, out, err = self.run_gate([])
         self.assertEqual(code, 2)
         self.assertIn("rank", err.split("<")[1])
+        self.assertIn("critical", err.split("<")[1].split(">")[0].split("|"))
+
+    # --- critical ---
+    def test_critical_step(self):
+        for v, want in ((0.7, "critical"), (0.69, "normal")):
+            with self.subTest(v=v):
+                self.sent.clear()
+                out, f = self.gate("critical", "  Critical: refunds charge twice\n", noul_ask(v))
+                self.assertEqual((out, f[1], f[2], f[4]), (want, "critical", CRITICAL_Q, want))
+                self.assertEqual(len(self.sent), 1)
+                self.assertEqual(self.sent[0][0], "Critical: refunds charge twice")
+
+    def test_critical_fallback(self):
+        for stdin in ("", " \n\t"):
+            with self.subTest(stdin=stdin):
+                out, f = self.gate("critical", stdin)  # ask=None: a Jev call fails the test
+                self.assertEqual((out, f[2], f[4]), ("normal", "-", "normal"))
+        for ask in (TimeoutError("t"), jev.JevError("x"), RuntimeError("boom"), lambda *a: {"q": {"noul": "high"}}):
+            with self.subTest(ask=ask):
+                out, f = self.gate("critical", "Critical: prod is down", ask)
+                self.assertEqual((out, f[2], f[4]), ("normal", CRITICAL_Q, "normal"))
 
 if __name__ == "__main__":
     unittest.main()

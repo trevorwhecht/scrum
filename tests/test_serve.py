@@ -427,7 +427,7 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve, "estimate"):
             code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": text})
         self.assertEqual(code, 200)
-        self.assertIn(f"- [ ] {text}\n", (self.root / "backlog.md").read_text())
+        self.assertIn(f"- [ ] {text} {{p:4}} {{by:t}}\n", (self.root / "backlog.md").read_text())
         with mock.patch.object(self.serve, "spawn"):
             code, out = self.req("POST", "/api/p/repo/backlog/run", {"index": items[-1]["index"]})
         self.assertEqual(code, 202)
@@ -446,9 +446,12 @@ class ServeTest(unittest.TestCase):
             for body in ({"op": "add", "text": "L", "urgency": "later"}, {"op": "add", "text": "M"},
                          {"op": "add", "text": "N", "urgency": None}):
                 code, items = self.req("POST", "/api/p/repo/backlog", body)
-                self.assertEqual((code, items[-1]["text"], items[-1]["priority"]), (200, body["text"], None))
+                self.assertEqual((code, items[-1]["text"], items[-1]["priority"], items[-1]["by"]),
+                                 (200, body["text"], 4, "t"))
+        self.assertEqual(items[0]["by"], "t")
         before = path.read_text()
-        self.assertEqual(before, "# Backlog\n- [ ] T {p:5}\n- [ ] [3] Dark mode\n- [ ] CSV export\n- [ ] L\n- [ ] M\n- [ ] N\n")
+        self.assertEqual(before, "# Backlog\n- [ ] T {p:5} {by:t}\n- [ ] [3] Dark mode\n- [ ] CSV export\n"
+                                 "- [ ] L {p:4} {by:t}\n- [ ] M {p:4} {by:t}\n- [ ] N {p:4} {by:t}\n")
         for bad in ("soon", "", "Next", 0, False, True, ["next"]):
             code, out = self.post_raw("/api/p/repo/backlog", {"op": "add", "text": "S", "urgency": bad})
             self.assertEqual((code, out), (400, {"error": "urgency must be now, next or later"}), bad)
@@ -483,7 +486,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(0.2)
         self.assertEqual(code, 200)
         self.assertEqual((items[-1]["text"], items[-1]["points"]), ("Picked by hand", 8))
-        self.assertIn("- [ ] [8] Picked by hand\n", (self.root / "backlog.md").read_text())
+        self.assertIn("- [ ] [8] Picked by hand {p:4} {by:t}\n", (self.root / "backlog.md").read_text())
         est.assert_not_called()
 
     def test_add_with_bad_points_rejected(self):

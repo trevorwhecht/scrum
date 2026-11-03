@@ -166,7 +166,7 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
         self.assertEqual(got["pickedClass"], "pts p8", got)
         self.assertEqual(got["afterAdd"], {"points": "", "cls": "pts px", "blError": ""}, got)
         self.assertEqual((self.repo / "scrum" / "backlog.md").read_text(),
-                         BACKLOG + f"- [ ] [8] Header broken [screenshot: {shot}]\n")
+                         BACKLOG + f"- [ ] [8] Header broken [screenshot: {shot}] {{p:4}} {{by:t}}\n")
         self.estimate.assert_not_called()
 
     def test_backlog_attach_desktop(self):
