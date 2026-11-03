@@ -2845,6 +2845,16 @@ class Blocker(str):
         return self
 
 
+def parked_bigboy(k, by_id, live, root) -> bool:
+    """A running, unpaused BigBoy job that runs no session: it has children, all idle and none live, and none waits
+    to start (a waiting child without setup pending is about to be claimed), and no chain lock is held. Such a job
+    holds no Run-all slot, so it never blocks a sibling's overlap check."""
+    kids = [by_id[c] for c in k.get("children") or [] if c in by_id]
+    return k.get("lane") == "bigboy" and k.get("stage") == "running" and not k.get("paused") and bool(kids) \
+        and all(idle(c) and c["id"] not in live and not (c.get("stage") == "waiting" and c.get("setup") != "pending")
+                for c in kids) and not chain_lock_live(root, k["id"])
+
+
 def resume_blocker(root, job_id, live=()):
     """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s overlap rules
     (slot_conflict) against its in-progress siblings: the ids in `live` (serve.py's running sessions, which still
@@ -2863,7 +2873,8 @@ def resume_blocker(root, job_id, live=()):
     files = {k["id"]: likely_files(spec(k)) for k in kids}
     # A sibling holds a slot only with a live session: `live`, or a WATCHED stage whose claude process is alive.
     # Needs-human, paused and limit-held (limitResetAt) siblings run nothing, so they never block each other.
-    maybe = [k for k in kids if k["id"] not in live and k["id"] != job_id and not idle(k) and not k.get("limitResetAt")]
+    maybe = [k for k in kids if k["id"] not in live and k["id"] != job_id and not idle(k) and not k.get("limitResetAt")
+             and not parked_bigboy(k, jobs, live, root)]
     alive = session_alive_fn() if any(k.get("stage") in WATCHED for k in maybe) else None  # ps only when needed
     busy = [k for k in kids if k["id"] != job_id and (k["id"] in live or (
         k in maybe and (alive(k) if k.get("stage") in WATCHED else True)))]
@@ -2928,6 +2939,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         # overlap slot; busy itself is kept so the parent stays running and in_progress counts them
         limited = [k for k in busy if k.get("limitResetAt") and not idle(k) and k["id"] not in live]
         slots = [k for k in busy if k not in limited] if cap is not None and allow < len(limited) else list(busy)
+        by_id = {j["id"]: j for j in board["jobs"]}
+        slots = [k for k in slots if not parked_bigboy(k, by_id, live, root)]  # a parked BigBoy child runs no session
         room = ram_room() if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)

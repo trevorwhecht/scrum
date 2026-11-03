@@ -7582,5 +7582,46 @@ class ProdOkTest(unittest.TestCase):
         self.assertIn("board.py prod-ok <id> '<bullet>'", BOARD_PY.read_text().split('"""')[1])
 
 
+class ParkedBigboyTest(unittest.TestCase):
+    def jobs(self, gc_stage="needs-human", **gc):
+        j = lambda i, **kw: {"id": i, "title": i, "stage": "waiting", "updatedAt": "2026-01-01T00:00:00+00:00", **kw}
+        return [j("107-big", stage="running", lane="bigboy", children=["285-gc"]),
+                j("285-gc", stage=gc_stage, parent="107-big", **gc)]
+
+    def check(self, jobs, live=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            return board.parked_bigboy(jobs[0], {j["id"]: j for j in jobs}, live, Path(tmp))
+
+    def test_parked_shapes(self):
+        self.assertTrue(self.check(self.jobs()))
+        self.assertTrue(self.check(self.jobs("waiting", setup="pending")))
+
+    def test_not_parked(self):
+        self.assertFalse(self.check(self.jobs("running")))
+        self.assertFalse(self.check(self.jobs("waiting")))
+        self.assertFalse(self.check(self.jobs(), live={"285-gc"}))
+        jobs = self.jobs()
+        jobs[0]["paused"] = True
+        self.assertFalse(self.check(jobs))
+        jobs = self.jobs()
+        jobs[0]["lane"] = "runall"
+        self.assertFalse(self.check(jobs))
+
+    def test_resume_blocker_ignores_parked_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            j = lambda i, **kw: {"id": i, "title": i, "stage": "waiting", "updatedAt": "2026-01-01T00:00:00+00:00", **kw}
+            jobs = [j("070", stage="running", lane="runall", children=["107", "108"]),
+                    j("107", stage="running", lane="bigboy", parent="070", children=["285"]),
+                    j("108", stage="needs-human", parent="070", lane="fast"),
+                    j("285", stage="needs-human", parent="107")]
+            (root / "board.json").write_text(json.dumps({"jobs": jobs}))
+            self.assertIsNone(board.resume_blocker(root, "108"))
+            jobs[3]["stage"] = "running"
+            (root / "board.json").write_text(json.dumps({"jobs": jobs}))
+            with mock.patch.object(board, "session_alive_fn", return_value=lambda k: True):
+                self.assertIsNotNone(board.resume_blocker(root, "108"))
+
+
 if __name__ == "__main__":
     unittest.main()
