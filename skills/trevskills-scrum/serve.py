@@ -3872,7 +3872,7 @@ class Handler(BaseHTTPRequestHandler):
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
                     return 202, {"id": job_id, "feature": text}
                 top = urgency == "next"
-                items = board.backlog_op(root, "add", text=body.get("text"), top=top,
+                items = board.backlog_op(root, "add", text=body.get("text"), top=top, by="t",  # Trevor's own item
                                          **({"points": body["points"]} if "points" in body else {}))
                 new = items[0] if top else items[-1]
                 if new["points"] is None:
@@ -4044,6 +4044,7 @@ def main():
     rotate_serve_log()  # only once the port is ours, so a duplicate start never moves the live log
     try:
         board.migrate_focus()  # one-time: `- Focus: yes` projects become the top of the rank
+        board.migrate_backlog_sources()  # one-time per project: {by:t} on Trevor's items, the p:4 floor and p:3 agent cap
     except (OSError, SystemExit) as e:
         print(f"focus migration: {e}", file=sys.stderr, flush=True)
     threading.Thread(target=watchdog_loop, daemon=True).start()

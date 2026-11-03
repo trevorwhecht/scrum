@@ -979,7 +979,7 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
-            self.assertLessEqual(len(path.read_text()), 21400, path.name)
+            self.assertLessEqual(len(path.read_text()), 21600, path.name)
 
     def test_review_agents_base_render_before_additive(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
@@ -1046,9 +1046,37 @@ class ContractTest(unittest.TestCase):
         self.assertIn("then `B backlog-add --top -- '<text>'`", line("next"))
         self.assertIn("Bare `/trevskills-scrum next` with no text stays as above", line("next"))
         self.assertIn("**Dupe check** and **Rank**", line("later"))
-        self.assertIn("then `B backlog-add [--priority N] -- '<text>'`", line("later"))
-        for word in ("next", "later"):
+        self.assertIn("then `B backlog-add --trevor [--priority N] -- '<text>'`", line("later"))
+        for word in ("next", "later", "later back"):
             self.assertIn("It starts no job", line(word))
+        self.assertIn("then `B backlog-add --back -- '<text>'`", line("later back"))
+        self.assertIn("does not rank", line("later back"))
+        self.assertIn("The optional source marker ` {by:t}`", commands)
+        self.assertIn("` {by:back}` (Trevor's, back of the backlog", commands)
+
+    def test_digest_reranks_backlog(self):
+        digest = self.lane("digest")
+        step = next(l for l in digest.splitlines() if l.startswith("5. "))
+        for phrase in ("After step 4 (either branch), run `B rank-backlog --all` (Bash timeout 600000)",
+                       "A failure or timeout is named in the report only"):
+            self.assertIn(phrase, step, phrase)
+        self.assertLess(digest.index("\n4. If the `proposals` list is empty"), digest.index("\n5. After step 4"))
+        self.assertLess(digest.index("\n5. After step 4"), digest.index("## Weekly"))
+
+    def test_rank_critical_gate(self):
+        new_job = self.section(skill_text(), "## New job", "## Run all")
+        rank = next(l for l in new_job.splitlines() if "**Rank** (after the Dupe check" in l)
+        for phrase in ("When the bare item starts with `Critical:`", "jev-gate.py critical $F/jobs/$ID",
+                       "on `critical`, pass `--critical`", "caps an item with no `--trevor` at p:3"):
+            self.assertIn(phrase, rank, phrase)
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        gate = self.section(approver, "**Out-of-scope follow-ups.**", "\nDon't edit code.")
+        self.assertIn("A follow-up bullet may start with `Critical: `, only for data loss, wrong money or pricing, "
+                      "broken production, or a security hole", gate)
+        writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        self.assertIn("any ` {p:N}` priority marker", writer)
+        self.assertIn("any ` {by:…}` source marker", writer)
+        self.assertIn("Keep a leading `Critical: ` from the follow-up bullet", writer)
 
     def test_skill_documents_resume_and_watchdog(self):
         text = skill_text()

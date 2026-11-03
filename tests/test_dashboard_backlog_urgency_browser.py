@@ -122,7 +122,7 @@ class DashboardBacklogUrgencyBrowserTest(unittest.TestCase):
         self.assertEqual(got["posts"], [{"op": "add", "text": "Jump the queue", "urgency": "next"},
                                         {"op": "add", "text": "Start this now", "urgency": "now"}], got)
         scrum = self.repo / "scrum"
-        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Jump the queue {p:5}\n" + BACKLOG[len("# Backlog\n"):])
+        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Jump the queue {p:5} {by:t}\n" + BACKLOG[len("# Backlog\n"):])
         job = json.loads((scrum / "board.json").read_text())["jobs"][-1]
         self.assertEqual((job["title"], job["stage"]), ("Start this now", "spec"), got)
         self.assertEqual((scrum / "jobs" / job["id"] / "feature.md").read_text(), "Start this now\n")
