@@ -716,6 +716,16 @@ class ContractTest(unittest.TestCase):
         for s in wait:
             self.assertIn("`DEV_URL` is absent", s)
 
+    def test_review_code_blocks_unjustified_not_run(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        lines = [l for l in text.splitlines() if "NOT RUN" in l]
+        rule = [l for l in lines if l.startswith("- every acceptance criterion")]
+        self.assertEqual(len(rule), 1)
+        self.assertIn("[blocking]", rule[0])
+        self.assertEqual(len(lines), 2)
+        fast = [l for l in lines if l.startswith("**Fast lane.**")]
+        self.assertEqual(len(fast), 1)
+
     def test_review_code_has_security_checklist(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ("injection", "secrets", "dangerouslySetInnerHTML"):
