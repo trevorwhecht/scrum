@@ -1143,10 +1143,22 @@ class ContractTest(unittest.TestCase):
 
     def test_new_job_parks_claude_dir_edits_when_headless(self):
         step3 = self.section(skill_text(), "3. **Spec:**", "4. **Worktree:**")
-        for phrase in ("B claude-paths $ID", "--a \"Run it in a Terminal window=lilguy $ID\"", "--title BUILDER_BLOCKED",
+        for phrase in ("B claude-paths $ID", "B claude-batch $ID", "moved to Terminal batch",
+                       "--a \"Run it in a Terminal window=lilguy $ID\"", "--title BUILDER_BLOCKED",
                        "Claude Code refuses those edits in a session that runs on its own"):
             self.assertIn(phrase, step3, phrase)
         self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
+
+    def test_builder_skips_batched_claude_edits(self):
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        rule = next(l for l in builder.splitlines() if "## Moved to Terminal batch" in l)
+        self.assertIn("make no edit under the project's `.claude/`", rule)
+
+    def test_spec_writer_writes_claude_edits(self):
+        writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        self.assertIn("    ## Claude edits        ← only when Likely files names a project `.claude/` path", writer)
+        rule = next(l for l in writer.splitlines() if l.startswith("- **Claude edits.**"))
+        self.assertIn("the exact text to add or replace", rule)
 
     def test_lilguy_runs_existing_job_in_terminal(self):
         lilguy = self.lane("lilguy")

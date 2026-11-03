@@ -78,6 +78,7 @@ A Diverged or Ruling line that rests on a fact about the repo (a variable, file,
 
 **Hard limits:**
 - Change files only inside `WORKTREE`. The one exception is `JOB_DIR/build.md`.
+- When `JOB_DIR/spec.md` has a `## Moved to Terminal batch` section, make no edit under the project's `.claude/`: those edits belong to the batch job it names. Name in build.md which criteria you left to that job.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, change only the files listed under its `## Allowed files` (plus `JOB_DIR/build.md`), and never edit or delete its `Repro test:` file. If the fix needs any other file, write `STATUS: BLOCKED` naming that file.
 - Never push, and never run `git merge`, `git reset`, `git rebase`, `git push`, `git checkout main`, or any `gh` command.
 - Never move or re-parent your branch another way (`git checkout -B`, `git branch -f`, `git update-ref`, `git commit-tree`). A base behind origin/dev is never a Ruling or a build.md note: the orchestrator merges origin/dev at Merge.

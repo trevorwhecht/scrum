@@ -1,4 +1,4 @@
-import errno, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import contextlib, errno, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -6638,6 +6638,25 @@ class ExitedRunSweepTest(unittest.TestCase):
                 mock.patch.object(s, "spawn", side_effect=fake_spawn) as spawn:
             s.watchdog_tick()
         return [(c.args[2], c.args[3]) for c in spawn.call_args_list]
+
+    def test_watchdog_migrates_legacy_claude_park(self):
+        old = "blocked: this job changes files in the project .claude folder, and Claude Code refuses those edits"
+        self.write([{"id": "010-mixed", "title": "Mixed", "stage": "needs-human", "reason": old},
+                    {"id": "011-only", "title": "Only", "stage": "needs-human", "reason": old}])
+        for jid, likely in (("010-mixed", "- `src/a.py`\n- `.claude/rules/c.md`\n"), ("011-only", "- `.claude/rules/d.md`\n")):
+            (self.root / "jobs" / jid).mkdir()
+            (self.root / "jobs" / jid / "spec.md").write_text(f"# {jid}\n## Likely files\n{likely}")
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "resume_refusal", return_value=None), contextlib.redirect_stderr(err):
+            spawns = self.tick()
+        self.assertEqual(spawns.count(("010-mixed", "resume")), 1)
+        self.assertNotIn("011-only", [jid for jid, _ in spawns])
+        self.assertEqual(self.job("011-only")["stage"], "aborted")
+        self.assertEqual(self.job("010-mixed")["stage"], "spec")
+        self.assertIn("watchdog: p: moved .claude edits of 010-mixed to 012-terminal-batch-project-claude-edits",
+                      err.getvalue())
+        with mock.patch.object(self.serve, "resume_refusal", return_value=None):
+            self.assertEqual(self.tick(), [])
 
     def test_exited_run_ignored_outside_watched_stages(self):
         jobs = [{"id": f"s-{st}", "stage": st} for st in ("done", "needs-human", "running", "plan", "aborted")]

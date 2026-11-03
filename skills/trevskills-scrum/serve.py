@@ -1197,9 +1197,21 @@ def auto_play(candidates: list[tuple[str, Path, dict, list[dict]]]) -> bool:
     return False
 
 
+def claude_migrate(project, root):
+    """board.cmd_claude_migrate: move the jobs parked on the old New job 3c question into the Terminal batch once, and
+    resume each one that keeps other work (a refused resume leaves it stalled, so its card offers Resume)."""
+    for moved in board.cmd_claude_migrate(root):
+        print(f"watchdog: {project}: moved .claude edits of {moved['id']} to {moved['batch']}", file=sys.stderr, flush=True)
+        if moved["only"]:
+            continue
+        job = board.find(board.read_board(root), moved["id"])
+        if resume_refusal(project, root, job) is None:
+            spawn(project, root, moved["id"], "resume", f"/trevskills-scrum resume {moved['id']}")
+
+
 def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
-    1. Resume: per project, flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
+    1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project. Then resume
        BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick).
@@ -1225,6 +1237,7 @@ def watchdog_tick():
             try:
                 root = repo / "scrum"
                 board.cmd_migrate_paused(root)  # legacy needs-human paused jobs back to their stage, before any reader
+                claude_migrate(project, root)
                 respawn_exited(project, root)
                 record_outcomes(project, root)
                 flagged = set(board.cmd_watchdog(root))
