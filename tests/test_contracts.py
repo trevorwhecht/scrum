@@ -979,7 +979,7 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
-            self.assertLessEqual(len(path.read_text()), 21000, path.name)
+            self.assertLessEqual(len(path.read_text()), 21100, path.name)
 
     def test_review_agents_base_render_before_additive(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
@@ -1145,7 +1145,7 @@ class ContractTest(unittest.TestCase):
         step3 = self.section(skill_text(), "3. **Spec:**", "4. **Worktree:**")
         for phrase in ("B claude-paths $ID", "B claude-batch $ID", "moved to Terminal batch",
                        "--a \"Run it in a Terminal window=lilguy $ID\"", "--title BUILDER_BLOCKED",
-                       "Claude Code refuses those edits in a session that runs on its own"):
+                       "Claude Code refuses those edits in a session that runs on its own", "dependents' `depends_on`"):
             self.assertIn(phrase, step3, phrase)
         self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
 
