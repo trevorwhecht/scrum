@@ -79,6 +79,9 @@
   board.py claude-paths <id>       print {"paths","headless"}: the project .claude/ files spec.md's Likely files name, and
                                    whether this session is unattended (claude -p, or no claude ancestor found)
                                    (lanes/newjob.md step 3c)
+  board.py claude-batch <id>       print {"batch","only","created"}: move the job's project .claude/ edits into the open
+                                   "Terminal batch: project .claude edits" job (else create and park one), mark spec.md
+                                   `## Moved to Terminal batch`; only = every Likely file is a .claude/ path (step 3c)
   board.py route-check <id> [--check-fails N] [--clean-start]  print {"promote","clean_round","approver_sonnet"}: the
                                    Fast or Lilguy Worktree mode promotion trigger (or null), whether a PASS round is a clean round, and
                                    whether scrum-approver gets Sonnet (SKILL.md Fast lane 1, Review 5, Approve 1)
@@ -3163,6 +3166,22 @@ UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", 
 UNBLOCK_MAX = 2  # unblocks per job, ever; a kind is unblocked at most once (the loop guard compares kinds, not text)
 
 
+def park(root, job, question, parsed, title, recommend=None):
+    """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound."""
+    if job.get("reason") != question:
+        job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
+    job.update(stage="needs-human", reason=question, question=question, options=parsed, stopTitle=title,
+               updatedAt=now())
+    entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job["id"],
+             "question": question, "options": parsed, "reason": question, "stopTitle": title,
+             "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
+    if recommend:
+        job["recommend"] = entry["recommend"] = recommend
+    else:
+        job.pop("recommend", None)  # a re-ask without one drops the old question's advice
+    questions_log(root, entry)
+
+
 def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title):
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
@@ -3216,19 +3235,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
                                  "question": question, "reason": reason, "kind": "stall"})
             return {"stalled": True}
-        reason = question
-        if job.get("reason") != reason:
-            job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
-        job.update(stage="needs-human", reason=reason, question=question, options=parsed, stopTitle=title,
-                   updatedAt=now())
-        entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                 "question": question, "options": parsed, "reason": reason, "stopTitle": title,
-                 "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
-        if recommend:
-            job["recommend"] = entry["recommend"] = recommend
-        else:
-            job.pop("recommend", None)  # a re-ask without one drops the old question's advice
-        questions_log(root, entry)
+        park(root, job, question, parsed, title, recommend)
     if was != "needs-human":
         play(sound("needs-human"))
     return parsed
@@ -3654,9 +3661,80 @@ def cmd_claude_paths(root, job_id: str) -> dict:
         text = (Path(root) / "jobs" / check_id(job_id) / "spec.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
-    found = re.findall(r"`([^`\s]+)`", md_section(text, "Likely files") or "")
-    paths = [p for p in dict.fromkeys(found) if p.startswith(".claude/") and not p.startswith(".claude/worktrees/")]
-    return {"paths": paths, "headless": caller_headless()}
+    return {"paths": [p for p in likely_backticked(text) if is_claude_path(p)], "headless": caller_headless()}
+
+
+def likely_backticked(spec: str) -> list[str]:
+    """spec.md's `## Likely files` backticked paths, deduplicated in file order."""
+    return list(dict.fromkeys(re.findall(r"`([^`\s]+)`", md_section(spec, "Likely files") or "")))
+
+
+def is_claude_path(path: str) -> bool:
+    return path.startswith(".claude/") and not path.startswith(".claude/worktrees/")
+
+
+TERMINAL_BATCH_TITLE = "Terminal batch: project .claude edits"
+# Never starts with a RESUMABLE prefix: a parked batch is run in a Terminal window, never resumed headless.
+TERMINAL_BATCH_QUESTION = ("project .claude edits: Claude Code refuses those edits in a session that runs on its own; "
+                           "approve each in a Terminal window.")
+TERMINAL_BATCH_INTRO = ("Lane: lilguy\nComplex: no\n\n# Terminal batch: project .claude edits\n\n"
+                        "Headless jobs moved these project `.claude/` edits here, because Claude Code refuses them in a "
+                        "session that runs on its own. Make every edit below in this repo as one change.\n")
+
+
+def cmd_claude_batch(root, job_id: str) -> dict:
+    """{"batch", "only", "created"}: move the job's project .claude/ edits into the open Terminal batch job (the first
+    TERMINAL_BATCH_TITLE job at needs-human; else a new one, parked BUILDER_BLOCKED), and mark its spec.md
+    `## Moved to Terminal batch`. only: every Likely file is a .claude/ path. A re-run writes nothing (lanes/newjob.md 3c)."""
+    folder = Path(root) / "jobs" / check_id(job_id)
+    created = False
+    with locked_board(root) as board:
+        job = live(board, job_id)
+        if job["title"] == TERMINAL_BATCH_TITLE:
+            raise SystemExit(f"job {job_id} is the Terminal batch; run it in a Terminal window")
+        spec_path = folder / "spec.md"
+        try:
+            spec = spec_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            spec = ""
+        likely = likely_backticked(spec)
+        paths = [p for p in likely if is_claude_path(p)]
+        if not paths:
+            raise SystemExit(f"job {job_id} names no project .claude/ path")
+        only = len(paths) == len(likely)
+        moved = md_section(spec, "Moved to Terminal batch")
+        if moved is not None:
+            m = re.search(r"`(\d{3,}-[a-z0-9-]+)`", moved)
+            return {"batch": m and m[1], "only": only, "created": False}
+        batch = next((j for j in board["jobs"] if j["title"] == TERMINAL_BATCH_TITLE and j["stage"] == "needs-human"), None)
+        if batch is None:
+            bid = add_job(root, board, TERMINAL_BATCH_TITLE)
+            (Path(root) / "jobs" / bid / "feature.md").write_text(TERMINAL_BATCH_INTRO)
+            batch = find(board, bid)
+            batch["base"] = job.get("base")
+            park(root, batch, TERMINAL_BATCH_QUESTION,
+                 [{"key": "a", "label": "Run it in a Terminal window", "command": f"lilguy {bid}"},
+                  {"key": "b", "label": "Remove this job", "command": f"abort {bid} --cascade"}],
+                 "BUILDER_BLOCKED", {"key": "a", "why": "Only a Terminal window can approve project .claude edits."})
+            created = True
+        bid = batch["id"]
+        feature_path = Path(root) / "jobs" / bid / "feature.md"
+        feature = feature_path.read_text(encoding="utf-8", errors="replace") if feature_path.is_file() else ""
+        if not re.search(rf"^## From {re.escape(job_id)}:", feature, re.M):
+            body = (md_section(spec, "Claude edits") or "").strip()
+            if not body:
+                criteria = [l.strip() for l in (md_section(spec, "Acceptance criteria") or "").splitlines()
+                            if CLAUDE_DIR_RE.search(l)]
+                body = "\n".join([f"- `{p}`" for p in paths] + (["", "Criteria that name them:", *criteria] if criteria else []))
+            with open(feature_path, "a", encoding="utf-8") as f:
+                f.write(f"\n## From {job_id}: {job['title']}\n{body}\n")
+        marker = (f"\n## Moved to Terminal batch\nBatch job: `{bid}`. Paths: {', '.join(f'`{p}`' for p in paths)}.\n"
+                  "This job's diff makes none of those edits. A criterion only they meet is met by the batch job.\n")
+        with open(spec_path, "a", encoding="utf-8") as f:
+            f.write(marker if spec.endswith("\n") or not spec else "\n" + marker)
+    if created:
+        play(sound("needs-human"))
+    return {"batch": bid, "only": only, "created": created}
 
 
 ACTION_NEEDED_RE = re.compile(r"[\s*_>•-]*action needed[\s*_:–—-]*(.*)", re.I)
@@ -3729,10 +3807,13 @@ WATCHED = ("spec", "build", "check", "review", "approve", "merging", "deploying"
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
+# The legacy lanes/newjob.md 3c park (before claude-batch); Resume sends it back through 3c.
+CLAUDE_PARK = "blocked: this job changes files in the project .claude folder"
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
-RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
+RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ",
+             CLAUDE_PARK)
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
 # existing resume path.
 PAUSABLE = ("spec", "build", "check", "review", "approve", "merging", "deploying", "plan", "running")
@@ -4200,6 +4281,7 @@ def main(argv=None):
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
     sub.add_parser("claude-paths").add_argument("id")
+    sub.add_parser("claude-batch").add_argument("id")
     rc = sub.add_parser("route-check")
     rc.add_argument("id")
     rc.add_argument("--check-fails", type=int, default=0)
@@ -4310,6 +4392,8 @@ def main(argv=None):
         print(json.dumps(cmd_lilguy_fit(a.dir, a.id)))
     elif a.cmd == "claude-paths":
         print(json.dumps(cmd_claude_paths(a.dir, a.id)))
+    elif a.cmd == "claude-batch":
+        print(json.dumps(cmd_claude_batch(a.dir, a.id)))
     elif a.cmd == "route-check":
         print(json.dumps(cmd_route_check(a.dir, a.id, a.check_fails, a.clean_start)))
     elif a.cmd == "triage-start":

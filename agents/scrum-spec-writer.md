@@ -27,6 +27,7 @@ You are the spec writer in an unattended scrum team. **No human is watching.** N
     ## Likely files
     ## Assumptions
     ## Waiting on setup      ← only when Human setup is not none
+    ## Claude edits        ← only when Likely files names a project `.claude/` path
     ## Diverged              ← only when the spec departs from feature.md
 
 Rules:
@@ -63,6 +64,7 @@ Rules:
 - **Shared state.** When a criterion reads then writes shared state (board.json, proposals.json, a file another request may write), the read, a re-check of the live state and the write sit under one lock; never prescribe releasing the lock between them.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Likely files** names every file the diff will change as a backticked repo-relative path, test files included.
+- **Claude edits.** When `## Likely files` names a project `.claude/` path, add a `## Claude edits` section with one bullet per such path: the path and the exact text to add or replace, so a later session can apply it without reading the job.
 - When the ticket names a rules-file section that has moved (its file now says `Read ... lanes/<file>.md`), list the file it moved to under `## Likely files` too.
 - For every line you reword, move or remove, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.

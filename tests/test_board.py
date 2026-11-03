@@ -6247,6 +6247,143 @@ class ClaudePathsTest(unittest.TestCase):
             self.assertIs(board.caller_headless(), True)
 
 
+class ClaudeBatchTest(unittest.TestCase):
+    """board.py claude-batch: a headless job's project .claude/ edits move into one parked Terminal batch job."""
+
+    SPEC = ("# Edit a skill\n## Acceptance criteria\n1. `src/a.py` returns 2 (verify: test_a)\n"
+            "2. `.claude/rules/c.md` names the new rule (verify: grep)\n## Likely files\n- `src/a.py`\n"
+            "- `.claude/rules/c.md`\n## Claude edits\n- `.claude/rules/c.md`: add the line `- Never X.`\n"
+            "## Assumptions\n- none\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.job = board.cmd_new(self.root, "Edit a skill")
+        board.cmd_set(self.root, self.job, ["base=main"])
+        self.spec = self.root / "jobs" / self.job / "spec.md"
+        self.spec.write_text(self.SPEC)
+
+    def batch(self, job_id=None):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            board.main(["--dir", str(self.root), "claude-batch", job_id or self.job])
+        return json.loads(out.getvalue())
+
+    def job_of(self, job_id):
+        return board.find(board.read_board(self.root), job_id)
+
+    def feature(self, job_id):
+        return (self.root / "jobs" / job_id / "feature.md").read_text()
+
+    def test_creates_and_parks_batch(self):
+        with mock.patch.object(board, "play") as play:
+            out = self.batch()
+        self.assertEqual(out, {"batch": "002-terminal-batch-project-claude-edits", "only": False, "created": True})
+        bid = out["batch"]
+        job = self.job_of(bid)
+        self.assertEqual(job["title"], "Terminal batch: project .claude edits")
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertEqual(job["base"], "main")
+        self.assertEqual(job["stopTitle"], "BUILDER_BLOCKED")
+        self.assertEqual(job["reason"], board.TERMINAL_BATCH_QUESTION)
+        self.assertEqual(job["question"], board.TERMINAL_BATCH_QUESTION)
+        self.assertEqual(job["options"], [
+            {"key": "a", "label": "Run it in a Terminal window", "command": f"lilguy {bid}"},
+            {"key": "b", "label": "Remove this job", "command": f"abort {bid} --cascade"}])
+        self.assertEqual(job["recommend"]["key"], "a")
+        feature = self.feature(bid)
+        self.assertTrue(feature.startswith("Lane: lilguy\nComplex: no\n"), feature)
+        self.assertEqual(board.header_value(self.root / "jobs" / bid / "feature.md", "Lane", board.LANES), "lilguy")
+        self.assertIn(f"## From {self.job}: Edit a skill\n- `.claude/rules/c.md`: add the line `- Never X.`\n", feature)
+        spec = self.spec.read_text()
+        self.assertIn("## Moved to Terminal batch\n", spec)
+        self.assertIn(f"`{bid}`", spec.split("## Moved to Terminal batch")[1])
+        self.assertIn("`.claude/rules/c.md`", spec.split("## Moved to Terminal batch")[1])
+        self.assertIn("makes none of those edits", spec)
+        log = [json.loads(l) for l in (self.root / "questions.log").read_text().splitlines()]
+        self.assertEqual([(e["job"], e["stopTitle"]) for e in log], [(bid, "BUILDER_BLOCKED")])
+        play.assert_called_once()
+        self.assertEqual(self.job_of(self.job)["stage"], "spec")
+
+    def test_appends_to_open_batch(self):
+        bid = self.batch()["batch"]
+        other = board.cmd_new(self.root, "Another skill edit")
+        (self.root / "jobs" / other / "spec.md").write_text(
+            "# B\n## Likely files\n- `.claude/skills/x/SKILL.md`\n## Claude edits\n- `.claude/skills/x/SKILL.md`: say Y\n")
+        with mock.patch.object(board, "play") as play:
+            out = self.batch(other)
+        self.assertEqual(out, {"batch": bid, "only": True, "created": False})
+        play.assert_not_called()
+        feature = self.feature(bid)
+        self.assertIn(f"## From {self.job}: Edit a skill\n", feature)
+        self.assertIn(f"## From {other}: Another skill edit\n- `.claude/skills/x/SKILL.md`: say Y\n", feature)
+        self.assertEqual([j["title"] for j in board.read_board(self.root)["jobs"]].count(board.TERMINAL_BATCH_TITLE), 1)
+
+    def test_only_when_all_likely_files_are_claude(self):
+        self.spec.write_text("# A\n## Likely files\n- `.claude/rules/c.md`\n- `.claude/skills/b/SKILL.md`: x\n")
+        self.assertIs(self.batch()["only"], True)
+        other = board.cmd_new(self.root, "Mixed")
+        (self.root / "jobs" / other / "spec.md").write_text(
+            "# M\n## Likely files\n- `.claude/rules/c.md`\n- `.claude/worktrees/x/a.py`\n")
+        self.assertIs(self.batch(other)["only"], False)
+
+    def test_fallback_without_claude_edits_section(self):
+        self.spec.write_text(self.SPEC.split("## Claude edits")[0] + "## Assumptions\n- none\n")
+        bid = self.batch()["batch"]
+        section = self.feature(bid).split(f"## From {self.job}: Edit a skill\n")[1]
+        self.assertIn("- `.claude/rules/c.md`\n", section)
+        self.assertIn("2. `.claude/rules/c.md` names the new rule (verify: grep)", section)
+        self.assertNotIn("`src/a.py` returns 2", section)
+
+    def test_rerun_appends_nothing(self):
+        bid = self.batch()["batch"]
+        spec, feature = self.spec.read_text(), self.feature(bid)
+        self.assertEqual(self.batch(), {"batch": bid, "only": False, "created": False})
+        self.assertEqual(self.spec.read_text(), spec)
+        self.assertEqual(self.feature(bid), feature)
+
+    def test_respawned_spec_no_duplicate_entry(self):
+        bid = self.batch()["batch"]
+        self.spec.write_text(self.SPEC)  # a respawned spec writer re-wrote spec.md without the marker
+        self.assertEqual(self.batch(), {"batch": bid, "only": False, "created": False})
+        self.assertEqual(self.feature(bid).count(f"## From {self.job}:"), 1)
+        self.assertEqual(self.spec.read_text().count("## Moved to Terminal batch"), 1)
+
+    def test_running_batch_gets_new_batch(self):
+        first = self.batch()["batch"]
+        board.cmd_set(self.root, first, ["stage=build", "reason="])
+        other = board.cmd_new(self.root, "Another")
+        (self.root / "jobs" / other / "spec.md").write_text("# B\n## Likely files\n- `.claude/rules/d.md`\n")
+        out = self.batch(other)
+        self.assertTrue(out["created"])
+        self.assertNotEqual(out["batch"], first)
+        self.assertNotIn(f"## From {other}:", self.feature(first))
+        self.assertIn(f"## From {other}: Another\n", self.feature(out["batch"]))
+
+    def test_refuses_batch_itself(self):
+        bid = self.batch()["batch"]
+        before = (self.root / "board.json").read_text()
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_claude_batch(self.root, bid)
+        self.assertEqual(str(e.exception), f"job {bid} is the Terminal batch; run it in a Terminal window")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
+    def test_refuses_job_without_claude_paths(self):
+        self.spec.write_text("# A\n## Likely files\n- `src/a.py`\n")
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_claude_batch(self.root, self.job)
+        self.assertEqual(str(e.exception), f"job {self.job} names no project .claude/ path")
+        self.assertEqual(self.spec.read_text(), "# A\n## Likely files\n- `src/a.py`\n")
+        self.assertEqual(len(board.read_board(self.root)["jobs"]), 1)
+
+    def test_batch_question_not_resumable(self):
+        self.assertIn("Claude Code refuses those edits in a session that runs on its own", board.TERMINAL_BATCH_QUESTION)
+        self.assertFalse(board.TERMINAL_BATCH_QUESTION.startswith(board.RESUMABLE))
+        self.assertTrue("blocked: this job changes files in the project .claude folder, and Claude Code refuses"
+                        .startswith(board.RESUMABLE))
+
+
 class RunAllLilguyTest(unittest.TestCase):
     """A Run all child crosses lilguy-fit routing, then the lilguy-with-worktree done guard (needs a merged PR)."""
 
