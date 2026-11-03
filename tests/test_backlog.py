@@ -177,6 +177,32 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(board.cmd_triage_start(self.root), {"id": None, "open": 0})
         self.assertEqual(sorted(p.name for p in (self.root / "triage").iterdir()), ["001", "002"])
 
+    def merged_line(self, backlog, items):
+        self.triage(backlog, {"merge": [{"items": items, "text": "Merged thing"}]})
+        board.cmd_triage_apply(self.root, "001")
+        return next(l for l in self.text().splitlines() if "Merged thing" in l)
+
+    def test_triage_merge_back_items_get_p1(self):
+        line = self.merged_line("# Backlog\n- [ ] Aa {by:back}\n- [ ] Bb {p:3} {by:back}\n", ["Aa", "Bb"])
+        self.assertEqual(line, "- [ ] Merged thing {p:1} {by:back}")
+
+    def test_triage_merge_t_items_get_p4_or_p5(self):
+        line = self.merged_line("# Backlog\n- [ ] Aa {by:t}\n- [ ] Bb {by:t}\n", ["Aa", "Bb"])
+        self.assertEqual(line, "- [ ] Merged thing {p:4} {by:t}")
+
+    def test_triage_merge_t_p5_stays_p5(self):
+        line = self.merged_line("# Backlog\n- [ ] Aa {p:5} {by:t}\n- [ ] Bb {by:t}\n", ["Aa", "Bb"])
+        self.assertEqual(line, "- [ ] Merged thing {p:5} {by:t}")
+
+    def test_triage_merge_t_with_back_is_t_p4(self):
+        line = self.merged_line("# Backlog\n- [ ] Aa {by:t}\n- [ ] Bb {by:back}\n", ["Aa", "Bb"])
+        self.assertEqual(line, "- [ ] Merged thing {p:4} {by:t}")
+
+    def test_triage_merge_agent_priority(self):
+        self.assertEqual(self.merged_line("# Backlog\n- [ ] Aa\n- [ ] Bb\n", ["Aa", "Bb"]), "- [ ] Merged thing")
+        self.assertEqual(self.merged_line("# Backlog\n- [ ] Aa {p:5}\n- [ ] Bb {p:2}\n", ["Aa", "Bb"]),
+                         "- [ ] Merged thing {p:5}")
+
     def test_triage_merge_retire_estimate(self):
         out = self.triage(
             "# Backlog\n"
@@ -884,10 +910,10 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(board.cmd_next(self.root, index=1)["feature"], "Low")
 
     def test_triage_merge_takes_max_priority(self):
-        self.triage("# Backlog\n- [ ] One {p:2}\n- [ ] Two\n- [ ] Three {p:4}\n",
+        self.triage("# Backlog\n- [ ] One {p:2}\n- [ ] Two\n- [ ] Three {p:3}\n",
                     {"merge": [{"items": ["One", "Two", "Three"], "text": "All three"}]})
         board.cmd_triage_apply(self.root, "001")
-        self.assertIn("- [ ] All three {p:4}\n", self.text())
+        self.assertIn("- [ ] All three {p:3}\n", self.text())
 
     def test_triage_merge_without_priority_has_none(self):
         self.triage("# Backlog\n- [ ] One\n- [ ] Two\n",

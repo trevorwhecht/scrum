@@ -2144,11 +2144,13 @@ def cmd_triage_apply(root, triage_id):
                 if kind == "merge":
                     text = clean(e["text"], ITEM_MAX)
                     own = {i["id"] for i in got if i["id"]}
+                    by = "t" if any(i["by"] == "t" for i in got) else "back" if any(i["by"] == "back" for i in got) else None
+                    n = max((i["priority"] for i in got if i["priority"]), default=None)
                     item = {"done": False, "points": pts, "text": text, "job": None, "why": why, "id": None,
-                            "priority": max((i["priority"] for i in got if i["priority"]), default=None),
+                            "priority": source_priority(by, n, critical=(by is None and n == 5), current=n),
                             "needs": list(dict.fromkeys(n for i in got for n in i["needs"] if n not in own)),
                             "setup": list(dict.fromkeys(st for i in got for st in i["setup"])),  # still waits on setup
-                            "by": "t" if any(i["by"] == "t" for i in got) else "back" if any(i["by"] == "back" for i in got) else None}
+                            "by": by}
                     merged.append(item)
                     remap.update((n, item) for n in own)
                     for i in got:
