@@ -1,4 +1,4 @@
-import hashlib, io, json, subprocess, sys, tempfile, unittest
+import hashlib, io, json, os, subprocess, sys, tempfile, unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
@@ -133,21 +133,22 @@ class BacklogTest(unittest.TestCase):
     def test_backlog_add_top_is_claimed_next(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] A\n- [ ] [3] B {p:5}\n")
         self.assertEqual(self.add_cli("--top", "X"), (0, ""))
-        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5}\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n- [ ] [3] B {p:5}\n")
         self.assertEqual(self.claim(), "X")
 
     def test_newest_top_wins(self):
         (self.root / "backlog.md").write_text("# Backlog\nnote above\n- [ ] A\n- [ ] [3] B {p:5}\n")
         board.cmd_backlog_add(self.root, ["X"], top=True)
         board.cmd_backlog_add(self.root, ["Y"], top=True)
-        self.assertEqual(self.text(), "# Backlog\nnote above\n- [ ] Y {p:5}\n- [ ] X {p:5}\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.text(), "# Backlog\nnote above\n- [ ] Y {p:5} {by:t}\n- [ ] X {p:5} {by:t}\n- [ ] A\n"
+                                      "- [ ] [3] B {p:5}\n")
         self.assertEqual(self.claim(), "Y")
         self.assertEqual(self.claim(), "X")
 
     def test_backlog_add_top_empty_and_conflict(self):
         (self.root / "backlog.md").write_text("# Backlog\n")
         board.cmd_backlog_add(self.root, ["X"], top=True)
-        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5}\n")
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5} {by:t}\n")
         before = self.text()
         code, err = self.add_cli("--top", "--priority", "3", "Z")
         self.assertNotEqual(code, 0)
@@ -844,9 +845,9 @@ class BacklogTest(unittest.TestCase):
     def test_backlog_add_priority_flag(self):
         with mock.patch.object(board, "spawn_estimates"):
             board.main(["--dir", str(self.root), "backlog-add", "--priority", "4", "a", "b"])
-        self.assertTrue(self.text().endswith("some note the user wrote\n- [ ] a {p:4}\n- [ ] b {p:4}\n"))
+        self.assertTrue(self.text().endswith("some note the user wrote\n- [ ] a {p:3}\n- [ ] b {p:3}\n"))  # agent cap
         board.backlog_op(self.root, "add", text="c", priority=4)
-        self.assertTrue(self.text().endswith("- [ ] b {p:4}\n- [ ] c {p:4}\n"))
+        self.assertTrue(self.text().endswith("- [ ] b {p:3}\n- [ ] c {p:3}\n"))
         board.cmd_backlog_add(self.root, ["d"], setup="Buy a number", priority=2)
         self.assertTrue(self.text().endswith("- [ ] d {p:2} {setup: Buy a number}\n"))
         with mock.patch.object(board, "spawn_estimates"):
@@ -901,6 +902,192 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual([(i["text"], i["priority"]) for i in items], [("Marked", 5), ("Unmarked", None)])
 
 
+    # --- {by:…} source marker ---
+    def test_source_marker_round_trip(self):
+        full = "- [x] [3] All {#a1b2} {p:5} {needs #k3f9} {setup: Step one; Step two} {by:t} → 003-x <!-- why -->"
+        backlog = ("# Backlog\n" + full + "\n"
+                   "- [ ] Mine {p:4} {by:t}\n"
+                   "- [ ] Later {p:1} {by:back}\n"
+                   "- [ ] Agent {p:2}\n"
+                   "- [ ] Bad {by:x}\n")
+        (self.root / "backlog.md").write_text(backlog)
+        lines, parsed = board.read_backlog(self.root)
+        self.assertEqual([board.format_item(i) for i in parsed], lines[1:])
+        self.assertEqual(board.format_item(parsed[0]), full)
+        self.assertEqual([(i["text"], i["by"]) for i in parsed],
+                         [("All", "t"), ("Mine", "t"), ("Later", "back"), ("Agent", None), ("Bad {by:x}", None)])
+        self.assertEqual((parsed[0]["setup"], parsed[0]["job"], parsed[0]["why"]), (["Step one", "Step two"], "003-x", "why"))
+        self.assertEqual([i["by"] for i in board.backlog_items(self.root)], ["t", "t", "back", None, None])
+
+    def test_source_marker_survives_setup_done_and_claim(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] [?] Parked {#park} {p:4} {setup: Buy a number} {by:t} <!-- why -->\n"
+            "- [ ] Two {p:1} {by:back}\n- [ ] Three {p:5} {by:t}\n")
+        board.backlog_op(self.root, "setup-done", index=0)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] [?] Parked {#park} {p:4} {by:t} <!-- why -->\n"
+                                      "- [ ] Two {p:1} {by:back}\n- [ ] Three {p:5} {by:t}\n")
+        board.backlog_op(self.root, "edit", index=0, text="Parked edited", points=3)
+        board.backlog_op(self.root, "move", index=1, delta=-1)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Two {p:1} {by:back}\n"
+                                      "- [ ] [3] Parked edited {#park} {p:4} {by:t} <!-- why -->\n- [ ] Three {p:5} {by:t}\n")
+        out = board.cmd_next(self.root)
+        self.assertEqual(out["feature"], "Three")
+        self.assertIn(f"- [x] Three {{p:5}} {{by:t}} → {out['id']}\n", self.text())
+
+    def test_backlog_add_source_rules(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] A\n")
+        cases = [(("--trevor", "T1"), "- [ ] T1 {p:4} {by:t}"),
+                 (("--trevor", "--priority", "2", "T2"), "- [ ] T2 {p:4} {by:t}"),
+                 (("--trevor", "--priority", "5", "T3"), "- [ ] T3 {p:5} {by:t}"),
+                 (("--back", "B1"), "- [ ] B1 {p:1} {by:back}"),
+                 (("--priority", "5", "G5"), "- [ ] G5 {p:3}"),
+                 (("--priority", "4", "G4"), "- [ ] G4 {p:3}"),
+                 (("--priority", "2", "G2"), "- [ ] G2 {p:2}"),
+                 (("G0",), "- [ ] G0"),
+                 (("--critical", "--priority", "2", "C2"), "- [ ] C2 {p:5}")]
+        for args, line in cases:
+            with self.subTest(args=args):
+                self.assertEqual(self.add_cli(*args), (0, ""))
+                self.assertTrue(self.text().endswith("\n" + line + "\n"), self.text())
+        self.assertEqual(self.add_cli("--top", "X"), (0, ""))
+        self.assertTrue(self.text().startswith("# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n"))
+        board.backlog_op(self.root, "add", text="Op trevor", by="t")
+        board.backlog_op(self.root, "add", text="Op agent", priority=5)
+        board.backlog_op(self.root, "add", text="Op critical", critical=True)
+        self.assertTrue(self.text().endswith("- [ ] Op trevor {p:4} {by:t}\n- [ ] Op agent {p:3}\n- [ ] Op critical {p:5}\n"))
+
+    def test_backlog_add_source_flag_conflicts(self):
+        before = self.text()
+        for args, msg in ((("--back", "--top", "Z"), "--back cannot be combined with --top or --priority"),
+                          (("--back", "--priority", "1", "Z"), "--back cannot be combined with --top or --priority"),
+                          (("--critical", "--trevor", "Z"), "--critical is only for agent items"),
+                          (("--critical", "--top", "Z"), "--critical is only for agent items"),
+                          (("--critical", "--back", "Z"), "--critical is only for agent items")):
+            with self.subTest(args=args):
+                code, err = self.add_cli(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn(msg, err)
+                self.assertEqual(self.text(), before)
+        with self.assertRaises(SystemExit) as e:
+            board.backlog_op(self.root, "add", text="Z", by="back", top=True)
+        self.assertEqual(str(e.exception), "--back cannot be combined with --top or --priority")
+        self.assertEqual(self.text(), before)
+
+    def test_triage_merge_carries_source_marker(self):
+        self.triage("# Backlog\n- [ ] One {p:2}\n- [ ] Two {p:4} {by:t}\n- [ ] Three {p:1} {by:back}\n"
+                    "- [ ] Four {p:1} {by:back}\n- [ ] Five\n- [ ] Six {p:3}\n- [ ] Seven\n",
+                    {"merge": [{"items": ["One", "Two", "Three"], "text": "Mine"},
+                               {"items": ["Four", "Five"], "text": "Back"},
+                               {"items": ["Six", "Seven"], "text": "Agent"}]})
+        board.cmd_triage_apply(self.root, "001")
+        items = [i for i in board.backlog_items(self.root) if not i["done"]]
+        self.assertEqual([(i["text"], i["by"]) for i in items], [("Mine", "t"), ("Back", "back"), ("Agent", None)])
+        self.assertIn("- [ ] Mine {p:4} {by:t}\n", self.text())
+        self.assertIn("- [ ] Agent {p:3}\n", self.text())
+
+    def test_rank_backlog_all_applies_source_rules(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n"
+            "- [ ] Mine low {p:4} {by:t}\n"
+            "- [ ] Mine top {p:5} {by:t}\n"
+            "- [ ] Mine raised {by:t}\n"
+            "- [ ] Later {p:1} {by:back}\n"
+            "- [ ] Agent loud {p:5}\n"
+            "- [ ] Agent stale {p:3}\n"
+            "- [ ] Agent none {p:5}\n"
+            "- [x] Done agent {p:5} → 001-x\n")
+        answers = {"Mine low": (0.2, 0.3, 0.1, "docs-rules"), "Mine top": (1, 2, 0.9, "bug"),
+                   "Mine raised": (3.8, 3, 0.9, "bug"), "Agent loud": (3.8, 3, 0.9, "bug"),
+                   "Agent stale": (3.8, 0.3, 0.9, "bug"), "Agent none": None}
+        out, asked = self.rank_backlog(answers, None, "--all")
+        self.assertEqual(out, {"rated": 5, "unrated": 1, "skipped": 1})
+        self.assertEqual(sorted(asked), sorted(answers))  # no call for the back item or the done line
+        self.assertEqual(self.text(), "# Backlog\n"
+                         "- [ ] Mine low {p:4} {by:t}\n"  # never below 4, even when Jev says p1
+                         "- [ ] Mine top {p:5} {by:t}\n"  # a Trevor p5 is never lowered
+                         "- [ ] Mine raised {p:5} {by:t}\n"
+                         "- [ ] Later {p:1} {by:back}\n"
+                         "- [ ] Agent loud {p:3}\n"
+                         "- [ ] Agent stale {p:1}\n"  # necessity under 0.5: p1
+                         "- [ ] Agent none {p:5}\n"  # none leaves the line alone
+                         "- [x] Done agent {p:5} → 001-x\n")
+        # an item edited or deleted mid-run is left alone
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Edit me {p:5}\n- [ ] Delete me {p:5}\n- [ ] Keep me {p:5}\n")
+        after = "# Backlog\n- [ ] Edit me please {p:5}\n- [ ] Keep me {p:5}\n"
+
+        def during(ticket):
+            (self.root / "backlog.md").write_text(after)
+        out, _ = self.rank_backlog({t: (2, 2, 0.9, "bug") for t in ("Edit me", "Delete me", "Keep me")}, during, "--all")
+        self.assertEqual(out, {"rated": 1, "unrated": 2, "skipped": 0})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Edit me please {p:5}\n- [ ] Keep me {p:3}\n")
+
+    def test_rank_backlog_critical_needs_jev_confirm(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Critical: refunds charge twice\n- [ ] Critical: typo in footer\n"
+            "- [ ] Critical: mine {by:t}\n- [ ] Plain bug\n")
+        answers = {t: (3.8, 3, 0.9, "bug") for t in ("Critical: refunds charge twice", "Critical: typo in footer",
+                                                      "Critical: mine", "Plain bug")}
+        critical = {"Critical: refunds charge twice": 0.9, "Critical: typo in footer": 0.2}
+        out, asked = self.rank_backlog(answers, None, critical=critical)
+        self.assertEqual(out, {"rated": 4, "unrated": 0, "skipped": 0})
+        self.assertEqual([a for a in asked if isinstance(a, tuple)],
+                         [("critical", "Critical: refunds charge twice"), ("critical", "Critical: typo in footer")])
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Critical: refunds charge twice {p:5}\n"
+                                      "- [ ] Critical: typo in footer {p:3}\n- [ ] Critical: mine {p:5} {by:t}\n"
+                                      "- [ ] Plain bug {p:3}\n")
+        log = [l.split("\t") for l in (self.root / "jev.log").read_text().splitlines()]
+        self.assertEqual([(f[1], f[4]) for f in log if f[1] == "critical"], [("critical", "critical"), ("critical", "normal")])
+
+    def test_migrate_backlog_sources_once(self):
+        base = Path(self.tmp.name)
+        for name in ("alpha", "empty"):
+            (base / name / "scrum").mkdir(parents=True)
+        (base / "nosrum").mkdir()
+        alpha = base / "alpha" / "scrum" / "backlog.md"
+        alpha.write_text(
+            "# Backlog\n"
+            "- [ ] Add dark mode — Trevor 2026-11-01\n"
+            "- [ ] Big ask {p:5}\n"
+            "- [ ] Small ask {p:2}\n"
+            "- [ ] Tidy the header (from 123-fix-nav) {p:5}\n"
+            "- [ ] Cover the gap (gap of 200-big) {p:4}\n"
+            "- [ ] Phase work (Phase 2 of 300-road)\n"
+            "- [ ] Merged thing (merged: digest 041) {p:4}\n"
+            "- [ ] Apply digest 048 p1 to lanes/newjob.md {p:5}\n"
+            "- [ ] Create digest 035 p2 skill at x {p:2}\n"
+            "- [ ] Old (pre-existing, from 412-x) {p:3}\n"
+            "- [ ] Already mine {p:4} {by:t}\n"
+            "- [ ] Already back {p:1} {by:back}\n"
+            "- [x] Done line {p:5} → 001-x\n"
+            "note\n")
+        reg = base / "projects.json"
+        reg.write_text(json.dumps([str(base / "alpha"), str(base / "empty"), str(base / "nosrum")]))
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)}):
+            self.assertEqual(board.migrate_backlog_sources(), ["alpha", "empty"])
+            want = ("# Backlog\n"
+                    "- [ ] Add dark mode — Trevor 2026-11-01 {p:4} {by:t}\n"
+                    "- [ ] Big ask {p:5} {by:t}\n"
+                    "- [ ] Small ask {p:4} {by:t}\n"
+                    "- [ ] Tidy the header (from 123-fix-nav) {p:3}\n"
+                    "- [ ] Cover the gap (gap of 200-big) {p:3}\n"
+                    "- [ ] Phase work (Phase 2 of 300-road)\n"
+                    "- [ ] Merged thing (merged: digest 041) {p:3}\n"
+                    "- [ ] Apply digest 048 p1 to lanes/newjob.md {p:3}\n"
+                    "- [ ] Create digest 035 p2 skill at x {p:2}\n"
+                    "- [ ] Old (pre-existing, from 412-x) {p:3}\n"
+                    "- [ ] Already mine {p:4} {by:t}\n"
+                    "- [ ] Already back {p:1} {by:back}\n"
+                    "- [x] Done line {p:5} → 001-x\n"
+                    "note\n")
+            self.assertEqual(alpha.read_text(), want)
+            self.assertTrue((base / "alpha" / "scrum" / "backlog-sources.done").is_file())
+            self.assertTrue((base / "empty" / "scrum" / "backlog-sources.done").is_file())
+            self.assertFalse((base / "empty" / "scrum" / "backlog.md").exists())
+            alpha.write_text(alpha.read_text() + "- [ ] Added after {p:5}\n")
+            self.assertEqual(board.migrate_backlog_sources(), [])
+            self.assertEqual(alpha.read_text(), want + "- [ ] Added after {p:5}\n")
+
+
     # --- rank-backlog ---
     RANK_BACKLOG = ("# Backlog\n"
                     "- [ ] [5] Add CSV export {#ab12} {needs #cd34} {setup: Buy a key} <!-- touches orders API -->\n"
@@ -911,13 +1098,16 @@ class BacklogTest(unittest.TestCase):
                     "- [ ] Polish the footer\n"
                     "- [ ] Jev chokes on this\n")
 
-    def rank_backlog(self, answers, during=None):
+    def rank_backlog(self, answers, during=None, *flags, critical=None):
         """Run rank-backlog via main with jev.ask stubbed; answers maps ticket text -> (importance, necessity, progress,
         kind) or None (Jev error). Returns (printed JSON, the tickets Jev was asked about)."""
         (self.root / "project.md").write_text("- Notes: Ship the orders app\n")
         asked = []
 
         def fake(state, questions, timeout=jev.TIMEOUT, key=None):
+            if isinstance(state, str):  # the critical step: one noul on the ticket text
+                asked.append(("critical", state))
+                return {q: {"noul": critical[state]} for q in questions}
             asked.append(state["ticket"])
             if during:
                 during(state["ticket"])
@@ -928,7 +1118,7 @@ class BacklogTest(unittest.TestCase):
                     "kind": {"choice": a[3]}}
         out = io.StringIO()
         with mock.patch.object(jev, "ask", side_effect=fake), mock.patch("sys.stdout", out):
-            board.main(["--dir", str(self.root), "rank-backlog"])
+            board.main(["--dir", str(self.root), "rank-backlog", *flags])
         return json.loads(out.getvalue()), asked
 
     ANSWERS = {"Add CSV export": (3.8, 2, 0.9, "feature"), "Polish the footer": (2, 2, 0.2, "ui-polish"),
@@ -939,8 +1129,8 @@ class BacklogTest(unittest.TestCase):
         out, asked = self.rank_backlog(self.ANSWERS)
         self.assertEqual(out, {"rated": 2, "unrated": 1, "skipped": 1})
         self.assertEqual(asked, ["Add CSV export", "Polish the footer", "Jev chokes on this"])
-        self.assertEqual(self.text(), "# Backlog\n"
-                         "- [ ] [5] Add CSV export {#ab12} {p:5} {needs #cd34} {setup: Buy a key} <!-- touches orders API -->\n"
+        self.assertEqual(self.text(), "# Backlog\n"  # Jev's p5 for the agent item is capped at p3
+                         "- [ ] [5] Add CSV export {#ab12} {p:3} {needs #cd34} {setup: Buy a key} <!-- touches orders API -->\n"
                          "- [ ] Already rated {p:3}\n"
                          "- [x] Old thing → 001-old-thing\n"
                          "- [x] Closed unmarked\n"
@@ -954,6 +1144,8 @@ class BacklogTest(unittest.TestCase):
     def test_rank_backlog_second_run_makes_no_calls(self):
         (self.root / "backlog.md").write_text(self.RANK_BACKLOG)
         self.rank_backlog(self.ANSWERS | {"Jev chokes on this": (1, 2, 0.9, "tests")})
+        self.assertIn("- [ ] [5] Add CSV export {#ab12} {p:3} {needs", self.text())
+        self.assertIn("- [ ] Jev chokes on this {p:2}\n", self.text())
         before = (self.root / "backlog.md").read_bytes()
         out, asked = self.rank_backlog({})
         self.assertEqual((out, asked), ({"rated": 0, "unrated": 0, "skipped": 4}, []))

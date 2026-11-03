@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Jev decision for the pipeline. Never fails the caller: any error prints the step's fallback.
 
-usage: jev-gate.py <step> <job-dir>   (steps: model promote dupe approver reviewer-security reviewer-ui rank)
+usage: jev-gate.py <step> <job-dir>   (steps: model promote dupe approver reviewer-security reviewer-ui rank critical)
 stdout is one line, the decision. Every run appends to <job-dir>/jev.log:
 timestamp, step, question, raw answer, decision, elapsed seconds (tab-separated).
 """
@@ -22,6 +22,8 @@ STEPS = {
     "reviewer-security": ("This diff needs a security review", 0.7, "skip"),
     "reviewer-ui": ("This diff needs a UI review", 0.7, "skip"),
     "rank": ("How important is this ticket to the project", None, "none"),  # prints p<1-5> <kind>
+    "critical": ("This ticket reports data loss, wrong money or pricing, broken production, or a security hole", 0.7,
+                 "normal"),  # prints critical or normal
 }
 LEVELS = ["trivial edit", "small contained change", "multi-file change with new logic", "cross-cutting or risky change"]
 IMPORTANCE = ["Trivial (cosmetic or pedantic, nobody would notice if never done)",
@@ -62,10 +64,20 @@ def rank_ticket(text, root, asked):
                       "progress": {"type": "noul", "instructions": PROGRESS},
                       "kind": {"type": "choice", "instructions": "Which kind of work is this ticket", "criteria": KINDS}})
     v = {k: val for k, (val, _) in a.items()}
-    n = round(v["importance"]) + 1
+    n = 1 if v["necessity"] < 0.5 else round(v["importance"]) + 1  # Unnecessary: done already or no longer needed
     if v["necessity"] < 1 or (v["progress"] < 0.5 and v["kind"] in SIDE_KINDS):
         n -= 1
     return q, {k: raw for k, (_, raw) in a.items()}, f"p{min(max(n, 1), 5)} {v['kind']}"
+
+
+def critical_ticket(text, asked):
+    """(question, raw answer, decision) for one ticket: `critical` when Jev confirms it is critical, else `normal`."""
+    q, cut, _ = STEPS["critical"]
+    if not text.strip():
+        return "-", "-", "normal"
+    asked.append(q)
+    v, raw = jev.noul(text.strip(), q)
+    return q, raw, "critical" if v >= cut else "normal"
 
 
 def decide(step, job, asked):
@@ -83,6 +95,8 @@ def decide(step, job, asked):
     stdin = sys.stdin.read().strip()
     if step == "rank":
         return rank_ticket(stdin, job.parent.parent, asked)
+    if step == "critical":
+        return critical_ticket(stdin, asked)
     if step == "promote":
         return "-", stdin or "-", "opus"
     if step == "dupe":
