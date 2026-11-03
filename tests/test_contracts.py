@@ -1995,6 +1995,14 @@ class ContractTest(unittest.TestCase):
         nr = next(l for l in text.splitlines() if l.startswith("**No rendered change.**"))
         self.assertIn("Never write `Rendered: n/a` for a diff that deletes UI JSX", nr)
 
+    def test_review_ux_clicks_through_refactored_flows(self):
+        text = (ROOT / "agents" / "scrum-review-ux.md").read_text()
+        step = next(l for l in text.splitlines() if l.startswith("3. Click through the new feature"))
+        self.assertTrue(step.startswith(
+            "3. Click through the new feature end to end, and in a refactor every existing flow whose request "
+            "or output the diff changes, signed in as PROJECT's `Test sign-in:` account, including every save "
+            "the diff adds or reroutes"), step)
+
     def test_review_ui_signin_before_harness(self):
         text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
         self.assertLess(text.index("**Signing in.**"), text.index("throwaway harness"))
