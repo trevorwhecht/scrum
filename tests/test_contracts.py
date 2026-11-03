@@ -1303,8 +1303,8 @@ class ContractTest(unittest.TestCase):
         e2e = ("   - An e2e test whose record is missing from the dev DB creates that record in its own setup; "
                "never skip it, mark it fixme or leave it out, so it cannot pass without running.")
         manual = ("   - A criterion whose verify step says manual check, browser or DevTools is never human-only: "
-                  "verify it yourself as the next bullet says, and the reviewers and approver cover it after "
-                  "you; never leave it for Trevor.")
+                  "verify it yourself as the next bullet says; never leave it for Trevor, and never skip it "
+                  "because reviewers, the approver or the e2e run check it later or because of time.")
         for line in (rmw, e2e, manual):
             self.assertEqual(text.count(line), 1, line)
         self.assertIn(b9 + "\n" + rmw + "\n" + step3, text)
