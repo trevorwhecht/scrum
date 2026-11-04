@@ -655,8 +655,11 @@ def auto_resume(project, root, jobs):
     job stalled in a WATCHED stage is moved back to that stage and held the same way (as respawn_exited does). True
     when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
     its next try or a free slot), so watchdog_tick claims nothing new this tick. Each resume first takes a session
-    from the tick's budget (take_room); with none left the job waits on a slot without spending a try."""
+    from the tick's budget (take_room); with none left the job waits on a slot without spending a try. A job parked
+    on the E2E queue also waits, spending no try, while another job sits in check (not paused, not stalled): that job
+    takes the E2E lock soon."""
     now, busy, e2e_resumed = time.time(), False, False
+    checking = any(j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) for j in jobs)
     for job in jobs:
         if job.get("paused"):
             continue
@@ -670,7 +673,7 @@ def auto_resume(project, root, jobs):
         if tries >= AUTO_RESUME_MAX:
             continue
         if str(job.get("reason") or "").startswith(board.STALL + E2E_WAIT):  # a capacity wait: one per tick, lock free
-            if not e2e_queue_free():
+            if checking or not e2e_queue_free():
                 busy = True
             elif not e2e_resumed and resume_refusal(project, root, job) is None and take_room():
                 e2e_resumed = busy = True
