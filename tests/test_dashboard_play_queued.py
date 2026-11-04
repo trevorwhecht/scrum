@@ -127,9 +127,19 @@ class PlayQueued(unittest.TestCase):
             self.assertEqual(column_of(html, f"p/30{i}-x"), col)
         sections = re.findall(r'<section class="([^"]*)" data-col="([^"]+)">', html)
         self.assertEqual([c for _, c in sections],
-                         ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud", "stalled", "needs-human", "done", "waiting"])
+                         ["spec", "build", "review", "shipping", "stalled", "needs-human", "done", "waiting"])
         self.assertEqual(dict((c, k) for k, c in sections)["stalled"], "col")  # no human class
         self.assertIn('data-col="stalled"><h2><span>stalled</span> <span>· 3</span></h2>', html)
+
+    def test_stages_group_into_fewer_columns(self):
+        stages = ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud"]
+        jobs = [{**ASK, "key": f"p/4{i}-x", "id": f"4{i}-x", "stage": st, "reason": "", "title": "T"} for i, st in enumerate(stages)]
+        cols, html = run(f"""jobs = {json.dumps(jobs)}; out(jobs.map(colOf)); render(); out(els.board.innerHTML);""")
+        self.assertEqual(cols, ["spec", "build", "review", "review", "review", "shipping", "shipping", "build"])
+        self.assertEqual(column_of(html, "p/47-x"), "build")  # a cloud job never vanishes
+        self.assertIn('<span class="lanechip">cloud</span>', html)
+        self.assertIn('<span class="lanechip">approve</span>', html)
+        self.assertNotIn('data-col="cloud"', html)
 
     def test_play_queued_new_shape_stalled(self):
         stall = {"stage": "build", "stalled": True, "reason": "stalled: no live session"}

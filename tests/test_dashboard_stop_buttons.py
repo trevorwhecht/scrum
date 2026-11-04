@@ -65,7 +65,7 @@ class StopBox(unittest.TestCase):
         text = DASHBOARD.read_text()
         card = text[text.index("function card(job)"):text.index("function render(")]
         stubs = ('const tag = () => "", laneLabel = () => "", bigboyLines = () => "", roundRow = () => "", routeTags = () => "",'
-                 ' progress = () => null, ago = () => "", STALE_MS = 1, routes = {};\n')
+                 ' progress = () => null, ago = () => "", STALE_MS = 1, routes = {}, GROUPED = {}, colOf = () => "";\n')
         started = 1767268860
         tail = (card + """
           const job = {...JOB, options: OPTS}, at = STARTED;
@@ -219,7 +219,7 @@ class StopBox(unittest.TestCase):
                                ""])
         text = DASHBOARD.read_text()
         self.assertIn('const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled"'
-                      ' : playQueued(job) ? "waiting" : job.stage;', text)
+                      ' : playQueued(job) ? "waiting" : GROUPED[job.stage] || job.stage;', text)
         card = text[text.index("function card(job)"):text.index("function render(")]
         self.assertIn('const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);', card)
         self.assertIn("const human = asked || paused(job)", card)
