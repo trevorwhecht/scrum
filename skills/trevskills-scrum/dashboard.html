@@ -315,10 +315,12 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <div id="aiBody"><nav id="aiCats" aria-label="Categories"></nav><article id="aiList"></article></div>
 </dialog>
 <script>
-const STAGES = ["spec", "build", "check", "review", "approve", "merging", "deploying", "cloud", "stalled", "needs-human", "done"];
+// Board columns, not pipeline stages (board.py STAGES): check, review and approve share Review; merging and deploying share Shipping; cloud shows under Build.
+const STAGES = ["spec", "build", "review", "shipping", "stalled", "needs-human", "done"];
+const GROUPED = {check: "review", review: "review", approve: "review", merging: "shipping", deploying: "shipping", cloud: "build"};
 // Aborted jobs are finished too: they sit, dimmed, in the done column rather than a column of their own.
 // A stalled or limit-held job (queued Play included) waits on its retry in the stalled column.
-const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled" : playQueued(job) ? "waiting" : job.stage;
+const colOf = job => job.stage === "aborted" ? "done" : isStalled(job) || limitHeld(job) ? "stalled" : playQueued(job) ? "waiting" : GROUPED[job.stage] || job.stage;
 const REVIEWERS = [["security", "sec"], ["ux", "ux"], ["ui", "ui"], ["code", "code"]];
 const STALE_MS = 30 * 60 * 1000; // ponytail: fixed threshold; make it a URL param if long builds trip it
 const PTS = [null, 1, 2, 3, 5, 8, 13];
@@ -588,7 +590,7 @@ function card(job) {
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
