@@ -1465,6 +1465,12 @@ class ContractTest(unittest.TestCase):
         self.assertIn("LANE=fast", text)
         self.assertNotIn("Skip the Codex step entirely", text)
 
+    def test_digest_reader_reads_timing(self):
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        for phrase in ("`DIGEST_DIR/timing.md`", "    ## Time sinks\n", "For `## Time sinks`, use `DIGEST_DIR/timing.md`",
+                       "3 or more different jobs or more than about 1 h in total", "no-change rounds"):
+            self.assertIn(phrase, reader, phrase)
+
     def test_digest_agents_contract(self):
         for name in ("scrum-digest-reader", "scrum-digester"):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)

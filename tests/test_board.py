@@ -3127,6 +3127,37 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
 
+    def test_digest_start_writes_timing(self):
+        (job,) = self.done_jobs(1)
+        waiting = board.cmd_new(self.root, "queued")
+        t0 = 1_700_000_000
+        folder = self.root / "jobs" / job
+        for rel, text, at in (("feature.md", "f\n", t0), ("spec.md", "s\n", t0 + 600),
+                              ("round-1/head.txt", "abc\n", t0 + 4200), ("round-1/check.md", "CHECK: PASS\n", t0 + 4200),
+                              ("round-2/head.txt", "abc\n", t0 + 7800),
+                              ("round-3/head.txt", "abc\n", t0 + 11400),
+                              ("round-3/check.md", "CHECK: PASS\nE2E — first try exit 124 (lock wait), retry exit 0\n",
+                               t0 + 11400)):
+            p = self.write(f"{job}/{rel}", text)
+            os.utime(p, (at, at))
+        with board.locked_board(self.root) as b:
+            for j in b["jobs"]:
+                if j["id"] == job:
+                    j["updatedAt"] = datetime.fromtimestamp(t0 + 12000, timezone.utc).isoformat()
+                if j["id"] == waiting:
+                    j.update(stage="check", stalled=True, reason="stalled: waiting on the E2E queue",
+                             updatedAt=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
+        (self.root / "questions.log").write_text(
+            json.dumps({"job": job, "kind": "stall", "reason": "stalled: x"}) + "\n"
+            + json.dumps({"job": waiting, "kind": "stall", "reason": "stalled: waiting on the E2E queue"}) + "\n")
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            self.assertEqual(self.cli("digest-start")["id"], "001")
+        text = (self.root / "digests" / "001" / "timing.md").read_text()
+        self.assertIn(f"| {job} | 3h20m | 10m | 3 | 1h00m, 1h00m, 1h00m | 2 | 1 | 1 |\n", text)
+        self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
+                      " · stalls 1\n", text)
+        self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
+
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
                          (20, 0.5, 3, 3))
