@@ -7912,6 +7912,18 @@ class ParkedBigboyTest(unittest.TestCase):
         jobs[0]["lane"] = "runall"
         self.assertFalse(self.check(jobs))
 
+    def test_waiting_child_behind_setup_pending_sibling_is_parked(self):
+        jobs = self.jobs("done")
+        jobs[0]["children"] = ["285-gc", "314", "315"]
+        j = lambda i, **kw: {"id": i, "title": i, "stage": "waiting", "updatedAt": "2026-01-01T00:00:00+00:00",
+                             "parent": "107-big", **kw}
+        jobs += [j("314", setup="pending"), j("315", depends_on=["314"])]
+        self.assertTrue(self.check(jobs))
+        jobs[2].pop("setup")  # 314 claimable: 315 still waits, but 314 is about to start
+        self.assertFalse(self.check(jobs))
+        jobs[2]["stage"] = "done"  # 315's dep is done: it is about to start
+        self.assertFalse(self.check(jobs))
+
     def test_resume_blocker_ignores_parked_sibling(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

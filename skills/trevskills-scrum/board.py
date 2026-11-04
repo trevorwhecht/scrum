@@ -2951,12 +2951,15 @@ class Blocker(str):
 
 def parked_bigboy(k, by_id, live, root) -> bool:
     """A running, unpaused BigBoy job that runs no session: it has children, all idle and none live, and none waits
-    to start (a waiting child without setup pending is about to be claimed), and no chain lock is held. Such a job
+    to start (a waiting child with setup not pending and every depends_on job done is about to be claimed), and no
+    chain lock is held. Such a job
     holds no Run-all slot, so it never blocks a sibling's overlap check."""
     kids = [by_id[c] for c in k.get("children") or [] if c in by_id]
+    # A waiting child behind a not-done sibling (e.g. one with setup pending) can't be claimed, so it isn't starting.
+    starts = lambda c: c.get("stage") == "waiting" and c.get("setup") != "pending" \
+        and all(by_id.get(d, {}).get("stage") == "done" for d in c.get("depends_on") or [])
     return k.get("lane") == "bigboy" and k.get("stage") == "running" and not k.get("paused") and bool(kids) \
-        and all(idle(c) and c["id"] not in live and not (c.get("stage") == "waiting" and c.get("setup") != "pending")
-                for c in kids) and not chain_lock_live(root, k["id"])
+        and all(idle(c) and c["id"] not in live and not starts(c) for c in kids) and not chain_lock_live(root, k["id"])
 
 
 def resume_blocker(root, job_id, live=()):
