@@ -490,6 +490,28 @@ def limit_reset(root, job):
     return True, at.timestamp(), bool(mon)
 
 
+E2E_WAIT = "waiting on the E2E queue"  # newjob.md Check gate step 2 parks a job on it after two lock-wait timeouts
+
+
+def e2e_queue_free():
+    """True when nobody holds the E2E lock and no live buildlock.py waits on it."""
+    lock = Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"
+    try:
+        with open(lock, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for m in buildlock.waiting_dir(lock).iterdir():
+            try:
+                os.kill(int(m.name), 0)
+                return False
+            except (ValueError, OSError):
+                pass
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
     that line names, else every 30 min; at most 12 tries per job. A job whose log ends on a network error resumes
@@ -501,7 +523,7 @@ def auto_resume(project, root, jobs):
     when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
     its next try or a free slot), so watchdog_tick claims nothing new this tick. Each resume first takes a session
     from the tick's budget (take_room); with none left the job waits on a slot without spending a try."""
-    now, busy = time.time(), False
+    now, busy, e2e_resumed = time.time(), False, False
     for job in jobs:
         if job.get("paused"):
             continue
@@ -513,6 +535,14 @@ def auto_resume(project, root, jobs):
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + E2E_WAIT):  # a capacity wait: one per tick, lock free
+            if not e2e_queue_free():
+                busy = True
+            elif not e2e_resumed and resume_refusal(project, root, job) is None and take_room():
+                e2e_resumed = busy = True
+                AUTO_RESUME[key] = [tries + 1, now]
+                resume_job(project, root, job, jobs)
             continue
         if now < due:
             busy = True

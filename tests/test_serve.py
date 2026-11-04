@@ -6136,6 +6136,16 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), [])
         self.assertEqual(self.serve.STALL_RESUMED, {"p/solo/build", "p/solo/check", "p/solo/check#2"})
 
+    def test_auto_resume_e2e_queue_stall_resumes_one_per_tick_when_lock_free(self):
+        s = self.serve
+        self.jobs = [{"id": f"q{i}", "stage": "check", "stalled": True, "parent": "bb", "reason": "stalled: waiting on the E2E queue"}
+                     for i in range(2)]
+        with mock.patch.object(s, "e2e_queue_free", return_value=False):
+            self.assertEqual(self.sweep(), [], "lock held: wait")
+        with mock.patch.object(s, "e2e_queue_free", return_value=True):
+            self.assertEqual(self.sweep(), ["q0"], "lock free: one job per tick, even a child")
+            self.assertEqual(self.sweep(), ["q0"], "again next tick, not once per stage")
+
     def test_auto_resume_standalone_stall_waits_for_machine(self):
         s = self.serve
         (self.root / "runs" / "crash.log").write_text("Traceback: something else broke")
