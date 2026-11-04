@@ -7690,6 +7690,28 @@ class AutoContinueTest(unittest.TestCase):
                     self.assertTrue((d / sub).is_dir(), d / sub)
             self.assertFalse(wt("missing").exists())
 
+    def test_prune_parked_worktrees(self):
+        """A parked job (needs-human, paused, stalled) with no live session loses only .next; an active stage or a
+        live session keeps both."""
+        repo = self.base / "a"
+        wt = lambda name: repo / ".claude" / "worktrees" / name
+        for name in ("human", "paused", "stalled", "check", "live"):
+            for sub in ("node_modules/pkg", ".next/cache", "src"):
+                (wt(name) / sub).mkdir(parents=True)
+        self.project("a", n=1, backlog="", jobs=[
+            {"id": "001-human", "stage": "needs-human", "worktree": str(wt("human"))},
+            {"id": "002-paused", "stage": "build", "paused": True, "worktree": str(wt("paused"))},
+            {"id": "003-stalled", "stage": "check", "stalled": True, "worktree": str(wt("stalled"))},
+            {"id": "004-check", "stage": "check", "worktree": str(wt("check"))},
+            {"id": "005-live", "stage": "needs-human", "worktree": str(wt("live"))}])
+        self.tick(running=lambda p, j: (p, j) == ("a", "005-live"))
+        for name in ("human", "paused", "stalled"):
+            self.assertFalse((wt(name) / ".next").exists(), name)
+            self.assertTrue((wt(name) / "node_modules/pkg").is_dir(), name)
+        for name in ("check", "live"):
+            self.assertTrue((wt(name) / ".next/cache").is_dir(), name)
+            self.assertTrue((wt(name) / "node_modules/pkg").is_dir(), name)
+
     def test_no_start_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
         self.assertEqual(self.tick(), self.started("a"), "b in flight: only b is skipped")
