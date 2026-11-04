@@ -4676,6 +4676,102 @@ class HookTest(unittest.TestCase):
         self.assertIsNone(self.get(legacy)["waiting"])
 
 
+class GitGuardTest(unittest.TestCase):
+    """board.py git-guard: a PreToolUse hook that refuses a chat's `git commit` on main in a registered main checkout."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "trevorhecht-skills"
+        self.git("init", "-q", "-b", "main", str(self.repo))
+        self.git("-C", str(self.repo), "commit", "-q", "--allow-empty", "-m", "first")
+        (self.repo / "scrum").mkdir()
+        self.reg = base / "projects.json"
+        self.reg.write_text(json.dumps([str(self.repo)]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(self.reg)})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CLAUDE_NOTIFIER_DISABLE", None)  # a scrum-launched test run has it set; a chat does not
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *a):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+
+    def event(self, command, cwd=None, tool="Bash"):
+        return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {"command": command},
+                "cwd": str(cwd or self.repo)}
+
+    def assert_denied(self, reason, branch="main"):
+        self.assertTrue(reason)
+        for phrase in ("trevorhecht-skills", f"on {branch}", "unpushed on main blocks every scrum merge",
+                       "/trevskills-scrum lilguy <what to save>", "Lane: lilguy — knowledge save",
+                       "Trevor can still commit by hand from his own terminal"):
+            self.assertIn(phrase, reason)
+
+    def test_denies_commit_on_main_in_registered_checkout(self):
+        other = Path(self.tmp.name)
+        self.assert_denied(board.git_guard_reason(self.event("git commit -m x"), "??", None))
+        self.assert_denied(board.git_guard_reason(self.event(f"git -C {self.repo} commit -m x", other), "??", None))
+        self.assert_denied(board.git_guard_reason(self.event("git -C trevorhecht-skills commit -m x", other), "??"))
+        self.assert_denied(board.git_guard_reason(self.event(f"cd {self.repo} && git add -A && git commit -m x", other), "??"))
+        self.assert_denied(board.git_guard_reason(self.event("git -c user.name=x commit"), "??", None))
+        self.git("-C", str(self.repo), "branch", "-m", "master")
+        self.assert_denied(board.git_guard_reason(self.event("git commit -m x"), "??", None), "master")
+
+    def test_allows_other_branches_worktrees_unregistered_and_non_commits(self):
+        commit = self.event("git commit -m x")
+        for command in ("git status", "git commit-tree HEAD^{tree} -m x", "git log --grep commit"):
+            self.assertIsNone(board.git_guard_reason(self.event(command), "??", None), command)
+        self.assertIsNone(board.git_guard_reason(self.event("git commit -m x", tool="Edit"), "??", None))
+        wt = Path(self.tmp.name) / "wt"
+        self.git("-C", str(self.repo), "worktree", "add", "-q", "-b", "scrum/607-x", str(wt))
+        self.assertIsNone(board.git_guard_reason(self.event("git commit -m x", wt), "??", None))
+        self.git("-C", str(wt), "checkout", "-q", "--detach")
+        self.git("-C", str(self.repo), "checkout", "-q", "scrum/607-x")
+        self.assertIsNone(board.git_guard_reason(commit, "??", None))
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach")
+        self.assertIsNone(board.git_guard_reason(commit, "??", None))
+        self.git("-C", str(self.repo), "checkout", "-q", "main")
+        self.assert_denied(board.git_guard_reason(commit, "??", None))
+        self.reg.write_text(json.dumps([str(Path(self.tmp.name) / "elsewhere")]))
+        self.assertIsNone(board.git_guard_reason(commit, "??", None))
+
+    def test_pipeline_sessions_are_exempt(self):
+        commit = self.event("git commit -m x")
+        with mock.patch.dict(os.environ, {"CLAUDE_NOTIFIER_DISABLE": "1"}):
+            self.assertIsNone(board.git_guard_reason(commit, "??", None))
+        jobs = self.repo / "scrum" / "board.json"
+        jobs.write_text(json.dumps({"jobs": [{"id": "1", "stage": "merging", "pid": 111, "tty": "ttys004"},
+                                             {"id": "2", "stage": "done", "tty": "ttys007"}]}))
+        self.assertIsNone(board.git_guard_reason(commit, "??", 111))  # the orchestrator's own pid
+        self.assert_denied(board.git_guard_reason(commit, "ttys004", 222))  # a later chat on a reused tty
+        self.assert_denied(board.git_guard_reason(commit, "ttys007", None))  # a done job exempts nobody
+        jobs.write_text(json.dumps({"jobs": [{"id": "1", "stage": "merging", "tty": "ttys004"}]}))
+        self.assertIsNone(board.git_guard_reason(commit, "ttys004", 222))  # a pid-less job matches by tty
+        self.assert_denied(board.git_guard_reason(commit, "ttys005", 222))
+
+    def test_cli_prints_deny_json_and_never_errors(self):
+        def cli(stdin):
+            with mock.patch.object(board, "caller_tty", return_value="??"), \
+                    mock.patch.object(board, "caller_claude_pid", return_value=None):
+                result = run_board("git-guard", input=stdin)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+        out = json.loads(cli(json.dumps(self.event("git commit -m x"))))
+        self.assertEqual(set(out), {"hookSpecificOutput"})
+        spec = out["hookSpecificOutput"]
+        self.assertEqual({k: spec[k] for k in ("hookEventName", "permissionDecision")},
+                         {"hookEventName": "PreToolUse", "permissionDecision": "deny"})
+        self.assert_denied(spec["permissionDecisionReason"])
+        self.assertEqual(set(spec), {"hookEventName", "permissionDecision", "permissionDecisionReason"})
+        gone = dict(self.event("git commit -m x"), cwd=str(Path(self.tmp.name) / "gone"))
+        no_cwd = {k: v for k, v in self.event("git commit -m x").items() if k != "cwd"}
+        for stdin in ("not json", "", json.dumps(no_cwd), json.dumps(gone)):
+            self.assertEqual(cli(stdin), "", stdin)
+
+
 class RetiredCommandsTest(unittest.TestCase):
     """Job 497 retired digest-verify and rules-check; RULES_RE stays for the Lilguy promotion trigger."""
 

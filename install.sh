@@ -33,11 +33,13 @@ if [ -e "$jev_rank" ] && [ ! -L "$jev_rank" ]; then
 else
   link "$here/skills/trevskills-scrum/jev-rank.py" "$jev_rank"
 fi
-# Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set.
+# Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set, and its
+# git-guard PreToolUse hook (refuses a chat's git commit on main in a scrum repo), only when no git-guard hook exists.
 python3 - "$dest" <<'PY'
 import json, os, shlex, sys
 dest = sys.argv[1]
 path = os.path.join(dest, "settings.json")
+board = "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/board.py")
 try:
     with open(path) as f:
         settings = json.load(f)
@@ -45,17 +47,27 @@ except FileNotFoundError:
     settings = {}
 except (OSError, ValueError) as e:
     settings = None
-    print(f"warning: {path} is not readable JSON ({e}); statusLine not set, add it by hand", file=sys.stderr)
+    print(f"warning: {path} is not readable JSON ({e}); statusLine and git-guard hook not set, add them by hand", file=sys.stderr)
 if settings is not None and not isinstance(settings, dict):
     settings = None
-    print(f"warning: {path} is not a JSON object; statusLine not set, add it by hand", file=sys.stderr)
+    print(f"warning: {path} is not a JSON object; statusLine and git-guard hook not set, add them by hand", file=sys.stderr)
+changed = []
 if settings is not None and "statusLine" not in settings:
-    settings["statusLine"] = {"type": "command", "refreshInterval": 60,
-                              "command": "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/board.py") + " statusline"}
+    settings["statusLine"] = {"type": "command", "refreshInterval": 60, "command": f"{board} statusline"}
+    changed.append("statusLine")
+if settings is not None:
+    hooks = settings.setdefault("hooks", {})
+    pre = hooks.setdefault("PreToolUse", []) if isinstance(hooks, dict) else None
+    if not isinstance(pre, list):
+        print(f"warning: {path} hooks.PreToolUse is not a list; git-guard hook not set, add it by hand", file=sys.stderr)
+    elif "git-guard" not in json.dumps(pre):
+        pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": f"{board} git-guard", "timeout": 5}]})
+        changed.append("git-guard PreToolUse hook")
+if changed:
     with open(path + ".tmp", "w") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
     os.replace(path + ".tmp", path)
-    print(f"set statusLine in {path}")
+    print(f"set {' and '.join(changed)} in {path}")
 PY
 echo "Done. In any repo: /trevskills-scrum <feature>"
