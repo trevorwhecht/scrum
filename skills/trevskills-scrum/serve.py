@@ -925,10 +925,40 @@ def claimable(root: Path) -> bool:
     return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
 
 
+def parked_tree(project, root, job, by_id, alive) -> bool:
+    """A running, unpaused Run-all/BigBoy parent whose every unfinished child waits only on Trevor, so it is not work
+    in flight: a needs-human (not stalled) child, a waiting child with setup pending or behind such a parked
+    dependency (transitively), or a nested BigBoy that board.parked_bigboy calls parked. No child running or alive,
+    no chain lock. parked_parent only names needs-human children; this is the wider test board_busy needs."""
+    if job.get("stage") != "running" or job.get("lane") not in ("runall", "bigboy") or job.get("paused"):
+        return False
+    kids = [by_id[k] for k in job.get("children") or [] if k in by_id and by_id[k].get("stage") not in ("done", "aborted")]
+
+    def parked(c, seen=()):
+        if c["id"] in seen:
+            return False
+        if c.get("lane") == "bigboy" and c.get("stage") == "running":
+            return board.parked_bigboy(c, by_id, set(), root)
+        if c.get("stage") == "needs-human":
+            return not (c.get("reason") or "").startswith(board.STALLED)
+        if c.get("stage") != "waiting":
+            return False
+        if c.get("setup") == "pending":
+            return True
+        return any(parked(by_id[d], seen + (c["id"],)) for d in c.get("depends_on") or []
+                   if d in by_id and by_id[d].get("stage") not in ("done", "aborted"))
+
+    if not kids or not all(parked(c) for c in kids) or board.chain_lock_live(root, job["id"]):
+        return False
+    every = kids + [by_id[g] for c in kids for g in c.get("children") or [] if g in by_id]
+    return not any(running(project, k["id"]) or alive()(k) for k in every)
+
+
 def board_busy(project, root, jobs, by_id, alive) -> bool:
     """Work in flight: some job not idle, other than a finished BigBoy parent or a parent parked on Trevor."""
     return any(not board.idle(j) and not finished_bigboy(j, by_id)
-               and not parked_parent(project, root, j, by_id, alive) for j in jobs)
+               and not parked_parent(project, root, j, by_id, alive)
+               and not parked_tree(project, root, j, by_id, alive) for j in jobs)
 
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
