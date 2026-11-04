@@ -4733,7 +4733,8 @@ def cmd_prod_ok(root: Path, job_id: str, bullet: str) -> str:
     "prod-ok: ...") a malformed bullet, a script missing from the repo's package.json, and any schema, deploy or
     fixture script (PROD_DENY_RE over name, args and command). "dev" for a non-prod run; a prod run (name ends
     `:prod`, or its command reads .env.prod*) is "ok" only when jobs/<id>/prod.md holds a passing dev dry run (args
-    without --apply) and dev apply (same args plus --apply) of the script with `:prod` stripped."""
+    without --apply) and dev apply (same args plus --apply) of the script with `:prod` stripped.
+    A `--prod` arg (a script's own prod guard) is dropped before matching, since dev never takes it."""
     check_id(job_id)
     script, args = prod_bullet(bullet)
     try:
@@ -4751,7 +4752,7 @@ def cmd_prod_ok(root: Path, job_id: str, bullet: str) -> str:
     if not script.endswith(":prod"):
         raise SystemExit(f"prod-ok: no dev script for {script}")
     dev = script[:-len(":prod")]
-    base = [a for a in args if a != "--apply"]
+    base = [a for a in args if a not in ("--apply", "--prod")]
     records = prod_records(Path(root) / "jobs" / job_id / "prod.md")
     dry = any(s == dev and a == base and ok for s, a, ok in records)
     applied = any(s == dev and "--apply" in a and [x for x in a if x != "--apply"] == base and ok for s, a, ok in records)
