@@ -3484,7 +3484,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_dashboard_shows_cloud_stage_and_link(self):
         text = DASHBOARD.read_text()
-        self.assertIn('"merging", "deploying", "cloud", "stalled", "needs-human"', text)
+        self.assertIn('const STAGES = ["spec", "build", "review", "shipping", "stalled", "needs-human", "done"]', text)
+        self.assertIn('deploying: "shipping", cloud: "build"}', text)
         self.assertIn('deploying: "Deploying"', text)
         self.assertIn("Cloud session ↗", text)
 
