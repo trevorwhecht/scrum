@@ -6146,6 +6146,26 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), ["q0"], "lock free: one job per tick, even a child")
             self.assertEqual(self.sweep(), ["q0"], "again next tick, not once per stage")
 
+    def test_auto_resume_e2e_queue_holds_while_another_job_in_check(self):
+        s = self.serve
+        self.jobs = [{"id": f"q{i}", "stage": "check", "stalled": True, "parent": "bb", "reason": "stalled: waiting on the E2E queue"}
+                     for i in range(2)]
+        self.jobs += [{"id": "live", "stage": "check", "reason": None},
+                      {"id": "pz", "stage": "check", "paused": True, "reason": "stalled in check: paused by Trevor"}]
+        with mock.patch.object(s, "e2e_queue_free", return_value=True), \
+                mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
+            self.assertIs(s.auto_resume("p", self.root, self.jobs), True, "a job in check takes the lock soon: hold")
+            self.assertEqual(resume.call_args_list, [])
+        self.assertNotIn("p/q0", s.AUTO_RESUME, "holding spends no try")
+        self.jobs[2]["stage"] = "approve"
+        with mock.patch.object(s, "e2e_queue_free", return_value=True):
+            self.assertEqual(self.sweep(), ["q0"], "check left: one resume, the paused check job holds nothing")
+        self.jobs[2].update(stage="check", stalled=True, reason="stalled in check: no live session")
+        with mock.patch.object(s, "e2e_queue_free", return_value=True), \
+                mock.patch.object(s, "limit_reset", return_value=(False, None, False)), \
+                mock.patch.object(s, "net_error", return_value=False):
+            self.assertEqual(self.sweep()[:1], ["q0"], "a check job stalled itself holds nothing")
+
     def test_auto_resume_standalone_stall_waits_for_machine(self):
         s = self.serve
         (self.root / "runs" / "crash.log").write_text("Traceback: something else broke")
