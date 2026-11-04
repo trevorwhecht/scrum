@@ -5671,7 +5671,9 @@ class E2eSpecsTest(unittest.TestCase):
     """board.py e2e-specs: the diff's UI files mapped to the E2E specs that cover their routes (job 613)."""
 
     FILES = {
-        "src/app/(pages)/pricing/page.tsx": "import Price from '@/components/Price'\nexport default () => <Price />\n",
+        "src/app/(pages)/pricing/page.tsx": "import Price from '@/components/Price'\nimport Grid from '@/app/admin/views/Grid'\n"
+                                            "export default () => <Price />\n",
+        "src/app/admin/views/Grid.tsx": "export default () => <table />\n",
         "src/components/Price.tsx": "export default function Price() { return <b>9</b> }\n",
         "src/components/Orphan.tsx": "export const Orphan = () => null\n",
         "src/app/order/[id]/page.tsx": "export default () => <p>order</p>\n",
@@ -5717,6 +5719,10 @@ class E2eSpecsTest(unittest.TestCase):
 
     def test_component_maps_through_its_importer(self):
         out = self.change("src/components/Price.tsx")
+        self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/pricing.spec.ts"], []))
+
+    def test_colocated_app_module_maps_through_its_importer(self):
+        out = self.change("src/app/admin/views/Grid.tsx")  # no spec names /admin/views; the pricing page imports it
         self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/pricing.spec.ts"], []))
 
     def test_param_route_matches_template_literal(self):

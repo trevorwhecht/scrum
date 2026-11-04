@@ -1832,6 +1832,7 @@ RUNTIME_EXCLUDE_RE = re.compile(r"(^|/)(__tests__|e2e|tests?|docs?)/|\.(test|spe
 E2E_FULL_DEFAULT = ["src/app/layout.tsx", "app/layout.tsx", "src/app/globals.css", "app/globals.css",
                     "src/middleware.ts", "middleware.ts", "src/proxy.ts", "proxy.ts", "playwright.config.ts",
                     "playwright.config.js"]
+APP_ROUTE_FILE_RE = re.compile(r"(^|/)(page|layout|template|loading|error|not-found|default)\.[^/]*$")
 SOURCE_RE = re.compile(r"\.([cm]?[jt]sx?|vue|svelte|astro)$")
 IMPORT_RE = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]""")
 # One shell word: quoted runs, a $( ... ) with one level of nested parens, or plain characters.
@@ -1873,15 +1874,20 @@ def _e2e_dir(wt):
     return "e2e" if (wt / "e2e").is_dir() else "tests"
 
 
-def _importers(wt, sources, path):
-    """Tracked source files with an import specifier ending in path's basename (its directory for index.*)."""
+def _import_index(sources):
+    """{last segment of an import specifier: files importing it} over the tracked source files."""
+    index = {}
+    for f, text in sources.items():
+        for spec in IMPORT_RE.findall(text):
+            index.setdefault(spec.rstrip("/").rsplit("/", 1)[-1], set()).add(f)
+    return index
+
+
+def _importers(index, path):
+    """Files with an import specifier ending in path's basename (its directory for index.*)."""
     p = Path(path)
     names = {p.parent.name} if p.stem == "index" else {p.name, p.stem}
-    out = []
-    for f, text in sources.items():
-        if f != path and any(spec.rstrip("/").rsplit("/", 1)[-1] in names for spec in IMPORT_RE.findall(text)):
-            out.append(f)
-    return out
+    return sorted(set().union(*(index.get(n, set()) for n in names)) - {path})
 
 
 def _e2e_command(cmd, specs):
@@ -1937,15 +1943,16 @@ def e2e_specs(wt, base: str, project_file) -> dict:
                 sources[f] = (wt / f).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-    specs = set()
+    index, specs = _import_index(sources), set()
     for f in ui:
         routes, seen, todo = set(), {f}, [f]
         while todo:  # follow importers until they reach route files
             g = todo.pop()
             if (r := _route_of(g)) is not None:
                 routes.add(r)
-                continue
-            for imp in _importers(wt, sources, g):
+                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
+                    continue  # a route file; a colocated app/ module also maps through its importers
+            for imp in _importers(index, g):
                 if imp not in seen:
                     seen.add(imp)
                     todo.append(imp)

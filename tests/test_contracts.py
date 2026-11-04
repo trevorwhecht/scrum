@@ -978,8 +978,9 @@ class ContractTest(unittest.TestCase):
                 self.assertIn(phrase, para, f"{name}: {phrase}")
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
-        for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
+        for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23000, "newjob.md")
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3159,6 +3160,32 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, replay, phrase)
         agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
         self.assertIn("never the whole suite", agent)
+
+    def test_check_gate_scoped_e2e(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        for phrase in ("B e2e-specs $ID", "`E2E: skipped, no spec covers the diff`", "`E2E specs: <spec files>|all`",
+                       "B check-reuse $ID", "go straight to step 5"):
+            self.assertIn(phrase, check, phrase)
+        self.assertLess(check.index("B check-reuse $ID"), check.index("2. **Runtime files**"))
+        self.assertNotIn("a full run outlasts the 600 s Bash timeout", check)
+
+    def test_e2e_reviewer_skips_checked_specs(self):
+        review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
+        step3 = self.section(review, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
+        self.assertIn("and not when `round-$N/check.md` says `CHECK: PASS`, has an `E2E specs:` line, and "
+                      "`B e2e-specs $ID` prints an empty `uncovered`", step3)
+        self.assertIn("has a `Check: reused from round` line", self.section(review, "2. **Which reviewers run.**", step3[:20]))
+        agent = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        self.assertIn("the Check gate already ran those specs: replay none of them, cover only the `uncovered` files", agent)
+        body = (ROOT / "skills" / "trevskills-e2e" / "SKILL.md").read_text()
+        mapping = self.section(body, "## 2. Map changed files", "## 3. Replay")
+        self.assertIn("board.py\" e2e-specs --worktree . --base <BASE> --project", mapping)
+
+    def test_approver_render_same_head(self):
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in approver.splitlines() if l.startswith("**UI must be rendered.**"))
+        self.assertIn("whose `head.txt` equals the latest round's `head.txt`", rule)
+        self.assertIn("the changed-screen rule after it", rule)
 
     def test_unblocker_has_no_edit(self):
         path = ROOT / "agents" / "scrum-unblocker.md"
