@@ -493,6 +493,7 @@ def limit_reset(root, job):
 E2E_WAIT = "waiting on the E2E queue"  # newjob.md Check gate step 2 parks a job on it after two lock-wait timeouts
 
 
+# TODO[4]: per-slot dev DBs (parallel E2E slots) if the E2E queue is still long
 def e2e_queue_free():
     """True when nobody holds the E2E lock and no live buildlock.py waits on it."""
     lock = Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"
@@ -510,6 +511,138 @@ def e2e_queue_free():
     except OSError:
         return False
     return True
+
+
+# --- e2e_full_tick: jobs run only their diff's specs (board.py e2e-specs), so the whole suite runs here, on each
+# project's main checkout, after 5 merges or 24 h. One run in flight across all projects.
+E2E_FULL = {"running": None}  # the project whose full run is in flight in this serve.py
+E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
+E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
+E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def e2e_full_due(record, head, merges, now) -> bool:
+    """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last."""
+    if not record:
+        return True
+    return head != record.get("head") and (merges >= E2E_FULL_MERGES or now - (record.get("at") or 0) >= E2E_FULL_EVERY)
+
+
+def e2e_full_failures(output, test_dir) -> list[dict]:
+    """The tests under Playwright's `N failed` summary as {"spec": "<test_dir>/<file>", "line", "title"}; the flaky
+    block and every other block are ignored."""
+    out, inside = [], False
+    for line in ANSI_RE.sub("", output).splitlines():
+        if E2E_FULL_FAILED_RE.match(line):
+            inside = True
+        elif inside and (m := E2E_FULL_ENTRY_RE.match(line)):
+            out.append({"spec": f"{test_dir}/{m[1]}", "line": int(m[2]), "title": m[3]})
+        else:
+            inside = False
+    return out
+
+
+def e2e_full_record(root):
+    try:
+        rec = json.loads((root / "e2e-full.json").read_text())
+        return rec if isinstance(rec, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_e2e_full(root, rec):
+    tmp = root / "e2e-full.json.tmp"
+    tmp.write_text(json.dumps(rec, indent=1) + "\n")
+    os.replace(tmp, root / "e2e-full.json")
+
+
+def e2e_full_tick(project, repo, root) -> None:
+    """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
+    flight anywhere, the E2E lock is free, the tracked tree is clean and e2e_full_due holds (watchdog_tick pass 1)."""
+    m = re.search(r"^\s*-\s*E2E:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
+        if (root / "project.md").is_file() else None
+    cmd = m[1].strip() if m else ""
+    if cmd.lower() in ("", "none") or E2E_FULL["running"]:
+        return
+    now = time.time()
+    for other in board.projects().values():
+        rec = e2e_full_record(other / "scrum")
+        if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
+            return
+    if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+        return
+    record = e2e_full_record(root)
+    head = board._git(repo, "rev-parse", "HEAD").decode().strip()
+    merges, last = 0, str((record or {}).get("head") or "")
+    if record:
+        try:
+            if not last or last.startswith("-"):
+                raise ValueError("no recorded head")
+            merges = int(board._git(repo, "rev-list", "--count", f"{last}..HEAD"))
+        except (ValueError, OSError, subprocess.SubprocessError):
+            merges = E2E_FULL_MERGES  # a git error counts as due
+    if not e2e_full_due(record, head, merges, now):
+        return
+    last_green = (record or {}).get("lastGreen")
+    write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
+                          "lastGreen": last_green})
+    E2E_FULL["running"] = project
+    threading.Thread(target=e2e_full_run, args=(repo, root, cmd, head, now, last_green), daemon=True).start()
+
+
+def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
+    """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
+    root/e2e-full.json and add one backlog item per failing spec not already on an open line. Exit 0 is pass; a
+    non-zero exit with parsed failures is fail; any other non-zero exit (lock timeout 124, a dev-server error) is
+    error and adds nothing."""
+    try:
+        env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
+        log = root / "e2e-full.log"
+        try:
+            with open(log, "w") as f:
+                proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
+                                        env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
+                try:
+                    code = proc.wait(timeout=E2E_FULL_STALE)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    code = proc.wait()
+            output = log.read_text(errors="replace")
+        except OSError as e:
+            code, output = -1, str(e)
+        failed = e2e_full_failures(output, board._e2e_dir(Path(repo))) if code else []
+        result = "pass" if code == 0 else "fail" if failed else "error"
+        rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
+               "lastGreen": head if code == 0 else last_green}
+        write_e2e_full(root, rec)
+        if failed:
+            e2e_full_backlog(repo, root, failed, last_green, head)
+        return rec
+    finally:
+        E2E_FULL["running"] = None
+
+
+def e2e_full_backlog(repo, root, failed, last_green, head):
+    """One backlog item per failing spec, naming its tests and the commits merged since the last green run."""
+    if last_green:
+        try:
+            log = board._git(repo, "log", "--format=%h %s", f"{last_green}..{head}").decode(errors="replace")
+        except (ValueError, OSError, subprocess.SubprocessError):
+            log = "(git log failed)"
+        merged = f"merges since last green run {last_green[:7]}..{head[:7]}: " + "; ".join(log.splitlines())
+    else:
+        merged = "no green run recorded"
+    open_text = [i["text"] for i in board.read_backlog(root)[1] if not i["done"]]
+    for spec in dict.fromkeys(f["spec"] for f in failed):
+        if any(spec in t for t in open_text):
+            continue
+        tests = "; ".join(f"{Path(spec).name}:{f['line']} {f['title']}" for f in failed if f["spec"] == spec)
+        text = f"E2E full suite on main fails: {spec} — {tests}; {merged}"
+        if len(text) > board.ITEM_MAX:  # never cut silently: say how much of the merge list was left out
+            text = text[:board.ITEM_MAX - 40].rsplit("; ", 1)[0] + "; … more in git log"
+        board.cmd_backlog_add(root, [text])
 
 
 def auto_resume(project, root, jobs):
@@ -1283,7 +1416,8 @@ def watchdog_tick():
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project. Then resume
-       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick).
+       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick), and start a due full E2E run on
+       the main checkout (e2e_full_tick).
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
@@ -1327,6 +1461,7 @@ def watchdog_tick():
                 candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
                                and j["stage"] not in ("done", "aborted") and not running(project, j["id"])
                                and not j.get("holdPause") and not by_id.get(j.get("parent"), {}).get("paused")]
+                e2e_full_tick(project, repo, root)  # last, so its failure skips nothing above
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     finally:

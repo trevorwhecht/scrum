@@ -8735,5 +8735,131 @@ class IdleCleanupTest(unittest.TestCase):
         self.assertIsNone(self.serve.DOCKER_IDLE_SINCE)
         self.assertEqual(self.calls, [])
 
+E2E_LIST_OUTPUT = """Running 5 tests using 1 worker
+  \x1b[31m✘\x1b[39m  1 [chromium] › pricing.spec.ts:12:5 › Pricing › shows price (3.1s)
+
+  2 failed
+    [chromium] › pricing.spec.ts:12:5 › Pricing › shows price ──────────────────
+    [chromium] › admin/orders.spec.ts:8:3 › orders list ─────────────
+  1 flaky
+    [chromium] › cart.spec.ts:4:1 › cart adds item ──────────
+  2 passed (20.1s)
+"""
+
+
+class E2eFullTest(unittest.TestCase):
+    """serve.py e2e_full_tick: one full E2E run on a project's main checkout after 5 merges or 24 h (job 613)."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo = base / "repo"
+        self.root = self.repo / "scrum"
+        self.root.mkdir(parents=True)
+        (self.root / "project.md").write_text("# Project\n- E2E: sh run-e2e.sh\n")
+        (self.repo / ".gitignore").write_text("scrum/\n")
+        (self.repo / "a.txt").write_text("a\n")
+        (self.repo / "e2e").mkdir()
+        (self.repo / "e2e" / "a.spec.ts").write_text("x\n")
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        for k, v in {"HOME": str(base / "home"), "SCRUM_REGISTRY": str(base / "projects.json")}.items():
+            p = mock.patch.dict(os.environ, {k: v})
+            p.start()
+            self.addCleanup(p.stop)
+        (base / "projects.json").write_text(json.dumps([str(self.repo)]))
+        serve.E2E_FULL["running"] = None
+        self.addCleanup(serve.E2E_FULL.update, running=None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def merge(self, msg):
+        (self.repo / "a.txt").write_text((self.repo / "a.txt").read_text() + msg + "\n")
+        self.git("commit", "-q", "-am", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def test_due(self):
+        due, now = self.serve.e2e_full_due, 1_000_000
+        rec = {"at": now - 3600, "head": "aaa"}
+        self.assertTrue(due(None, "aaa", 0, now))
+        self.assertFalse(due(rec, "aaa", 0, now))
+        self.assertTrue(due(rec, "bbb", 5, now))
+        self.assertFalse(due(rec, "bbb", 4, now))
+        self.assertTrue(due({"at": now - 86400, "head": "aaa"}, "bbb", 4, now))
+        self.assertFalse(due({"at": now - 90000, "head": "aaa"}, "aaa", 0, now))
+
+    def tick(self):
+        with mock.patch.object(self.serve, "e2e_queue_free", return_value=True), \
+                mock.patch.object(self.serve.threading, "Thread") as thread:
+            self.serve.e2e_full_tick("p", self.repo, self.root)
+        return thread.call_count
+
+    def test_tick_starts_one_run_on_a_clean_checkout(self):
+        self.assertEqual(self.tick(), 1)
+        rec = json.loads((self.root / "e2e-full.json").read_text())
+        self.assertEqual((rec["result"], rec["head"], rec["lastGreen"]), ("running", self.base, None))
+        self.assertEqual(self.tick(), 0, "the in-flight guard holds")
+
+    def test_tick_skips_dirty_checkout(self):
+        (self.repo / "a.txt").write_text("dirty\n")
+        self.assertEqual(self.tick(), 0)
+        self.assertFalse((self.root / "e2e-full.json").exists())
+
+    def test_tick_skips_fresh_running_record(self):
+        rec = {"at": time.time() - 600, "head": "x", "result": "running", "exit": None, "failed": [], "lastGreen": None}
+        (self.root / "e2e-full.json").write_text(json.dumps(rec))
+        self.assertEqual(self.tick(), 0)
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+
+    def test_failures_parse_failed_block_only(self):
+        self.assertEqual(self.serve.e2e_full_failures(E2E_LIST_OUTPUT, "e2e"), [
+            {"spec": "e2e/pricing.spec.ts", "line": 12, "title": "Pricing › shows price"},
+            {"spec": "e2e/admin/orders.spec.ts", "line": 8, "title": "orders list"}])
+
+    def run_suite(self, out, code, last_green=None):
+        (self.repo / "out.txt").write_text(out)
+        (self.repo / "run-e2e.sh").write_text(f"cat out.txt; exit {code}\n")
+        head = self.git("rev-parse", "HEAD")
+        return self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 123.0, last_green)
+
+    def open_items(self):
+        return [i["text"] for i in self.serve.board.read_backlog(self.root)[1] if not i["done"]]
+
+    def test_failures_reach_backlog_once(self):
+        head = self.merge("Fix the cart")
+        rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
+        self.assertEqual((rec["result"], rec["exit"], rec["lastGreen"]), ("fail", 1, self.base))
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        merged = f"merges since last green run {self.base[:7]}..{head[:7]}: {head[:7]} Fix the cart"
+        self.assertEqual(self.open_items(), [
+            f"E2E full suite on main fails: e2e/pricing.spec.ts — pricing.spec.ts:12 Pricing › shows price; {merged}",
+            f"E2E full suite on main fails: e2e/admin/orders.spec.ts — orders.spec.ts:8 orders list; {merged}"])
+        self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
+        self.assertEqual(len(self.open_items()), 2, "no duplicate on a second run")
+
+    def test_no_green_run_recorded(self):
+        self.run_suite(E2E_LIST_OUTPUT, 1)
+        self.assertTrue(self.open_items()[0].endswith("; no green run recorded"), self.open_items())
+
+    def test_lock_timeout_is_error_with_no_backlog(self):
+        rec = self.run_suite("buildlock: timed out\n", 124)
+        self.assertEqual((rec["result"], rec["exit"], rec["failed"]), ("error", 124, []))
+        self.assertEqual(self.open_items(), [])
+
+    def test_pass_sets_last_green(self):
+        rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
+        self.assertEqual((rec["result"], rec["lastGreen"]), ("pass", self.git("rev-parse", "HEAD")))
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+
+
 if __name__ == "__main__":
     unittest.main()
