@@ -3986,6 +3986,45 @@ def cmd_hook(event, tty, pid=None):
         pass
 
 
+# `git`, its -C/-c options, then the commit subcommand (not commit-tree, not `--grep commit`). Group 1: the options.
+GIT_COMMIT_RE = re.compile(r"\bgit((?:\s+-[cC]\s+\S+)*)\s+commit(?=\s|$|[;&|)])")
+CD_RE = re.compile(r"(?<![\w.-])cd\s+([^\s;&|]+)")
+
+
+def git_guard_reason(event, tty, pid=None):
+    """`board.py git-guard`: the deny reason when a Bash `git commit` would land on main/master in a registered repo's
+    main checkout from a chat, else None. Pipeline sessions are exempt: CLAUDE_NOTIFIER_DISABLE set (scrum-launched),
+    or an ACTIVE job matched to this session by cmd_hook's rule (pid when the job records one, else tty)."""
+    command = str((event.get("tool_input") or {}).get("command") or "") if event.get("tool_name") == "Bash" else ""
+    m = GIT_COMMIT_RE.search(command)
+    cwd = event.get("cwd")
+    if not m or not cwd or notifier_disabled():
+        return None
+    # The commit's directory: the last -C on it, else the last `cd` before it, else cwd; relative to cwd.
+    dirs = re.findall(r"-C\s+(\S+)", m.group(1)) or CD_RE.findall(command[:m.start()])
+    where = Path(cwd, os.path.expanduser(dirs[-1].strip("'\""))) if dirs else Path(cwd)
+    git = lambda *a: subprocess.run(["git", "-C", str(where), *a], capture_output=True, text=True,
+                                    timeout=2).stdout.strip()
+    top = git("rev-parse", "--show-toplevel")
+    branch = git("symbolic-ref", "--short", "-q", "HEAD")
+    registry = read_registry()
+    if branch not in ("main", "master") or not top or Path(top).resolve() not in {Path(r).resolve() for r in registry}:
+        return None
+    tty_ok = SHAPES["tty"].fullmatch(tty or "")
+    for repo in registry:
+        try:
+            jobs = json.loads((Path(repo) / "scrum" / "board.json").read_text())["jobs"]
+            if any(job.get("stage") in ACTIVE and (job.get("pid") == pid if job.get("pid") else
+                                                   bool(tty_ok) and job.get("tty") == tty) for job in jobs):
+                return None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return (f"Refused: git commit on {branch} in the {Path(top).name} main checkout from a chat. A commit left unpushed "
+            f"on main blocks every scrum merge in that repo. Save the change through a scrum job instead: "
+            f"/trevskills-scrum lilguy <what to save> (Lane: lilguy — knowledge save). "
+            f"Trevor can still commit by hand from his own terminal.")
+
+
 # --- watchdog: a job whose orchestrator session died stays in its stage forever; flag it stalled in that stage ---
 WATCHED = ("spec", "build", "check", "review", "approve", "merging", "deploying")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
@@ -4475,6 +4514,7 @@ def main(argv=None):
     sub.add_parser("triage-start")
     sub.add_parser("triage-apply").add_argument("triage")
     sub.add_parser("hook")
+    sub.add_parser("git-guard")
     sub.add_parser("statusline")
     fo = sub.add_parser("fable-ok")
     fo.add_argument("id")
@@ -4509,6 +4549,18 @@ def main(argv=None):
         # Never block Claude Code: no output, exit 0, whatever happens (exit 2 would block the tool call).
         try:
             cmd_hook(json.loads(sys.stdin.read()), caller_tty(), caller_claude_pid())
+        except (Exception, SystemExit):
+            pass
+        return 0
+    if a.cmd == "git-guard":
+        # Never block Claude Code on an error: no output, exit 0. ps runs only for a command that is a git commit.
+        try:
+            event = json.loads(sys.stdin.read())
+            command = str((event.get("tool_input") or {}).get("command") or "")
+            reason = GIT_COMMIT_RE.search(command) and git_guard_reason(event, caller_tty(), caller_claude_pid())
+            if reason:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                         "permissionDecisionReason": reason}}))
         except (Exception, SystemExit):
             pass
         return 0

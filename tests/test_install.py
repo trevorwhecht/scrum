@@ -135,25 +135,48 @@ class InstallTest(unittest.TestCase):
             settings = home / "settings.json"
             want = {"type": "command", "command": f"python3 {home}/skills/trevskills-scrum/board.py statusline",
                     "refreshInterval": 60}
-            # no settings.json: created holding only statusLine; a second run changes nothing
+            guard = {"matcher": "Bash", "hooks": [{"type": "command", "timeout": 5,
+                                                   "command": f"python3 {home}/skills/trevskills-scrum/board.py git-guard"}]}
+            # no settings.json: created holding only statusLine and the git-guard hook; a second run changes nothing
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
-                self.assertEqual(json.loads(settings.read_text()), {"statusLine": want})
+                self.assertEqual(json.loads(settings.read_text()), {"statusLine": want, "hooks": {"PreToolUse": [guard]}})
             # other keys and no statusLine: added, every other key kept
             settings.write_text(json.dumps({"model": "opus", "hooks": {"Stop": [{"x": 1}]}}))
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
                 self.assertEqual(json.loads(settings.read_text()),
-                                 {"model": "opus", "hooks": {"Stop": [{"x": 1}]}, "statusLine": want})
-            # an existing statusLine, or invalid JSON: byte-for-byte unchanged
-            for text in ('{"statusLine": {"type": "command", "command": "mine"},  "a": 1}\n', "{not json"):
+                                 {"model": "opus", "hooks": {"Stop": [{"x": 1}], "PreToolUse": [guard]}, "statusLine": want})
+            # an existing statusLine and git-guard hook, or invalid JSON or a non-object: byte-for-byte unchanged
+            mine = '{"statusLine": {"type": "command", "command": "mine"},  "a": 1, "hooks": {"PreToolUse": ' \
+                   '[{"matcher": "Bash", "hooks": [{"type": "command", "command": "my git-guard"}]}]}}\n'
+            for text in (mine, "{not json", "[1, 2]\n"):
                 settings.write_text(text)
                 result = self.run_install(home)
                 self.assertEqual(result.returncode, 0)
                 self.assertEqual(settings.read_text(), text)
-                if text == "{not json":
+                if text != mine:
                     self.assertIn("settings.json", result.stderr)
             self.assertEqual(sorted(p.name for p in home.iterdir() if p.name.startswith("settings")), ["settings.json"])
+
+    def test_install_registers_git_guard_hook_once(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "my home" / ".claude"
+            home.mkdir(parents=True)
+            settings = home / "settings.json"
+            inline = {"matcher": "Bash", "hooks": [{"type": "command", "command": "block-reset.sh"}]}
+            settings.write_text(json.dumps({"model": "opus", "statusLine": {"command": "mine"},
+                                            "hooks": {"Stop": [{"x": 1}], "PreToolUse": [inline]}, "z": 2}))
+            for _ in range(2):
+                self.assertEqual(self.run_install(home).returncode, 0)
+            got = json.loads(settings.read_text())
+            self.assertEqual(list(got), ["model", "statusLine", "hooks", "z"])
+            self.assertEqual(list(got["hooks"]), ["Stop", "PreToolUse"])
+            self.assertEqual(got["hooks"]["Stop"], [{"x": 1}])
+            board = f"{t}/my home/.claude/skills/trevskills-scrum/board.py"
+            self.assertEqual(got["hooks"]["PreToolUse"], [inline, {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "python3 '" + board + "' git-guard", "timeout": 5}]}])
+            self.assertEqual(shlex.split(got["hooks"]["PreToolUse"][1]["hooks"][0]["command"]), ["python3", board, "git-guard"])
 
     def test_install_quotes_status_line_path_with_spaces(self):
         with tempfile.TemporaryDirectory() as t:
