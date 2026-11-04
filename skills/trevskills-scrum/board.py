@@ -314,6 +314,7 @@ def live(board, job_id, unpause=False):
 
 
 def slug(title):
+    title = re.sub(r"\[screenshot:[^\]]*\]", " ", title, flags=re.I)  # the path would become the id
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].strip("-") or "job"
 
 

@@ -91,6 +91,19 @@ class BoardTest(unittest.TestCase):
     def test_new_with_symbol_only_title_gets_fallback_slug(self):
         self.assertEqual(board.cmd_new(self.root, "!!!"), "001-job")
 
+    def test_slug_strips_screenshot_tags(self):
+        self.assertEqual(board.slug("[screenshot: /Users/a/b.png] Fix the login button"), "fix-the-login-button")
+        self.assertEqual(board.slug("[screenshot: /a.png][screenshot: /b.png] Fix x"), "fix-x")
+
+    def test_new_with_only_screenshot_tags_gets_fallback_slug(self):
+        self.assertEqual(board.cmd_new(self.root, "[screenshot: /x/y.png]"), "001-job")
+
+    def test_new_slug_ignores_screenshot_tag(self):
+        title = "[screenshot: /x/y.png] Add rate limit"
+        jid = board.cmd_new(self.root, title)
+        self.assertTrue(jid.startswith("001-add-rate-limit"))
+        self.assertEqual(self.jobs()[0]["title"], title)
+
     def test_concurrent_new_jobs_get_unique_ids(self):
         procs = [subprocess.Popen([sys.executable, str(BOARD_PY), "--dir", str(self.root), "new", f"job {i}"],
                                   stdout=subprocess.PIPE, text=True) for i in range(8)]
