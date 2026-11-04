@@ -3992,7 +3992,7 @@ STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
-AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded", re.I)
+AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the E2E queue", re.I)
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the
