@@ -6583,13 +6583,22 @@ class ClaudePathsTest(unittest.TestCase):
             code = board.main(["--dir", str(self.root), "claude-paths", self.job])
         self.assertIn(code, (0, None))
         self.assertEqual(json.loads(out.getvalue()),
-                         {"paths": [".claude/skills/b/SKILL.md", ".claude/rules/c.md"], "headless": True})
+                         {"paths": [".claude/rules/c.md"], "headless": True})
 
     def test_ignores_worktrees_and_other_sections(self):
         self.spec.write_text("## Scope\n- `.claude/skills/x/SKILL.md`\n## Likely files\n- `.claude/worktrees/scrum-1/a.py`\n"
                              "- `~/.claude/scrum-map.md`\n- `skills/.claude/x`\n- .claude/no-backticks.md\n"
                              "## Assumptions\n- `.claude/rules/y.md`\n")
         self.assertEqual(self.paths(), [])
+
+    def test_skills_paths_are_not_claude_paths(self):
+        for path in (".claude/settings.json", ".claude/agents/a.md", ".claude/hooks/h.sh", ".claude/rules/c.md"):
+            self.assertTrue(board.is_claude_path(path), path)
+        for path in (".claude/skills/x/SKILL.md", ".claude/worktrees/scrum-1/a.py"):
+            self.assertFalse(board.is_claude_path(path), path)
+        self.spec.write_text("# Spec\n## Likely files\n- `.claude/skills/x/SKILL.md`\n")
+        with self.assertRaises(SystemExit):
+            board.claude_split(self.root, {"id": self.job, "title": "x"})
 
     def test_missing_spec_gives_empty(self):
         self.assertEqual(self.paths(), [])
@@ -6683,18 +6692,18 @@ class ClaudeBatchTest(unittest.TestCase):
         bid = self.batch()["batch"]
         other = board.cmd_new(self.root, "Another skill edit")
         (self.root / "jobs" / other / "spec.md").write_text(
-            "# B\n## Likely files\n- `.claude/skills/x/SKILL.md`\n## Claude edits\n- `.claude/skills/x/SKILL.md`: say Y\n")
+            "# B\n## Likely files\n- `.claude/rules/x.md`\n## Claude edits\n- `.claude/rules/x.md`: say Y\n")
         with mock.patch.object(board, "play") as play:
             out = self.batch(other)
         self.assertEqual(out, {"batch": bid, "only": True, "created": False})
         play.assert_not_called()
         feature = self.feature(bid)
         self.assertIn(f"## From {self.job}: Edit a skill\n", feature)
-        self.assertIn(f"## From {other}: Another skill edit\n- `.claude/skills/x/SKILL.md`: say Y\n", feature)
+        self.assertIn(f"## From {other}: Another skill edit\n- `.claude/rules/x.md`: say Y\n", feature)
         self.assertEqual([j["title"] for j in board.read_board(self.root)["jobs"]].count(board.TERMINAL_BATCH_TITLE), 1)
 
     def test_only_when_all_likely_files_are_claude(self):
-        self.spec.write_text("# A\n## Likely files\n- `.claude/rules/c.md`\n- `.claude/skills/b/SKILL.md`: x\n")
+        self.spec.write_text("# A\n## Likely files\n- `.claude/rules/c.md`\n- `.claude/rules/b.md`: x\n")
         self.assertIs(self.batch()["only"], True)
         other = board.cmd_new(self.root, "Mixed")
         (self.root / "jobs" / other / "spec.md").write_text(
@@ -6809,7 +6818,7 @@ class ClaudeMigrateTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "scrum"
         self.mixed = self.parked("Mixed job", "- `src/a.py`\n- `.claude/rules/c.md`\n")
-        self.only = self.parked("Only claude", "- `.claude/skills/x/SKILL.md`\n")
+        self.only = self.parked("Only claude", "- `.claude/rules/x.md`\n")
         self.other = board.cmd_new(self.root, "Unrelated")
         board.cmd_ask(self.root, self.other, "blocked: something else", ["Carry on=resume " + self.other,
                       "Remove=abort " + self.other], title="BUILDER_BLOCKED")
@@ -6861,7 +6870,7 @@ class ClaudeMigrateTest(unittest.TestCase):
         self.assertEqual(self.job(bid)["stage"], "needs-human")
         feature = (self.root / "jobs" / bid / "feature.md").read_text()
         self.assertIn(f"## From {self.mixed}: Mixed job\n- `.claude/rules/c.md`\n", feature)
-        self.assertIn(f"## From {self.only}: Only claude\n- `.claude/skills/x/SKILL.md`\n", feature)
+        self.assertIn(f"## From {self.only}: Only claude\n- `.claude/rules/x.md`\n", feature)
         self.assertIn(f"`{bid}`", (self.root / "jobs" / self.mixed / "spec.md").read_text())
 
     def test_dry_run_writes_nothing(self):

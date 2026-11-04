@@ -4065,7 +4065,7 @@ def caller_headless() -> bool:
 
 
 def cmd_claude_paths(root, job_id: str) -> dict:
-    """{"paths", "headless"}: spec.md's `## Likely files` backticked paths under `.claude/` (not `.claude/worktrees/`),
+    """{"paths", "headless"}: spec.md's `## Likely files` backticked paths under `.claude/` (not `.claude/worktrees/` or `.claude/skills/`),
     in file order, [] for a missing spec or section; headless from caller_headless (lanes/newjob.md step 3c)."""
     try:
         text = (Path(root) / "jobs" / check_id(job_id) / "spec.md").read_text(encoding="utf-8", errors="replace")
@@ -4080,7 +4080,8 @@ def likely_backticked(spec: str) -> list[str]:
 
 
 def is_claude_path(path: str) -> bool:
-    return path.startswith(".claude/") and not path.startswith(".claude/worktrees/")
+    # .claude/skills/** is allowed in settings.json, so a headless builder edits it like any file.
+    return path.startswith(".claude/") and not path.startswith((".claude/worktrees/", ".claude/skills/"))
 
 
 TERMINAL_BATCH_TITLE = "Terminal batch: project .claude edits"
