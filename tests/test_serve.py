@@ -7911,6 +7911,28 @@ class ParkedParentTest(unittest.TestCase):
         parent = self.jobs()["054-run-all"]
         self.assertEqual((parent["stage"], parent.get("reason")), ("done", None))
 
+    def test_setup_pending_bigboy_and_nested_runall_not_busy(self):
+        T = self.board.now()
+        def j(i, stage, **kw):
+            return {"id": i, "stage": stage, "reason": None, "updatedAt": T, **kw}
+        jobs = [j("296-run-all", "running", lane="runall", children=["301-big"]),
+                j("301-big", "running", lane="bigboy", parent="296-run-all", children=["300-a", "314-b", "315-c"]),
+                j("300-a", "done", parent="301-big"),
+                j("314-b", "waiting", parent="301-big", setup="pending"),
+                j("315-c", "waiting", parent="301-big", depends_on=["314-b"])]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        by_id = self.jobs()
+        no = lambda: (lambda job: False)
+        with mock.patch.object(self.serve, "running", return_value=False):
+            self.assertTrue(self.board.parked_bigboy(by_id["301-big"], by_id, set(), self.root))
+            self.assertTrue(self.serve.parked_tree("p", self.root, by_id["296-run-all"], by_id, no))
+            self.assertFalse(self.serve.board_busy("p", self.root, list(by_id.values()), by_id, no))
+            by_id["315-c"]["depends_on"] = ["300-a"]  # claimable now: busy again
+            self.assertTrue(self.serve.board_busy("p", self.root, list(by_id.values()), by_id, no))
+        with mock.patch.object(self.serve, "running", return_value=False):
+            by_id = self.jobs()
+            self.assertFalse(self.serve.parked_tree("p", self.root, by_id["296-run-all"], by_id, lambda: (lambda job: True)))
+
     def test_agent_types_child_auto_resumed(self):
         self.write([("060-a", "done", None), ("074-b", "build", None)])
         self.board.cmd_ask(self.root, "074-b", "scrum-debugger, scrum-builder are not loaded as agent types in this "
