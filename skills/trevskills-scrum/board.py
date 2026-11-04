@@ -78,6 +78,11 @@
   board.py review-plan <id> [--incremental]  SKILL.md Review step 2 minus the Jev gate: incremental re-review (only with
                                    --incremental) or full review, write round-N's carried-forward or UI/UX and security
                                    skip files, print {"spawn","since"} (since null = full review)
+  board.py e2e-specs <id> | --worktree <dir> --base <ref> --project <file>  print {"mode","command","specs",
+                                   "uncovered","trigger"}: the E2E specs the diff's UI files map to (full, scoped or none;
+                                   lanes/newjob.md Check gate step 2)
+  board.py check-reuse <id>        print {"reused"}: copy round-(n-1)'s CHECK: PASS into round-n/check.md when HEAD equals
+                                   round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
@@ -137,7 +142,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1802,10 +1807,15 @@ def ui_globs(root):
         text = (Path(root) / "project.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    return _project_list(text, "UI globs") or None
+
+
+def _project_list(text, label):
+    """The entries of project.md's `- <label>:` line; None when there is no such line, [] when it is empty or `none`."""
     for line in text.splitlines():
-        if m := re.match(r"^\s*-\s*UI globs:(.*)$", line):
+        if m := re.match(rf"^\s*-\s*{re.escape(label)}:(.*)$", line):
             globs = [g.strip("`") for g in m[1].split() if g.strip("`")]
-            return None if not globs or globs == ["none"] else globs
+            return [] if globs == ["none"] else globs
     return None
 
 
@@ -1871,6 +1881,211 @@ def _incremental_since(prev, wt, base):
     return since, verdicts
 
 
+def _rework_roles(prev):
+    """Roles named on a `fix-now` line of prev/decision.md when that decision is REWORK; else empty."""
+    if first_word(prev / "decision.md", ("REWORK",)) != "REWORK":
+        return set()
+    text = (prev / "decision.md").read_text(encoding="utf-8", errors="replace")
+    return {r.lower() for line in text.splitlines() if "fix-now" in line.lower()
+            for r in re.findall(r"\b(security|ux|ui|code)\b", line, re.I)}
+
+
+def _unrendered_roles(root, jobdir, n, wt, base):
+    """{"ui", "ux"} minus each role that rendered (a `^Rendered:` line) in an earlier round at the current HEAD; empty
+    when the diff hits no UI globs. The approver only accepts a same-HEAD render, so an older one is never carried."""
+    globs, files = ui_globs(root), _names(wt, f"{base}...HEAD")
+    if not globs or files is None or not any(glob_match(f, globs) for f in files):
+        return set()
+    try:
+        head = _git(wt, "rev-parse", "HEAD").decode().strip()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return {"ui", "ux"}
+    out = {"ui", "ux"}
+    for k in range(1, n):
+        d = jobdir / f"round-{k}"
+        try:
+            if (d / "head.txt").read_text(encoding="utf-8", errors="replace").strip() != head:
+                continue
+            out -= {r for r in ("ui", "ux") if (d / f"review-{r}.md").is_file() and re.search(
+                r"^Rendered:", (d / f"review-{r}.md").read_text(encoding="utf-8", errors="replace"), re.M)}
+        except OSError:
+            continue
+    return out
+
+
+# --- e2e-specs: the Check gate's and trevskills-e2e's route-to-spec mapping, so a job runs only the specs its diff needs.
+RUNTIME_EXCLUDE_RE = re.compile(r"(^|/)(__tests__|e2e|tests?|docs?)/|\.(test|spec)\.[cm]?[jt]sx?$|\.(md|mdx|txt)$")  # newjob.md
+E2E_FULL_DEFAULT = ["src/app/layout.tsx", "app/layout.tsx", "src/app/globals.css", "app/globals.css",
+                    "src/middleware.ts", "middleware.ts", "src/proxy.ts", "proxy.ts", "playwright.config.ts",
+                    "playwright.config.js"]
+APP_ROUTE_FILE_RE = re.compile(r"(^|/)(page|layout|template|loading|error|not-found|default)\.[^/]*$")
+SOURCE_RE = re.compile(r"\.([cm]?[jt]sx?|vue|svelte|astro)$")
+IMPORT_RE = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]""")
+# One shell word: quoted runs, a $( ... ) with one level of nested parens, or plain characters.
+SHELL_WORD = r"""(?:'[^']*'|"[^"]*"|\$\((?:'[^']*'|"[^"]*"|\([^()]*\)|[^()'"])*\)|[^\s'"])+"""
+ENV_PREFIX_RE = re.compile(rf"^(?:\s*[A-Za-z_][A-Za-z0-9_]*={SHELL_WORD})*")
+
+
+def _route_of(path):
+    """(route, prefix) for a file under an `app/` or `pages/` directory, else None. app/: the directory's route without
+    (group) and @slot segments, and a layout.* covers its route as a prefix; pages/: the path, index -> its parent."""
+    parts = path.split("/")
+    if "app" in parts[:-1]:
+        segs = [s for s in parts[parts.index("app") + 1:-1] if not (s.startswith("(") and s.endswith(")"))
+                and not s.startswith("@")]
+        return "/" + "/".join(segs), parts[-1].split(".")[0] == "layout"
+    if "pages" in parts[:-1]:
+        segs = parts[parts.index("pages") + 1:]
+        segs[-1] = segs[-1].split(".")[0]
+        if segs[-1] == "index":
+            segs.pop()
+        return "/" + "/".join(segs), False
+    return None
+
+
+def _route_re(route, prefix):
+    """A route as it appears in a spec string literal; a [param] segment matches any one segment."""
+    body = "".join("/" + (r"[^/'\"`?#]+" if s.startswith("[") else re.escape(s)) for s in route.split("/") if s)
+    end = r"(?=['\"`?#])"
+    if prefix:
+        return re.compile(rf"['\"`]{body}(?:/[^'\"`?#\s]*)?{end}" if body else rf"['\"`]/[^'\"`?#\s]*{end}")
+    return re.compile(rf"['\"`]{body or '/'}/?{end}")
+
+
+def _e2e_dir(wt):
+    """testDir from playwright.config.*, else e2e/, else tests/ (repo-relative, no trailing slash)."""
+    for cfg in sorted(wt.glob("playwright.config.*")):
+        if m := re.search(r"""testDir\s*:\s*['"`]([^'"`]+)""", cfg.read_text(encoding="utf-8", errors="replace")):
+            return m[1].strip().removeprefix("./").rstrip("/")
+    return "e2e" if (wt / "e2e").is_dir() else "tests"
+
+
+def _import_index(sources):
+    """{last segment of an import specifier: files importing it} over the tracked source files."""
+    index = {}
+    for f, text in sources.items():
+        for spec in IMPORT_RE.findall(text):
+            index.setdefault(spec.rstrip("/").rsplit("/", 1)[-1], set()).add(f)
+    return index
+
+
+def _importers(index, path):
+    """Files with an import specifier ending in path's basename (its directory for index.*)."""
+    p = Path(path)
+    names = {p.parent.name} if p.stem == "index" else {p.name, p.stem}
+    return sorted(set().union(*(index.get(n, set()) for n in names)) - {path})
+
+
+def _e2e_command(cmd, specs):
+    """The E2E command narrowed to specs: after `--` for npm run, appended for playwright test, else
+    `npx playwright test` keeping the leading NAME=value tokens."""
+    args = " ".join(shlex.quote(s) for s in specs)
+    if re.search(r"\bnpm run\b", cmd):
+        return f"{cmd} -- {args}"
+    if re.search(r"\bplaywright test\b", cmd):
+        return f"{cmd} {args}"
+    env = ENV_PREFIX_RE.match(cmd)[0].strip()
+    return f"{env} npx playwright test {args}".lstrip()
+
+
+def e2e_specs(wt, base: str, project_file) -> dict:
+    """{"mode", "command", "specs", "uncovered", "trigger"} for the diff base...HEAD in wt (lanes/newjob.md Check gate
+    step 2). full: a diff file matches `- E2E full globs:` (default E2E_FULL_DEFAULT; `none` = never); scoped: the specs
+    whose string literals name a route a changed UI runtime file renders; none: no spec covers it. An unreadable diff
+    runs the full suite (the safe direction)."""
+    if base.startswith("-"):
+        raise SystemExit(f"base {base!r} starts with '-'")
+    wt = Path(wt)
+    try:
+        text = Path(project_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise SystemExit(f"cannot read {project_file}")
+    m = re.search(r"^\s*-\s*E2E:(.*)$", text, re.M)
+    cmd = m[1].strip() if m and m[1].strip().lower() not in ("", "none") else None
+    full = _project_list(text, "E2E full globs")
+    full = E2E_FULL_DEFAULT if full is None else full
+    out = {"mode": "none", "command": None, "specs": [], "uncovered": [], "trigger": None}
+    files = _names(wt, f"{base}...HEAD")
+    if files is None or (full and (hit := next((f for f in sorted(files) if glob_match(f, full)), None))):
+        return {**out, "mode": "full", "command": cmd, "trigger": hit if files is not None else "diff unreadable"}
+    globs = _project_list(text, "UI globs") or []
+    ui = sorted(f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs))
+    if not ui:
+        return out
+    tdir = _e2e_dir(wt)
+    spec_text = {}
+    if (wt / tdir).is_dir():
+        for p in sorted((wt / tdir).rglob("*")):
+            if p.is_file() and "node_modules" not in p.parts and re.search(r"\.(spec|test)\.", p.name):
+                spec_text[p.relative_to(wt).as_posix()] = p.read_text(encoding="utf-8", errors="replace")
+    try:
+        tracked = _git(wt, "ls-files").decode(errors="replace").splitlines()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        tracked = []
+    sources = {}
+    for f in tracked:
+        if SOURCE_RE.search(f) and not RUNTIME_EXCLUDE_RE.search(f) and "node_modules/" not in f:
+            try:
+                sources[f] = (wt / f).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    index, specs = _import_index(sources), set()
+    for f in ui:
+        routes, seen, todo = set(), {f}, [f]
+        while todo:  # follow importers until they reach route files
+            g = todo.pop()
+            if (r := _route_of(g)) is not None:
+                routes.add(r)
+                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
+                    continue  # a route file; a colocated app/ module also maps through its importers
+            for imp in _importers(index, g):
+                if imp not in seen:
+                    seen.add(imp)
+                    todo.append(imp)
+        hits = {s for s, body in spec_text.items() for r in routes if _route_re(*r).search(body)}
+        if not hits:
+            out["uncovered"].append(f)
+        specs |= hits
+    if specs:
+        out.update(mode="scoped", specs=sorted(specs), command=_e2e_command(cmd, sorted(specs)) if cmd else None)
+    return out
+
+
+def cmd_e2e_specs(root, job_id) -> dict:
+    """e2e_specs for the job's worktree and base with root/project.md."""
+    job = find(read_board(root), check_id(job_id))
+    if not job.get("worktree") or not job.get("base"):
+        raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
+    return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md")
+
+
+def cmd_check_reuse(root, job_id) -> dict:
+    """{"reused": n-1} after writing round-n/check.md from round-(n-1)'s when that round passed at the worktree's current
+    HEAD (round-(n-1)/head.txt); else {"reused": None} and nothing written (Check gate step 1)."""
+    job = find(read_board(root), check_id(job_id))
+    try:
+        n = int(job.get("round") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    d = Path(root) / "jobs" / job_id
+    prev = d / f"round-{n - 1}"
+    if n < 2 or not job.get("worktree"):
+        return {"reused": None}
+    try:
+        head = (prev / "head.txt").read_text(encoding="utf-8").strip()
+        lines = (prev / "check.md").read_text(encoding="utf-8").splitlines()
+        now = _git(job["worktree"], "rev-parse", "HEAD").decode().strip()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return {"reused": None}
+    if not head or head != now or not lines or lines[0].strip() != "CHECK: PASS":
+        return {"reused": None}
+    body = [l for l in lines[1:] if not l.startswith("Check: reused")]
+    (d / f"round-{n}").mkdir(parents=True, exist_ok=True)
+    (d / f"round-{n}" / "check.md").write_text(
+        "\n".join(["CHECK: PASS", f"Check: reused from round {n - 1}, HEAD unchanged", *body]) + "\n", encoding="utf-8")
+    return {"reused": n - 1}
+
+
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
     (incremental) or UI/UX (no UI file) and security skip files (full); never writes
@@ -1890,11 +2105,12 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         and not base.startswith("-") else None
     if inc:
         since, verdicts = inc
+        extra = _rework_roles(rd.parent / f"round-{n - 1}") | _unrendered_roles(root, rd.parent, n, wt, base)
+        spawn = [r for r in REVIEWERS if verdicts[r] == "CHANGES" or r in extra]
         rd.mkdir(parents=True, exist_ok=True)
         for r in REVIEWERS:
-            if verdicts[r] == "PASS":
+            if r not in spawn:
                 (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
-        spawn = [r for r in REVIEWERS if verdicts[r] == "CHANGES"]
         _drop_stale(rd, spawn)
         return {"spawn": spawn, "since": since}
     spawn = list(REVIEWERS)
@@ -4622,6 +4838,12 @@ def main(argv=None):
     rp = sub.add_parser("review-plan")
     rp.add_argument("id")
     rp.add_argument("--incremental", action="store_true")
+    es = sub.add_parser("e2e-specs")
+    es.add_argument("id", nargs="?")
+    es.add_argument("--worktree")
+    es.add_argument("--base")
+    es.add_argument("--project")
+    sub.add_parser("check-reuse").add_argument("id")
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
@@ -4748,6 +4970,15 @@ def main(argv=None):
         print(json.dumps(cmd_chain_unlock(a.dir, a.id, a.holder)))
     elif a.cmd == "review-plan":
         print(json.dumps(cmd_review_plan(a.dir, a.id, a.incremental)))
+    elif a.cmd == "e2e-specs":
+        if a.id:
+            print(json.dumps(cmd_e2e_specs(a.dir, a.id)))
+        elif a.worktree and a.base and a.project:
+            print(json.dumps(e2e_specs(a.worktree, a.base, a.project)))
+        else:
+            raise SystemExit("e2e-specs needs <id>, or --worktree, --base and --project")
+    elif a.cmd == "check-reuse":
+        print(json.dumps(cmd_check_reuse(a.dir, a.id)))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "prod-ok":
