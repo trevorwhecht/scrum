@@ -979,7 +979,15 @@ class ContractTest(unittest.TestCase):
             bash = next(l for l in text.splitlines() if "Bash is read-only, with one exception" in l)
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents] + [SKILL_DIR / "lanes" / "newjob.md"]:
-            self.assertLessEqual(len(path.read_text()), 21900, path.name)
+            self.assertLessEqual(len(path.read_text()), 22200, path.name)
+
+    def test_check_gate_dev_migrate(self):
+        newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
+        merge = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        self.assertIn("**Dev migrate (Check gate)**", newjob)
+        sec = merge.split("## Dev migrate (Check gate)")[1].split("\n## ")[0]
+        for phrase in ("Steps 0-7 only", "never Step 8", "needs migration: <spec>", "not a **Cloud lane** session"):
+            self.assertIn(phrase, sec)
 
     def test_review_agents_base_render_before_additive(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
