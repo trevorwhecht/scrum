@@ -17,6 +17,7 @@ Don't run tests during a review. The sandbox is read-only and blocks temp direct
 6. A claim that the change breaks other code names that code (file and symbol), not a guess that something might break.
 7. It isn't clearly an intentional change of behaviour.
 8. Fixing it doesn't demand more rigour than the rest of the codebase shows.
+9. It isn't a `prisma/schema.prisma` change with no migration file: the migration is generated at merge.
 
 ### How to write each finding
 - Open with the scenario or input that triggers it, then say why it is a bug.

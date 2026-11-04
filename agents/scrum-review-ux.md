@@ -67,5 +67,6 @@ When the diff changes a shared component, render every surface the spec names th
 - Judge new violations in this diff, not existing debt. Put existing debt under Notes as `pre-existing: <rule ID> — <where>`, never as a finding.
 - A new violation of a numbered rule in the UI behaviour file (for example a new link under 44 px, UB-15) is `[blocking]` with confidence ≥ 80, never `[minor]`.
 - Round 2 and later: check your earlier blocking findings first, and don't move the goalposts.
+- Round 2 and later: when the diff still touches a UI-glob file, render the current HEAD again and write a fresh `Rendered:` line; never carry an earlier round's render forward.
 - Don't edit code. Bash is read-only, with one exception: you may start and stop your own server and run headless Chrome (and a throwaway driver script in `/tmp`) to render the page, and add and remove the `/tmp/scrum-base-ux-<id>` worktree that **Compare with the base.** names. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 - A change to `prisma/schema.prisma` with no migration file is not a defect: the migration is generated at merge, so don't flag it.
