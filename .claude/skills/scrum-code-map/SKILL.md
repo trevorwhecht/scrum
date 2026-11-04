@@ -13,7 +13,8 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `pace_cap(...)` always returns None (job 282) and is kept only for continue.py; `usage_allowance(usage, now, live)` is the usage gate for automated claims.
 - `machine_ok(path, manual=False, claim=False)`: None when there is room, else the reason. Order: cool-down (`COOLING`, only when `claim` and not `manual`), free RAM, swap, free disk, CPU busy (skipped when `manual`; `MAX_CPU_BUSY_PCT`, the mean of the last 3 `top` samples the serve.py watchdog records via `record_cpu_sample`), CPU load (skipped when `manual`; `MAX_CPU_LOAD_PCT`, the 5-minute load average over `os.cpu_count()`), session ceiling. Gates new claims, resumes and auto-continue starts only; cool-down holds every automatic start of new work (claim=True: Run-all and BigBoy child claims via `cmd_ready`, `wake_waiting`, auto-continue, `/api/machine`; `manual=True` from Setup done and Play lets Trevor's clicks through), `window_tick` skips the bad-window digest while `cooling_down()`, and `next` (no index), `runall-start`, `cloud-claim` and `roadmap-next` check `cooling_down()` themselves.
 - `resume_blocker(root, job_id, live=())`: a `Blocker` (a str with `.ids`) when a sibling child holds overlapping files.
-- `session_alive_fn()`: the live-session check; tests mock it.
+- `session_alive_fn()`: the live-session check for every claude process, Terminal and pre-restart sessions included; tests mock it.
+- Watchdog state: `cmd_watchdog(root, alive=None)` flags a stall; `stalled(job)` reads both shapes (legacy needs-human reason `STALLED` = `stalled in `, new `STALL` = `stalled: ` with board `stalled` true); `RESUMABLE` lists the reason prefixes whose card offers Resume; `resume_first(jobs)` counts the paused and stalled jobs that hold new claims; `parked_bigboy(k, by_id, live, root)` is a running BigBoy with no live child session.
 - `cmd_ask(...)`: the only way a job becomes needs-human.
 - `cmd_abort(...)` calls `abort_job(root, job, requeue, reason)`.
 - `projects()`: registered repos that have a `scrum/` folder; `SCRUM_REGISTRY` overrides the registry path.
@@ -22,6 +23,8 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `Handler.route(project, root, rest, body)`: the dashboard POST API (`/attachments`, `/manual-checks`, `/backlog`, job actions). When you add or remove a job action, check which branch an unmatched action reaches.
 - `resume_refusal(project, root, job, manual=False)`: None or a `Refusal` (a str; `.blocker` set when a sibling blocks). It wraps the lilguy check, `board.machine_ok` and `board.resume_blocker`.
 - `rework_job(project, root, job_id, feedback)`, `abort_job(project, root, job_id, requeue, cascade=False)`, `auto_resume(project, root, jobs)`.
+- `running(project, job_id)` only sees sessions serve.py started (its `RUNS` table); a liveness test also checks `board.session_alive_fn()`, as `parked_tree` does.
+- `board_busy(project, root, jobs, by_id, alive)`: work in flight for auto-continue; it skips `finished_bigboy`, `parked_parent` and `parked_tree` parents.
 
 ## Tests
 - `tests/test_board.py` covers board.py; `tests/test_serve.py` covers serve.py (`AutoResumeTest` covers `auto_resume`).

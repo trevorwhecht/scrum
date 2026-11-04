@@ -33,6 +33,7 @@ For `cloud`, fill in the values from your prompt and the line above, start this 
 No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so it takes its rules from `~/.codex/AGENTS.md`. Keep `</dev/null`, or Codex waits on stdin. Run it only this once: never retry it, never run any other Codex command, and never spawn agents. The router call and `route.py record` are not Codex commands. Codex's read-only sandbox blocks local sockets, so a socket-binding test that errors or skips inside Codex is not a finding; check.md is the authority on test results.
 - **Confirm every Codex finding before keeping it.** Open the cited lines, check the trigger scenario is real, and drop anything you can't confirm.
 - Codex never reads spec.md: a Codex finding about a case the spec's `Out:` excludes, about a behaviour an acceptance criterion or `## Assumptions` line chooses, or that an open `scrum/backlog.md` item already covers, goes under Notes or `## Out of scope`, never `[blocking]`.
+- A spec line that only picks a mechanism or heuristic ("reuse the existing running() check", "one resume per tick") does not accept that mechanism's confirmed gap: map such a Codex finding by its severity below, unless the spec names that gap as accepted.
 - Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes.
 - Run Codex in every round, round 2 and later included.
 - Before you write `review-code.md`, wait for the background Codex command to exit or reach its 10-minute timeout. Finishing your own review first is never a skip reason, and "still running" is never a skip reason either.
@@ -72,5 +73,6 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - A finding that relies on a CLAUDE.md, AGENTS.md or rules-file rule must quote the rule.
 - `VERDICT: CHANGES` only when at least one finding is `[blocking]` with confidence ≥ 80. Taste goes in Notes.
 - Round 2 and later: check your earlier blocking findings first, and don't move the goalposts.
+- A ruling or choice recorded in build.md is the builder's claim, not a pass: judge it against the spec and the code like any other change, and never accept it because build.md records it.
 - Don't edit code. Bash is for read-only commands and running tests; the Codex step above is one exception, and it runs read-only; `route.py record`, which appends to `JOB_DIR/routing.log`, is the other. Never run `prisma migrate`, `prisma db push`, `git merge`, `git reset`, `git rebase`, or any push.
 - A change to `prisma/schema.prisma` with no migration file is not a defect: the migration is generated at merge, so don't flag it.
