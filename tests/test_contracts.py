@@ -986,6 +986,9 @@ class ContractTest(unittest.TestCase):
         merge = (SKILL_DIR / "lanes" / "merge.md").read_text()
         self.assertIn("**Dev migrate (Check gate)**", newjob)
         sec = merge.split("## Dev migrate (Check gate)")[1].split("\n## ")[0]
+        skill = (SKILL_DIR / "SKILL.md").read_text()
+        self.assertIn("dev-only **Dev migrate** (Steps 0-7, never Step 8/prod)", skill)
+        self.assertIn("Sub-agents never migrate", skill)
         for phrase in ("Steps 0-7 only", "never Step 8", "needs migration: <spec>", "not a **Cloud lane** session"):
             self.assertIn(phrase, sec)
 

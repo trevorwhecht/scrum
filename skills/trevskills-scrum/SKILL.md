@@ -42,7 +42,7 @@ This skill is a sanctioned exception to the global git rules: it may push its ow
 - never push `main`/`master`, except **Digest** (`serve.py --digest-auto`), which pushes its applied repo edits to origin's default branch under a lilguy board job and fast-forwards the main checkout
 - never `--auto` or `--admin`
 - when `scrum/project.md` sets `Base branch:`, never open a PR into, merge into, or push the remote default branch; every job targets that base branch instead. Promoting it to `main` is Trevor's own merge commit, never squash, and no scrum command does it
-- never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from the **Migrate** step (run by **Merge**'s schema guard). Trevor chose this: schema changes migrate and merge unattended once the pipeline passes. Sub-agents never migrate
+- never `prisma migrate` or `prisma db push` directly. The one way to migrate is invoking `/trevskills-migrate` (Skill tool), and only from the **Migrate** step (run by **Merge**'s schema guard) or the Check gate's dev-only **Dev migrate** (Steps 0-7, never Step 8/prod). Trevor chose this: schema changes migrate and merge unattended once the pipeline passes. Sub-agents never migrate
 
 Jev never removes a reviewer and never approves a merge.
 
