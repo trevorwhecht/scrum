@@ -7867,6 +7867,13 @@ class ProdOkTest(unittest.TestCase):
         self.write("- run: npm run backfill:x -- --limit=5 exit 0\n    ok\n",
                    "- run: npm run backfill:x -- --apply --limit=5 exit 0\n    ok\n")
         self.assertEqual(self.ok("npm run backfill:x:prod -- --limit=5 --apply"), "ok")
+        self.write(dry, apply)
+        self.assertEqual(self.ok("npm run backfill:x:prod -- --prod"), "ok", "--prod is the script's prod guard")
+        self.assertEqual(self.ok("npm run backfill:x:prod -- --apply --prod"), "ok")
+        self.write(dry)
+        self.assertIn(need_apply, self.refused("npm run backfill:x:prod -- --prod"), "message names the dev bullet")
+        self.write("- run: npm run backfill:x -- --prod exit 0\n", "- run: npm run backfill:x -- --apply --prod exit 0\n")
+        self.assertIn(need_dry, self.refused("npm run backfill:x:prod -- --prod"), "a dev record with --prod is not the dev run")
         self.assertIn("no dev script for report:live", self.refused("npm run report:live"))
 
     def test_cli_exit_codes(self):
