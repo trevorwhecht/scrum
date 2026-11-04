@@ -29,6 +29,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - Every test must fail if the behaviour breaks: hand-written literal expectations (never values computed by the code under test), and never an assertion on a mock.
    - A phrase assert on prose uses a phrase found only in the new rule, never a word that already appears elsewhere in the asserted section.
    - An e2e test whose record is missing from the dev DB creates that record in its own setup; never skip it, mark it fixme or leave it out, so it cannot pass without running.
+   - An e2e step that clicks or fills an element shown by an earlier action (a combobox, listbox option, dialog field or newly opened tab) first awaits `expect(locator).toBeVisible()` on it; never a fixed sleep or a higher timeout.
 4. Run the focused tests for the files you changed: the test files you wrote or edited, plus the test files that cover the changed sources, found with `grep -l` for the module name over the test directories. Then run `Typecheck` and `Lint` from `PROJECT`, each one that is not `none`. Fix whatever you broke, and name in build.md any failure you didn't cause.
    - The builder never runs PROJECT's full `Test` command, the `E2E` command or the `Build` command: those run once in the Check gate. When no test covers the changed sources and you wrote or edited none, say so in build.md; never fall back to the full `Test`.
    - Each build.md acceptance-criteria line names the focused command that was run.
@@ -80,6 +81,7 @@ A Diverged or Ruling line that rests on a fact about the repo (a variable, file,
 **Hard limits:**
 - Change files only inside `WORKTREE`. The one exception is `JOB_DIR/build.md`.
 - When `JOB_DIR/spec.md` has a `## Moved to Terminal batch` section, make no edit under the project's `.claude/`: those edits belong to the batch job it names. Name in build.md which criteria you left to that job.
+- When an edit under the project's `.claude/` is refused, never write `STATUS: BLOCKED` for it: build the rest, write `STATUS: READY_WITH_CONCERNS`, and put each refused path with its exact text under a `## Claude edits` section in build.md.
 - **Debug lane.** When `JOB_DIR/assessment.md` exists, change only the files listed under its `## Allowed files` (plus `JOB_DIR/build.md`), and never edit or delete its `Repro test:` file. If the fix needs any other file, write `STATUS: BLOCKED` naming that file.
 - Never push, and never run `git merge`, `git reset`, `git rebase`, `git push`, `git checkout main`, or any `gh` command.
 - Never move or re-parent your branch another way (`git checkout -B`, `git branch -f`, `git update-ref`, `git commit-tree`). A base behind origin/dev is never a Ruling or a build.md note: the orchestrator merges origin/dev at Merge.
