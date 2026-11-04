@@ -5622,6 +5622,204 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), {"spawn": ["code"], "since": None})
         self.assertEqual((self.root / "board.json").read_bytes(), before)
 
+    # --- job 613: a reused check spawns only what is needed ---
+    RENDERED = "VERDICT: PASS\nRendered: yes — price row visible\n"
+
+    def ui_round_one(self, ui=RENDERED, ux=RENDERED, code="PASS"):
+        """Round 1 reviewed a web/page.html change at HEAD; sets round=2 with HEAD unchanged."""
+        sha = self.commit("web/page.html", "<p>new</p>\n")
+        d = self.rdir(1)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "head.txt").write_text(sha + "\n")
+        for role, text in (("security", "VERDICT: PASS\n"), ("ux", ux), ("ui", ui), ("code", f"VERDICT: {code}\n")):
+            (d / f"review-{role}.md").write_text(text)
+        board.cmd_set(self.root, self.job, ["round=2"])
+        return sha
+
+    def test_review_plan_rework_fix_now_spawns_named_role(self):
+        since = self.ui_round_one()
+        (self.rdir(1) / "decision.md").write_text(
+            "REWORK\n## Rulings\n- fix-now — the UX reviewer must check the tab order of the price row\n"
+            "- accept — the copy is fine\n")
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["ux"], "since": since})  # ui rendered at this HEAD: carried
+        self.assertEqual(self.read(2, "ui"), self.CARRIED)
+        (self.rdir(1) / "review-ui.md").write_text("VERDICT: PASS\nlooks fine\n")  # no render at this HEAD
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["ux", "ui"], "since": since})
+
+    def test_review_plan_carries_ui_with_same_head_render(self):
+        since = self.ui_round_one(code="CHANGES")
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["code"], "since": since})
+        self.assertEqual(self.read(2, "ui"), self.CARRIED)
+        self.assertEqual(self.read(2, "ux"), self.CARRIED)
+
+    def test_review_plan_spawns_ui_when_render_was_at_another_head(self):
+        since = self.ui_round_one(code="CHANGES")
+        self.commit("web/page.html", "<p>newer</p>\n")  # the fix moved HEAD; round 1 rendered the old one
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["ux", "ui", "code"], "since": since})
+        self.assertEqual(self.files(2), ["review-security.md"])
+
+
+E2E_CMD = ("E2E_PORT=$(python3 -c 'import socket;s=socket.socket();s.bind((\"\",0));print(s.getsockname()[1])') "
+           "npm run test:e2e")
+
+
+class E2eSpecsTest(unittest.TestCase):
+    """board.py e2e-specs: the diff's UI files mapped to the E2E specs that cover their routes (job 613)."""
+
+    FILES = {
+        "src/app/(pages)/pricing/page.tsx": "import Price from '@/components/Price'\nexport default () => <Price />\n",
+        "src/components/Price.tsx": "export default function Price() { return <b>9</b> }\n",
+        "src/components/Orphan.tsx": "export const Orphan = () => null\n",
+        "src/app/order/[id]/page.tsx": "export default () => <p>order</p>\n",
+        "src/app/layout.tsx": "export default ({ children }) => children\n",
+        "playwright.config.ts": "export default { testDir: './e2e' }\n",
+        "e2e/pricing.spec.ts": "test('price', async ({ page }) => { await page.goto('/pricing') })\n",
+        "e2e/order.spec.ts": "test('order', async ({ page }) => { await page.goto(`/order/${id}`) })\n",
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        for rel, text in self.FILES.items():
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text(text)
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "job")
+        self.project()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                       capture_output=True)
+
+    def project(self, extra=""):
+        self.pfile = Path(self.tmp.name) / "project.md"
+        self.pfile.write_text(f"# Project\n- E2E: {E2E_CMD}\n- UI globs: *.tsx *.css src/components/ src/app/\n{extra}")
+
+    def change(self, rel):
+        p = self.repo / rel
+        p.write_text(p.read_text() + "// changed\n")
+        self.git("commit", "-q", "-am", f"edit {rel}")
+        return board.e2e_specs(self.repo, "main", self.pfile)
+
+    def test_page_change_maps_to_its_spec(self):
+        self.assertEqual(self.change("src/app/(pages)/pricing/page.tsx"), {
+            "mode": "scoped", "command": E2E_CMD + " -- e2e/pricing.spec.ts", "specs": ["e2e/pricing.spec.ts"],
+            "uncovered": [], "trigger": None})
+
+    def test_component_maps_through_its_importer(self):
+        out = self.change("src/components/Price.tsx")
+        self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/pricing.spec.ts"], []))
+
+    def test_param_route_matches_template_literal(self):
+        out = self.change("src/app/order/[id]/page.tsx")
+        self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/order.spec.ts"], []))
+
+    def test_root_layout_runs_full_suite(self):
+        self.assertEqual(self.change("src/app/layout.tsx"), {
+            "mode": "full", "command": E2E_CMD, "specs": [], "uncovered": [], "trigger": "src/app/layout.tsx"})
+
+    def test_unimported_component_is_uncovered(self):
+        self.assertEqual(self.change("src/components/Orphan.tsx"), {
+            "mode": "none", "command": None, "specs": [], "uncovered": ["src/components/Orphan.tsx"], "trigger": None})
+
+    def test_full_globs_none_disables_full_trigger(self):
+        self.project("- E2E full globs: none\n")
+        out = self.change("src/app/layout.tsx")
+        self.assertEqual(out["mode"], "scoped")  # the root layout covers every route as a prefix
+        self.assertEqual(out["specs"], ["e2e/order.spec.ts", "e2e/pricing.spec.ts"])
+
+    def test_tests_only_diff_runs_nothing(self):
+        self.assertEqual(self.change("e2e/pricing.spec.ts"), {
+            "mode": "none", "command": None, "specs": [], "uncovered": [], "trigger": None})
+
+    def test_command_shapes(self):
+        self.assertEqual(board._e2e_command("npx playwright test --workers=1", ["e2e/a b.spec.ts"]),
+                         "npx playwright test --workers=1 'e2e/a b.spec.ts'")
+        self.assertEqual(board._e2e_command("FOO=1 BAR='x y' node run-e2e.js", ["e2e/a.spec.ts"]),
+                         "FOO=1 BAR='x y' npx playwright test e2e/a.spec.ts")
+
+    def test_cli_without_job(self):
+        (self.repo / "src/components/Price.tsx").write_text("export default () => <i>1</i>\n")
+        self.git("commit", "-q", "-am", "price")
+        r = run_board("--dir", self.tmp.name, "e2e-specs", "--worktree", str(self.repo), "--base", "main",
+                      "--project", str(self.pfile))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["specs"], ["e2e/pricing.spec.ts"])
+        r = run_board("--dir", self.tmp.name, "e2e-specs", "--worktree", str(self.repo), "--base", "-x",
+                      "--project", str(self.pfile))
+        self.assertNotEqual(r.returncode, 0)
+
+
+class CheckReuseTest(unittest.TestCase):
+    """board.py check-reuse: a round at an unchanged HEAD reuses the previous round's CHECK: PASS (job 613)."""
+
+    BODY = "CHECK: PASS\nCheck: reused from round 0, HEAD unchanged\nTest: exit 0\n```\nOK\n```\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.repo, self.wt = base / "repo", base / "wt"
+        self.root = self.repo / "scrum"
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "no-projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.repo.mkdir()
+        (self.repo / "a.py").write_text("a = 1\n")
+        self.git(self.repo, "init", "-q", "-b", "main")
+        self.git(self.repo, "add", "a.py")
+        self.git(self.repo, "commit", "-q", "-m", "base")
+        self.job = board.cmd_new(self.root, "Reuse")
+        self.git(self.repo, "worktree", "add", "-q", "-b", f"scrum/{self.job}", str(self.wt))
+        board.cmd_set(self.root, self.job, [f"worktree={self.wt}", "base=main", "round=2", "stage=check"])
+        self.r1 = self.root / "jobs" / self.job / "round-1"
+        self.r1.mkdir(parents=True)
+        (self.r1 / "head.txt").write_text(self.git(self.wt, "rev-parse", "HEAD") + "\n")
+        (self.r1 / "check.md").write_text(self.BODY)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def r2(self):
+        return self.root / "jobs" / self.job / "round-2" / "check.md"
+
+    def test_reuses_pass_at_same_head(self):
+        r = run_board("--dir", str(self.root), "check-reuse", self.job)
+        self.assertEqual(json.loads(r.stdout), {"reused": 1})
+        self.assertEqual(self.r2().read_text(),
+                         "CHECK: PASS\nCheck: reused from round 1, HEAD unchanged\nTest: exit 0\n```\nOK\n```\n")
+
+    def test_moved_head_runs_the_check(self):
+        (self.wt / "a.py").write_text("a = 2\n")
+        self.git(self.wt, "commit", "-q", "-am", "fix")
+        self.assertEqual(board.cmd_check_reuse(self.root, self.job), {"reused": None})
+        self.assertFalse(self.r2().exists())
+
+    def test_failed_check_is_not_reused(self):
+        (self.r1 / "check.md").write_text("CHECK: FAIL\nTest: exit 1\n")
+        self.assertEqual(board.cmd_check_reuse(self.root, self.job), {"reused": None})
+        self.assertFalse(self.r2().exists())
+
+    def test_missing_head_is_not_reused(self):
+        (self.r1 / "head.txt").unlink()
+        self.assertEqual(board.cmd_check_reuse(self.root, self.job), {"reused": None})
+        self.assertFalse(self.r2().exists())
+
+    def test_round_one_is_never_reused(self):
+        board.cmd_set(self.root, self.job, ["round=1"])
+        self.assertEqual(board.cmd_check_reuse(self.root, self.job), {"reused": None})
 
 
 class MoveRatioTest(unittest.TestCase):
