@@ -63,7 +63,9 @@
                                    or first pass <0.5 over 3+ jobs) no digests/*/windows.txt lists, written after the
                                    newest digest folder ("bad window <file>"); reason null when not due
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
-                                   scorecard no live digest lists as windows.txt + windows.json, print {"id","jobs","windows"}
+                                   scorecard no live digest lists as windows.txt + windows.json, plus timing.md (per-job wall
+                                   time, rounds, no-change rounds, E2E lock waits; jobs waiting on the E2E queue),
+                                   print {"id","jobs","windows"}
                                    (id null = nothing new; starts with no jobs when the questions trigger fired); then a
                                    pipeline health check parks one "Pipeline health: <tool>" job at needs-human per tool
                                    (codex-review, review-e2e, check) that failed in half the claimed jobs (2+)
@@ -1219,6 +1221,10 @@ def cmd_digest_start(root):
         pipeline_health(root, digest_id, jobs)
     except (SystemExit, OSError) as e:
         print(f"digest-start: pipeline health: {e}", file=sys.stderr)
+    try:
+        write_timing(root, digest_id, jobs)
+    except (SystemExit, OSError) as e:
+        print(f"digest-start: timing: {e}", file=sys.stderr)
     return out
 
 
@@ -1450,6 +1456,86 @@ def pipeline_health(root, digest_id: str, jobs: list[str]) -> list[str]:
                 [f"Got it=abort {job_id}", f"Add a fix to the backlog=abort {job_id} --requeue"], title="DIGEST")
         created.append(job_id)
     return created
+
+
+# --- timing: digest-start writes digests/<NNN>/timing.md, the time each claimed job cost, for ## Time sinks ---
+E2E_WAIT_REASON = "waiting on the E2E queue"  # newjob.md Check gate step 2 stalls a job on it (serve.py E2E_WAIT)
+E2E_LOCK_RE = re.compile(r"\bexit 124\b")
+
+
+def _mins(secs):
+    """A duration as `1h05m` or `12m`, rounded to the minute; `-` for None."""
+    if secs is None:
+        return "-"
+    m = max(round(secs / 60), 0)
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
+def _mtime(p):
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _timing_row(root, job_id, job, stalls):
+    """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. Created is feature.md's
+    mtime (else spec.md's), done is the board updatedAt; each round's time runs from the previous round's last file
+    (round 1: spec.md) to its own last file."""
+    folder = Path(root) / "jobs" / job_id
+    created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
+    done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
+    wall = done - created if done and created else None
+    rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
+    times, heads, prev = [], [], spec_at or created
+    for n in rounds:
+        rd = folder / f"round-{n}"
+        end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
+        times.append(_mins(end - prev if end and prev else None))
+        prev = end or prev
+        try:
+            heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
+        except OSError:
+            heads.append("")
+    same = sum(1 for a, b in zip(heads, heads[1:]) if a and a == b)
+    waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
+    spec = spec_at - created if spec_at and created else None
+    cells = [job_id, _mins(wall), _mins(spec), str(len(rounds)), ", ".join(times) or "-", str(same), str(waits),
+             str(stalls.get(job_id, 0))]
+    return cells, wall, len(rounds), same, waits
+
+
+def write_timing(root, digest_id, jobs):
+    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, rounds, round times, no-change rounds = a
+    head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines),
+    totals, and every job on every registered board (and this one) now stalled waiting on the E2E queue."""
+    board = {j["id"]: j for j in read_board(root)["jobs"]}
+    stalls = {}
+    for q in _json_lines(Path(root) / "questions.log"):
+        if q.get("kind") == "stall" and isinstance(q.get("job"), str):
+            stalls[q["job"]] = stalls.get(q["job"], 0) + 1
+    rows = [_timing_row(root, j, board.get(j, {}), stalls) for j in jobs]
+    lines = [f"# Timing: digest {digest_id}", "",
+             "| Job | Wall | Spec | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
+             "|---|---|---|---|---|---|---|---|"]
+    lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
+    lines += ["", "## Totals",
+              f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
+              f" · no-change rounds {sum(r[3] for r in rows)} in {sum(1 for r in rows if r[3])} jobs"
+              f" · E2E lock waits {sum(r[4] for r in rows)} in {sum(1 for r in rows if r[4])} jobs"
+              f" · stalls {sum(stalls.get(j, 0) for j in jobs)}", "", "## Waiting on the E2E queue"]
+    waiting, t = [], time.time()
+    for scrum in dict.fromkeys([Path(root).resolve(), *((p / "scrum").resolve() for p in projects().values())]):
+        try:
+            other = read_board(scrum)
+        except SystemExit:
+            continue
+        for j in other["jobs"]:
+            at = _epoch(j.get("updatedAt"))
+            if stalled(j) and E2E_WAIT_REASON in str(j.get("reason") or "") and at:
+                waiting.append(f"- {scrum.parent.name}/{j['id']}: {_mins(t - at)}")
+    lines += waiting or ["None"]
+    (Path(root) / "digests" / digest_id / "timing.md").write_text("\n".join(lines) + "\n")
 
 
 # --- window-report: remembers each open usage window in windows/open.json (merge_limits drops closed ones) and, once
