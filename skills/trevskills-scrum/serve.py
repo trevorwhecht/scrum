@@ -1025,16 +1025,25 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
 
 
-def prune_worktrees(repo: Path, jobs: list[dict]) -> None:
-    """Delete node_modules and .next in the worktree of every done or aborted job, only under repo/.claude/worktrees/
-    (never a lilguy job's main checkout). Errors are ignored, and a symlinked folder is left in place."""
+def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None) -> None:
+    """Delete node_modules and .next in the worktree of every done or aborted job, and only .next (node_modules stays
+    so a resume is fast) for a parked job (needs-human, paused or stalled) with no live session. Only under
+    repo/.claude/worktrees/ (never a lilguy job's main checkout). Errors are ignored, and a symlinked folder is left
+    in place."""
     base = (repo / ".claude" / "worktrees").resolve()
     for job in jobs:
-        if job.get("stage") not in ("done", "aborted") or not job.get("worktree"):
+        if not job.get("worktree"):
+            continue
+        if job.get("stage") in ("done", "aborted"):
+            names = ("node_modules", ".next")
+        elif ((job.get("stage") == "needs-human" or job.get("paused") or board.stalled(job))
+              and not (project and running(project, job["id"]))):
+            names = (".next",)
+        else:
             continue
         wt = Path(job["worktree"]).resolve()
         if base in wt.parents and wt.is_dir():
-            for name in ("node_modules", ".next"):
+            for name in names:
                 shutil.rmtree(wt / name, ignore_errors=True)
 
 
@@ -1343,7 +1352,7 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
-            prune_worktrees(repo, jobs)
+            prune_worktrees(repo, jobs, project)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     try:
