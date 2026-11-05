@@ -1577,6 +1577,7 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, a, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_runall_ready_has_no_count_cap(self):
         parent, kids = self.runall(7)
         for i, k in enumerate(kids):
@@ -1790,6 +1791,7 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual(board.live_sessions(), 14)
                 self.assertEqual(board.machine_ok(self.tmp.name, claim=True), "14 sessions running (ceiling 14)")
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ram_room_reserves_young_sessions(self):
         """Two projects claiming within a minute both saw healthy free RAM: a session takes a while to grow into it."""
         ps = Path(self.tmp.name) / "ps.txt"
@@ -1804,7 +1806,7 @@ class BoardTest(unittest.TestCase):
 
     def test_ram_room(self):
         self.assertEqual(board.SESSION_RAM_PCT, 5)
-        for ram, room in (("66", 9), ("100", 14), ("26", 1), ("20", 1)):  # 100: the MAX_SESSIONS ceiling
+        for ram, room in (("66", 2), ("100", 2), ("26", 1), ("20", 1)):  # 66/100: the MAX_YOUNG_SESSIONS ramp
             with self.subTest(ram=ram), self.machine(ram, "1000"):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):
@@ -1917,14 +1919,14 @@ class BoardTest(unittest.TestCase):
 
     def test_cpu_load_pct(self):
         """2026-10-26: load 13.4 on 8 cores with busy at 51%; the 5-minute load average over the cores catches the
-        threads queued behind them."""
+        threads queued behind them. The 1-minute one, since the 5-minute read near 0 after sleep (2026-11-04)."""
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168.4"):
             self.assertEqual(board.cpu_load_pct(), 168.4)
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=""):
             with mock.patch.object(board.os, "getloadavg", return_value=(20.0, 12.0, 9.0)), \
                     mock.patch.object(board.os, "cpu_count", return_value=8):
-                self.assertEqual(board.cpu_load_pct(), 150.0, "the 5-minute value")
-            with mock.patch.object(board.os, "getloadavg", return_value=(1.0, 0.0, 2.0)), \
+                self.assertEqual(board.cpu_load_pct(), 250.0, "the 1-minute value")
+            with mock.patch.object(board.os, "getloadavg", return_value=(0.0, 1.0, 2.0)), \
                     mock.patch.object(board.os, "cpu_count", return_value=8):
                 self.assertEqual(board.cpu_load_pct(), 0.0, "a zero load is a reading")
             with mock.patch.object(board.os, "getloadavg", side_effect=OSError("no load")), \
@@ -2009,12 +2011,14 @@ class BoardTest(unittest.TestCase):
                 self.assertIsNone(board.swap_used_pct())
                 self.assertIsNone(board.machine_ok(self.tmp.name))
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ram_room_is_one_while_swap_fills(self):
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
             self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2: one claim per call")
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10"):
             self.assertEqual(board.ram_room(), 9)
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ram_room_floor_zero(self):
         """Job 624: serve.py's launch gate needs ram_room to say "no room"; floor=1 (the default) is unchanged."""
         ps = Path(self.tmp.name) / "ps.txt"
@@ -2058,6 +2062,7 @@ class BoardTest(unittest.TestCase):
             self.assertNotIn("queued_launch", job, job["id"])
             self.assertNotIn("play_queued", job, job["id"])
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ready_claims_only_up_to_ram_room(self):
         """The 2026-10-24 crash: one ready call claimed 7 children at once. Claims stop at the free RAM's room."""
         parent, kids = self.runall(7)
@@ -2069,6 +2074,7 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids[4:5])
         self.assertEqual(self.child(parent)["stage"], "running")
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ready_machine_guard_blocks_then_recovers(self):
         parent, (a, b, c) = self.runall(3)
         for i, k in enumerate((a, b, c)):
@@ -2111,6 +2117,7 @@ class BoardTest(unittest.TestCase):
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_bigboy_ready_unchanged_by_runall(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3), self.ticket(4),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
@@ -7867,7 +7874,8 @@ class ReadyUsageTest(unittest.TestCase):
         self.live(0)
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:1])
         self.usage.unlink()
-        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[1:], "no usage.json: no taper")
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[1:1 + board.MAX_YOUNG_SESSIONS],
+                         "no usage.json: no taper, only the young-session ramp")
 
     def test_ready_holds_parent_with_usage_reason(self):
         self.write_usage(96)
@@ -7878,7 +7886,7 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual((p["stage"], p["reason"]),
                          ("running", f"waiting: usage 5h 96% used, resets {at:%H:%M} (allowance 1, 1 live)"))
         self.write_usage(50)
-        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids)
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:board.MAX_YOUNG_SESSIONS])
         p = self.parent_job()
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
 
