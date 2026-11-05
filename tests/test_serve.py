@@ -2610,6 +2610,42 @@ class ServeTest(unittest.TestCase):
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args.args[2:], (job_id, "resume", f"/trevskills-scrum resume {job_id}"))
 
+    def test_reloaded_proc_poll_concurrent(self):
+        calls = []
+
+        def waitpid(pid, flags):  # reaps once (exit 3), slowly so the other poller arrives; then the child is gone
+            calls.append(pid)
+            if len(calls) > 1:
+                raise ChildProcessError
+            time.sleep(0.2)
+            return pid, 3 << 8
+        proc, seen = self.serve.ReloadedProc(4242), []
+        with mock.patch.object(self.serve.os, "waitpid", side_effect=waitpid):
+            threads = [threading.Thread(target=lambda: seen.append(proc.poll())) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(seen, [3, 3])
+        self.assertEqual(calls, [4242])
+
+    def test_reloaded_proc_known_returncode_skips_waitpid(self):
+        with mock.patch.object(self.serve.os, "waitpid") as waitpid:
+            self.assertEqual(self.serve.ReloadedProc(4242, 7).poll(), 7)
+        waitpid.assert_not_called()
+
+    def test_start_ready_passes_manual(self):
+        b = self.serve.board
+        parent, kid = (b.cmd_new(self.root, t) for t in ("Manual parent", "Manual kid"))
+        self.edit_job(parent, lane="runall", stage="running", children=[kid])
+        for manual in (True, False):
+            self.edit_job(kid, parent=parent, stage="waiting")
+            with mock.patch.object(self.serve, "spawn") as spawn:
+                args = {"manual": True} if manual else {}
+                self.assertEqual(self.serve.start_ready("repo", self.root, parent, **args)["ready"], [kid])
+            self.assertEqual([(c.args[2:], c.kwargs) for c in spawn.call_args_list],
+                             [((kid, "start", f"/trevskills-scrum start {kid}"), {"manual": manual})])
+
     def test_play_on_paused_parent_resumes_children_and_starts_ready(self):
         self.settle_board()
         b = self.serve.board

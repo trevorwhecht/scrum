@@ -68,7 +68,7 @@ Rules:
 - **Likely files** names every file the diff will change as a backticked repo-relative path, test files included.
 - **Claude edits.** When `## Likely files` names a project `.claude/` path, add a `## Claude edits` section with one bullet per such path: the path and the exact text to add or replace, so a later session can apply it without reading the job.
 - When the ticket names a rules-file section that has moved (its file now says `Read ... lanes/<file>.md`), list the file it moved to under `## Likely files` too.
-- For every line you reword, move or remove, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
+- For every line you add, reword, move or remove in an agent, lane or SKILL.md file, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
 - **Self-review before writing.** Re-read the spec for placeholders, contradictions and criteria that could be read two ways; pick one reading and record it under Assumptions.
 - **Check for work already built.** When the request may already be built, check earlier jobs (`scrum/jobs/*/spec.md`, `build.md`) and the commits (`git log $BASE`) first, and take the `OBSOLETE:` path if so, instead of re-deriving it.
 - **Do not restate `RULES_RE`.** Never re-explain the Merge agent-rules guard (`RULES_RE`) in a spec; CLAUDE.md says specs need not. Agent, SKILL.md and lane edits merge with no agent-rules stop (CLAUDE.md), so no Assumption works out which files are human-only or whether Merge's rules gate fires.

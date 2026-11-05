@@ -323,6 +323,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
+    def test_code_reviewer_codex_never_uses_timeout(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        self.assertIn("never prefix or wrap it with `timeout` or `gtimeout`", text)
+        line = next(l for l in text.splitlines() if "codex exec review --base" in l)
+        self.assertNotIn("timeout", line)
+        self.assertEqual(text.count("codex exec"), 1)
+
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ('"pre-existing"', "must name that code", "opens with the scenario", '"No findings"',
@@ -1350,9 +1357,11 @@ class ContractTest(unittest.TestCase):
                   "A criterion whose verify step starts `rendered by reviewers` is the one exception: do not "
                   "walk it, and write `rendered by reviewers` for it in build.md, never `NOT RUN`.")
         siblings = ("   - When you add a field, setting, enum value or code, grep for every list that names one "
-                    "of its siblings (allowlists, `select` clauses, serializers, switch cases, code lists, "
+                    "of its siblings (allowlists, `select` clauses, shared `include` constants like "
+                    "ORDER_DETAIL_INCLUDE, serializers, switch cases, code lists, "
                     "every route method that writes it) and add it to each, or cite in build.md why one is "
-                    "left out.")
+                    "left out. For a new endpoint or tab, test it once as every role that can open the "
+                    "screen (admin and employee), not only admin.")
         for line in (rmw, e2e, manual, siblings):
             self.assertEqual(text.count(line), 1, line)
         self.assertIn(b9 + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
@@ -2393,7 +2402,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(len(commands), (2, 3), span)
             for command in commands:
                 self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a 'Trevor always runs these in a Terminal window')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window')$")
             self.assertEqual(span.count("--recommend"), 1, span)
         text = self.rules()
         self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
@@ -2431,7 +2440,7 @@ class ContractTest(unittest.TestCase):
             key = words[words.index("--title") + 1]
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a 'Trevor always runs these in a Terminal window')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window')$")
         self.assertEqual(len(board.STOP_TITLES), 15)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
@@ -3352,7 +3361,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                       'as this job, and two automatic attempts to combine them failed." --kind conflict', merge)
         self.assertEqual(text.count("--kind "), 7)
         for line in text.splitlines():
-            if any(p in line for p in ("Hard stop: schema", "migrate stopped", "Hard stop: agent rules")):
+            if any(p in line for p in ("Hard stop: schema", "migrate stopped")):
                 self.assertNotIn("--kind", line, line[:80])
 
     def test_unblock_lane_covers_verdicts(self):
