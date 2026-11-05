@@ -9,7 +9,7 @@ def prop_rows(calls):
     if not node:
         raise unittest.SkipTest("node not on PATH")
     text = DASHBOARD.read_text()
-    lines = [l for l in text.splitlines() if l.startswith(("const esc = ", "const diffHtml = "))]
+    lines = [l for l in text.splitlines() if l.startswith(("const esc = ", "const diffHtml = ", "const shortPath = "))]
     start = text.index("const propRow = ")
     fn = text[start:text.index("\nfunction renderDigests(", start)]
     script = "\n".join(lines) + "\n" + fn + f"\nconsole.log(JSON.stringify({json.dumps(calls)}.map(a => propRow(...a))));"
@@ -56,7 +56,7 @@ class DigestLogTest(unittest.TestCase):
             with self.subTest(s):
                 self.assertTrue(h.startswith(f'<div class="prop" data-digest="004" data-pid="p{i}">'), h)
                 self.assertIn(f'<span class="id">p{i} <span class="chip ', h)
-                self.assertIn('<span class="path">/r/agents/scrum-x.md</span>', h)
+                self.assertIn('<span class="path" title="/r/agents/scrum-x.md">/r/agents/scrum-x.md</span>', h)
                 self.assertIn("Seen in 001-a &amp; 002-b.", h)
                 self.assertIn('<pre>old &lt;line&gt;</pre>', h)
                 self.assertIn('<pre>new line</pre>', h)
@@ -78,6 +78,33 @@ class DigestLogTest(unittest.TestCase):
             self.assertNotIn("undefined", h)
             self.assertNotIn('class="note">', h.split('<div class="diff">')[0])
         self.assertIn("<pre></pre>", html[8])  # a skill has an empty Old side
+
+    def test_prop_row_short_target_full_title(self):
+        base = {"id": "p1", "why": "w", "old": "a", "new": "b", "kind": "edit", "status": "applied"}
+        targets = ["/Users/trev/Developer/repos/app/agents/x.md", "/Users/trev/.claude/rules/y.md", "/home/ci/z.md",
+                   "agents/rel.md", ""]
+        html = prop_rows([["004", {**base, "target": t}] for t in targets])
+        self.assertIn('<span class="path" title="/Users/trev/Developer/repos/app/agents/x.md">app/agents/x.md</span>', html[0])
+        self.assertIn('<span class="path" title="/Users/trev/.claude/rules/y.md">~/.claude/rules/y.md</span>', html[1])
+        self.assertIn('<span class="path" title="/home/ci/z.md">~/z.md</span>', html[2])
+        self.assertIn('<span class="path" title="agents/rel.md">agents/rel.md</span>', html[3])
+        self.assertIn('<span class="path" title=""></span>', html[4])
+        self.assertIn('data-pid="p1"', html[0])
+
+    def test_load_error_clears_list(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        start = text.index("async function loadDigests()")
+        fn = text[start:text.index("\n}\n", start) + 2]
+        script = ('const els = {dgList: {innerHTML: \'<p class="empty">loading…</p>\'}, dgError: {textContent: ""}};'
+                  ' const $ = id => els[id], enc = encodeURIComponent, STALE = "stale", dgProject = () => "p";'
+                  ' let digestData = null, digestText = "", rendered = 0; const renderDigests = () => rendered++;'
+                  ' const getJson = async () => null;\n' + fn
+                  + '\nloadDigests().then(() => console.log(JSON.stringify([els.dgList.innerHTML, els.dgError.textContent, rendered])));')
+        got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(got, ["", "Couldn't load digests. Is serve.py running?", 0])
 
     def test_diff_colours_use_theme_vars(self):
         css = DASHBOARD.read_text().split("<style>")[1].split("</style>")[0]
