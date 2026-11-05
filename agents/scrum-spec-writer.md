@@ -67,6 +67,7 @@ Rules:
 - **Shared state.** When a criterion reads then writes shared state (board.json, proposals.json, a file another request may write), the read, a re-check of the live state and the write sit under one lock; never prescribe releasing the lock between them.
 - **No placeholders.** No "TBD", "handle edge cases" or "add validation" without saying exactly what. Anything new that other files depend on gets its exact name and signature under Likely files.
 - **Likely files** names every file the diff will change as a backticked repo-relative path, test files included.
+- When feature.md asks for screenshots on the PR, a criterion saves them under `/tmp/scrum-<job id>-screenshots/` and one `## Assumptions` line says Trevor attaches them, because no agent can upload a file to a PR; this is never a `## Diverged` bullet.
 - **Claude edits.** When `## Likely files` names a project `.claude/` path, add a `## Claude edits` section with one bullet per such path: the path and the exact text to add or replace, so a later session can apply it without reading the job.
 - When the ticket names a rules-file section that has moved (its file now says `Read ... lanes/<file>.md`), list the file it moved to under `## Likely files` too.
 - For every line you add, reword, move or remove in an agent, lane or SKILL.md file, grep all of `tests/` (not only `tests/test_contracts.py`) for a distinctive phrase of the old text; list each hit's test file under `## Likely files` and name its test method, never a line number.
