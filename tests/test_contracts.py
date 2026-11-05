@@ -1349,9 +1349,13 @@ class ContractTest(unittest.TestCase):
                   "because reviewers, the approver or the e2e run check it later or because of time. "
                   "A criterion whose verify step starts `rendered by reviewers` is the one exception: do not "
                   "walk it, and write `rendered by reviewers` for it in build.md, never `NOT RUN`.")
-        for line in (rmw, e2e, manual):
+        siblings = ("   - When you add a field, setting, enum value or code, grep for every list that names one "
+                    "of its siblings (allowlists, `select` clauses, serializers, switch cases, code lists, "
+                    "every route method that writes it) and add it to each, or cite in build.md why one is "
+                    "left out.")
+        for line in (rmw, e2e, manual, siblings):
             self.assertEqual(text.count(line), 1, line)
-        self.assertIn(b9 + "\n" + rmw + "\n" + step3, text)
+        self.assertIn(b9 + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
