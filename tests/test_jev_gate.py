@@ -93,7 +93,7 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual([l.split("\t")[3] for l in self.log()], ["one", "two"])
 
     def test_unknown_step_exits_nonzero(self):
-        for argv in (["nope", str(self.job)], ["model"], ["model", str(self.job), "extra"], []):
+        for argv in (["nope", str(self.job)], ["model"], ["model", str(self.job), "extra"], ["spec-model"], []):
             with self.subTest(argv=argv):
                 code, out, err = self.run_gate(argv)
                 self.assertEqual(code, 2)
@@ -104,10 +104,10 @@ class JevGateTest(unittest.TestCase):
     def test_fallbacks(self):
         (self.job / "feature.md").write_text("# Feature\nDo a thing")
         (self.root / "backlog.md").write_text(BACKLOG)
-        bad = {"model": {"q": {"score": 7}}, "dupe": {"q0": {"noul": "high"}, "q1": {"noul": 0.1}},
+        bad = {"model": {"q": {"score": 7}}, "spec-model": {"q": {"score": 7}}, "dupe": {"q0": {"noul": "high"}, "q1": {"noul": 0.1}},
                "approver": {"q": {"noul": "high"}}, "reviewer-security": {"q": {"noul": 1.5}},
                "reviewer-ui": {"q": {"noul": "high"}}}
-        fallback = {"model": "opus", "dupe": "add", "approver": "opus", "reviewer-security": "skip",
+        fallback = {"model": "opus", "spec-model": "opus", "dupe": "add", "approver": "opus", "reviewer-security": "skip",
                     "reviewer-ui": "skip"}
         for step, want in fallback.items():
             kinds = {"nokey": (None, "JevError"), "timeout": (TimeoutError("timed out"), "TimeoutError"),
@@ -146,6 +146,21 @@ class JevGateTest(unittest.TestCase):
                 self.assertEqual(state, "# Feature\nAdd a button")
                 self.assertEqual(questions["q"]["type"], "score")
                 self.assertEqual(len(questions["q"]["criteria"]), 4)
+
+    def test_spec_model_cutoffs(self):
+        (self.job / "feature.md").write_text("# Feature\nAdd a button")
+        for score, want in ((0, "sonnet"), (1, "sonnet"), (2, "opus"), (3, "opus")):
+            with self.subTest(score=score):
+                out, f = self.gate("spec-model", ask=lambda s, q, *a, v=score: {"q": {"type": "score", "score": v}})
+                self.assertEqual((out, f[1], f[4]), (want, "spec-model", want))
+
+    def test_spec_model_missing_feature(self):
+        out, f = self.gate("spec-model")
+        self.assertEqual((out, f[1], f[2], f[3], f[4]), ("opus", "spec-model", "-", "-", "opus"))
+        (self.job / "feature.md").write_text(" \n")
+        out, f = self.gate("spec-model")
+        self.assertEqual((out, f[4]), ("opus", "opus"))
+        self.assertEqual(self.sent, [])
 
     def test_model_missing_feature(self):
         out, f = self.gate("model")
@@ -214,6 +229,7 @@ class JevGateTest(unittest.TestCase):
         (self.job / "feature.md").write_text("feature")
         (self.root / "backlog.md").write_text(BACKLOG)
         good = {"model": lambda s, q, *a: {"q": {"score": 1, "echo": KEY}},
+                "spec-model": lambda s, q, *a: {"q": {"score": 1, "echo": KEY}},
                 "dupe": lambda s, q, *a: {"q0": {"noul": 0.1, "echo": KEY}, "q1": {"noul": 0.2}},
                 "approver": noul_ask(0.5), "reviewer-security": noul_ask(0.9), "reviewer-ui": noul_ask(0.1),
                 "promote": None}

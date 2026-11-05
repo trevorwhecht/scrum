@@ -744,7 +744,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_jev_model_step(self):
         text = skill_text()
         new_job = self.section(text, "## New job", "## Run all")
-        for phrase in ("jev-gate.py model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
+        for phrase in ("jev-gate.py model", "jev-gate.py spec-model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
             self.assertIn(phrase, new_job, phrase)
         self.assertNotIn("## Done when", new_job)
 
@@ -990,7 +990,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23000, "newjob.md")
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23300, "newjob.md")
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
