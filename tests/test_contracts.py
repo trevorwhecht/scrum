@@ -323,6 +323,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn('export PATH="$PATH:/opt/homebrew/bin"', line)
         self.assertNotIn('cd "$WORKTREE" && START=$(date +%s)', text)
 
+    def test_code_reviewer_codex_never_uses_timeout(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        self.assertIn("never prefix or wrap it with `timeout` or `gtimeout`", text)
+        line = next(l for l in text.splitlines() if "codex exec review --base" in l)
+        self.assertNotIn("timeout", line)
+        self.assertEqual(text.count("codex exec"), 1)
+
     def test_code_reviewer_strictness_rules(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
         for phrase in ('"pre-existing"', "must name that code", "opens with the scenario", '"No findings"',
