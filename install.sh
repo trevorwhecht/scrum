@@ -5,6 +5,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 dest="${CLAUDE_HOME:-$HOME/.claude}"
 codex="${CODEX_HOME:-$HOME/.codex}"
 
+# A linked worktree is throwaway: linking from it would repoint the live ~/.claude symlinks at it. CLAUDE_HOME set is a sandbox.
+if [ -z "${CLAUDE_HOME:-}" ] && [ "$(git -C "$here" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$here" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  echo "refusing to install from a git worktree ($here); run it from the main checkout" >&2
+  exit 1
+fi
+
 refuse_real() {
   if [ -e "$1" ] && [ ! -L "$1" ]; then echo "refusing to replace real file: $1" >&2; exit 1; fi
 }
