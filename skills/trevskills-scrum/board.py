@@ -1511,11 +1511,22 @@ def _build_start(root, job_id):
     return None
 
 
-def _timing_row(root, job_id, job, stalls):
+def _waited(prev, end, starts, mtimes):
+    """Secs of [prev, end] spent waiting: each start in the window runs to the next file mtime (else end); overlaps count once."""
+    spans = sorted((w, min(next((t for t in mtimes if t > w), end), end)) for w in starts if prev <= w < end)
+    total, upto = 0, prev
+    for a, b in spans:
+        a = max(a, upto)
+        if b > a:
+            total, upto = total + b - a, b
+    return total
+
+
+def _timing_row(root, job_id, job, stalls, waits=()):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), done is the board updatedAt; each round's time runs from the previous round's last file
-    (round 1: the build start, see _build_start) to its own last file."""
+    (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs)."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -1527,10 +1538,11 @@ def _timing_row(root, job_id, job, stalls):
     else:
         start, queue = spec_at, 0 if spec_at else None
     times, heads, prev = [], [], start or created
+    mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     for n in rounds:
         rd = folder / f"round-{n}"
         end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
-        times.append(_mins(end - prev if end and prev else None))
+        times.append(_mins(end - prev - _waited(prev, end, waits, mtimes) if end and prev else None))
         prev = end or prev
         try:
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
@@ -1550,11 +1562,15 @@ def write_timing(root, digest_id, jobs):
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines),
     totals, and every job on every registered board (and this one) now stalled waiting on the E2E queue."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
-    stalls = {}
+    stalls, waits = {}, {}
     for q in _json_lines(Path(root) / "questions.log"):
+        at = _epoch(q.get("date"))
+        if at and isinstance(q.get("job"), str) and (q.get("kind") == "machine" or (
+                q.get("kind") == "stall" and E2E_WAIT_REASON in str(q.get("reason") or ""))):
+            waits.setdefault(q["job"], []).append(at)
         if q.get("kind") == "stall" and isinstance(q.get("job"), str):
             stalls[q["job"]] = stalls.get(q["job"], 0) + 1
-    rows = [_timing_row(root, j, board.get(j, {}), stalls) for j in jobs]
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ())) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
              "|---|---|---|---|---|---|---|---|---|"]
