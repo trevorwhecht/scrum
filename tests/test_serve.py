@@ -6357,6 +6357,39 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), ["q0"], "lock free: one job per tick, even a child")
             self.assertEqual(self.sweep(), ["q0"], "again next tick, not once per stage")
 
+    def test_auto_resume_check_queue_stall_resumes_when_slot_free(self):
+        s = self.serve
+        self.jobs = [{"id": f"c{i}", "stage": "check", "stalled": True, "parent": "bb",
+                      "reason": "stalled: waiting on the Check queue"} for i in range(2)]
+        with mock.patch.object(s, "queue_free", return_value=False) as free:
+            self.assertEqual(self.sweep(), [], "every check.lock slot held: wait")
+        free.assert_called_with("check.lock")
+        self.assertNotIn("p/c0", s.AUTO_RESUME, "waiting spends no try")
+        with mock.patch.object(s, "queue_free", return_value=True):
+            self.assertEqual(self.sweep(), ["c0"], "slot free: one job per call, even a child of a stopped parent")
+            self.assertEqual(self.sweep(), ["c0"], "again next call, not once per stage")
+        self.assertEqual(s.AUTO_RESUME["p/c0"][0], 2)
+
+    def test_queue_free_checks_every_check_lock_slot(self):
+        import fcntl
+        s = self.serve
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        d = home / ".claude" / "trevskills-scrum"
+        d.mkdir(parents=True)
+        with mock.patch.dict(os.environ, HOME=str(home)):
+            self.assertIs(s.queue_free("check.lock"), True, "nothing held")
+            held = [open(d / f"check.lock.{i}", "a") for i in range(2)]
+            for f in held:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIs(s.queue_free("check.lock"), False, "both slots held")
+            held[1].close()
+            self.assertIs(s.queue_free("check.lock"), True, "one slot free")
+            (d / "check.lock.waiting").mkdir()
+            (d / "check.lock.waiting" / str(os.getpid())).write_text("/tmp")
+            self.assertIs(s.queue_free("check.lock"), False, "a live waiter takes the free slot first")
+            held[0].close()
+
     def test_auto_resume_e2e_queue_holds_while_another_job_in_check(self):
         s = self.serve
         self.jobs = [{"id": f"q{i}", "stage": "check", "stalled": True, "parent": "bb", "reason": "stalled: waiting on the E2E queue"}

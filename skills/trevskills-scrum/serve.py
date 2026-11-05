@@ -556,15 +556,18 @@ def limit_reset(root, job):
 
 
 E2E_WAIT = "waiting on the E2E queue"  # newjob.md Check gate step 2 parks a job on it after two lock-wait timeouts
+CHECK_WAIT = "waiting on the Check queue"  # the same park for a Test/Typecheck/Lint wait on check.lock
 
 
 # TODO[4]: per-slot dev DBs (parallel E2E slots) if the E2E queue is still long
-def e2e_queue_free():
-    """True when nobody holds the E2E lock and no live buildlock.py waits on it."""
-    lock = Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"
+def queue_free(name="e2e.lock"):
+    """True when a slot of this lock is free and no live buildlock.py waits on it."""
+    lock = Path.home() / ".claude" / "trevskills-scrum" / name
     try:
-        with open(lock, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f = buildlock.take(buildlock.slot_paths(lock))
+        if f is None:
+            return False
+        f.close()
         for m in buildlock.waiting_dir(lock).iterdir():
             try:
                 os.kill(int(m.name), 0)
@@ -576,6 +579,10 @@ def e2e_queue_free():
     except OSError:
         return False
     return True
+
+
+def e2e_queue_free():
+    return queue_free("e2e.lock")
 
 
 # --- e2e_full_tick: jobs run only their diff's specs (board.py e2e-specs), so the whole suite runs here, on each
@@ -765,9 +772,10 @@ def auto_resume(project, root, jobs):
     whose project.md has an E2E command: that job takes the machine-wide E2E lock soon. E2E-queue resumes are capped
     at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick. A cool-down park
     (board.COOLDOWN_PARK) waits, spending no try and not busy, while cooling down; after it, it is resumed whatever
-    its parent, with no per-stage limit."""
+    its parent, with no per-stage limit. A job parked on the Check queue (CHECK_WAIT) is resumed the same way, one
+    per call, once a check.lock slot is free and nobody waits on it."""
     global E2E_RESUMED
-    now, busy, e2e_resumed = time.time(), False, bool(E2E_RESUMED)
+    now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
 
     def check_job(j):
         return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j)
@@ -809,6 +817,14 @@ def auto_resume(project, root, jobs):
                 e2e_resumed = busy = True
                 if E2E_RESUMED is not None:
                     E2E_RESUMED = True
+                AUTO_RESUME[key] = [tries + 1, now]
+                resume_job(project, root, job, jobs)
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + CHECK_WAIT):  # like E2E_WAIT, on check.lock
+            if check_resumed or not queue_free("check.lock"):
+                busy = True
+            elif resume_refusal(project, root, job) is None and take_room():
+                check_resumed = busy = True
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
             continue

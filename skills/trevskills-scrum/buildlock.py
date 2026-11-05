@@ -172,5 +172,6 @@ def main(argv: list[str]) -> int:
         except (FileNotFoundError, PermissionError):
             return 127
 
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
