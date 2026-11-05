@@ -159,11 +159,11 @@ LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one st
 GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
 
 
-def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
+def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
-    RAM); else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
+    RAM) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
     None. A start clears both fields, whichever path launched it."""
     reason, on_board = None, False
     if action in GATED:
@@ -174,7 +174,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             pass
     if on_board:
         with LAUNCH_LOCK:
-            if board.ram_room(floor=0) < 1:
+            cpu = None if manual else board.cpu_load_pct()
+            if board.ram_room(floor=0) < 1 or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
             else:
                 proc, log = board.spawn(root, job_id, action, prompt, flags)
@@ -262,10 +263,10 @@ def resume_job(project, root, job, jobs, manual=False):
                         live.update(stalled=True, updatedAt=board.now(),
                                     reason=f"{board.STALL}waiting for a free slot after Play")
             else:
-                spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
+                spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}", manual=manual)
         start_ready(project, root, job_id, manual=manual)
         return True
-    return spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
+    return spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}", manual=manual)
 
 
 def resumable(job):
@@ -484,7 +485,7 @@ def answer_job(project, root, job, jobs, key, note=None):
         started = resume_job(project, root, job, jobs, manual=True)
     else:
         note = f'Trevor picked "{picked.get("label")}": run {arg}, then continue'
-        started = spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}")
+        started = spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}", manual=True)
     return 202, {"id": job_id, "action": "answer", "command": verb, **queued(started)}
 
 

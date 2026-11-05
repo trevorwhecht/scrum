@@ -3013,6 +3013,7 @@ MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-1
 #                       queued behind the cores, and the 1-minute average lets a post-reboot spike (681%) clear in minutes
 MAX_CPU_LOAD_PCT = 150  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459)
+MAX_LAUNCH_CPU_LOAD_PCT = 500  # serve.spawn queues every non-manual job launch (resume, approve, rework, start) above this load
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
 CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM

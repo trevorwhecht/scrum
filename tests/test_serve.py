@@ -2552,7 +2552,7 @@ class ServeTest(unittest.TestCase):
             (self.root / "jobs" / k / "spec.md").write_text(f"# x\n## Likely files\n- `src/cap{i % 5}.py`: why\n")
         b.cmd_pause(self.root, parent)
 
-        def fake_spawn(project, root, jid, action, prompt, flags=()):
+        def fake_spawn(project, root, jid, action, prompt, flags=(), manual=False):
             proc = mock.Mock(); proc.poll.return_value = None
             with s.RUNS_LOCK:
                 s.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/y.log"}
@@ -6953,7 +6953,7 @@ class ExitedRunSweepTest(unittest.TestCase):
         """One watchdog_tick; returns the (job id, action) of every spawn it made."""
         s = self.serve
 
-        def fake_spawn(project, root, jid, action, prompt, flags=()):
+        def fake_spawn(project, root, jid, action, prompt, flags=(), manual=False):
             proc = mock.Mock(); proc.poll.return_value = None
             with s.RUNS_LOCK:
                 s.RUNS[f"{project}/{jid}"] = {"action": action, "started": time.time(), "proc": proc, "log": "runs/y.log"}
