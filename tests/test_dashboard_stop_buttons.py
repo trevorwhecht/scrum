@@ -21,7 +21,8 @@ const els = {
 };
 const $ = id => els[id];
 const enc = encodeURIComponent;
-const post = async (url, body) => { posted.push([url, body]); if (postFails) throw new Error(postFails); return {}; };
+let postWait = null;
+const post = async (url, body) => { posted.push([url, body]); await postWait; if (postFails) throw new Error(postFails); return {}; };
 const poll = async () => {};
 const open = () => {};
 const fetch = async url => { fetched.push(url); return {ok: true, text: async () => "# hi"}; };
@@ -146,6 +147,32 @@ class StopBox(unittest.TestCase):
         self.assertEqual(empty, [[ANSWER, {"key": "b", "note": ""}]])
         plain, = js(setup + ' await handlers.click({target: {closest: () => ({dataset: {answer: "a"}})}}); out(posted);')
         self.assertEqual(plain, [[ANSWER, {"key": "a"}]])
+
+    def test_pending_answer_labels_clicked_button(self):
+        job = {**ASKED, "options": OPTIONS}
+        html, note = js(f'jobs = [{json.dumps(job)}]; answerState["p/020-q"] = {{pending: "a"}}; out(stopBox(jobs[0]));'
+                        ' answerState["p/020-q"] = {noteOpen: "b", note: "x", pending: "b"}; out(stopBox(jobs[0]));')
+        self.assertIn('data-answer="a" disabled>Sending…</button>', html)
+        self.assertNotIn(">Ship it<", html)
+        self.assertEqual(len(re.findall(r'data-answer="\w" disabled>', html)), 3)
+        self.assertIn('>Drop it</button>', html)
+        self.assertIn('data-send="b" disabled>Sending…</button>', note)
+        self.assertIn('data-answer="b" disabled>Redo</button>', note)
+        hung, = js(f'jobs = [{json.dumps(job)}]; let go; postWait = new Promise(r => go = r);'
+                   ' const p = answer("p/020-q", "a"); out(stopHtml); go(); await p;')
+        self.assertIn('data-answer="a" disabled>Sending…</button>', hung)
+
+    def test_approve_reads_merging_then_restores_on_failure(self):
+        job = {k: v for k, v in ASKED.items()}
+        submit = ('const btn = {dataset: {}, disabled: false, textContent: "Confirm: merge into main"};'
+                  ' const p = handlers.submit({preventDefault() {}, submitter: btn,'
+                  ' target: {dataset: {act: "approve", armed: "1"}, querySelector: () => btn}});')
+        during, shown, after = js(f"""jobs = [{json.dumps(job)}]; let go; postWait = new Promise(r => go = r); {submit}
+            out([btn.textContent, btn.disabled]); renderActions(jobs[0]); out(els.actions.innerHTML);
+            postFails = "merge refused"; go(); await p; out([btn.textContent, btn.disabled, errP.textContent]);""")
+        self.assertEqual(during, ["Merging…", True])
+        self.assertIn('<button class="btn primary" type="submit" disabled>Merging…</button>', shown)
+        self.assertEqual(after, ["Confirm: merge into main", False, "merge refused"])
 
     def test_abort_option_arms_first(self):
         setup = f'jobs = [{json.dumps({**ASKED, "options": OPTIONS})}];'
