@@ -7296,7 +7296,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
                           "play_queued": "2026-10-25T11:00:00+00:00"},
                          {"id": "010-old", "stage": "needs-human", "reason": stalled,
                           "play_queued": "2026-10-25T10:00:00+00:00"})
-        spawn, _, _ = self.tick()
+        with mock.patch.object(s.board, "MAX_YOUNG_SESSIONS", s.board.MAX_SESSIONS):  # start order, not the wake ramp
+            spawn, _, _ = self.tick()
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list][:3],
                          [("010-old", "resume"), ("011-new", "resume"), ("002-kid", "resume")])
         self.assertNotIn("play_queued", self.job("010-old"))
