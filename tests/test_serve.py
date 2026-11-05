@@ -7472,12 +7472,13 @@ class AutoContinueTest(unittest.TestCase):
         self.projects[name] = root.parent
         return root
 
-    def tick(self, running=lambda p, j: False):
+    def tick(self, running=lambda p, j: False, alive=lambda job: False):
         s = self.serve
         with mock.patch.object(self.board, "projects", return_value=self.projects), \
-                mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.board, "session_alive_fn", return_value=alive) as scan, \
                 mock.patch.object(s, "running", side_effect=running), mock.patch.object(s, "spawn") as spawn:
             s.watchdog_tick()
+        self.scans = scan.call_count
         return [c.args for c in spawn.call_args_list]
 
     def started(self, name):
@@ -7701,6 +7702,7 @@ class AutoContinueTest(unittest.TestCase):
             {"id": "007-escape", "stage": "done", "worktree": str(wt("..") / ".." / "checkout")}])
         for _ in range(2):  # the second tick finds nothing left to delete
             self.tick()
+            self.assertEqual(self.scans, 0, "no parked job: no ps scan")
             for name in ("done", "aborted"):
                 self.assertFalse((wt(name) / "node_modules").exists(), name)
                 self.assertFalse((wt(name) / ".next").exists(), name)
@@ -7715,7 +7717,7 @@ class AutoContinueTest(unittest.TestCase):
         live session keeps both."""
         repo = self.base / "a"
         wt = lambda name: repo / ".claude" / "worktrees" / name
-        for name in ("human", "paused", "stalled", "check", "live"):
+        for name in ("human", "paused", "stalled", "check", "live", "term"):
             for sub in ("node_modules/pkg", ".next/cache", "src"):
                 (wt(name) / sub).mkdir(parents=True)
         self.project("a", n=1, backlog="", jobs=[
@@ -7723,14 +7725,19 @@ class AutoContinueTest(unittest.TestCase):
             {"id": "002-paused", "stage": "build", "paused": True, "worktree": str(wt("paused"))},
             {"id": "003-stalled", "stage": "check", "stalled": True, "worktree": str(wt("stalled"))},
             {"id": "004-check", "stage": "check", "worktree": str(wt("check"))},
-            {"id": "005-live", "stage": "needs-human", "worktree": str(wt("live"))}])
-        self.tick(running=lambda p, j: (p, j) == ("a", "005-live"))
+            {"id": "005-live", "stage": "needs-human", "worktree": str(wt("live"))},
+            {"id": "006-term", "stage": "needs-human", "worktree": str(wt("term"))}])
+        self.tick(running=lambda p, j: (p, j) == ("a", "005-live"), alive=lambda job: job["id"] == "006-term")
+        self.assertEqual(self.scans, 1, "one lazy ps scan per tick")
         for name in ("human", "paused", "stalled"):
             self.assertFalse((wt(name) / ".next").exists(), name)
             self.assertTrue((wt(name) / "node_modules/pkg").is_dir(), name)
-        for name in ("check", "live"):
+        for name in ("check", "live", "term"):
             self.assertTrue((wt(name) / ".next/cache").is_dir(), name)
             self.assertTrue((wt(name) / "node_modules/pkg").is_dir(), name)
+        (wt("human") / ".next/cache").mkdir(parents=True)
+        self.tick(alive=lambda job: True)  # ps unreadable: always-True fn keeps parked .next
+        self.assertTrue((wt("human") / ".next/cache").is_dir())
 
     def test_no_start_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
