@@ -18,6 +18,7 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `cmd_ask(...)`: the only way a job becomes needs-human.
 - `cmd_abort(...)` calls `abort_job(root, job, requeue, reason)`.
 - `projects()`: registered repos that have a `scrum/` folder; `SCRUM_REGISTRY` overrides the registry path.
+- Job-folder readers to reuse, never re-parse: `md_section(text, heading)`, `likely_files(spec_text)`, `job_files(d)`, `_round_text(folder, name)`; `.claude/` routing is `is_claude_path(path)` and `claude_split(root, job)`.
 
 ## serve.py (`skills/trevskills-scrum/serve.py`)
 - `Handler.route(project, root, rest, body)`: the dashboard POST API (`/attachments`, `/manual-checks`, `/backlog`, job actions). When you add or remove a job action, check which branch an unmatched action reaches.
