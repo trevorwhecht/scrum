@@ -101,6 +101,16 @@ class PlayQueued(unittest.TestCase):
         self.assertEqual(stuck_box, "")  # a stalled job waits on its retry, not on Trevor
         self.assertIn("<b>Waiting on you</b><p>CHANGES after 3 rounds.</p>", ask_box)
 
+    def test_queued_needs_human_job_with_options_shows_start_now(self):
+        job = {**OFF_TRACK, "options": ["Yes", "No"]}
+        queued, plain = run(f"""jobs = [{json.dumps(job)}]; runs = {{}};
+            renderActions(jobs[0]); out(els.actions.innerHTML);
+            renderActions({{...jobs[0], play_queued: null}}); out(els.actions.innerHTML);""")
+        self.assertIn('data-act="resume"', queued)
+        self.assertNotIn('data-act="approve"', queued)
+        self.assertNotIn('data-act="rework"', queued)
+        self.assertNotIn('data-act="resume"', plain)
+
     def test_play_queued_child_not_waiting_on_you(self):
         legacy = {**ASK, "key": "p/204-l", "id": "204-l", "title": "Legacy", "reason": "stalled in plan: x. Fix: click Resume."}
         parent = {"key": "p/100-big", "project": "p", "id": "100-big", "stage": "running",

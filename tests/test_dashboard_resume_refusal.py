@@ -16,7 +16,7 @@ CASES = ((PAUSED, "Play"), (STALLED, "Resume"))
 # An outright refusal (the POST would 409): the panel drops the button. A machine wait would only queue the click (job 644).
 LILGUY = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
           "/trevskills-commitpush, or discard it, then click Abort.")
-LILGUY_NOTE = '<p class="note" role="status">Waiting: lilguy job: there is no pipeline to resume.</p>'
+LILGUY_NOTE = '<p class="note" role="status">Can&#39;t resume: lilguy job: there is no pipeline to resume.</p>'
 MACHINE = "waiting: free RAM 10% (< 20%). Fix: click Resume once memory or disk frees up."
 # A job stalled in its own stage (board `stalled` true) keeps its stage, so its panel takes the not-needs-human branch.
 NEW_SHAPE = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "stalled": True, "worktree": "/tmp/wt-021",

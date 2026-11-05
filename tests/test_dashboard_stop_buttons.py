@@ -280,7 +280,7 @@ class StopBox(unittest.TestCase):
         stalled = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
         refusal = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
                    "/trevskills-commitpush, or discard it, then click Abort.")
-        note = '<p class="note" role="status">Waiting: lilguy job: there is no pipeline to resume.</p>'
+        note = '<p class="note" role="status">Can&#39;t resume: lilguy job: there is no pipeline to resume.</p>'
         for job, label in ((paused, "Play"), (stalled, "Resume")):
             form = f'<form data-act="resume"><button class="btn primary tall" type="submit">{label}</button></form>'
             with self.subTest(label=label):

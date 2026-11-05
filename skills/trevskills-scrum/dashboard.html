@@ -1049,7 +1049,7 @@ const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && jo
   : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
   : job.paused ? "Paused by you"
-  : job.resumeRefusal ? `Waiting: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
+  : job.resumeRefusal ? `${String(job.resumeRefusal).startsWith("lilguy job") ? "Can't resume" : "Waiting"}: ${String(job.resumeRefusal).split(" Fix: ")[0]}`
   : playQueued(job) ? "Queued, starts next"
   : isStalled(job) ? `Stalled: ${stopIssue(job.reason)}`
   : limitHeld(job) ? "Stalled: usage limit"
@@ -1128,7 +1128,7 @@ function actionsHtml(job, err) {
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
   const resume = job.options?.length && !job.play_queued ? "" : resumeForm(job);
-  return banner + kids + last + (job.options?.length ? "" : resume + (resume ? err : "")
+  return banner + kids + last + resume + (resume ? err : "") + (job.options?.length ? "" : ""
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
       <button class="btn primary" type="submit"${merging[job.key] ? " disabled>Merging…" : ">Approve &amp; merge"}</button></form>` : "")
