@@ -37,7 +37,7 @@ h1{font-size:16px;margin:0}
 #colour label{display:flex;align-items:center;gap:8px}#colourInput{padding:2px;border:1px solid var(--line);border-radius:6px;background:var(--card);cursor:pointer}
 #rankList .rnum{color:var(--muted);min-width:2ch;text-align:right}#rankList .rname{flex:1;min-width:0;overflow-wrap:anywhere}
 .usage{width:100%;border-collapse:collapse;font-size:13px}.usage th,.usage td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-.usage td:nth-child(2),.usage td:nth-child(3),.usage thead th:nth-child(2),.usage thead th:nth-child(3){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.usage td:nth-child(2),.usage td:nth-child(3),.usage thead th:nth-child(2),.usage thead th:nth-child(3){font-variant-numeric:tabular-nums;white-space:nowrap}
 .usage.windows{margin-top:16px}.usage.windows td{overflow-wrap:anywhere}.usage.windows th{overflow-wrap:normal;min-width:8ch}.usage.windows td:nth-child(2),.usage.windows thead th:nth-child(2){text-align:left;white-space:normal}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .col h2 span{white-space:nowrap}
@@ -75,6 +75,7 @@ dialog::backdrop{background:#0007}
 .tabs button,#aiCats button{font:12px ui-monospace,monospace;border:1px solid var(--line);background:none;color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer}
 .tabs button[aria-pressed="true"],.tabs button[aria-selected="true"],#aiCats button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .tabs .close{margin-left:auto}
+#tabs>a,#actions a.hit{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;vertical-align:middle}
 .vhead{position:sticky;top:0;z-index:1;background:var(--card)}.vhead .tabs{position:static}
 #viewerTitle{margin:0;padding:10px 10px 0;font-size:16px;overflow-wrap:anywhere;color:var(--ink)}
 #viewerStatus{padding:2px 10px 0;overflow-wrap:anywhere}#viewerStatus:empty{display:none}
@@ -854,6 +855,7 @@ const specHeader = md => {
 async function show(job, file) {
   [...$("tabs").querySelectorAll("button[data-file]")].forEach(b => b.setAttribute("aria-pressed", b.dataset.file === file));
   const url = `${job.docBase ?? `p/${enc(job.project)}/jobs/${enc(job.id)}/`}${file.split("/").map(enc).join("/")}`;
+  $("doc").innerHTML = '<p class="empty">Loading…</p>';
   try {
     const res = await fetch(url, {cache: "no-store"});
     if ($("viewer").dataset.key !== job.key) return;  // the modal moved to another job while this loaded
@@ -1055,7 +1057,7 @@ const modalStatus = job => {
 // A needs-human job's closed question (board.py ask): armed/pending/note-open state per job key, outside the DOM so a
 // poll re-render keeps it. actionError: a refused POST's message per job key, kept across re-renders until the next
 // POST for that job succeeds or its stage changes.
-const answerState = {}, actionError = {};
+const answerState = {}, actionError = {}, merging = {};  // merging: job keys whose Approve POST is in flight
 const setActionError = (key, stage, msg) => {
   actionError[key] = {msg, stage};
   const p = $("viewer").dataset.key === key && $("actions").querySelector(":scope > .error");
@@ -1075,13 +1077,13 @@ function stopBox(job) {
   const rec = job.recommend, dis = off ? " disabled" : "";
   const buttons = job.play_queued ? "" : stopOptions(job).map((o, i) => {
     const armed = st.armed === o.key, top = i === 0 && !!rec && o.key === rec.key;
-    return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}</button>`
+    return `<button class="btn tall${armed ? " danger" : ""}" type="button" data-answer="${esc(o.key)}"${dis}>${st.pending === o.key && !st.noteOpen ? "Sending…" : `${armed ? "Confirm: " : ""}${esc(o.label)}${top ? ' <span class="badge">Recommended</span>' : ""}`}</button>`
       + (top && rec.why ? `<p class="note">${esc(rec.why)}</p>` : "");
   }).join("");
   // Without options the reason's own fix (after " Fix: ") stays as the box's second line, as before.
   const fix = buttons ? "" : (job.reason || "").split(" Fix: ").slice(1).join(" Fix: ");
   const note = !st.noteOpen ? "" : `<div class="sendback"><textarea name="note" maxlength="2000" placeholder="Anything the builder should know? (optional)" aria-label="Note for the builder"${dis}>${esc(st.note || "")}</textarea>
-    <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>Send back</button></div>`;
+    <button class="btn primary tall" type="button" data-send="${esc(st.noteOpen)}"${dis}>${st.pending ? "Sending…" : "Send back"}</button></div>`;
   return `<div class="stop" role="status"
     data-agent-hint="This job stopped and needs Trevor. The first line is the agent's question in full, or what went wrong; then either the exact fix or the buttons for the ways forward, the recommended one first.">
     <b>${esc(stopTitleText(job) || "Waiting on you")}</b><p>${esc(job.question || stopIssue(job.reason))}</p>${fix ? `<p>${esc(fix.charAt(0).toUpperCase() + fix.slice(1))}</p>` : ""}${buttons ? `<div class="acts">${buttons}</div>` : ""}${note}</div>`;
@@ -1099,7 +1101,7 @@ function renderActions(job) {
 // The modal's actions for job; err is the error line: right under the Play/Resume part when there is one, else last, under the buttons.
 function actionsHtml(job, err) {
   const run = runs[job.key], reason = job.reason || "", banner = outcomeLine(job, "p", "note") + stopBox(job);
-  const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener">log</a>` : "";
+  const log = run?.log ? ` · <a href="p/${enc(job.project)}/${esc(run.log)}" target="_blank" rel="noopener" class="hit">log</a>` : "";
   const kids = waitingNote(job, "note") + childLinks(job);
   // A Discuss session runs in Terminal and may itself approve or rework, so the needs-human buttons stay while it is open.
   const now = run?.alive ? `<p class="running">${esc(runLine(run))}${log}</p>` : "";
@@ -1116,7 +1118,7 @@ function actionsHtml(job, err) {
   return banner + kids + last + (job.options?.length ? "" : resume + (resume ? err : "")
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}
-      <button class="btn primary" type="submit">Approve &amp; merge</button></form>` : "")
+      <button class="btn primary" type="submit"${merging[job.key] ? " disabled>Merging…" : ">Approve &amp; merge"}</button></form>` : "")
     + (noRework ? "" : `<form data-act="rework"><textarea name="feedback" required maxlength="2000" placeholder="What should the builder change?" aria-label="Feedback for the builder"></textarea>
       <button class="btn" type="submit" data-act="discuss" formnovalidate data-agent-hint="Opens an interactive Claude session in a new Terminal window that explains why the job stopped and what a rework can or cannot fix, then runs the approve or rework you agree on.">Discuss first</button>
       <button class="btn" type="submit">Send back to builder</button></form>`)) + reworkList(job) + moreMenu(job) + (resume ? "" : err);
@@ -1135,7 +1137,9 @@ $("actions").addEventListener("submit", async e => {
     form.dataset.armed = "1"; form.querySelector("label").hidden = false;
     btn.textContent = "Confirm abort"; btn.className = "btn danger"; return;
   }
+  const label = btn.textContent;
   btn.disabled = true;
+  if (act === "approve") { merging[key] = true; btn.textContent = "Merging…"; }
   try {
     const body = act === "approve" ? {migrated: !!form.migrated?.checked} : act === "abort" ? {requeue: form.requeue.checked}
       : act === "reopen" ? {note: form.note.value} : act === "resume" ? {manual: true} : act === "pause" || act === "setup-done" ? {} : {feedback: form.feedback.value};
@@ -1143,11 +1147,13 @@ $("actions").addEventListener("submit", async e => {
     delete actionError[key];
     if (act === "discuss") { btn.disabled = false; btn.textContent = "Opened in Terminal"; return; }
     await poll();
+    delete merging[key];
     const linked = act === "reopen" && jobs.find(j => j.key === `${job.project}/${out.id}`);
     if (linked) return open(linked);
     renderActions(jobs.find(j => j.key === key));
   } catch (err) {
-    btn.disabled = false;
+    delete merging[key];
+    btn.disabled = false; btn.textContent = label;
     setActionError(key, job.stage, err.message);
   }
 });
@@ -1171,7 +1177,7 @@ async function answer(key, k, note) {
   if (note === undefined && /^rework /.test(opt.command || "")) { answerState[key] = {noteOpen: k, note: st.note}; return redrawAnswer(key, k); }
   if (/^abort\b/.test(opt.command || "") && st.armed !== k) { answerState[key] = {armed: k}; return redrawAnswer(key, k); }
   const keep = note === undefined ? {} : {noteOpen: k, note};
-  answerState[key] = {...keep, pending: true}; redrawAnswer(key, k);
+  answerState[key] = {...keep, pending: k}; redrawAnswer(key, k);
   try {
     await post(`api/p/${enc(job.project)}/jobs/${enc(job.id)}/answer`, note === undefined ? {key: k} : {key: k, note});
     delete answerState[key];
@@ -1413,10 +1419,12 @@ $("blManualList").addEventListener("change", async e => {
 let digestData = null, digestText = "";
 const dgProject = () => $("dgProject").value;
 const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</span><pre>${esc(old)}</pre></div><div><span class="note">New</span><pre>${esc(now)}</pre></div></div>`;
+// A proposal target for display: the repos folder dropped, any other home folder as ~/ (the full path stays in title).
+const shortPath = t => String(t ?? "").replace(/^\/Users\/[^/]+\/Developer\/repos\//, "").replace(/^\/(Users|home)\/[^/]+\//, "~/");
 // One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
 const propRow = (digestId, p, readOnly = false) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
     <span class="id">${esc(p.id)} <span class="chip ${esc(p.status)}">${esc(p.status)}</span></span>
-    ${p.kind === "backlog" ? "" : `<span class="path">${esc(p.target)}</span>`}<span>${esc(p.why)}</span>
+    ${p.kind === "backlog" ? "" : `<span class="path" title="${esc(p.target)}">${esc(shortPath(p.target))}</span>`}<span>${esc(p.why)}</span>
     ${p.kind === "backlog" ? `<span>${esc(p.backlog)}</span>` : ""}
     ${["skipped", "queued"].includes(p.status) && p.reason ? `<span class="note">${esc(p.reason)}</span>` : ""}
     ${p.kind === "backlog" ? "" : diffHtml(p.old ?? "", p.new ?? "")}
@@ -1442,7 +1450,10 @@ async function loadDigests() {
   if (!p) return renderDigests();
   const data = await getJson(`api/p/${enc(p)}/digests`, null, STALE);
   if (dgProject() !== p) return;  // a newer project pick is already loading
-  if (!data?.digests) return $("dgError").textContent = data || "Couldn't load digests. Is serve.py running?";
+  if (!data?.digests) {
+    digestData = null; digestText = ""; $("dgList").innerHTML = "";  // no "loading…" under the error
+    return $("dgError").textContent = data || "Couldn't load digests. Is serve.py running?";
+  }
   const text = JSON.stringify(data);
   if (text === digestText) return;  // unchanged: keep the DOM (and focus) as it is
   digestText = text; digestData = data;
@@ -1650,6 +1661,7 @@ $("agentsBtn").addEventListener("click", async () => {
     return $("agError").textContent = list || "Couldn't load agents. Is serve.py running?";
   }
   agents = list;
+  if (!list.length) return $("flow").innerHTML = '<p class="empty">No agents</p>';  // no chart; #pipeBar stays hidden
   $("pipeBar").hidden = false;
   renderFlow();
 });
@@ -2043,7 +2055,7 @@ function windowRows(list) {
   const num = v => typeof v === "number" && isFinite(v), n = (v, one) => `${num(v) ? v : "—"} ${one}${v === 1 ? "" : "s"}`;
   return list.map(({project, windows}) => [["five_hour", "5h"], ["seven_day", "7d"]].map(([key, label]) => {
     const c = windows?.[key], head = `<tr><th scope="row">${esc(project)}</th>`;
-    if (!c) return `${head}<td>${esc(`Last ${label} window: No scorecard yet`)}</td></tr>`;
+    if (!c) return `${head}<td>${esc(`Last ${label} window: ${windows === null ? "Couldn't load scorecard" : "No scorecard yet"}`)}</td></tr>`;
     const text = `Last ${label} window: ${n(c.points_done, "point")}, ${pct(c.budget?.used_pct)} budget, `
       + `${num(c.headline) ? `${Math.round(c.headline * 100) / 100}/%` : "—"}. First pass `
       + `${pct(num(c.first_pass_rate) ? c.first_pass_rate * 100 : null)}, waste ${pct(c.wasted_pct)}, ${n(c.escapes, "escape")}`;
@@ -2066,7 +2078,9 @@ async function loadRouting() {
 let windowsSeq = 0;
 async function loadWindows() {
   const seq = ++windowsSeq, f = filter, list = f ? [f] : projects;
-  const res = await Promise.all(list.map(p => getJson(`api/p/${enc(p)}/windows`, null)));
+  if ($("windowRows")) $("windowRows").innerHTML = '<tr><td colspan="2">Loading…</td></tr>';
+  // null: the fetch failed; a 404 ({}) means the project has no scorecard yet
+  const res = await Promise.all(list.map(p => getJson(`api/p/${enc(p)}/windows`, null, {})));
   const body = $("windowRows");
   if (!body || seq !== windowsSeq || filter !== f || !$("usage").open) return;
   body.innerHTML = windowRows(list.map((project, i) => ({project, windows: res[i]})));
