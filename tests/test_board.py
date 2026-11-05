@@ -3269,7 +3269,7 @@ class BoardTest(unittest.TestCase):
         os.utime(self.root / "jobs/j/spec.md", (t0, t0))
         os.utime(self.root / "jobs/j/round-1/head.txt", (t0 + 7200, t0 + 7200))
         waits = [board._epoch(q["date"]) for q in board._json_lines(self.root / "questions.log")]
-        self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][5], "1h00m")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][5], "1h40m")
 
     def test_timing_ignores_other_stalls(self):
         t0 = 1_700_000_000
@@ -3286,7 +3286,7 @@ class BoardTest(unittest.TestCase):
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
-        self.assertIn("| j | - | - | - | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
+        self.assertIn("| j | - | 0m | 0m | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
 
     def test_timing_wait_clamped_and_merged(self):
         self.assertEqual(self.timing_cell([6000, 6100]), "1h50m")  # overlapping spans count once
