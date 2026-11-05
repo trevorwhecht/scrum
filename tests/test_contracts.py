@@ -2297,12 +2297,14 @@ class ContractTest(unittest.TestCase):
                     "`verify failed`"):
             self.assertIn(why, cleanup[cleanup.index("merged, not live: <why>"):], why)
         live = cleanup[cleanup.index("merged, not live: <why>"):]
-        for fix in (" Fix: run git checkout <default> in <repo name>, then git pull --ff-only.",
-                    " Fix: stash or commit the changes in <repo name> (git stash or git commit), then git pull --ff-only.",
+        fixes = (" Fix: run git checkout <default> in <repo name>, then git pull --ff-only.",
+                    " Fix: stash the changes in <repo name> (git stash) or commit them with /trevskills-commitpush, then git pull --ff-only.",
                     " Fix: if local main holds commits origin lacks, push them or run git reset --hard origin/<default> "
-                    "yourself, then git pull --ff-only."):
+                    "yourself, then git pull --ff-only.")
+        for fix in fixes:
             self.assertIn(fix, live, fix)
             self.assertNotIn("'", fix)
+        self.assertNotIn("git commit", fixes[1])
         self.assertIn("Trevor runs these fixes; agents never do.", live)
         merged = next(l for l in text.splitlines() if l.strip().startswith("- `MERGED`:"))
         self.assertNotIn("stage=done", merged)
