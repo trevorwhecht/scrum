@@ -2683,7 +2683,7 @@ def board_with_activity(root, project):
     waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
     `nextRetryAt` (epoch seconds, or None). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
-    cannot go live, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    cannot go live, or None) and `e2eFull` (the full-E2E record's at, head, result, failed, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -2713,6 +2713,8 @@ def board_with_activity(root, project):
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
+    rec = e2e_full_record(root)  # the dashboard's "E2E main" header line
+    data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
     return data
 
 
