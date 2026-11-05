@@ -589,8 +589,11 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
-    or the project is settled (cool down is on and no job blocks a restart there)."""
+    or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
+    24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried."""
     if not record:
+        return True
+    if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
     return head != record.get("head") and (settled or merges >= E2E_FULL_MERGES
                                            or now - (record.get("at") or 0) >= E2E_FULL_EVERY)

@@ -3235,6 +3235,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         mapping = self.section(body, "## 2. Map changed files", "## 3. Replay")
         self.assertIn("same exclusion as the Check gate", mapping)
         self.assertIn("`*.test.tsx`", mapping)
+        self.assertIn("no `scrum/project.md`", mapping)
         replay = self.section(body, "## 3. Replay", "## 4. Cover changed UI")
         for phrase in ("Specs run: 0 — none", "appended to it, keeping any env prefix such as `E2E_PORT=...`",
                        "only when no base is given", "For any other `E2E:` command, run `npx playwright test <spec files>`"):

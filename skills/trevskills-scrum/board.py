@@ -1951,8 +1951,13 @@ def _route_of(path):
 
 
 def _route_re(route, prefix):
-    """A route as it appears in a spec string literal; a [param] segment matches any one segment."""
-    body = "".join("/" + (r"[^/'\"`?#]+" if s.startswith("[") else re.escape(s)) for s in route.split("/") if s)
+    """A route as it appears in a spec string literal; a [param] segment matches any one segment, [...x] one or more
+    and [[...x]] zero or more. A body that can match empty (a root [[...x]]) still needs its leading /."""
+    seg = r"/[^/'\"`?#]+"
+    body = "".join(f"(?:{seg})*" if s.startswith("[[...") else f"(?:{seg})+" if s.startswith("[...")
+                   else seg if s.startswith("[") else "/" + re.escape(s) for s in route.split("/") if s)
+    if body and re.fullmatch(body, ""):
+        body = "(?=/)" + body
     end = r"(?=['\"`?#])"
     if prefix:
         return re.compile(rf"['\"`]{body}(?:/[^'\"`?#\s]*)?{end}" if body else rf"['\"`]/[^'\"`?#\s]*{end}")
