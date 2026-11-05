@@ -2015,6 +2015,49 @@ class BoardTest(unittest.TestCase):
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10"):
             self.assertEqual(board.ram_room(), 9)
 
+    def test_ram_room_floor_zero(self):
+        """Job 624: serve.py's launch gate needs ram_room to say "no room"; floor=1 (the default) is unchanged."""
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 9)
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.ram_room(floor=0), 0, "9 shares, 9 young sessions")
+            self.assertEqual(board.ram_room(), 1)
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 11)
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.ram_room(floor=0), -2, "raw room may go below 0")
+        with self.machine("66", "1000"), self.sessions(13):
+            self.assertEqual(board.ram_room(floor=0), 1, "one short of the MAX_SESSIONS ceiling")
+        with self.machine("66", "1000"), self.sessions(14):
+            self.assertEqual(board.ram_room(floor=0), 0, "at the ceiling")
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n")
+        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+                self.assertEqual(board.ram_room(floor=0), 0, "swapping: none while a session is young")
+                self.assertEqual(board.ram_room(), 1)
+            ps.write_text("   05:00 claude -p /trevskills-scrum start 1-a\n")
+            with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+                self.assertEqual(board.ram_room(floor=0), 1, "swapping: one once every session is past the ramp")
+        with mock.patch.object(board, "free_ram_pct", return_value=None):
+            with mock.patch.dict(os.environ, SCRUM_PS=os.devnull):
+                self.assertEqual(board.ram_room(floor=0), 1, "unknown RAM, nothing young: one")
+            ps.write_text("   00:10 claude -p /trevskills-scrum approve 1-a\n")
+            with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+                self.assertEqual(board.ram_room(floor=0), 0, "unknown RAM, one young: none")
+
+    def test_pause_and_abort_clear_queued_launch(self):
+        launch = {"action": "start", "prompt": "/trevskills-scrum start x", "stage": "build"}
+        paused, aborted = board.cmd_new(self.root, "paused"), board.cmd_new(self.root, "aborted")
+        for job_id in (paused, aborted):
+            board.cmd_set(self.root, job_id, ["stage=build"])
+            with board.locked_board(self.root) as b:
+                board.find(b, job_id).update(play_queued="2026-11-04T16:19:36Z", queued_launch=launch)
+        with mock.patch.object(board, "play"):
+            board.cmd_pause(self.root, paused)
+        board.cmd_abort(self.root, aborted, False)
+        for job in self.jobs():
+            self.assertNotIn("queued_launch", job, job["id"])
+            self.assertNotIn("play_queued", job, job["id"])
+
     def test_ready_claims_only_up_to_ram_room(self):
         """The 2026-10-24 crash: one ready call claimed 7 children at once. Claims stop at the free RAM's room."""
         parent, kids = self.runall(7)

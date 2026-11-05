@@ -136,16 +136,41 @@ def kill_session(project, root, job_id):
             pass
 
 
+LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one step, so a burst of requests can't race the gate
+GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits")):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
-    shows as running; it covers a job that isn't on the board. Returns the log path relative to root."""
-    reason = None
-    if action in ("approve", "rework", "resume"):  # record_outcomes compares against this: same reason = nothing changed
+    shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
+    on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
+    RAM); else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
+    None. A start clears both fields, whichever path launched it."""
+    reason, on_board = None, False
+    if action in GATED:
         try:
             reason = board.find(board.read_board(root), job_id).get("reason")
+            on_board = True
         except (SystemExit, OSError, ValueError):
             pass
-    proc, log = board.spawn(root, job_id, action, prompt, flags)
+    if on_board:
+        with LAUNCH_LOCK:
+            if board.ram_room(floor=0) < 1:
+                proc = None
+            else:
+                proc, log = board.spawn(root, job_id, action, prompt, flags)
+        with board.locked_board(root) as b:  # the live job, re-read under the lock
+            live = next((j for j in b["jobs"] if j["id"] == job_id), {})  # {}: removed meanwhile, nothing to mark
+            if proc is None:  # setdefault: a second click keeps the first time and launch
+                live.setdefault("play_queued", board.now())
+                live.setdefault("queued_launch", {"action": action, "prompt": prompt, "stage": live.get("stage")})
+            else:
+                live.pop("play_queued", None)
+                live.pop("queued_launch", None)
+        if proc is None:
+            return None
+    else:
+        proc, log = board.spawn(root, job_id, action, prompt, flags)
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
                                        **({"reason": reason} if action in ("approve", "rework", "resume") else {})}
@@ -220,8 +245,8 @@ def resume_job(project, root, job, jobs, manual=False):
             else:
                 spawn(project, root, k, "resume", f"/trevskills-scrum resume {k}")
         start_ready(project, root, job_id, manual=manual)
-        return
-    spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
+        return True
+    return spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id}")
 
 
 def resumable(job):
@@ -236,7 +261,8 @@ def limit_held(job):
     return bool(job.get("limitResetAt")) and job["stage"] in board.WATCHED and not job.get("paused")
 
 
-RESUME_ROOM: int | None = None  # watchdog_tick's resume pass budget (board.ram_room()); None outside a tick = unlimited
+RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.ram_room()), None outside a tick; spawn's
+# gate (LAUNCH_LOCK, ram_room(floor=0)) limits every launch, in a tick or not
 
 
 def take_room() -> bool:
@@ -254,19 +280,31 @@ PLAY_QUEUED = "queued, starts next"
 
 
 def unqueue(root, job):
-    """Drop the job's play_queued flag, when it has one."""
-    if job.get("play_queued"):
+    """Drop the job's play_queued flag and queued_launch, when it has one."""
+    if job.get("play_queued") or job.get("queued_launch"):
         with board.locked_board(root) as b:
-            board.find(b, job["id"]).pop("play_queued", None)
+            live = board.find(b, job["id"])
+            live.pop("play_queued", None)
+            live.pop("queued_launch", None)
 
 
 def play_queue_tick(project, root, jobs) -> bool:
     """Start the Play clicks the machine guard or a sibling queued, oldest first, before any other start this tick. A
     job no longer resumable, limit-held (a sibling-blocked click) or answered, or already running, is dropped from the
     queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
-    (take_room) stops here and keeps it and every later one queued. True when it started one or one waits on a slot."""
+    (take_room) stops here and keeps it and every later one queued. A launch spawn's gate queued (queued_launch) is
+    re-run through spawn as it was, and dropped when its job is running or left that stage; a second refusal from the
+    gate stops here too. True when it started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
+        if launch := job.get("queued_launch"):
+            if running(project, job["id"]) or job["stage"] != launch["stage"]:
+                unqueue(root, job)
+                continue
+            if not take_room() or spawn(project, root, job["id"], launch["action"], launch["prompt"]) is None:
+                return True
+            started = True
+            continue
         answered = job["stage"] == "needs-human" and job.get("options")  # a resume pick answer_job queued
         if running(project, job["id"]) or not (resumable(job) or limit_held(job) or answered):
             unqueue(root, job)
@@ -276,9 +314,8 @@ def play_queue_tick(project, root, jobs) -> bool:
             break
         if refusal:
             continue
-        if not take_room():
+        if not take_room() or not resume_job(project, root, job, jobs):
             return True
-        resume_job(project, root, job, jobs)
         unqueue(root, job)
         started = True
     return started
@@ -327,7 +364,7 @@ def waiting_on(blocker):
 def approve_job(project, root, job_id, migrated=False):
     """The Approve & merge button, and an `approve` answer."""
     note = " — Trevor confirms /trevskills-migrate has already been run for this job." if migrated else ""
-    spawn(project, root, job_id, "approve", f"/trevskills-scrum approve {job_id}{note}")
+    return spawn(project, root, job_id, "approve", f"/trevskills-scrum approve {job_id}{note}")
 
 
 def rework_job(project, root, job_id, feedback):
@@ -335,7 +372,7 @@ def rework_job(project, root, job_id, feedback):
     feedback = board.clean(feedback or "", board.ITEM_MAX)
     if not feedback:
         raise SystemExit("feedback is empty")
-    spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
+    return spawn(project, root, job_id, "rework", f"/trevskills-scrum rework {job_id} {json.dumps(feedback)}")
 
 
 def abort_job(project, root, job_id, requeue, cascade=False):
@@ -368,6 +405,11 @@ def option_command(command):
     if len(words) in (2, 3) and words[0] == "abort" and words[2:] in ([], ["--requeue"], ["--cascade"]):
         return "abort", words[2][2:] if words[2:] else None
     return None
+
+
+def queued(started):
+    """The reply fields for a launch spawn's gate queued (it returned None), else none."""
+    return {} if started else {"queued": True, "message": PLAY_QUEUED}
 
 
 def refused(root, job_id, refusal):
@@ -412,15 +454,15 @@ def answer_job(project, root, job, jobs, key, note=None):
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
     if verb == "approve":
-        approve_job(project, root, job_id)
+        started = approve_job(project, root, job_id)
     elif verb == "rework":
-        rework_job(project, root, job_id, note if board.clean(note or "") else arg)
+        started = rework_job(project, root, job_id, note if board.clean(note or "") else arg)
     elif verb == "resume":
-        resume_job(project, root, job, jobs, manual=True)
+        started = resume_job(project, root, job, jobs, manual=True)
     else:
         note = f'Trevor picked "{picked.get("label")}": run {arg}, then continue'
-        spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}")
-    return 202, {"id": job_id, "action": "answer", "command": verb}
+        started = spawn(project, root, job_id, "resume", f"/trevskills-scrum resume {job_id} {json.dumps(note)}")
+    return 202, {"id": job_id, "action": "answer", "command": verb, **queued(started)}
 
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
@@ -4141,8 +4183,8 @@ class Handler(BaseHTTPRequestHandler):
             return setup_done(project, root, job_id)
         if action == "reopen":
             new_id = board.cmd_reopen(root, job_id, body.get("note") or "")
-            spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
-            return 202, {"id": new_id, "reopened_from": job_id}
+            started = spawn(project, root, new_id, "start", f"/trevskills-scrum start {new_id}")
+            return 202, {"id": new_id, "reopened_from": job_id, **queued(started)}
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
         if action == "answer":
@@ -4158,21 +4200,20 @@ class Handler(BaseHTTPRequestHandler):
                     with board.locked_board(root) as b:  # play_queue_tick starts it once the sibling finishes
                         board.find(b, job_id).setdefault("play_queued", board.now())
                     return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
-                resume_job(project, root, job, jobs, manual=manual)
-                return 202, {"id": job_id, "action": action}
+                return 202, {"id": job_id, "action": action, **queued(resume_job(project, root, job, jobs, manual=manual))}
             if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
                     return refused(root, job_id, refusal)
                 with board.locked_board(root) as b:  # the machine guard or a sibling queues the click; the watchdog starts it
                     board.find(b, job_id).setdefault("play_queued", board.now())
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
-            resume_job(project, root, job, jobs, manual=manual)
-            unqueue(root, job)
-            return 202, {"id": job_id, "action": action}
+            if started := resume_job(project, root, job, jobs, manual=manual):
+                unqueue(root, job)
+            return 202, {"id": job_id, "action": action, **queued(started)}
         if not job or job["stage"] != "needs-human" or running(project, job_id):
             return 409, {"error": "job isn't waiting on you, or is already running"}
         if action == "approve":
-            approve_job(project, root, job_id, bool(body.get("migrated")))
+            started = approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
             note = board.clean(body.get("feedback") or "", board.ITEM_MAX)
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
@@ -4185,8 +4226,8 @@ class Handler(BaseHTTPRequestHandler):
                     DISCUSSES[f"{project}/{job_id}"] = clicked
             return code, {"id": job_id, **obj} if code == 200 else obj
         else:
-            rework_job(project, root, job_id, body.get("feedback"))
-        return 202, {"id": job_id, "action": action}
+            started = rework_job(project, root, job_id, body.get("feedback"))
+        return 202, {"id": job_id, "action": action, **queued(started)}
 
 
 def make_server(port):

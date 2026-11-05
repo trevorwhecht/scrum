@@ -728,6 +728,7 @@ def abort_job(root, job, requeue, reason):
     job.update(stage="aborted", reason=reason, updatedAt=now())
     job.pop("paused", None)  # an aborted job is never played
     job.pop("play_queued", None)  # nor started by serve.py's Play queue
+    job.pop("queued_launch", None)
     if requeue:
         requeue_job(root, job, folder, feature)
     job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
@@ -3182,18 +3183,21 @@ def machine_ok(path, manual=False, claim=False):
     return None
 
 
-def ram_room():
+def ram_room(floor=1):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
-    for but not used yet), never past MAX_SESSIONS in all, at least 1. An unknown reading allows 1, so a batch never
-    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping."""
+    for but not used yet), never past MAX_SESSIONS in all, at least `floor`. An unknown reading allows 1, so a batch never
+    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping.
+    floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
+    while no session is younger than SESSION_RAMP_SECS."""
     ram = free_ram_pct()
     swap = swap_used_pct()
     if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
-        return 1
+        return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
-    room = int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - sum(a < SESSION_RAMP_SECS for a in ages)
-    return max(1, min(room, MAX_SESSIONS - len(ages)))
+    room = min(int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - sum(a < SESSION_RAMP_SECS for a in ages),
+               MAX_SESSIONS - len(ages))
+    return max(floor, room) if floor else room
 
 
 SESSION_RE = re.compile(r"(\S*/)?claude -p /trevskills-scrum [a-z-]+")
@@ -4427,6 +4431,7 @@ def cmd_pause(root, job_id):
             j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
             j.pop("play_queued", None)  # a pause cancels a queued Play
+            j.pop("queued_launch", None)
             if j.get("autoPlayed"):
                 j["holdPause"] = True  # re-paused after an auto-play: deliberate, so the watchdog leaves it paused
         return [j["id"] for j in hit]
