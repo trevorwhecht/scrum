@@ -1513,8 +1513,8 @@ class ServeTest(unittest.TestCase):
 
     def test_api_machine(self):
         keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct",
-                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct", "server",
-                "sessions", "swap_pct", "usage", "verdict"]
+                "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
+                "restart_waiting", "server", "sessions", "swap_pct", "usage", "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
         self.addCleanup(cores.stop)
@@ -1522,6 +1522,7 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
         self.assertEqual((code, sorted(out)), (200, keys))
         out.pop("server")
+        out.pop("restart_waiting")  # the fixture board's jobs; RestartBlockersTest pins the value
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -1529,7 +1530,7 @@ class ServeTest(unittest.TestCase):
                                "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
-            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k != "server"},
+            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting")},
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -1550,6 +1551,7 @@ class ServeTest(unittest.TestCase):
                                   side_effect=lambda p: disk.append(p) or (_ for _ in ()).throw(OSError("gone"))):
             code, out = self.req("GET", "/api/machine")
         out.pop("server")
+        out.pop("restart_waiting")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -6317,6 +6319,34 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), [])
         self.assertEqual(self.serve.STALL_RESUMED, {"p/solo/build", "p/solo/check", "p/solo/check#2"})
 
+    PARKED = "stalled: parked for cool down; resumes when cool down ends"
+
+    def test_cooldown_parked_waits_while_cooling(self):
+        """Job 622: a cool-down park waits out cool down without a try and without holding new claims (busy)."""
+        s = self.serve
+        flag = self.root / "cooldown"
+        flag.write_text("")
+        self.jobs = [{"id": "far", "stage": "build", "stalled": True, "reason": self.PARKED}]
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)), \
+                mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
+            self.assertIs(s.auto_resume("p", self.root, self.jobs), False)
+        resume.assert_not_called()
+        self.assertNotIn("p/far", s.AUTO_RESUME)
+
+    def test_cooldown_parked_resumes_after(self):
+        s = self.serve
+        flag = self.root / "cooldown"
+        flag.write_text("")
+        self.jobs = [{"id": "far", "stage": "build", "stalled": True, "reason": self.PARKED, "parent": "ra"},
+                     {"id": "ra", "stage": "running", "lane": "runall"}]
+        s.STALL_RESUMED.add("p/far/build")  # its one non-limit resume in build is already spent
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertEqual(self.sweep(), [])
+        flag.unlink()
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertEqual(self.sweep(), ["far"])
+        self.assertEqual(s.AUTO_RESUME["p/far"][0], 1)
+
     def test_auto_resume_e2e_queue_stall_resumes_one_per_tick_when_lock_free(self):
         s = self.serve
         self.jobs = [{"id": f"q{i}", "stage": "check", "stalled": True, "parent": "bb", "reason": "stalled: waiting on the E2E queue"}
@@ -9006,6 +9036,46 @@ E2E_LIST_OUTPUT = """Running 5 tests using 1 worker
 """
 
 
+class RestartBlockersTest(unittest.TestCase):
+    """Job 622: serve.restart_blockers() names the jobs (and full E2E runs) that keep a restart unsafe."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.root = base / "proj" / "scrum"
+        self.root.mkdir(parents=True)
+        (base / "projects.json").write_text(json.dumps([str(base / "proj")]))
+        p = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(base / "projects.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(serve.E2E_FULL.update, running=None)
+
+    def blockers(self, jobs):
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        return self.serve.restart_blockers()
+
+    def test_blockers(self):
+        self.assertEqual(self.blockers([{"id": "618-build-it", "stage": "build"}]), ["proj/618"])
+        quiet = [{"id": "001-paused", "stage": "build", "paused": True, "reason": "stalled in build: paused by Trevor"},
+                 {"id": "002-parked", "stage": "build", "stalled": True,
+                  "reason": "stalled: parked for cool down; resumes when cool down ends"},
+                 {"id": "003-done", "stage": "done"}, {"id": "004-held", "stage": "check", "limitResetAt": 123},
+                 {"id": "005-parent", "stage": "running", "lane": "bigboy"}, {"id": "006-ask", "stage": "needs-human"},
+                 {"id": "007-wait", "stage": "waiting"}, {"id": "008-cloud", "stage": "cloud"}]
+        self.assertEqual(self.blockers(quiet), [])
+        self.assertEqual(self.blockers(quiet + [{"id": "009-plan", "stage": "plan"}, {"id": "noid", "stage": "review"}]),
+                         ["proj/009", "proj/noid"])
+        self.serve.E2E_FULL["running"] = "proj"
+        self.assertEqual(self.blockers(quiet), ["proj/E2E full run"])
+
+    def test_machine_status_lists_them(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": "618-a", "stage": "check"}]}))
+        self.assertEqual(self.serve.machine_status()["restart_waiting"], ["proj/618"])
+
+
 class E2eFullTest(unittest.TestCase):
     """serve.py e2e_full_tick: one full E2E run on a project's main checkout after 5 merges or 24 h (job 613)."""
 
@@ -9055,11 +9125,29 @@ class E2eFullTest(unittest.TestCase):
         self.assertFalse(due(rec, "bbb", 4, now))
         self.assertTrue(due({"at": now - 86400, "head": "aaa"}, "bbb", 4, now))
         self.assertFalse(due({"at": now - 90000, "head": "aaa"}, "aaa", 0, now))
+        # job 622: once cool down settles a project, any new HEAD is due; an unchanged HEAD never is
+        self.assertTrue(due(rec, "bbb", 1, now, settled=True))
+        self.assertFalse(due(rec, "aaa", 1, now, settled=True))
+        self.assertFalse(due(rec, "bbb", 1, now))
 
-    def tick(self):
+    def test_tick_cooldown_settled_runs_one_merge(self):
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": time.time() - 60, "head": self.base, "result": "pass", "exit": 0, "failed": [], "lastGreen": self.base}))
+        self.merge("one merge")
+        flag = Path(self.tmp.name) / "cooldown"
+        flag.write_text("")
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": "001-a", "stage": "build"}]}))
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertEqual(self.tick("repo"), 0, "a build job on this board still blocks a restart")
+        self.assertEqual(self.tick("repo"), 0, "outside cool down one merge is not due")
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": "001-a", "stage": "done"}]}))
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertEqual(self.tick("repo"), 1, "settled: the one merge is due")
+
+    def tick(self, project="p"):
         with mock.patch.object(self.serve, "e2e_queue_free", return_value=True), \
                 mock.patch.object(self.serve.threading, "Thread") as thread:
-            self.serve.e2e_full_tick("p", self.repo, self.root)
+            self.serve.e2e_full_tick(project, self.repo, self.root)
         return thread.call_count
 
     def test_tick_starts_one_run_on_a_clean_checkout(self):

@@ -43,9 +43,9 @@
    ```
    Run `Install` from `project.md` in `$WT`; never symlink `node_modules` from `$REPO`.
    When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` in `$WT` after the install.
-   Then `B set $ID worktree=$WT stage=build`.
+   Then `B set $ID worktree=$WT stage=build`, then **Cool-down park** (merge.md).
 5. **Build:** first sync the branch: run `git -C "$WT" fetch origin` then `git -C "$WT" merge "$BASE" --no-edit`. On a merge conflict run `git -C "$WT" merge --abort`, carry on to the builder unmerged (the Merge **Conflicts** step still resolves it). Then spawn `scrum-builder` (see **Routing**) with step 3's **Model:** override and wait for it. Prompt: the 5 lines with `WORKTREE=$WT` and `ROUND=0`, plus `Implement spec.md. Write build.md.` Record the returned agent id/name with `B set $ID builder=<id>`. If `build.md` starts `STATUS: BLOCKED`: when its first reason line names a job on this board (id or number), run `B wait-on $ID <that id>`; on exit 0 run `git -C "$REPO" worktree remove -f "$WT"` and `git -C "$REPO" branch -D "scrum/$ID"` (a child then runs **BigBoy lane** step 6) and stop: serve.py starts it once that job merges. When no job is named or `wait-on` exits non-zero, run `B ask $ID 'blocked: <first reason line>' --kind blocked --a "Send back with a note=rework $ID \"make the most reasonable call on the blocker and record it as a Ruling in build.md\"" --b "Put back on the backlog=abort $ID --requeue" --c "Remove this job=abort $ID --cascade" --title BUILDER_BLOCKED --recommend <key> '<why>'` and stop, with `<first reason line>` rewritten to the **Issue** bar in `lanes/stops.md` with its prefix kept. If the job's `lane` is `debug`, see **Debug lane** instead of this step.
-6. Continue at **Check gate**.
+6. Continue: **Cool-down park** (merge.md), then **Check gate**.
 
 ## Fast lane
 

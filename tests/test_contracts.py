@@ -955,6 +955,26 @@ class ContractTest(unittest.TestCase):
         approve = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum approve <id>`**"))
         self.assertIn("obsolete", approve)
 
+    def test_cooldown_park_checkpoints(self):
+        """Job 622: New job parks a round-0 job at two checkpoints while cooling down (merge.md's paragraph)."""
+        merge = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        para = next(l for l in merge.splitlines() if l.startswith("**Cool-down park**"))
+        self.assertIn("B cooldown-park $ID", para)
+        self.assertIn('`"parked": true`', para)
+        self.assertIn("stop with the **Final report**", para)
+        newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
+        self.assertEqual(newjob.count("**Cool-down park**"), 2)
+        self.assertIn("worktree=$WT stage=build`, then **Cool-down park**", newjob)
+        self.assertIn("6. Continue: **Cool-down park** (merge.md), then **Check gate**.", newjob)
+
+    def test_approver_minor_findings_never_rework(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        self.assertIn("Use it only when a remaining `[blocking]` finding is real and must be fixed before shipping; a "
+                      "`[minor]` finding, a Note or taste never justifies REWORK, on any lane and whether or not cool "
+                      "down is on.", text)
+        self.assertIn("Each latest-round `[minor]` finding the diff does not fix gets a defer ruling and becomes a "
+                      "`## Follow-ups` bullet through the Follow-up gate below.", text)
+
     def test_no_unrequested_redesigns(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text()
                   for n in ("approver", "triager", "spec-writer", "review-ui", "review-ux")}
