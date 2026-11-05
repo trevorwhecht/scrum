@@ -1350,9 +1350,11 @@ class ContractTest(unittest.TestCase):
                   "A criterion whose verify step starts `rendered by reviewers` is the one exception: do not "
                   "walk it, and write `rendered by reviewers` for it in build.md, never `NOT RUN`.")
         siblings = ("   - When you add a field, setting, enum value or code, grep for every list that names one "
-                    "of its siblings (allowlists, `select` clauses, serializers, switch cases, code lists, "
+                    "of its siblings (allowlists, `select` clauses, shared `include` constants like "
+                    "ORDER_DETAIL_INCLUDE, serializers, switch cases, code lists, "
                     "every route method that writes it) and add it to each, or cite in build.md why one is "
-                    "left out.")
+                    "left out. For a new endpoint or tab, test it once as every role that can open the "
+                    "screen (admin and employee), not only admin.")
         for line in (rmw, e2e, manual, siblings):
             self.assertEqual(text.count(line), 1, line)
         self.assertIn(b9 + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
