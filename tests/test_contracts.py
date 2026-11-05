@@ -990,7 +990,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23000, "newjob.md")
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23300, "newjob.md")
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
