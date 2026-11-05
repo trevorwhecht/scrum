@@ -2063,6 +2063,32 @@ class ContractTest(unittest.TestCase):
                            "never relaxes the `Rendered: no` / `VERDICT: CHANGES` rule or the BASE compare"):
                 self.assertIn(phrase, para, f"{name}: {phrase}")
 
+    def test_review_shared_base_render(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "review.md").read_text()
+        steps = self.section(text, "2. **Which reviewers run.**", "3. Spawn **in ONE message**")
+        lines = [l.lstrip() for l in steps.splitlines()]
+        base = next(l for l in lines if l.startswith("- **Shared base render"))
+        self.assertLess(lines.index(next(l for l in lines if l.startswith("- **Shared render"))), lines.index(base))
+        for phrase in ("Only when **Shared render** exited 0", "round-$N/render-base", "render.py <base-url>",
+                       "/tmp/scrum-base-$ID", "cat-file -e $BASE:<path>",
+                       "stop that server and run `git -C \"$WT\" worktree remove --force /tmp/scrum-base-$ID` "
+                       "on every outcome"):
+            self.assertIn(phrase, base, phrase)
+        step3 = self.section(text, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
+        self.assertIn("When step 2's **Shared base render** exited 0, the `scrum-review-ui` and `scrum-review-ux` "
+                      "spawns, and any step 4 re-spawn of them, also get "
+                      "`RENDER_BASE_DIR=$F/jobs/$ID/round-$N/render-base`; no other reviewer gets it.", step3)
+
+    def test_review_ui_ux_read_shared_render_base(self):
+        for name in ("ui", "ux"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
+            for phrase in ("When your prompt has `RENDER_BASE_DIR=<dir>`",
+                           "`<dir>/manifest.json` instead of adding the BASE worktree",
+                           "add it only for a changed existing screen not listed or not `ok`"):
+                self.assertIn(phrase, para, f"{name}: {phrase}")
+            self.assertLess(para.index("RENDER_BASE_DIR"), para.index("worktree add --detach"), name)
+
     def test_review_ux_ui_dev_lock_reuse(self):
         stale = "Do not decline it as possibly stale."
         collision = ("If a server you reused this way stops answering before you finish, its owner (often the other "
