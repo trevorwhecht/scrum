@@ -184,8 +184,11 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             if proc is None:  # setdefault: a second click keeps the first time and launch
                 live.setdefault("play_queued", board.now())
                 live.setdefault("queued_launch", {"action": action, "prompt": prompt, "stage": live.get("stage")})
+                if manual:  # Trevor's click: play_queue_tick re-runs it past the CPU gate, as he sent it
+                    live["play_queued_manual"] = True
             else:
                 live.pop("play_queued", None)
+                live.pop("play_queued_manual", None)
                 live.pop("queued_launch", None)
         if proc is None:
             return None
@@ -301,11 +304,12 @@ PLAY_QUEUED = "queued, starts next"
 
 
 def unqueue(root, job):
-    """Drop the job's play_queued flag and queued_launch, when it has one."""
+    """Drop the job's play_queued flag (with its play_queued_manual marker) and queued_launch, when it has one."""
     if job.get("play_queued") or job.get("queued_launch"):
         with board.locked_board(root) as b:
             live = board.find(b, job["id"])
             live.pop("play_queued", None)
+            live.pop("play_queued_manual", None)
             live.pop("queued_launch", None)
 
 
@@ -315,14 +319,16 @@ def play_queue_tick(project, root, jobs) -> bool:
     queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
     (take_room) stops here and keeps it and every later one queued. A launch spawn's gate queued (queued_launch) is
     re-run through spawn as it was, and dropped when its job is running or left that stage; a second refusal from the
-    gate stops here too. True when it started one or one waits on a slot."""
+    gate stops here too. A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. True when it
+    started one or one waits on a slot."""
     started = False
     for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
+        manual = bool(job.get("play_queued_manual"))
         if launch := job.get("queued_launch"):
             if running(project, job["id"]) or job["stage"] != launch["stage"]:
                 unqueue(root, job)
                 continue
-            if not take_room() or spawn(project, root, job["id"], launch["action"], launch["prompt"]) is None:
+            if not take_room() or spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
                 return True
             started = True
             continue
@@ -330,12 +336,12 @@ def play_queue_tick(project, root, jobs) -> bool:
         if running(project, job["id"]) or not (resumable(job) or limit_held(job) or answered):
             unqueue(root, job)
             continue
-        refusal = resume_refusal(project, root, job)
+        refusal = resume_refusal(project, root, job, manual=manual)
         if refusal and refusal.startswith(board.MACHINE_WAIT):
             break
         if refusal:
             continue
-        if not take_room() or not resume_job(project, root, job, jobs):
+        if not take_room() or not resume_job(project, root, job, jobs, manual=manual):
             return True
         unqueue(root, job)
         started = True
@@ -464,6 +470,7 @@ def answer_job(project, root, job, jobs, key, note=None):
         with board.locked_board(root) as b:  # the machine guard or a sibling queues the pick like a Play; play_queue_tick starts it
             if (live := board.find(b, job_id))["stage"] == "needs-human":
                 live.setdefault("play_queued", board.now())
+                live["play_queued_manual"] = True  # Trevor's pick: play_queue_tick gates it as his click
         return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
     if option_command(opt.get("command"))[0] == "apply":  # writes the global file itself, then records the pick
         return weekly_apply(project, root, job_id, key)
@@ -2781,8 +2788,9 @@ def board_with_activity(root, project):
                 job["fable"] = True  # the card's Fable chip
         if resumable(job) and not running(project, job.get("id")):
             # ponytail: machine_ok runs per resumable job each poll; compute it once per board if many sit paused
-            # manual: as the dashboard's click sends it; a queued Play is gated as play_queue_tick gates it, CPU included
-            refusal = resume_refusal(project, root, job, manual=not job.get("play_queued"))
+            # manual: as the dashboard's click sends it; a queued Play is gated as play_queue_tick gates it: CPU included,
+            # unless Trevor made the click (play_queued_manual)
+            refusal = resume_refusal(project, root, job, manual=not job.get("play_queued") or bool(job.get("play_queued_manual")))
             job["resumeRefusal"] = str(refusal) if refusal else None
             job["waitingOn"] = waiting_on(getattr(refusal, "blocker", None))
         if board.stalled(job) or limit_held(job):  # when auto_resume tries it next: its own retry, else the limit reset
@@ -4275,23 +4283,35 @@ class Handler(BaseHTTPRequestHandler):
         job = next((j for j in jobs if j["id"] == job_id), None)
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"), body.get("note"))
-        if action == "resume":  # a paused job (Play), or one stopped for a reason whose card offers Resume (RESUMABLE)
-            if not job or running(project, job_id) or not resumable(job) and not limit_held(job):
+        if action == "resume":  # a paused job (Play), one stopped for a reason whose card offers Resume (RESUMABLE), or a queued one (Start now)
+            if not job or running(project, job_id) or not resumable(job) and not limit_held(job) and not job.get("play_queued"):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
+
+            def queue_click():  # setdefault: a repeat click keeps the first time; the marker gates the drain as a click
+                with board.locked_board(root) as b:
+                    live = board.find(b, job_id)
+                    live.setdefault("play_queued", board.now())
+                    if manual:
+                        live["play_queued_manual"] = True
+            if (launch := job.get("queued_launch")) and not resumable(job) and not limit_held(job):
+                if job["stage"] != launch["stage"]:  # the stage moved on: play_queue_tick would drop it too
+                    unqueue(root, job)
+                    return 409, {"error": "job isn't stalled, or is already running"}
+                # Start now on a launch spawn's gate queued: re-run it as Trevor's click (the RAM gate still holds it)
+                started = spawn(project, root, job_id, launch["action"], launch["prompt"], manual=manual)
+                return 202, {"id": job_id, "action": action, **queued(started)}
             if limit_held(job):  # held on a usage limit: only a sibling refusal is queued, never the machine guard
                 if refusal := resume_refusal(project, root, job, manual=manual):
                     if not getattr(refusal, "blocker", None):
                         return refused(root, job_id, refusal)
-                    with board.locked_board(root) as b:  # play_queue_tick starts it once the sibling finishes
-                        board.find(b, job_id).setdefault("play_queued", board.now())
+                    queue_click()  # play_queue_tick starts it once the sibling finishes
                     return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
                 return 202, {"id": job_id, "action": action, **queued(resume_job(project, root, job, jobs, manual=manual))}
             if refusal := resume_refusal(project, root, job, manual=manual):
                 if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
                     return refused(root, job_id, refusal)
-                with board.locked_board(root) as b:  # the machine guard or a sibling queues the click; the watchdog starts it
-                    board.find(b, job_id).setdefault("play_queued", board.now())
+                queue_click()  # the machine guard or a sibling queues the click; the watchdog starts it
                 return 202, {"id": job_id, "action": action, "queued": True, "message": PLAY_QUEUED}
             if started := resume_job(project, root, job, jobs, manual=manual):
                 unqueue(root, job)

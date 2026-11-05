@@ -1997,22 +1997,129 @@ class ServeTest(unittest.TestCase):
 
     def test_play_queued_cleared_on_abort_pause_and_play(self):
         b = self.serve.board
-        gone = self.paused_job("Abort queued", play_queued="2026-10-25T10:00:00+00:00")
+        q = {"play_queued": "2026-10-25T10:00:00+00:00", "play_queued_manual": True}
+        gone = self.paused_job("Abort queued", **q)
         b.cmd_abort(self.root, gone, False)
         self.assertNotIn("play_queued", self.stage_of(gone))
+        self.assertNotIn("play_queued_manual", self.stage_of(gone))
         parent, kid = b.cmd_new(self.root, "Pause queued"), b.cmd_new(self.root, "Pause queued kid")
-        self.edit_job(parent, stage="running", lane="runall", children=[kid], play_queued="2026-10-25T10:00:00+00:00")
-        self.edit_job(kid, stage="build", parent=parent, play_queued="2026-10-25T10:00:00+00:00")
+        self.edit_job(parent, stage="running", lane="runall", children=[kid], **q)
+        self.edit_job(kid, stage="build", parent=parent, **q)
         self.assertEqual(b.cmd_pause(self.root, parent), [parent, kid])
-        self.assertNotIn("play_queued", self.stage_of(parent))
-        self.assertNotIn("play_queued", self.stage_of(kid))
+        for j in (parent, kid):
+            self.assertNotIn("play_queued", self.stage_of(j))
+            self.assertNotIn("play_queued_manual", self.stage_of(j))
         b.cmd_abort(self.root, kid, False); b.cmd_abort(self.root, parent, False)
-        played = self.paused_job("Play queued", play_queued="2026-10-25T10:00:00+00:00")
+        played = self.paused_job("Play queued", **q)
         with mock.patch.object(self.serve, "spawn") as spawn:
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{played}/resume", {}),
                              (202, {"id": played, "action": "resume"}))
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [(played, "resume")])
         self.assertNotIn("play_queued", self.stage_of(played))
+        self.assertNotIn("play_queued_manual", self.stage_of(played))
+        # A leftover marker with no play_queued changes nothing: the board gates it as any unqueued job.
+        left = self.paused_job("Leftover marker", play_queued_manual=True)
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            self.assertEqual(self.board_jobs()[left]["resumeRefusal"][:len("waiting: free RAM")], "waiting: free RAM")
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.object(self.serve, "resume_job") as resume:
+            self.serve.play_queue_tick("repo", self.root, [j for j in jobs if j["id"] == left])
+        resume.assert_not_called()
+
+    # --- job 644: a queued Play remembers it was Trevor's click (play_queued_manual) ---
+    CALM = {"SCRUM_FREE_RAM": "90", "SCRUM_SWAP_PCT": "0", "SCRUM_FREE_DISK_GB": "500", "SCRUM_CPU_BUSY_PCT": "5",
+            "SCRUM_CPU_LOAD_PCT": "10"}
+    QUEUED_REPLY = {"action": "resume", "queued": True, "message": "queued, starts next"}
+
+    def test_play_under_load_queues_with_manual_marker(self):
+        manual, auto = self.paused_job("Play under load"), self.paused_job("Auto under load")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{manual}/resume", {"manual": True}),
+                             (202, {"id": manual, **self.QUEUED_REPLY}))
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{auto}/resume", {}), (202, {"id": auto, **self.QUEUED_REPLY}))
+        spawn.assert_not_called()
+        self.assertTrue(self.stage_of(manual)["play_queued"])
+        self.assertIs(self.stage_of(manual)["play_queued_manual"], True)
+        self.assertTrue(self.stage_of(auto)["play_queued"])
+        self.assertNotIn("play_queued_manual", self.stage_of(auto), "continue.py's {} is not Trevor's click")
+        # A click the launch gate queued (no RAM share left) keeps the marker too; an automatic launch does not.
+        s, b = self.serve, self.serve.board
+        clicked, sweep = self.gate_job("Manual launch queued"), self.gate_job("Auto launch queued")
+        ps, fake = self.launch_ps()
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertIsNone(s.spawn("repo", self.root, clicked, "approve", f"/trevskills-scrum approve {clicked}", manual=True))
+            self.assertIsNone(s.spawn("repo", self.root, sweep, "approve", f"/trevskills-scrum approve {sweep}"))
+        spawn.assert_not_called()
+        self.assertIs(self.stage_of(clicked)["play_queued_manual"], True)
+        self.assertNotIn("play_queued_manual", self.stage_of(sweep))
+
+    @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))
+    def test_manual_play_queued_skips_cpu_gate_after_sibling(self):
+        """Job 454: a manual Play queued behind a sibling, drained once the sibling finished while CPU load is high."""
+        s, b = self.serve, self.serve.board
+        _, kid, sib, mine = self.sibling_pair("Cpu", stage="build", paused=True, reason=self.PAUSED_REASON)
+        self.addCleanup(self.edit_job, kid, stage="aborted", paused=None, play_queued=None, play_queued_manual=None)
+        self.addCleanup(s.RUNS.pop, f"repo/{kid}", None)
+        ps, fake = self.launch_ps()
+        with mock.patch.dict(os.environ, {**self.CALM, "SCRUM_PS": str(ps)}), mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{kid}/resume", {"manual": True}),
+                             (202, {"id": kid, **self.QUEUED_REPLY}))
+        spawn.assert_not_called()
+        self.assertIs(self.stage_of(kid)["play_queued_manual"], True)
+        self.edit_job(sib, stage="done")
+        with mock.patch.dict(os.environ, {**self.CALM, "SCRUM_PS": str(ps), "SCRUM_CPU_LOAD_PCT": "900",
+                                          "SCRUM_CPU_BUSY_PCT": "99"}), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertIsNone(self.board_jobs()[kid]["resumeRefusal"], "gated as Trevor's click: CPU skipped")
+            self.assertTrue(s.play_queue_tick("repo", self.root, mine()))
+        self.assertEqual([c.args[1:3] for c in spawn.call_args_list], [(kid, "resume")])
+        self.assertNotIn("play_queued", self.stage_of(kid))
+        self.assertNotIn("play_queued_manual", self.stage_of(kid))
+
+    def test_start_now_on_queued_job(self):
+        from test_dashboard_stop_buttons import js  # node render of the dashboard's real renderActions
+        s, b = self.serve, self.serve.board
+        built = b.cmd_new(self.root, "Start now build")
+        launch = {"action": "resume", "prompt": f"/trevskills-scrum resume {built}", "stage": "build"}
+        self.addCleanup(self.edit_job, built, stage="aborted", play_queued=None, queued_launch=None)
+        self.edit_job(built, stage="build", reason=None, play_queued="2026-10-25T10:00:00+00:00", queued_launch=launch)
+        paused = self.paused_job("Start now paused", play_queued="2026-10-25T10:00:00+00:00")
+        form = '<form data-act="resume"><button class="btn primary tall" type="submit">Start now</button></form>'
+        for job_id in (built, paused):
+            job = self.board_jobs()[job_id]
+            html, = js(f"renderActions({json.dumps({**job, 'key': f'repo/{job_id}', 'project': 'repo'})}); out(els.actions.innerHTML);")
+            self.assertIn(form, html, job_id)
+            self.assertIn('<p class="note" role="status">queued, starts next</p>', html)
+            self.assertNotIn(">Play</button>", html)
+        with mock.patch.object(s, "spawn", return_value=None) as spawn:  # the RAM gate still holds it
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{built}/resume", {"manual": True}),
+                             (202, {"id": built, **self.QUEUED_REPLY}))
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(built, "resume", f"/trevskills-scrum resume {built}")])
+        self.assertIs(spawn.call_args.kwargs.get("manual"), True)
+        with mock.patch.object(s, "spawn", return_value="runs/x.log"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{built}/resume", {"manual": True}),
+                             (202, {"id": built, "action": "resume"}))
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(s, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{paused}/resume", {"manual": True}),
+                             (202, {"id": paused, **self.QUEUED_REPLY}))
+        spawn.assert_not_called()
+        self.assertEqual(self.stage_of(paused)["play_queued"], "2026-10-25T10:00:00+00:00")
+        with mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "spawn", return_value="runs/y.log"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{paused}/resume", {"manual": True}),
+                             (202, {"id": paused, "action": "resume"}))
+        self.assertNotIn("play_queued", self.stage_of(paused))
+
+    def test_repeat_play_keeps_first_queue_time(self):
+        b = self.serve.board
+        job_id = self.paused_job("Repeat play")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"), mock.patch.object(self.serve, "spawn"):
+            for clicked in ("2026-10-25T10:00:00+00:00", "2026-10-25T11:00:00+00:00", "2026-10-25T12:00:00+00:00"):
+                with mock.patch.object(b, "now", return_value=clicked):
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {"manual": True}),
+                                     (202, {"id": job_id, **self.QUEUED_REPLY}))
+        jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id]
+        self.assertEqual([(j["play_queued"], j["play_queued_manual"]) for j in jobs], [("2026-10-25T10:00:00+00:00", True)])
 
     def test_answer_unknown_command(self):
         for command in ("deploy 1", 'rework 1 "unclosed', "", "approve"):
@@ -7435,7 +7542,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
                           "play_queued": "2026-10-25T09:02:00+00:00"},
                          {"id": "010-q", "stage": "build", "paused": True, "reason": self.PAUSED, "play_queued": q})
         sib = "can't resume yet: sibling 9-x shares a.py. Fix: click Resume when 9-x finish."
-        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j: sib if j["id"] == "022-blocked" else None):
+        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j, **_: sib if j["id"] == "022-blocked" else None):
             spawn, _, _ = self.tick(running=lambda project, job_id: job_id == "021-live")
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("010-q", "resume")])
         self.assertNotIn("play_queued", self.job("020-run"), "no longer resumable: dropped")
@@ -7445,7 +7552,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         ram = "waiting: free RAM 14% (< 20%). Fix: click Resume once memory or disk frees up."
         self.queue_board(*({"id": k, "stage": "build", "paused": True, "reason": self.PAUSED,
                             "play_queued": f"2026-10-25T10:0{n}:00+00:00"} for n, k in enumerate(("030-a", "031-b", "032-c"))))
-        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j: ram if j["id"] == "031-b" else None):
+        with mock.patch.object(s, "resume_refusal", side_effect=lambda p, r, j, **_: ram if j["id"] == "031-b" else None):
             spawn, _, _ = self.tick()
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("030-a", "resume")], "the guard stops the queue")
         self.assertEqual([self.job(k).get("play_queued") for k in ("030-a", "031-b", "032-c")],

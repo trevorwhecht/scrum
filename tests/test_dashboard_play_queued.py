@@ -147,6 +147,22 @@ class PlayQueued(unittest.TestCase):
             out(playQueued({json.dumps(stall)})); out(playQueued({json.dumps({"stage": "build", "play_queued": "x"})}));""")
         self.assertEqual(got, [True, False, False])
 
+    def test_queued_job_status_line_reads_queued(self):
+        """Job 644: a queued Play on a job playQueued() does not cover (paused, or unpaused in build) reads as queued,
+        never "Paused by you" or a doubled "Waiting: waiting:"."""
+        machine = "waiting: CPU load 900% (> 500%). Fix: click Resume once memory or disk frees up."
+        paused = {"key": "p/210-p", "project": "p", "id": "210-p", "title": "P", "stage": "build", "paused": True,
+                  "reason": "stalled in build: paused by Trevor. Fix: click Play.", "play_queued": "2026-10-25T10:00:00Z",
+                  "updatedAt": "2026-10-25T10:00:00Z"}
+        build = {**paused, "key": "p/211-b", "id": "211-b", "paused": None, "reason": None}
+        got = run(f"""const p = {json.dumps(paused)}, b = {json.dumps(build)}, m = {json.dumps(machine)};
+            out([p, b, {{...p, resumeRefusal: m}}, {{...b, resumeRefusal: m}}].map(statusLine));
+            jobs = [{{...p, resumeRefusal: m}}]; renderActions(jobs[0]); out(els.viewerStatus.textContent);
+            out(statusLine({{...p, play_queued: null}}));""")
+        self.assertEqual(got, [["Queued, starts next", "Queued, starts next", "Queued: starts when CPU/RAM frees up",
+                                "Queued: starts when CPU/RAM frees up"],
+                               "Queued: starts when CPU/RAM frees up", "Paused by you"])
+
     def test_missing_job_file_tab_hidden(self):
         job = {**STUCK, "files": ["feature.md", "plan.md"]}
         notfound = 'fetchImpl = async url => url.endsWith("feature.md") ? {ok: false, status: 404, text: async () => "nope"} : {ok: true, status: 200, text: async () => "# plan"};'

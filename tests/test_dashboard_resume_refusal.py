@@ -13,6 +13,11 @@ PAUSED = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "pa
           "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
 STALLED = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
 CASES = ((PAUSED, "Play"), (STALLED, "Resume"))
+# An outright refusal (the POST would 409): the panel drops the button. A machine wait would only queue the click (job 644).
+LILGUY = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
+          "/trevskills-commitpush, or discard it, then click Abort.")
+LILGUY_NOTE = '<p class="note" role="status">Waiting: lilguy job: there is no pipeline to resume.</p>'
+MACHINE = "waiting: free RAM 10% (< 20%). Fix: click Resume once memory or disk frees up."
 # A job stalled in its own stage (board `stalled` true) keeps its stage, so its panel takes the not-needs-human branch.
 NEW_SHAPE = {"key": "p/020-q", "project": "p", "id": "020-q", "stage": "build", "stalled": True, "worktree": "/tmp/wt-021",
              "reason": "stalled: no live session. Fix: click Resume.", "updatedAt": "2026-01-01T00:00:00Z"}
@@ -40,13 +45,15 @@ def assert_inline(case, html, label, alert=ALERT):
 
 class RefusedResume(unittest.TestCase):
     def test_refused_resume_shows_reason_inline(self):
-        offered, refused = js(f"""const n = {json.dumps(NEW_SHAPE)}; jobs = [n]; renderActions(n); out(els.actions.innerHTML);
-            jobs = [{{...n, resumeRefusal: {json.dumps(MSG)}}}]; renderActions(jobs[0]); out(els.actions.innerHTML);""")
+        offered, refused, machine = js(f"""const n = {json.dumps(NEW_SHAPE)}; jobs = [n]; renderActions(n); out(els.actions.innerHTML);
+            jobs = [{{...n, resumeRefusal: {json.dumps(LILGUY)}}}]; renderActions(jobs[0]); out(els.actions.innerHTML);
+            jobs = [{{...n, resumeRefusal: {json.dumps(MACHINE)}}}]; renderActions(jobs[0]); out(els.actions.innerHTML);""")
         self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', offered)
         for gone in ('data-act="approve"', 'data-act="rework"'):
             self.assertNotIn(gone, offered)
         self.assertNotIn('data-act="resume"', refused)
-        self.assertIn('<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>', refused)
+        self.assertIn(LILGUY_NOTE, refused)
+        self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Resume</button></form>', machine)
         for job, label in CASES + ((NEW_SHAPE, "Resume"),):
             with self.subTest(label=label):
                 shown, viewer, disabled, html = js(f"""jobs = [{json.dumps(job)}]; renderActions(jobs[0]);
@@ -73,12 +80,11 @@ class RefusedResume(unittest.TestCase):
                 again, waiting = js(f"""jobs = [{json.dumps(job)}]; renderActions(jobs[0]);
                     postFails = {json.dumps(MSG)}; {SUBMIT}
                     renderActions(jobs[0]); renderActions(jobs[0]); out(els.actions.innerHTML);
-                    jobs[0] = {{...jobs[0], resumeRefusal: {json.dumps(MSG)}}}; renderActions(jobs[0]); out(els.actions.innerHTML);""")
+                    jobs[0] = {{...jobs[0], resumeRefusal: {json.dumps(LILGUY)}}}; renderActions(jobs[0]); out(els.actions.innerHTML);""")
                 assert_inline(self, again, label)
                 # The poll swapped the button out for the "Waiting:" note, and the full reason is still there once.
                 self.assertNotIn('data-act="resume"', waiting)
-                note = '<p class="note" role="status">Waiting: can&#39;t resume yet: 222.</p>'
-                self.assertIn(f'{note}{ALERT}', waiting)
+                self.assertIn(f'{LILGUY_NOTE}{ALERT}', waiting)
                 self.assertEqual(waiting.count(SHOWN), 1, waiting)
 
     def test_refused_resume_reason_clears(self):

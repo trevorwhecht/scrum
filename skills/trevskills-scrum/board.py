@@ -732,6 +732,7 @@ def abort_job(root, job, requeue, reason):
     job.update(stage="aborted", reason=reason, updatedAt=now())
     job.pop("paused", None)  # an aborted job is never played
     job.pop("play_queued", None)  # nor started by serve.py's Play queue
+    job.pop("play_queued_manual", None)
     job.pop("queued_launch", None)
     if requeue:
         requeue_job(root, job, folder, feature)
@@ -4500,6 +4501,7 @@ def cmd_pause(root, job_id):
             j.update(paused=True, reason=f"{STALLED}{j['stage']}: {PAUSED}. Fix: click Play.", updatedAt=now())
             j.pop("limitResetAt", None)
             j.pop("play_queued", None)  # a pause cancels a queued Play
+            j.pop("play_queued_manual", None)
             j.pop("queued_launch", None)
             if j.get("autoPlayed"):
                 j["holdPause"] = True  # re-paused after an auto-play: deliberate, so the watchdog leaves it paused
