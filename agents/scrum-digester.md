@@ -16,18 +16,18 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 3. Every file under `Conventions to read` in `PROJECT`.
 4. The memory files under `~/.claude/projects/*/memory/` (Glob them; read the ones for this repo and any that touch the findings).
 
-**Decide.** For each recurring finding, ask what one sentence, in which one file, would have prevented it: a missing rule in a reviewer or builder prompt, an unclear step in SKILL.md, a convention the agents keep missing, a memory note that's wrong or out of date. Prefer sharpening an existing line over adding a new one. When `notes.md`'s Fast lane verdict is `SKIP_SPEC_WRITER`, propose the SKILL.md edit that lets fast-lane jobs skip the spec writer, citing the verdict's reasoning; for `KEEP_SPEC_WRITER` or `TOO_EARLY`, propose nothing about it. Skip a finding that the files already cover clearly (the agent just didn't follow it), or that no text edit would fix. Proposing nothing is a valid answer.
+**Decide.** For each recurring finding, ask what one sentence, in which one file, would have prevented it: a missing rule in a reviewer or builder prompt, an unclear step in SKILL.md, a convention the agents keep missing, a memory note that's wrong or out of date. Prefer sharpening an existing line over adding a new one. When `notes.md`'s Fast lane verdict is `SKIP_SPEC_WRITER`, propose the SKILL.md edit that lets fast-lane jobs skip the spec writer, citing the verdict's reasoning; for `KEEP_SPEC_WRITER` or `TOO_EARLY`, propose nothing about it. Skip a finding that the files already cover clearly (the agent just didn't follow it), or that no text edit would fix, except an entry the section rules below send to the **Backlog fallback**. Proposing nothing is a valid answer.
 
 **Default picks.** From `notes.md`'s `## Repeated questions` section:
 - Every entry carrying `DEFAULT: <label>` becomes exactly one proposal that makes that pick the default: a self-heal rule or a default answer in `SKILL.md`.
 - Its `why` names the `SKILL.md` section (`## <heading>`) where the question is asked, plus the entry's counts and job ids.
-- An entry with no `DEFAULT:` gets no proposal.
+- An entry with no `DEFAULT:` becomes at most one proposal: a text edit when one would stop the question from recurring, otherwise the **Backlog fallback**.
 - It counts toward the at-most-8 cap.
 
 **Recurring blockers.** From `notes.md`'s `## Recurring blockers` section:
 - Each entry becomes at most one proposal whose `why` starts `Recurring blockers:` and names the entry's count and job ids.
 - It proposes the one-sentence edit (builder, spec-writer or `SKILL.md` text) that would stop that blocker.
-- An entry no text edit would fix gets no proposal.
+- An entry no text edit would fix goes to the **Backlog fallback**.
 - It counts toward the at-most-8 cap.
 
 **Pipeline fit.** From `notes.md`'s `## Pipeline fit` section, you may propose threshold or routing edits (a lane-size limit, a routing rule in `SKILL.md`) when its over-routed jobs show a pattern. Cite their ids and `fit`. They count toward the at-most-8 cap.
@@ -40,6 +40,18 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 - Otherwise write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`. The `backlog` line names the cause, its count and the pipeline change in board.py, serve.py or the dashboard.
 - A row with Automate `no` gets no proposal.
 - Skip a row when `scrum/backlog.md` already holds an open `- [ ]` item for its cause (read it first), and skip a `bigboy review: main not updated` row: `lanes/bigboy.md` step 7 (`waiting: main fast-forward`, which serve.py resumes) already self-heals it.
+
+**Time sinks.** From `notes.md`'s `## Time sinks` section:
+- Each entry becomes at most one proposal whose `why` starts `Time sinks:` and names the entry's count, time lost and job ids.
+- It is a text edit when an agent, lane or `SKILL.md` rule would remove the cause, otherwise the **Backlog fallback**.
+- A `None` section gets no proposal.
+- It counts toward the at-most-8 cap.
+
+**Backlog fallback.** When no agent, lane or `SKILL.md` text edit would fix an entry's cause:
+- Write `{"id": "pN", "kind": "backlog", "why": "...", "backlog": "<one line>"}` with no `target`, `old` or `new`.
+- The `backlog` line names the cause, its count, its job ids and the pipeline change in board.py, serve.py or the dashboard.
+- Skip the entry when `scrum/backlog.md` already holds an open `- [ ]` item for that cause (read it first).
+- It counts toward the at-most-8 cap.
 
 **New skill.** From `notes.md`'s `## Rediscovery` section only, you may propose a new skill: a short reference an agent reads up front so it stops re-deriving the same facts.
 - Propose a skill only from a `## Rediscovery` entry. When that section is `None`, propose no skill.
@@ -79,7 +91,7 @@ How they land, so you can judge the cost: an edit to a file inside a registered 
 - Read step 3 uses each such project's `scrum/project.md`.
 - Propose only kind `edit`, with a `target` inside a registered repo (one listed in `~/.claude/trevskills-scrum/projects.json`): an agent, a `SKILL.md`, a lane, a project's `CLAUDE.md` or `.claude/rules/`; or a global file: `~/.claude/CLAUDE.md`, `~/.claude/rules/` or `/Users/trevorhecht/Developer/repos/.claude/rules/`. Never a memory file, a new skill or a backlog proposal.
 - Each `why` names the projects and job ids the finding came from.
-- Write `WEEKLY_DIR/proposals.json` in the **Output** shape above. The at-most-8 cap and every rule for each proposal still hold. **Default picks**, **Recurring blockers**, **Pipeline fit**, **Usage windows**, **Stops** and **New skill** read `notes.md`, so they do not apply.
+- Write `WEEKLY_DIR/proposals.json` in the **Output** shape above. The at-most-8 cap and every rule for each proposal still hold. **Default picks**, **Recurring blockers**, **Pipeline fit**, **Usage windows**, **Stops**, **Time sinks**, **Backlog fallback** and **New skill** read `notes.md`, so they do not apply.
 - How they land differs: each proposal goes to Trevor one by one as a question, and none is applied here. A repo edit asks on its target repo's board, and one he picks runs as a normal job. A global edit asks on the trevskills-scrum board with **Apply it**, which writes it in place after a backup.
 
 **Hard limits:**
