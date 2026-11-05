@@ -914,6 +914,28 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_ready_waiting_children_use_plan_paths(self):
+        # Job 673: a waiting child has no spec.md; its plan's Parallel: paths stand in as its Likely files.
+        plan = lambda: self.plan(self.ticket(1, parallel="yes — touches only `src/app/(pages)/`"),
+                                 self.ticket(2, parallel="yes — touches only `src/lib/` and `docs/x.md`"),
+                                 self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
+        parent = plan()
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        feature = (self.root / "jobs" / c2 / "feature.md").read_text()
+        self.assertIn("## Likely files\n- `src/lib/`\n- `docs/x.md`\n", feature)
+        self.assertNotIn("## Likely files", (self.root / "jobs" / c3 / "feature.md").read_text())
+        self.assertIsNone(board.resume_blocker(self.root, c2, live={c1}))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        # A specced file under a waiting sibling's folder clashes with it (prefix-aware), in ready and resume_blocker.
+        parent = plan()
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(d2, "src/app/(pages)/page.tsx")
+        hit = board.resume_blocker(self.root, d2, live={d1})
+        self.assertEqual((str(hit), hit.ids), (f"sibling {d1} shares src/app/(pages)/page.tsx", [d1]))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
+        # A folder named without the trailing slash still never matches a mere name prefix.
+        self.assertEqual(board.shared_files({"src/app"}, {"src/application.ts", "src/app/x.ts"}), {"src/app/x.ts"})
+
     def test_ready_unknown_likely_files_runs_alone(self):
         # T2 has no spec, then a Likely files section holding only a non-path token: both mean "files unknown".
         for unknown in (None, "# x\n## Likely files\n- `cmd_ready(root)`: the scheduler\n## Assumptions\n- `src/z.py`\n"):
