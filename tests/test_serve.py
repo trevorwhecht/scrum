@@ -797,6 +797,136 @@ class ServeTest(unittest.TestCase):
             with e:
                 return e.code, json.loads(e.read())
 
+    # --- job 624: spawn's launch gate (board.ram_room(floor=0) under LAUNCH_LOCK) ---
+    def gate_job(self, title, root=None, project="repo", stage="needs-human"):
+        b = self.serve.board
+        root = root or self.root
+        job_id = b.cmd_new(root, title)
+        with b.locked_board(root) as data:
+            b.find(data, job_id).update(stage=stage, reason="approve: ready to merge")
+        self.addCleanup(lambda: self.serve.RUNS.pop(f"{project}/{job_id}", None))
+        self.addCleanup(lambda: b.cmd_abort(root, job_id, False))
+        return job_id
+
+    def launch_ps(self, *lines):
+        """A SCRUM_PS file holding `lines`, and a board.spawn stub that adds a 0 s old session to it."""
+        ps = Path(self.tmp.name) / f"ps-{self._testMethodName}.txt"
+        ps.write_text("".join(f"{l}\n" for l in lines))
+
+        def fake_spawn(root, job_id, action, prompt=None, flags=()):
+            with ps.open("a") as f:
+                f.write(f"   00:00 claude -p /trevskills-scrum {action} {job_id}\n")
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            return proc, f"runs/{job_id}-{action}.log"
+        return ps, fake_spawn
+
+    def test_launch_gate_one_per_ramp_when_swapping_across_projects(self):
+        s, b = self.serve, self.serve.board
+        other = Path(self.tmp.name) / "other-gate" / "scrum"
+        ids = [self.gate_job(f"Swap gate {i}") for i in range(3)]
+        start = self.gate_job("Other project start", root=other, project="other", stage="spec")
+        ps, fake = self.launch_ps()
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="66", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            out = [s.spawn("repo", self.root, i, "approve", f"/trevskills-scrum approve {i}") for i in ids]
+            out.append(s.spawn("other", other, start, "start", f"/trevskills-scrum start {start}"))
+            self.assertEqual([c.args[1] for c in spawn.call_args_list], [ids[0]], "swapping: one young session at a time")
+            self.assertEqual(out, [f"runs/{ids[0]}-approve.log", None, None, None])
+            self.assertEqual(b.find(b.read_board(other), start)["queued_launch"],
+                             {"action": "start", "prompt": f"/trevskills-scrum start {start}", "stage": "spec"})
+            ps.write_text(f"   02:01 claude -p /trevskills-scrum approve {ids[0]}\n")  # past SESSION_RAMP_SECS
+            self.assertEqual(s.spawn("other", other, start, "start", f"/trevskills-scrum start {start}"),
+                             f"runs/{start}-start.log")
+
+    def test_launch_gate_holds_under_concurrent_requests(self):
+        s, b = self.serve, self.serve.board
+        ids = [self.gate_job(f"Race {i}") for i in range(4)]
+        ps, fake = self.launch_ps()
+
+        def slow(*args, **kwargs):  # ps sees the new session only once the Popen returns
+            time.sleep(0.1)
+            return fake(*args, **kwargs)
+        gate = threading.Barrier(4)
+
+        def click(job_id):
+            gate.wait()
+            s.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=slow) as spawn:
+            threads = [threading.Thread(target=click, args=(i,)) for i in ids]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(spawn.call_count, 2, "2 shares of free RAM: 2 sessions")
+        self.assertEqual(sum(bool(self.stage_of(i).get("queued_launch")) for i in ids), 2)
+
+    def test_queued_launch_drains_through_gate(self):
+        s, b = self.serve, self.serve.board
+        moved, busy, first, second, third = (self.gate_job(f"Drain {n}") for n in
+                                             ("moved", "busy", "first", "second", "third"))
+        ps, fake = self.launch_ps("   00:10 claude -p /trevskills-scrum start 999-young")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="25", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            for job_id in (moved, busy, first, second, third):
+                self.assertIsNone(s.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}"))
+        spawn.assert_not_called()
+        for n, job_id in enumerate((moved, busy, first, second, third)):
+            self.edit_job(job_id, play_queued=f"2026-11-04T16:19:3{n}+00:00")
+        self.edit_job(moved, stage="merge")
+        s.RUNS[f"repo/{busy}"] = {"action": "approve", "started": time.time(), "proc": fake(None, busy, "x")[0], "log": "x"}
+        ps.write_text("   02:01 claude -p /trevskills-scrum start 999-young\n")  # aged past SESSION_RAMP_SECS
+        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
+        self.assertEqual([c.args[1:4] for c in spawn.call_args_list],
+                         [(first, "approve", f"/trevskills-scrum approve {first}"),
+                          (second, "approve", f"/trevskills-scrum approve {second}")])
+        for job_id in (moved, busy, first, second):
+            self.assertNotIn("queued_launch", self.stage_of(job_id), job_id)
+            self.assertNotIn("play_queued", self.stage_of(job_id), job_id)
+        self.assertEqual(self.stage_of(third)["play_queued"], "2026-11-04T16:19:34+00:00")
+        self.assertEqual(self.stage_of(third)["queued_launch"]["action"], "approve")
+
+    def test_started_launch_clears_queue_fields(self):
+        s, b = self.serve, self.serve.board
+        job_id = self.gate_job("Queued then auto-resumed")
+        ps, fake = self.launch_ps(*["   00:10 claude -p /trevskills-scrum start 999-young"] * 2)
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertIsNone(s.resume_job("repo", self.root, self.stage_of(job_id), []))
+            self.assertEqual(self.stage_of(job_id)["queued_launch"]["action"], "resume")
+            ps.write_text("")
+            self.assertEqual(s.resume_job("repo", self.root, self.stage_of(job_id), []), f"runs/{job_id}-resume.log")
+            self.assertNotIn("queued_launch", self.stage_of(job_id))
+            self.assertNotIn("play_queued", self.stage_of(job_id))
+            s.RUNS.pop(f"repo/{job_id}")  # the session ended: only the queue could start it again
+            self.assertFalse(s.play_queue_tick("repo", self.root, json.loads((self.root / "board.json").read_text())["jobs"]))
+        self.assertEqual(spawn.call_count, 1, "never spawned a second time from the queue")
+
+    def test_launch_gate_edge_cases(self):
+        s, b = self.serve, self.serve.board
+        job_id = self.gate_job("Double click")
+        ps, fake = self.launch_ps()
+        self.addCleanup(lambda: [s.RUNS.pop(f"repo/{k}", None) for k in ("998-off-board", "run-all", "digest")])
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
+                mock.patch.object(b, "spawn", side_effect=fake) as spawn:
+            self.assertEqual(s.spawn("repo", self.root, "998-off-board", "approve", "/trevskills-scrum approve 998"),
+                             "runs/998-off-board-approve.log", "not on the board: ungated")
+            for clicked in ("2026-11-04T16:19:36+00:00", "2026-11-04T16:20:00+00:00"):
+                with mock.patch.object(b, "now", return_value=clicked):
+                    self.assertIsNone(s.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}"))
+            with mock.patch.object(b, "ram_room", side_effect=AssertionError("gate consulted")):
+                s.spawn("repo", self.root, "run-all", "run-all", "/trevskills-scrum run-all")
+                s.spawn("repo", self.root, "digest", "digest", "/trevskills-scrum digest")
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], ["998-off-board", "run-all", "digest"])
+        job = self.stage_of(job_id)
+        self.assertEqual(job["play_queued"], "2026-11-04T16:19:36+00:00", "the second click keeps the first time")
+        self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {job_id}",
+                                                "stage": "needs-human"})
+
     def test_resume_refuses_lilguy_job(self):
         b = self.serve.board
         refusal = {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "
@@ -8024,7 +8154,7 @@ class HighUsageStartsTest(unittest.TestCase):
         self.usage = self.base / "usage.json"
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
         env.start(); self.addCleanup(env.stop)
-        for name, value in (("spawn", None), ("running", False)):
+        for name, value in (("spawn", "runs/001-std.log"), ("running", False)):  # spawn's log path: the launch started
             p = mock.patch.object(serve, name, return_value=value)
             setattr(self, name, p.start()); self.addCleanup(p.stop)
 
