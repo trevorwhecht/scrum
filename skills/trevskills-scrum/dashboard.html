@@ -1419,9 +1419,9 @@ $("blManualList").addEventListener("change", async e => {
 let digestData = null, digestText = "";
 const dgProject = () => $("dgProject").value;
 const diffHtml = (old, now) => `<div class="diff"><div><span class="note">Old</span><pre>${esc(old)}</pre></div><div><span class="note">New</span><pre>${esc(now)}</pre></div></div>`;
-// One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
 // A proposal target for display: the repos folder dropped, any other home folder as ~/ (the full path stays in title).
 const shortPath = t => String(t ?? "").replace(/^\/Users\/[^/]+\/Developer\/repos\//, "").replace(/^\/(Users|home)\/[^/]+\//, "~/");
+// One proposal as a log row. pending and rejected only appear in digests from before digest_auto.
 const propRow = (digestId, p, readOnly = false) => `<div class="prop" data-digest="${esc(digestId)}" data-pid="${esc(p.id)}">
     <span class="id">${esc(p.id)} <span class="chip ${esc(p.status)}">${esc(p.status)}</span></span>
     ${p.kind === "backlog" ? "" : `<span class="path" title="${esc(p.target)}">${esc(shortPath(p.target))}</span>`}<span>${esc(p.why)}</span>
