@@ -31,6 +31,13 @@ class BuildLockWaitTest(unittest.TestCase):
         self.assertEqual(self.flags([job], {os.getpid(): wt}), {"1-a": True})
         self.assertEqual(self.flags([job], {os.getpid(): sub}), {"1-a": True})
 
+    def test_build_lock_wait_two_line_marker(self):
+        """Job 622: buildlock.py's marker is `<cwd>\n<rank>`; only line 1 is the cwd."""
+        wt = tempfile.mkdtemp()
+        job = {"id": "1-a", "stage": "check", "worktree": wt}
+        self.assertEqual(self.flags([job], {os.getpid(): f"{wt}\n3"}), {"1-a": True})
+        self.assertEqual(self.flags([job], {os.getpid(): f"{Path(wt) / 'pkg'}\n0"}), {"1-a": True})
+
     def test_build_lock_wait_ignores_stale_other_stage(self):
         wt = tempfile.mkdtemp()
         other = tempfile.mkdtemp()

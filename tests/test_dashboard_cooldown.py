@@ -25,6 +25,7 @@ class CooldownButton(unittest.TestCase):
         click = click[:click.index("\n});\n")]
         self.assertIn('post("api/cooldown", {on: !btn.dataset.on})', click, "the opposite of the shown state")
         self.assertIn("renderCooldown({cooldown: out.cooldown", click, "re-renders from the response")
+        self.assertIn("restart_waiting: waiting", click, "the click re-render keeps the last poll's Safe to restart")
         self.assertIn("if (focused) btn.focus()", click, "disabling during the POST drops focus; it comes back")
         self.assertIn('act === "resume" ? {manual: true}', text, "the Play/Resume form marks the click manual")
         self.assertIn("renderCooldown(m)", fn_body(text, "poll"))
@@ -41,7 +42,10 @@ class CooldownButton(unittest.TestCase):
         script = (f"const els = {{cooldown: {{dataset: {{}}}}, cooldownState: {{}}}};\nconst $ = id => els[id];\n{esc}\n"
                   f"{fn_body(text, 'renderCooldown')}\n"
                   "const out = [{cooldown: false, sessions: 3}, {cooldown: true, sessions: 3}, {cooldown: true, sessions: 1},\n"
-                  "  {cooldown: true, sessions: 0}].map(m => { renderCooldown(m);\n"
+                  "  {cooldown: true, sessions: 0}, {cooldown: true, sessions: 0, restart_waiting: []},\n"
+                  "  {cooldown: true, sessions: 2, restart_waiting: ['p/618']},\n"
+                  "  {cooldown: true, sessions: 0, restart_waiting: ['p/<b>', 'q/7']},\n"
+                  "  {cooldown: false, sessions: 0, restart_waiting: ['p/618']}].map(m => { renderCooldown(m);\n"
                   "  return [els.cooldown.hidden, els.cooldown.textContent, els.cooldownState.innerHTML]; });\n"
                   "renderCooldown(null);\n"
                   "out.push(els.cooldown.hidden);\n"
@@ -52,6 +56,11 @@ class CooldownButton(unittest.TestCase):
                                [False, "Resume work", "Cooling down · 3 sessions finishing"],
                                [False, "Resume work", "Cooling down · 1 session finishing"],
                                [False, "Resume work", "Idle, safe to restart <code>sudo shutdown -r now</code>"],
+                               [False, "Resume work", "Safe to restart: yes <code>sudo shutdown -r now</code>"],
+                               [False, "Resume work",
+                                "Cooling down · 2 sessions finishing · Safe to restart: no — waiting on p/618"],
+                               [False, "Resume work", "Safe to restart: no — waiting on p/&lt;b&gt;, q/7"],
+                               [False, "Cool down", ""],
                                True])
 
 

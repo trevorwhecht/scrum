@@ -57,6 +57,8 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
+  board.py cooldown-park <id>      while cooling down, stall a round-0 spec/build job at this checkpoint (serve.py resumes
+                                   it after cool down); print {"parked": bool}
   board.py dev-clear <id>          stop every server listening from inside the job's .claude/worktrees/ worktree (TERM,
                                    up to 5 s, then KILL), print {"killed": [pids]}
   board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
@@ -4378,6 +4380,60 @@ def stall_stage(job: dict) -> str | None:
 
 LEGACY_STALL_RE = re.compile(rf"^{STALLED}(\w+): (.*)$", re.S)
 
+# --- cool down drains fast: lock waiters are served by progress, and far-off jobs park at their next checkpoint ---
+COOLDOWN_PARK = "parked for cool down; resumes when cool down ends"  # serve.py auto_resume resumes it after cool down
+PARK_STAGES = ("spec", "build")  # a job that has not reached its first Check gate (board round 0)
+
+
+def lock_rank(cwd) -> int:
+    """buildlock.py's place in the cool-down queue for a waiter in cwd: 3 approved or merging (stage approve, merging,
+    deploying, or an APPROVE round-*/decision.md: the Merge Conflicts re-check), 2 back from a review round (stage
+    review or board round >= 2), 1 a first check, 0 anything else: no matching job (serve.py's full E2E run on main)
+    or any read error. The job is the one not done or aborted, on any registered board, whose worktree holds cwd."""
+    try:
+        cwd = os.path.realpath(cwd)
+        for repo in projects().values():
+            try:
+                jobs = read_board(repo / "scrum")["jobs"]
+            except (OSError, SystemExit, KeyError, TypeError):
+                continue  # one broken board never ranks another project's waiter
+            for job in jobs:
+                wt = job.get("worktree")
+                if job.get("stage") in ("done", "aborted") or not wt:
+                    continue
+                wt = os.path.realpath(wt)
+                if cwd != wt and not cwd.startswith(wt + os.sep):
+                    continue
+                stage = job.get("stage")
+                folder = repo / "scrum" / "jobs" / check_id(job["id"])
+                if stage in ("approve", "merging", "deploying") or any(
+                        first_word(d, ("APPROVE", "REWORK", "ESCALATE")) == "APPROVE"
+                        for d in folder.glob("round-*/decision.md")):
+                    return 3
+                if stage == "review" or int(job.get("round") or 0) >= 2:
+                    return 2
+                return 1 if stage == "check" else 0
+    except (Exception, SystemExit):
+        pass
+    return 0
+
+
+def cmd_cooldown_park(root, job_id) -> dict:
+    """cooldown-park: while cooling down, stall a round-0 spec or build job (not paused, not stalled, not lilguy or
+    cloud) in its stage with reason `stalled: parked for cool down; ...`, so it stops at this checkpoint and
+    serve.py's auto_resume restarts it once cool down ends. Every condition is re-read under the board lock; any
+    other case writes nothing. Returns {"parked": bool}."""
+    try:
+        with locked_board(root) as board:
+            job = find(board, check_id(job_id))
+            if not (cooling_down() and job.get("stage") in PARK_STAGES and not job.get("round")
+                    and not job.get("paused") and not job.get("stalled") and job.get("lane") not in ("lilguy", "cloud")):
+                raise _Gone
+            job.update(stalled=True, reason=f"{STALL}{COOLDOWN_PARK}", updatedAt=now())
+    except _Gone:
+        return {"parked": False}
+    return {"parked": True}
+
 
 def migrate_paused(board: dict) -> list[str]:
     """Rewrite each legacy needs-human job in place: a PAUSED_RE reason to its stage plus `paused`, keeping the
@@ -4889,6 +4945,7 @@ def main(argv=None):
     ab.add_argument("--reason")
     sub.add_parser("artifacts").add_argument("id")
     sub.add_parser("dev-clear").add_argument("id")
+    sub.add_parser("cooldown-park").add_argument("id")
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
@@ -5013,6 +5070,8 @@ def main(argv=None):
     elif a.cmd == "dev-clear":
         wt = find(read_board(a.dir), a.id).get("worktree")
         print(json.dumps({"killed": stop_worktree_servers(Path(a.dir).resolve().parent, wt, wait=5)}))
+    elif a.cmd == "cooldown-park":
+        print(json.dumps(cmd_cooldown_park(a.dir, a.id)))
     elif a.cmd == "digest-due":
         print(json.dumps(cmd_digest_due(a.dir)))
     elif a.cmd == "digest-start":

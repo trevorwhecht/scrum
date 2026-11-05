@@ -61,6 +61,10 @@
    - **BigBoy chaining.** If the job has a `parent`, after `stage=done` run **BigBoy lane** step 5 (tracker, `B ready`, start the next children or the final review).
    - **Digest check.** After `stage=done`, run `B digest-due`. If it prints `"due": true`, run **Digest** in this same session before the final report.
 
+## Cool-down park
+
+**Cool-down park** (New job steps 4 and 6). Outside a Cloud lane session, run `B cooldown-park $ID`. When it prints `"parked": true` (cool down is on and the job has not reached its first Check gate), stop with the **Final report**: serve.py resumes the job once cool down ends. Otherwise carry on.
+
 ## Migrate (Merge's schema guard)
 
 1. `cd "$WT"` and invoke `/trevskills-migrate` (Skill tool) there with args `base=$BASE`, plus `prod-approved=<content>` if `$F/jobs/$ID/prod-approval.md` exists, following it exactly. Every question it would put to Trevor is a stop: never answer one yourself.

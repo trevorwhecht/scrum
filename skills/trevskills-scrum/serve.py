@@ -587,11 +587,13 @@ E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-def e2e_full_due(record, head, merges, now) -> bool:
-    """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last."""
+def e2e_full_due(record, head, merges, now, settled=False) -> bool:
+    """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
+    or the project is settled (cool down is on and no job blocks a restart there)."""
     if not record:
         return True
-    return head != record.get("head") and (merges >= E2E_FULL_MERGES or now - (record.get("at") or 0) >= E2E_FULL_EVERY)
+    return head != record.get("head") and (settled or merges >= E2E_FULL_MERGES
+                                           or now - (record.get("at") or 0) >= E2E_FULL_EVERY)
 
 
 def e2e_full_failures(output, test_dir) -> list[dict]:
@@ -631,7 +633,8 @@ def e2e_command(root) -> str:
 
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
-    flight anywhere, the E2E lock is free, the tracked tree is clean and e2e_full_due holds (watchdog_tick pass 1)."""
+    flight anywhere, the E2E lock is free, the tracked tree is clean and e2e_full_due holds (watchdog_tick pass 1). During
+    cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
@@ -652,7 +655,8 @@ def e2e_full_tick(project, repo, root) -> None:
             merges = int(board._git(repo, "rev-list", "--count", f"{last}..HEAD"))
         except (ValueError, OSError, subprocess.SubprocessError):
             merges = E2E_FULL_MERGES  # a git error counts as due
-    if not e2e_full_due(record, head, merges, now):
+    settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
+    if not e2e_full_due(record, head, merges, now, settled):
         return
     last_green = (record or {}).get("lastGreen")
     write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
@@ -715,6 +719,33 @@ def e2e_full_backlog(repo, root, failed, last_green, head):
         board.cmd_backlog_add(root, [text])
 
 
+E2E_FULL_BLOCKER = "E2E full run"  # restart_blockers' entry for a project whose full run is in flight
+
+
+def restart_blockers(only=None) -> list[str]:
+    """`<project>/<n>` (n: the id's leading number, else the full id) for each job on every registered board (or only
+    that project's) that keeps a restart unsafe: in a WATCHED stage or plan, not paused, not stalled (cool-down parks
+    included) and not held for a usage-limit reset; plus `<project>/E2E full run` while its full E2E run is in flight.
+    Waiting, needs-human, cloud and running (BigBoy parent: its children count) jobs never block. An unreadable board
+    adds nothing."""
+    out = []
+    for project, repo in board.projects().items():
+        if only is not None and project != only:
+            continue
+        try:
+            jobs = cached_board(repo / "scrum").get("jobs", [])
+        except (OSError, ValueError, AttributeError):
+            jobs = []
+        for j in jobs:
+            if j.get("stage") in (*board.WATCHED, "plan") and not j.get("paused") and not board.stalled(j) \
+                    and not j.get("limitResetAt"):
+                m = re.match(r"\d+", str(j.get("id")))
+                out.append(f"{project}/{m[0] if m else j.get('id')}")
+        if E2E_FULL["running"] == project:
+            out.append(f"{project}/{E2E_FULL_BLOCKER}")
+    return out
+
+
 def auto_resume(project, root, jobs):
     """Resume a stalled job only when its session died on the account's usage limit: right after the reset time
     that line names, else every 30 min; at most 12 tries per job. A job whose log ends on a network error resumes
@@ -729,7 +760,9 @@ def auto_resume(project, root, jobs):
     on the E2E queue also waits, spending no try, while another job sits in check (not paused, not stalled, not
     limit-held: a limit-held check job runs nothing and holds nothing) in this project or in any registered project
     whose project.md has an E2E command: that job takes the machine-wide E2E lock soon. E2E-queue resumes are capped
-    at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick."""
+    at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick. A cool-down park
+    (board.COOLDOWN_PARK) waits, spending no try and not busy, while cooling down; after it, it is resumed whatever
+    its parent, with no per-stage limit."""
     global E2E_RESUMED
     now, busy, e2e_resumed = time.time(), False, bool(E2E_RESUMED)
 
@@ -759,6 +792,12 @@ def auto_resume(project, root, jobs):
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
+            continue
+        if str(job.get("reason") or "").startswith(board.STALL + board.COOLDOWN_PARK):  # waits out cool down, no try spent
+            if not board.cooling_down() and resume_refusal(project, root, job) is None and take_room():
+                busy = True
+                AUTO_RESUME[key] = [tries + 1, now]
+                resume_job(project, root, job, jobs)
             continue
         if str(job.get("reason") or "").startswith(board.STALL + E2E_WAIT):  # a capacity wait: one per tick, lock free
             if checking or e2e_resumed or not e2e_queue_free():
@@ -1902,7 +1941,8 @@ def machine_status():
             "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
             "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
             "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": r(board.cpu_load_pct()),
-            "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT}
+            "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
+            "restart_waiting": restart_blockers()}
 
 
 def machine_usage(now):
@@ -2595,12 +2635,13 @@ def activity(root, job):
 
 
 def build_lock_waiting(worktree):
-    """True when a live buildlock.py waiter (a `.waiting/<pid>` marker whose pid is alive) has its cwd in `worktree`."""
+    """True when a live buildlock.py waiter (a `.waiting/<pid>` marker whose pid is alive) has its cwd (the marker's
+    first line) in `worktree`."""
     try:
         wt = os.path.realpath(worktree)
         for m in buildlock.waiting_dir(buildlock.lock_path()).iterdir():
             try:
-                cwd = os.path.realpath(m.read_text().strip())
+                cwd = os.path.realpath(m.read_text().partition("\n")[0].strip())  # line 2 is buildlock's rank
                 try:
                     os.kill(int(m.name), 0)
                 except PermissionError:

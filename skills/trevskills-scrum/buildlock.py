@@ -6,6 +6,8 @@ usage: buildlock.py '<Build string>'   (run through sh -c)
        buildlock.py --project <file>   (run the `- Build:` line of <file> through sh -c; exit 2 when it is missing or none)
 
 SCRUM_BUILD_LOCK overrides the lock file; SCRUM_BUILD_LOCK_TIMEOUT the wait in seconds (default 1800).
+While board.py's cool-down flag is on, waiters go in board.lock_rank order (nearest the finish line first), then by
+arrival; the waiting marker holds `<cwd>\n<rank>`.
 Exits with the command's exit code, 124 on a lock timeout, 127 when the command is not found.
 """
 import fcntl, math, os, re, subprocess, sys, time
@@ -29,6 +31,50 @@ def timeout_s() -> float:
     except ValueError:
         return DEFAULT_TIMEOUT
     return value if math.isfinite(value) and value >= 0 else DEFAULT_TIMEOUT
+
+
+def board_module():
+    """board.py, imported lazily from this file's folder; None when the import fails (the build still runs)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import board
+        return board
+    except (Exception, SystemExit):
+        return None
+
+
+def marker_rank(m: Path) -> int:
+    """A waiting marker's second line as its rank; 0 when it has none or it is not a number."""
+    try:
+        return int(m.read_text().split("\n")[1].strip())
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def outranked(board, marker: Path, rank: int) -> bool:
+    """While board.cooling_down(), True when another live waiter's marker beside `marker` goes first: a higher rank,
+    or the same rank with an older mtime (then a lower pid). Outside cool down, or on any error, False."""
+    try:
+        if not board or not board.cooling_down():
+            return False
+        mine = (marker.stat().st_mtime, int(marker.name))
+        for m in marker.parent.iterdir():
+            if m.name == marker.name:
+                continue
+            try:
+                pid = int(m.name)
+                try:
+                    os.kill(pid, 0)
+                except PermissionError:
+                    pass  # alive, owned by another user
+                theirs, at = marker_rank(m), (m.stat().st_mtime, pid)
+            except (OSError, ValueError):
+                continue  # a dead pid or a vanished marker never blocks
+            if theirs > rank or (theirs == rank and at < mine):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def build_from(path: str) -> str | None:
@@ -64,15 +110,22 @@ def main(argv: list[str]) -> int:
             limit = timeout_s()
             deadline = time.monotonic() + limit
             marker = waiting_dir(path) / str(os.getpid())  # the dashboard reads this to show the Check is queued
+            board, rank = board_module(), 0
+            try:
+                rank = int(board.lock_rank(os.getcwd())) if board else 0
+            except (Exception, SystemExit):
+                rank = 0  # the rank only orders cool-down waiters; never fail the build over it
             try:
                 marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(os.getcwd())
+                marker.write_text(f"{os.getcwd()}\n{rank}")
             except OSError:
                 pass  # the marker is only a hint; never fail the build over it
             try:
                 while True:  # flock has no timeout, so poll LOCK_NB
                     time.sleep(0.5)
                     try:
+                        if outranked(board, marker, rank):
+                            raise BlockingIOError  # cool down: a job nearer the finish line goes first
                         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:

@@ -23,7 +23,9 @@ class BuildLockTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.lock = self.dir / "sub" / "build.lock"
-        self.env = {**os.environ, "SCRUM_BUILD_LOCK": str(self.lock)}
+        self.env = {**os.environ, "SCRUM_BUILD_LOCK": str(self.lock),
+                    "SCRUM_REGISTRY": str(self.dir / "none.json"),  # never Trevor's real boards
+                    "SCRUM_COOLDOWN": str(self.dir / "no-cooldown")}  # never Trevor's real cool-down flag
         self.env.pop("SCRUM_BUILD_LOCK_TIMEOUT", None)
         self.procs = []
 
@@ -190,10 +192,79 @@ class BuildLockTest(unittest.TestCase):
             if marker.exists() and marker.read_text():
                 break
             time.sleep(0.1)
-        self.assertEqual(marker.read_text(), os.getcwd())
+        self.assertEqual(marker.read_text().split("\n")[0], os.getcwd())
+        self.assertEqual(marker.read_text().split("\n")[1], "0", "no board job holds this cwd: rank 0")
         holder.kill()
         self.assertEqual(waiter.wait(timeout=10), 0)
         self.assertFalse(marker.exists())
+
+    def peer(self, rank, pid=None):
+        """A live (or the given pid's) waiting marker of `rank`, older than any marker a waiter writes next."""
+        self.marker_dir().mkdir(parents=True, exist_ok=True)
+        if pid is None:
+            p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            self.procs.append(p)
+            pid = p.pid
+        m = self.marker_dir() / str(pid)
+        m.write_text(f"/elsewhere\n{rank}")
+        os.utime(m, (time.time() - 60, time.time() - 60))
+        return m
+
+    def cooling(self):
+        flag = self.dir / "cooldown"
+        flag.write_text("")
+        return {"SCRUM_COOLDOWN": str(flag)}
+
+    def wait_marker(self, pid):
+        m = self.marker_dir() / str(pid)
+        for _ in range(100):
+            if m.exists() and m.read_text():
+                return m
+            time.sleep(0.1)
+        self.fail("no marker")
+
+    def test_cooldown_serves_higher_rank_first(self):
+        holder = self.hold()
+        self.peer(3)
+        waiter = self.start_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="3", **self.cooling())
+        self.wait_marker(waiter.pid)
+        holder.kill()
+        holder.wait()
+        self.assertEqual(waiter.wait(timeout=20), 124, "the rank-3 peer is alive, so the free lock stays its turn")
+
+    def test_cooldown_equal_rank_older_marker_first(self):
+        holder = self.hold()
+        self.peer(0)
+        waiter = self.start_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="3", **self.cooling())
+        self.wait_marker(waiter.pid)
+        holder.kill()
+        holder.wait()
+        self.assertEqual(waiter.wait(timeout=20), 124, "an older marker of the same rank goes first")
+
+    def test_dead_peer_marker_never_blocks(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        holder = self.hold()
+        self.peer(3, pid=dead.pid)
+        waiter = self.start_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="20", **self.cooling())
+        self.wait_marker(waiter.pid)
+        holder.kill()
+        self.assertEqual(waiter.wait(timeout=10), 0)
+
+    def test_unparseable_peer_rank_is_zero(self):
+        mod = load()
+        self.marker_dir().mkdir(parents=True)
+        for text, rank in (("/x", 0), ("/x\nabc", 0), ("/x\n2", 2)):
+            (self.marker_dir() / "1").write_text(text)
+            self.assertEqual(mod.marker_rank(self.marker_dir() / "1"), rank, text)
+
+    def test_rank_ignored_outside_cooldown(self):
+        holder = self.hold()
+        self.peer(3)
+        waiter = self.start_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="20")
+        self.wait_marker(waiter.pid)
+        holder.kill()
+        self.assertEqual(waiter.wait(timeout=10), 0)
 
     def test_no_marker_when_lock_free(self):
         self.assertEqual(self.run_wrap(sys.executable, "-c", "pass").returncode, 0)

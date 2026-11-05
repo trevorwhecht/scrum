@@ -8419,5 +8419,115 @@ class StopWorktreeServersTest(unittest.TestCase):
         self.assertIn("dev-clear <id>", board.__doc__)
 
 
+
+class LockRankTest(unittest.TestCase):
+    """Job 622: board.lock_rank(cwd) orders cool-down lock waiters by how near their job is to merging."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name).resolve()
+        self.root = base / "repo" / "scrum"
+        (base / "corrupt" / "scrum").mkdir(parents=True)
+        (base / "corrupt" / "scrum" / "board.json").write_text("{")
+        reg = base / "projects.json"
+        reg.write_text(json.dumps([str(base / "corrupt"), str(base / "repo")]))
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.wts = {}
+        jobs = []
+        for n, (stage, rnd) in enumerate([("check", 1), ("check", 2), ("check", 1), ("build", 0), ("done", 1)]):
+            wt = base / f"wt{n}"
+            (wt / "pkg").mkdir(parents=True)
+            self.wts[n] = wt
+            jobs.append({"id": f"00{n + 1}-job", "stage": stage, "round": rnd, "worktree": str(wt)})
+        self.root.mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        decided = self.root / "jobs" / "003-job" / "round-1"
+        decided.mkdir(parents=True)
+        (decided / "decision.md").write_text("APPROVE\nRestart: none\n")
+        rework = self.root / "jobs" / "001-job" / "round-1"
+        rework.mkdir(parents=True)
+        (rework / "decision.md").write_text("REWORK\nRestart: none\n")
+
+    def test_ranks(self):
+        self.assertEqual(board.lock_rank(str(self.wts[0])), 1, "first check")
+        self.assertEqual(board.lock_rank(str(self.wts[1])), 2, "back from a review round")
+        self.assertEqual(board.lock_rank(str(self.wts[2])), 3, "APPROVE decision: the Merge Conflicts re-check")
+        self.assertEqual(board.lock_rank(str(self.wts[3])), 0, "build")
+        self.assertEqual(board.lock_rank(str(self.wts[4])), 0, "a done job never matches")
+        self.assertEqual(board.lock_rank(tempfile.gettempdir()), 0, "unknown cwd")
+        self.assertEqual(board.lock_rank(str(self.wts[1] / "pkg")), 2, "a subdirectory of the worktree")
+
+    def test_stages_and_errors(self):
+        jobs = [{"id": "001-job", "stage": "review", "round": 1, "worktree": str(self.wts[0])},
+                {"id": "002-job", "stage": "merging", "round": 1, "worktree": str(self.wts[1])}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(board.lock_rank(str(self.wts[0])), 2)
+        self.assertEqual(board.lock_rank(str(self.wts[1])), 3)
+        (self.root / "board.json").write_text("{")
+        self.assertEqual(board.lock_rank(str(self.wts[0])), 0, "a read error is rank 0")
+
+
+class CooldownParkTest(unittest.TestCase):
+    """Job 622: `board.py cooldown-park <id>` stalls a far-off job at its next checkpoint while cooling down."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        no_claude_pid(self)
+        self.flag = Path(self.tmp.name) / "cooldown"
+        self.flag.write_text("")
+        env = mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(self.flag))
+        env.start()
+        self.addCleanup(env.stop)
+
+    def job(self, *pairs, **extra):
+        job_id = board.cmd_new(self.root, "a job")
+        if pairs:
+            board.cmd_set(self.root, job_id, list(pairs))
+        if extra:
+            with board.locked_board(self.root) as b:
+                board.find(b, job_id).update(extra)
+        return job_id
+
+    def get(self, job_id):
+        return board.find(board.read_board(self.root), job_id)
+
+    def park(self, job_id):
+        r = run_board("--dir", str(self.root), "cooldown-park", job_id)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_parks_spec_and_round0_build(self):
+        for pairs in (("stage=spec",), ("stage=build",)):
+            j = self.job(*pairs)
+            self.assertEqual(self.park(j), {"parked": True})
+            got = self.get(j)
+            self.assertEqual((got["stage"], got["stalled"], got["reason"]),
+                             (pairs[0][6:], True, "stalled: parked for cool down; resumes when cool down ends"))
+            self.assertTrue(board.stalled(got))
+            before = (self.root / "board.json").read_text()
+            self.assertEqual(self.park(j), {"parked": False}, "already parked")
+            self.assertEqual((self.root / "board.json").read_text(), before, "nothing written")
+
+    def test_does_not_park(self):
+        cases = {"build round 1": self.job("stage=build", "round=1"), "check": self.job("stage=check"),
+                 "stalled": self.job("stage=build", stalled=True, reason="stalled: no session"),
+                 "lilguy": self.job("stage=build", "lane=lilguy"), "cloud": self.job("stage=build", lane="cloud"),
+                 "paused": self.job("stage=build", paused=True)}
+        for name, j in cases.items():
+            before = self.get(j)
+            self.assertEqual(self.park(j), {"parked": False}, name)
+            self.assertEqual(self.get(j), before, name)
+        self.flag.unlink()
+        j = self.job("stage=build")
+        self.assertEqual(self.park(j), {"parked": False}, "cool down off")
+        self.assertNotIn("stalled", self.get(j))
+        self.assertIn("cooldown-park <id>", board.__doc__)
+
+
 if __name__ == "__main__":
     unittest.main()
