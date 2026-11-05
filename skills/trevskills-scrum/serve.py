@@ -98,11 +98,30 @@ def stop(project, job_id):
             pass
 
 
+def stop_job_servers(root, job_id):
+    """SIGTERM the dev servers listening from inside the job's worktree (board.stop_worktree_servers, no wait so the
+    HTTP handler never blocks). A job missing from the board or with no worktree signals nothing."""
+    try:
+        wt = board.find(board.read_board(root), job_id).get("worktree")
+    except (SystemExit, OSError, ValueError):
+        return
+    board.stop_worktree_servers(root.parent, wt)
+
+
 def kill_session(project, root, job_id):
-    """Pause: stop the job's session. A dashboard-started run is stopped as Abort does; otherwise one `ps` scan finds
+    """Pause: stop the job's session, then its worktree dev servers (stop_job_servers, whichever path ran). A
+    dashboard-started run is stopped as Abort does; otherwise one `ps` scan finds
     claude lines running /trevskills-scrum <cmd> <id> (nohup child, Terminal), and one `lsof` call reads their cwds.
     Only groups with such a line running inside this project's repo (root.parent, worktrees included) get SIGTERM:
     job ids are per project. No cwd, no signal; the pause is already recorded, so a survivor is refused anyway."""
+    try:
+        kill_claude(project, root, job_id)
+    finally:
+        stop_job_servers(root, job_id)
+
+
+def kill_claude(project, root, job_id):
+    """kill_session's process-group kill."""
     with RUNS_LOCK:
         run = RUNS.get(f"{project}/{job_id}")
     if run and run["proc"].poll() is None:
@@ -378,11 +397,14 @@ def rework_job(project, root, job_id, feedback):
 
 def abort_job(project, root, job_id, requeue, cascade=False):
     """The Abort job button, and an `abort` answer: stop its run, then mark it aborted. With cascade, its waiting
-    dependents are aborted too (board.cmd_abort) and each one's run is stopped."""
+    dependents are aborted too (board.cmd_abort) and each one's run is stopped. Every aborted job's worktree dev
+    servers get SIGTERM (stop_job_servers)."""
     stop(project, job_id)
     ids = board.cmd_abort(root, job_id, requeue, cascade=True) if cascade else board.cmd_abort(root, job_id, requeue)
     for i in ids[1:]:
         stop(project, i)
+    for i in ids:
+        stop_job_servers(root, i)
     return 200, {"id": job_id, "stage": "aborted", "aborted": ids}
 
 
@@ -1253,38 +1275,13 @@ def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None, al
                 shutil.rmtree(wt / name, ignore_errors=True)
 
 
-KEEP_PORTS = (3001, 8765)  # Trevor's prod-env dev port and serve.py itself: never stopped
+KEEP_PORTS = board.KEEP_PORTS
 DOCKER_IDLE_WAIT = 600  # seconds every Docker project stays idle before Docker Desktop is quit
 DOCKER_IDLE_SINCE: float | None = None  # first tick on which every Docker project was idle; a restart resets it
 TMP_SCRUM = ("/tmp/scrum-", "/private/tmp/scrum-")
 
 
-def listeners() -> list[tuple[int, int, str]]:
-    """(pid, port, realpath cwd) of every listening TCP socket this user owns: one lsof for the sockets, one for their
-    cwds. lsof missing, failing or timing out (5 s) gives [], so nothing is killed."""
-    def lsof(*args):
-        out = subprocess.run(["lsof", *args], capture_output=True, text=True, timeout=5)
-        if out.returncode:
-            raise OSError(out.stderr.strip())
-        return out.stdout.splitlines()
-    try:
-        ports, pid = [], None
-        for line in lsof("-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"):
-            if line[:1] == "p":
-                pid = int(line[1:])
-            elif line[:1] == "n" and pid is not None and (pid, int(line.rsplit(":", 1)[1])) not in ports:
-                ports.append((pid, int(line.rsplit(":", 1)[1])))
-        if not ports:
-            return []
-        cwds, pid = {}, None
-        for line in lsof("-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(p) for p in dict.fromkeys(p for p, _ in ports))):
-            if line[:1] == "p":
-                pid = int(line[1:])
-            elif line[:1] == "n" and pid is not None:
-                cwds[pid] = os.path.realpath(line[1:])
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return []
-    return [(p, port, cwds[p]) for p, port in ports if p in cwds]
+listeners = board.listeners
 
 
 def stop_dev_servers(idle: dict[str, Path], listening: list[tuple[int, int, str]]) -> list[int]:

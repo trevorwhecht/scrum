@@ -57,6 +57,8 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
+  board.py dev-clear <id>          stop every server listening from inside the job's .claude/worktrees/ worktree (TERM,
+                                   up to 5 s, then KILL), print {"killed": [pids]}
   board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
                                    and questions.log lines since the last digest's questions.lines; due at 10+ jobs ("10
                                    done"), 15+ lines ("questions"), or 3+ jobs and a bad windows/ scorecard (wasted >20%,
@@ -142,7 +144,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -4739,6 +4741,82 @@ def cmd_roadmap_stop(root, job_id, reason):
         roadmap_stop_locked(root, job_id, reason)
 
 
+KEEP_PORTS = (3001, 8765)  # Trevor's prod-env dev port and serve.py itself: never stopped
+
+
+def listeners() -> list[tuple[int, int, str]]:
+    """(pid, port, realpath cwd) of every listening TCP socket this user owns: one lsof for the sockets, one for their
+    cwds. lsof missing, failing or timing out (5 s) gives [], so nothing is killed."""
+    def lsof(*args):
+        out = subprocess.run(["lsof", *args], capture_output=True, text=True, timeout=5)
+        if out.returncode:
+            raise OSError(out.stderr.strip())
+        return out.stdout.splitlines()
+    try:
+        ports, pid = [], None
+        for line in lsof("-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"):
+            if line[:1] == "p":
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None and (pid, int(line.rsplit(":", 1)[1])) not in ports:
+                ports.append((pid, int(line.rsplit(":", 1)[1])))
+        if not ports:
+            return []
+        cwds, pid = {}, None
+        for line in lsof("-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(p) for p in dict.fromkeys(p for p, _ in ports))):
+            if line[:1] == "p":
+                pid = int(line[1:])
+            elif line[:1] == "n" and pid is not None:
+                cwds[pid] = os.path.realpath(line[1:])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    return [(p, port, cwds[p]) for p, port in ports if p in cwds]
+
+
+def stop_worktree_servers(repo: Path, wt: str | None, listening=None, wait: float = 0.0) -> list[int]:
+    """SIGTERM every listener whose cwd is the job worktree wt or under it; returns the pids signalled, in order.
+    wt must sit strictly inside <repo>/.claude/worktrees/ and exist, else nothing is read or signalled (a main-checkout
+    job never loses Trevor's own server). Never a pid that also listens on a KEEP_PORTS port, never this process.
+    listening defaults to listeners(). With wait > 0, each pid still alive after polling every 0.25 s for wait
+    seconds gets SIGKILL: a wedged Node event loop may never run its SIGTERM handler."""
+    if not wt:
+        return []
+    base = os.path.realpath(Path(repo) / ".claude" / "worktrees") + os.sep
+    wt = os.path.realpath(wt)
+    if not wt.startswith(base) or not os.path.isdir(wt):
+        return []
+    listening = listeners() if listening is None else listening
+    keep = {pid for pid, port, _ in listening if port in KEEP_PORTS} | {os.getpid()}
+    killed = []
+    for pid, _, cwd in listening:
+        if pid in keep or pid in killed or not (cwd == wt or cwd.startswith(wt + os.sep)):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    def gone(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        return False
+    alive = list(killed)
+    for _ in range(int(wait / 0.25)):
+        if not alive:
+            break
+        time.sleep(0.25)
+        alive = [pid for pid in alive if not gone(pid)]
+    for pid in alive if wait > 0 else []:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
 def require_scrum_dir(d: Path) -> Path:
     """Refuse a git checkout root: .board.lock and runs/ would land in the repo (a worktree has a .git file)."""
     if (d / ".git").exists():
@@ -4810,6 +4888,7 @@ def main(argv=None):
     ab.add_argument("--cascade", action="store_true")
     ab.add_argument("--reason")
     sub.add_parser("artifacts").add_argument("id")
+    sub.add_parser("dev-clear").add_argument("id")
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
@@ -4931,6 +5010,9 @@ def main(argv=None):
             print(json.dumps({"aborted": aborted}))
     elif a.cmd == "artifacts":
         print("".join(f"{line}\n" for line in cmd_artifacts(a.dir, a.id)), end="")
+    elif a.cmd == "dev-clear":
+        wt = find(read_board(a.dir), a.id).get("worktree")
+        print(json.dumps({"killed": stop_worktree_servers(Path(a.dir).resolve().parent, wt, wait=5)}))
     elif a.cmd == "digest-due":
         print(json.dumps(cmd_digest_due(a.dir)))
     elif a.cmd == "digest-start":

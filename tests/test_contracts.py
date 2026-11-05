@@ -1985,6 +1985,14 @@ class ContractTest(unittest.TestCase):
             self.assertIn("**Environment-blocked render.** Only when the harness above also could not render the new "
                           "element, and the environment, not the diff, stopped you", blocked, name)
 
+    def test_review_shared_server_clears_worktree(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "review.md").read_text()
+        bullet = self.section(text, "**Shared dev server", "3. Spawn **in ONE message**")
+        self.assertLess(bullet.index("B dev-clear $ID"), bullet.index("Pick a free port"))
+        probe = next(l for l in bullet.splitlines() if l.lstrip().startswith("- **Probe**"))
+        self.assertEqual(probe.count("-m 15"), 2, "probe (a) and the probe (b) GET")
+        self.assertIn("within 60 seconds of the start", probe)
+
     def test_review_ux_ui_dev_lock_reuse(self):
         stale = "Do not decline it as possibly stale."
         collision = ("If a server you reused this way stops answering before you finish, its owner (often the other "
@@ -1993,12 +2001,18 @@ class ContractTest(unittest.TestCase):
         wait = ("If your server is a Next.js dev server for WORKTREE and `JOB_DIR/round-ROUND/review-ui.md` or "
                 "`review-ux.md` (the other UI reviewer's file) is not written yet, wait up to 5 minutes for it "
                 "before you stop the server.")
+        wedged = ("When it gives no HTTP answer within 15 s it is wedged: `kill <its PID>` (then `kill -9 <its PID>` if "
+                  "it still listens after 5 s), start your own fresh server from WORKTREE once, and never wait on it "
+                  "longer or write `Rendered: blocked` for that alone.")
         for name in ("ux", "ui"):
             text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
             step1 = next(l for l in text.splitlines() if l.startswith("1. If your prompt has `DEV_URL=<url>`"))
             self.assertIn("use that one. " + stale, step1, name)
             self.assertLess(step1.index("holds WORKTREE's lock"), step1.index(stale), name)
             self.assertIn(collision, step1, name)
+            self.assertIn("no HTTP answer to `curl -s -o /dev/null -m 15 <DEV_URL>`", step1, name)
+            self.assertIn(wedged, step1, name)
+            self.assertLess(step1.index("-m 15 http://localhost:<its port>"), step1.index("use that one. " + stale), name)
             step4 = next(l for l in text.splitlines() if l.startswith("4. Stop the server and Chrome you started"))
             self.assertIn(wait, step4, name)
             for phrase in ("rm -rf <the mktemp path written out>", "kill <their PIDs written out>", "never pass `$T`"):
