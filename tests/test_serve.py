@@ -2429,6 +2429,55 @@ class ServeTest(unittest.TestCase):
                 self.serve.kill_session("repo", self.root, "090-ps")
             killpg.assert_not_called()
 
+    def job_servers(self, title):
+        """A job with a real worktree under the repo's .claude/worktrees/; returns (id, listeners: its server, another's)."""
+        job_id = self.serve.board.cmd_new(self.root, title)
+        repo = Path(os.path.realpath(self.root.parent))
+        wt, other = repo / ".claude" / "worktrees" / f"scrum-{job_id}", repo / ".claude" / "worktrees" / "scrum-999-other"
+        wt.mkdir(parents=True, exist_ok=True)
+        other.mkdir(parents=True, exist_ok=True)
+        self.serve.board.cmd_set(self.root, job_id, [f"worktree={wt}"])
+        return job_id, [(4101, 3000, str(wt)), (4102, 3002, str(other))]
+
+    def test_pause_stops_job_worktree_dev_server(self):
+        job_id, listening = self.job_servers("pause servers")
+        ps = f"  101   101 claude /trevskills-scrum resume {job_id}\n"
+        lsof = f"p101\nfcwd\nn{os.path.realpath(self.root.parent)}\n"
+        for out in (ps, ""):  # the ps path, and no claude line matched
+            outs = {"ps": mock.Mock(returncode=0, stdout=out), "lsof": mock.Mock(returncode=0, stdout=lsof)}
+            with self.subTest(ps=bool(out)), mock.patch.object(self.serve.board, "listeners", return_value=listening), \
+                    mock.patch.object(self.serve.subprocess, "run", side_effect=lambda cmd, **kw: outs[cmd[0]]), \
+                    mock.patch.object(self.serve.os, "getpgrp", return_value=500), \
+                    mock.patch.object(self.serve.os, "killpg"), mock.patch.object(self.serve.os, "kill") as kill:
+                self.serve.kill_session("repo", self.root, job_id)
+            self.assertEqual([c.args for c in kill.call_args_list], [(4101, 15)])
+        run = {"proc": mock.Mock(**{"poll.return_value": None, "pid": 77})}
+        with mock.patch.dict(self.serve.RUNS, {f"repo/{job_id}": run}), \
+                mock.patch.object(self.serve.board, "listeners", return_value=listening), \
+                mock.patch.object(self.serve.os, "killpg") as killpg, mock.patch.object(self.serve.os, "kill") as kill:
+            self.serve.kill_session("repo", self.root, job_id)
+        self.assertEqual([c.args for c in killpg.call_args_list], [(77, 15)])
+        self.assertEqual([c.args for c in kill.call_args_list], [(4101, 15)], "the dashboard-run path too")
+        with mock.patch.object(self.serve.board, "listeners", return_value=listening) as ls, \
+                mock.patch.object(self.serve.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="")), \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            self.serve.kill_session("repo", self.root, "999-nope")
+        kill.assert_not_called()
+        ls.assert_not_called()
+
+    def test_abort_stops_job_worktree_dev_server(self):
+        job_id, listening = self.job_servers("abort servers")
+        with mock.patch.object(self.serve.board, "listeners", return_value=listening), \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            self.assertEqual(self.serve.abort_job("repo", self.root, job_id, False)[0], 200)
+        self.assertEqual([c.args for c in kill.call_args_list], [(4101, 15)])
+        bare = self.serve.board.cmd_new(self.root, "no worktree")
+        with mock.patch.object(self.serve.board, "listeners", return_value=listening) as ls, \
+                mock.patch.object(self.serve.os, "kill") as kill:
+            self.serve.abort_job("repo", self.root, bare, False)
+        kill.assert_not_called()
+        ls.assert_not_called()
+
     def test_play_on_paused_job_calls_resume(self):
         job_id = self.serve.board.cmd_new(self.root, "play me")
         self.serve.board.cmd_set(self.root, job_id, ["stage=check"])

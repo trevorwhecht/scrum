@@ -8346,5 +8346,78 @@ class ParkedBigboyTest(unittest.TestCase):
                 self.assertIsNotNone(board.resume_blocker(root, "108"))
 
 
+class StopWorktreeServersTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(os.path.realpath(self.tmp.name)) / "app"
+        self.wt = self.repo / ".claude" / "worktrees" / "scrum-1"
+        (self.wt / "web").mkdir(parents=True)
+        (self.repo / ".claude" / "worktrees" / "scrum-10").mkdir(parents=True)
+
+    def test_stop_worktree_servers_kills_only_that_worktree(self):
+        w = str(self.wt)
+        listening = [(101, 3000, w), (102, 3002, w + "/web"), (101, 3005, w), (103, 3000, w + "0"),
+                     (104, 3000, str(self.repo)), (105, 3001, w), (105, 3010, w), (os.getpid(), 4000, w),
+                     (106, 3003, w), (107, 3004, w)]
+        with mock.patch.object(board.os, "kill", side_effect=[None, None, ProcessLookupError, PermissionError]) as kill:
+            got = board.stop_worktree_servers(self.repo, w, listening)
+        self.assertEqual(got, [101, 102])
+        self.assertEqual([c.args for c in kill.call_args_list], [(101, 15), (102, 15), (106, 15), (107, 15)])
+
+    def test_stop_worktree_servers_ignores_non_worktree_paths(self):
+        wts = [None, "", str(self.repo / ".claude" / "worktrees" / "gone"), str(self.repo),
+               str(self.repo / ".claude" / "worktrees"), str(self.repo / ".claude"), "/tmp"]
+        for wt in wts:
+            with self.subTest(wt=wt), mock.patch.object(board.os, "kill") as kill, \
+                    mock.patch.object(board.subprocess, "run") as run:
+                self.assertEqual(board.stop_worktree_servers(self.repo, wt), [])
+            kill.assert_not_called()
+            run.assert_not_called()
+
+    def test_stop_worktree_servers_sigkills_survivors(self):
+        w = str(self.wt)
+        def kill(pid, sig):  # 201 never dies (a wedged event loop); 202 exits on SIGTERM
+            if sig == 0 and pid == 202:
+                raise ProcessLookupError
+        with mock.patch.object(board.os, "kill", side_effect=kill) as k, \
+                mock.patch.object(board.time, "sleep") as sleep:
+            got = board.stop_worktree_servers(self.repo, w, [(201, 3000, w), (202, 3002, w)], wait=1)
+        self.assertEqual(got, [201, 202])
+        calls = [c.args for c in k.call_args_list]
+        self.assertEqual(calls[:2], [(201, 15), (202, 15)])
+        self.assertEqual(calls[-1], (201, 9))
+        self.assertNotIn((202, 9), calls)
+        self.assertEqual(sleep.call_count, 4, "every 0.25 s for 1 s")
+        self.assertTrue(all(c.args == (0.25,) for c in sleep.call_args_list))
+        with mock.patch.object(board.os, "kill") as k, mock.patch.object(board.time, "sleep") as sleep:
+            board.stop_worktree_servers(self.repo, w, [(201, 3000, w)])
+        sleep.assert_not_called()
+        self.assertEqual([c.args for c in k.call_args_list], [(201, 15)], "no wait: TERM only")
+
+    def test_dev_clear_cli_prints_killed(self):
+        root = self.repo / "scrum"
+        root.mkdir()
+        job_id = board.cmd_new(root, "Clear me")
+        board.cmd_set(root, job_id, [f"worktree={self.wt}"])
+        w = str(self.wt)
+        def kill(pid, sig):  # the server exits on SIGTERM
+            if sig == 0:
+                raise ProcessLookupError
+        with mock.patch.object(board, "listeners", return_value=[(301, 3000, w), (302, 3000, str(self.repo))]), \
+                mock.patch.object(board.os, "kill", side_effect=kill) as kill, \
+                mock.patch.object(board.time, "sleep"):
+            r = run_board("--dir", str(root), "dev-clear", job_id)
+        self.assertEqual((r.returncode, json.loads(r.stdout)), (0, {"killed": [301]}))
+        self.assertIn((301, 15), [c.args for c in kill.call_args_list])
+        with mock.patch.object(board, "listeners", return_value=[]):
+            r = run_board("--dir", str(root), "dev-clear", job_id)
+        self.assertEqual((r.returncode, json.loads(r.stdout)), (0, {"killed": []}))
+        r = run_board("--dir", str(root), "dev-clear", "999-nope")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no job '999-nope' on the board", r.stderr)
+        self.assertIn("dev-clear <id>", board.__doc__)
+
+
 if __name__ == "__main__":
     unittest.main()
