@@ -3248,6 +3248,51 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((row()[3], row()[5]), ("20m", "40m"))
         self.assertEqual(board._timing_row(self.root, "none", {}, {})[0][3], "-")
 
+    def timing_cell(self, waits, files=((6600, "round-1/a.md"), (7200, "round-1/head.txt"))):
+        """Round-1 time cell for a 2h round (spec.md at t0) with the given wait starts (secs after t0)."""
+        t0 = 1_700_000_000
+        for at, rel in ((0, "spec.md"), *files):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+        return board._timing_row(self.root, "j", {}, {}, [t0 + w for w in waits])[0][5]
+
+    def test_timing_subtracts_e2e_wait(self):
+        self.assertEqual(self.timing_cell([]), "2h00m")
+        self.assertEqual(self.timing_cell([6000]), "1h50m")
+
+    def test_timing_subtracts_machine_wait(self):
+        t0 = 1_700_000_000
+        self.write("j/spec.md", "s\n")
+        (self.root / "questions.log").write_text(
+            json.dumps({"job": "j", "kind": "machine", "date": datetime.fromtimestamp(t0 + 6000, timezone.utc).isoformat()}) + "\n")
+        self.write("j/round-1/head.txt", "h\n")
+        os.utime(self.root / "jobs/j/spec.md", (t0, t0))
+        os.utime(self.root / "jobs/j/round-1/head.txt", (t0 + 7200, t0 + 7200))
+        waits = [board._epoch(q["date"]) for q in board._json_lines(self.root / "questions.log")]
+        self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][5], "1h00m")
+
+    def test_timing_ignores_other_stalls(self):
+        t0 = 1_700_000_000
+        self.write("j/spec.md", "s\n")
+        self.write("k/spec.md", "s\n")
+        self.write("j/round-1/head.txt", "h\n")
+        os.utime(self.root / "jobs/j/spec.md", (t0, t0))
+        os.utime(self.root / "jobs/j/round-1/head.txt", (t0 + 7200, t0 + 7200))
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        (self.root / "questions.log").write_text("".join(json.dumps(d) + "\n" for d in (
+            {"job": "j", "kind": "stall", "reason": "stalled: no board update for 2 min and no live session", "date": iso(3600)},
+            {"job": "k", "kind": "stall", "reason": "stalled: waiting on the E2E queue", "date": iso(3600)},
+            {"job": "j", "kind": "stall", "reason": "stalled: waiting on the E2E queue", "date": iso(9000)})))
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            board.write_timing(self.root, "001", ["j"])
+        self.assertIn("| j | - | - | - | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
+
+    def test_timing_wait_clamped_and_merged(self):
+        self.assertEqual(self.timing_cell([6000, 6100]), "1h50m")  # overlapping spans count once
+        (self.root / "jobs/j/round-1/a.md").unlink()
+        self.assertEqual(self.timing_cell([0, 7100], files=((7200, "round-1/head.txt"),)), "0m")  # whole round waited
+
     def test_timing_row_no_change_cell(self):
         for job, heads in (("a", {1: "x", 2: "y", 3: "z"}), ("b", {1: "x", 2: "y", 4: "y"})):
             for n, h in heads.items():
