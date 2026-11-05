@@ -100,6 +100,8 @@ body:has(dialog[open]){overflow:hidden}
 .badge{color:var(--changes);border:1px solid var(--changes)}
 #diverged{padding:12px 20px;border-bottom:1px solid var(--line)}#diverged:empty{display:none}
 #diverged h3{font-size:13px;margin:0 0 4px}#diverged ul{margin:0;padding-left:18px;overflow-wrap:anywhere}
+#batchEdits{padding:12px 20px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}#batchEdits:empty{display:none}
+#batchEdits h3{font-size:13px;margin:0 0 4px}#batchEdits section+section{margin-top:12px}#batchEdits pre{white-space:pre-wrap;background:var(--bg);padding:8px;border-radius:6px}
 .tag{display:inline-block;font:600 10px system-ui,sans-serif;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-right:6px;color:#fff;background:var(--c,hsl(var(--h) 50% 42%));cursor:pointer}
 .tag[data-project]{position:relative}
 .tag[data-project]::after{content:"";position:absolute;left:50%;top:50%;width:max(100%,44px);height:44px;transform:translate(-50%,-50%)}
@@ -256,7 +258,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <p class="error" id="checkoutAlert" role="alert" hidden></p>
 <select id="colPick" aria-label="Show stage"></select>
 <main id="board"></main>
-<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="actions"></div><article id="doc"></article></dialog>
+<dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="batchEdits"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
@@ -341,6 +343,8 @@ if (window.marked) marked.use({renderer: {
   // v12 hands image() alt text already escaped; the v13+ token's text is raw.
   image(h, title, text) { const o = typeof h === "object"; return safeUrl(o ? h.href : h) !== null ? false : o ? esc(h.text) : text; },
 }});
+// The one markdown render for job files (show() and the Terminal batch card); plain text when marked didn't load.
+const mdHtml = s => window.marked ? marked.parse(s) : `<pre>${esc(s)}</pre>`;
 const $ = id => document.getElementById(id);
 const enc = encodeURIComponent;
 const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
@@ -809,6 +813,7 @@ async function poll() {
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
       if (openJob) renderDiverged(openJob);
+      if (openJob) renderBatchEdits(openJob);
       if (openJob) loadRework(openJob);
     }
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
@@ -866,8 +871,7 @@ async function show(job, file) {
     // spec.md: the "# " title, then its header rows (built outside marked, so they show without it), then the rest.
     const [head, rest] = file === "spec.md" ? specHeader(md) : ["", md];
     const title = head && /^# .*$/m.exec(rest), cut = title ? title.index + title[0].length : 0;
-    const render = s => window.marked ? marked.parse(s) : `<pre>${esc(s)}</pre>`;
-    $("doc").innerHTML = (cut ? render(rest.slice(0, cut)) : "") + head + render(rest.slice(cut));
+    $("doc").innerHTML = (cut ? mdHtml(rest.slice(0, cut)) : "") + head + mdHtml(rest.slice(cut));
   } catch (e) {
     if ($("viewer").dataset.key !== job.key) return;
     $("doc").innerHTML = `<p class="empty">Couldn't load ${esc(file)} (${esc(e.message)}).</p>`;
@@ -883,9 +887,10 @@ function open(job) {
   $("tabs").innerHTML = tagButton(job.project) + files.map(f => `<button data-file="${esc(f)}" aria-pressed="false">${esc(f)}</button>`).join("")
     + pr + '<button class="close" aria-label="Close">✕</button>';
   $("doc").innerHTML = files.length ? "" : '<p class="empty">No files yet.</p>';
-  $("diverged").innerHTML = "";  // the previous job's bullets must not show while this job's files load
+  $("diverged").innerHTML = $("batchEdits").innerHTML = "";  // the previous job's bullets must not show while this job's files load
   renderActions(job);
   renderDiverged(job);
+  renderBatchEdits(job);
   loadRework(job);
   if (!$("viewer").open) $("viewer").showModal();
   const first = files.includes("decision.md") ? "decision.md" : files.includes("spec.md") ? "spec.md" : files[0];
@@ -903,7 +908,7 @@ function openRoadmap(p) {
   $("viewerTitle").textContent = rm.name;
   $("viewerStatus").textContent = "";
   $("tabs").innerHTML = tagButton(p) + '<button data-file="roadmap.md" aria-pressed="false">roadmap.md</button><button class="close" aria-label="Close">✕</button>';
-  $("doc").innerHTML = $("actions").innerHTML = $("diverged").innerHTML = "";
+  $("doc").innerHTML = $("actions").innerHTML = $("diverged").innerHTML = $("batchEdits").innerHTML = "";
   if (!$("viewer").open) $("viewer").showModal();
   show(doc, "roadmap.md");
 }
@@ -925,6 +930,43 @@ async function renderDiverged(job) {
   if ($("viewer").dataset.key !== job.key) return;
   el.innerHTML = !items.length ? "" : `<h3 data-agent-hint="Every bullet under a ## Diverged heading in this job's spec.md, build.md, assessment.md and plan.md: where an agent departed from feature.md or spec.md, and why.">Diverged</h3>
     <ul>${items.map(([f, b]) => `<li><span class="lanechip">${esc(f)}</span>${esc(b)}</li>`).join("")}</ul>`;
+}
+
+// The Terminal batch job (board.py TERMINAL_BATCH_TITLE, claude_batch) gets one `## From <id>: <title>` section of
+// feature.md per job whose project .claude edits moved there. Returns them in file order as {id, title, body}; the intro
+// above the first one is skipped, and a `## ` line inside a code fence never ends a section.
+// Pinned by tests/test_dashboard_batch_edits.py.
+const TERMINAL_BATCH_TITLE = "Terminal batch: project .claude edits";
+function batchEdits(md) {
+  let cur = null, fence = null;
+  const out = [];
+  for (const line of md.split(/\r?\n/)) {
+    const run = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (run && run[1][0] === fence[0] && run[1].length >= fence.length && !run[2].trim()) fence = null;
+    } else if (run) fence = run[1];
+    else if (line.startsWith("## ")) {
+      const m = /^## From ([^\s:]+):\s*(.*)$/.exec(line);
+      cur = m && {id: m[1], title: m[2].trim(), lines: []};
+      if (cur) out.push(cur);
+      continue;
+    }
+    if (cur) cur.lines.push(line);
+  }
+  return out.map(({id, title, lines}) => ({id, title, body: lines.join("\n").trim()}));
+}
+
+// Lists each edit of the open Terminal batch job above its stop box; any other job leaves #batchEdits alone (open()
+// clears it). batchGen: only the latest call may write, and never after the modal moved to another job.
+let batchGen = 0;
+async function renderBatchEdits(job) {
+  const gen = ++batchGen;
+  if (job.title !== TERMINAL_BATCH_TITLE || !(job.files || []).includes("feature.md")) return;
+  const md = await fetch(`p/${enc(job.project)}/jobs/${enc(job.id)}/feature.md`, {cache: "no-store"})
+    .then(r => r.ok ? r.text() : null).catch(() => null);
+  const el = $("batchEdits");
+  if (md === null || gen !== batchGen || !el || $("viewer").dataset.key !== job.key) return;
+  el.innerHTML = batchEdits(md).map(e => `<section><h3><span class="id">${esc(e.id)}</span> ${esc(e.title)}</h3>${mdHtml(e.body)}</section>`).join("");
 }
 
 // Fetches the open needs-human job's rework.md into reworkMd and swaps only the Sent back list, so typed feedback stays.
