@@ -85,6 +85,8 @@
   board.py e2e-specs <id> | --worktree <dir> --base <ref> --project <file>  print {"mode","command","specs",
                                    "uncovered","trigger"}: the E2E specs the diff's UI files map to (full, scoped or none;
                                    lanes/newjob.md Check gate step 2)
+  board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render, at most 8,
+                                   dynamic routes skipped, ["/"] when none maps (lanes/review.md step 2 Shared render)
   board.py check-reuse <id>        print {"reused"}: copy round-(n-1)'s CHECK: PASS into round-n/check.md when HEAD equals
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
@@ -2016,6 +2018,38 @@ def _e2e_command(cmd, specs):
     return f"{env} npx playwright test {args}".lstrip()
 
 
+def changed_routes(wt: Path, ui: list[str]) -> dict[str, set[tuple[str, bool]]]:
+    """{changed UI file: its (route, prefix) pairs}: follow each file's importers over wt's tracked source files until
+    they reach route files (_route_of). Shared by e2e_specs and render_paths."""
+    wt = Path(wt)
+    try:
+        tracked = _git(wt, "ls-files").decode(errors="replace").splitlines()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        tracked = []
+    sources = {}
+    for f in tracked:
+        if SOURCE_RE.search(f) and not RUNTIME_EXCLUDE_RE.search(f) and "node_modules/" not in f:
+            try:
+                sources[f] = (wt / f).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    index, out = _import_index(sources), {}
+    for f in ui:
+        routes, seen, todo = set(), {f}, [f]
+        while todo:  # follow importers until they reach route files
+            g = todo.pop()
+            if (r := _route_of(g)) is not None:
+                routes.add(r)
+                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
+                    continue  # a route file; a colocated app/ module also maps through its importers
+            for imp in _importers(index, g):
+                if imp not in seen:
+                    seen.add(imp)
+                    todo.append(imp)
+        out[f] = routes
+    return out
+
+
 def e2e_specs(wt, base: str, project_file) -> dict:
     """{"mode", "command", "specs", "uncovered", "trigger"} for the diff base...HEAD in wt (lanes/newjob.md Check gate
     step 2). full: a diff file matches `- E2E full globs:` (default E2E_FULL_DEFAULT; `none` = never); scoped: the specs
@@ -2046,30 +2080,8 @@ def e2e_specs(wt, base: str, project_file) -> dict:
         for p in sorted((wt / tdir).rglob("*")):
             if p.is_file() and "node_modules" not in p.parts and re.search(r"\.(spec|test)\.", p.name):
                 spec_text[p.relative_to(wt).as_posix()] = p.read_text(encoding="utf-8", errors="replace")
-    try:
-        tracked = _git(wt, "ls-files").decode(errors="replace").splitlines()
-    except (ValueError, OSError, subprocess.SubprocessError):
-        tracked = []
-    sources = {}
-    for f in tracked:
-        if SOURCE_RE.search(f) and not RUNTIME_EXCLUDE_RE.search(f) and "node_modules/" not in f:
-            try:
-                sources[f] = (wt / f).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
-    index, specs = _import_index(sources), set()
-    for f in ui:
-        routes, seen, todo = set(), {f}, [f]
-        while todo:  # follow importers until they reach route files
-            g = todo.pop()
-            if (r := _route_of(g)) is not None:
-                routes.add(r)
-                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
-                    continue  # a route file; a colocated app/ module also maps through its importers
-            for imp in _importers(index, g):
-                if imp not in seen:
-                    seen.add(imp)
-                    todo.append(imp)
+    specs = set()
+    for f, routes in changed_routes(wt, ui).items():
         hits = {s for s, body in spec_text.items() for r in routes if _route_re(*r).search(body)}
         if not hits:
             out["uncovered"].append(f)
@@ -2085,6 +2097,40 @@ def cmd_e2e_specs(root, job_id) -> dict:
     if not job.get("worktree") or not job.get("base"):
         raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
     return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md")
+
+
+RENDER_CAP = 8  # pages per shared review render (lanes/review.md step 2); the rest fall back to the reviewers
+
+
+def render_paths(wt, base: str, project_file) -> dict:
+    """{"paths", "skipped"} for the diff base...HEAD in wt (lanes/review.md step 2 Shared render): the sorted routes the
+    changed UI runtime files render, minus dynamic ([param]) routes and those past RENDER_CAP, which go to skipped.
+    A UI runtime file that maps to no renderable route gives ["/"]; no UI runtime file (or an unreadable diff) gives
+    empty lists."""
+    if base.startswith("-"):
+        raise SystemExit(f"base {base!r} starts with '-'")
+    try:
+        text = Path(project_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise SystemExit(f"cannot read {project_file}")
+    globs = _project_list(text, "UI globs") or []
+    files = _names(Path(wt), f"{base}...HEAD") or set()
+    ui = sorted(f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs))
+    if not ui:
+        return {"paths": [], "skipped": []}
+    routes = sorted({r for pairs in changed_routes(wt, ui).values() for r, _ in pairs})
+    skipped = [f"{r}: dynamic route" for r in routes if "[" in r]
+    static = [r for r in routes if "[" not in r]
+    skipped += [f"{r}: over the {RENDER_CAP}-page cap" for r in static[RENDER_CAP:]]
+    return {"paths": static[:RENDER_CAP] or ["/"], "skipped": skipped}
+
+
+def cmd_render_paths(root, job_id) -> dict:
+    """render_paths for the job's worktree and base with root/project.md."""
+    job = find(read_board(root), check_id(job_id))
+    if not job.get("worktree") or not job.get("base"):
+        raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
+    return render_paths(job["worktree"], job["base"], Path(root) / "project.md")
 
 
 def cmd_check_reuse(root, job_id) -> dict:
@@ -5014,6 +5060,7 @@ def main(argv=None):
     es.add_argument("--base")
     es.add_argument("--project")
     sub.add_parser("check-reuse").add_argument("id")
+    sub.add_parser("render-paths").add_argument("id")
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
@@ -5154,6 +5201,8 @@ def main(argv=None):
             raise SystemExit("e2e-specs needs <id>, or --worktree, --base and --project")
     elif a.cmd == "check-reuse":
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
+    elif a.cmd == "render-paths":
+        print(json.dumps(cmd_render_paths(a.dir, a.id)))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "prod-ok":
