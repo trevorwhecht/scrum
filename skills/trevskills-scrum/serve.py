@@ -263,6 +263,7 @@ def limit_held(job):
 
 RESUME_ROOM: int | None = None  # watchdog_tick's per-tick resume budget (board.ram_room()), None outside a tick; spawn's
 # gate (LAUNCH_LOCK, ram_room(floor=0)) limits every launch, in a tick or not
+E2E_RESUMED: bool | None = None  # one E2E-queue resume per watchdog_tick across projects; None outside a tick = one per call
 
 
 def take_room() -> bool:
@@ -599,12 +600,17 @@ def write_e2e_full(root, rec):
     os.replace(tmp, root / "e2e-full.json")
 
 
+def e2e_command(root) -> str:
+    """The `- E2E:` value from root/project.md, stripped; "" when the file or the line is missing."""
+    m = re.search(r"^\s*-\s*E2E:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
+        if (root / "project.md").is_file() else None
+    return m[1].strip() if m else ""
+
+
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
     flight anywhere, the E2E lock is free, the tracked tree is clean and e2e_full_due holds (watchdog_tick pass 1)."""
-    m = re.search(r"^\s*-\s*E2E:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
-        if (root / "project.md").is_file() else None
-    cmd = m[1].strip() if m else ""
+    cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
     now = time.time()
@@ -698,10 +704,28 @@ def auto_resume(project, root, jobs):
     when it resumed a job this tick or a limit-stalled job is still in its auto-resume window (waiting for its reset,
     its next try or a free slot), so watchdog_tick claims nothing new this tick. Each resume first takes a session
     from the tick's budget (take_room); with none left the job waits on a slot without spending a try. A job parked
-    on the E2E queue also waits, spending no try, while another job sits in check (not paused, not stalled): that job
-    takes the E2E lock soon."""
-    now, busy, e2e_resumed = time.time(), False, False
-    checking = any(j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) for j in jobs)
+    on the E2E queue also waits, spending no try, while another job sits in check (not paused, not stalled, not
+    limit-held: a limit-held check job runs nothing and holds nothing) in this project or in any registered project
+    whose project.md has an E2E command: that job takes the machine-wide E2E lock soon. E2E-queue resumes are capped
+    at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick."""
+    global E2E_RESUMED
+    now, busy, e2e_resumed = time.time(), False, bool(E2E_RESUMED)
+
+    def check_job(j):
+        return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j)
+
+    checking = any(check_job(j) for j in jobs)
+    if not checking and any(not j.get("paused") and str(j.get("reason") or "").startswith(board.STALL + E2E_WAIT)
+                            for j in jobs):
+        for other, repo in board.projects().items():
+            if other == project or e2e_command(repo / "scrum").lower() in ("", "none"):
+                continue
+            try:
+                if any(check_job(j) for j in json.loads((repo / "scrum" / "board.json").read_text())["jobs"]):
+                    checking = True
+                    break
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
     for job in jobs:
         if job.get("paused"):
             continue
@@ -715,10 +739,12 @@ def auto_resume(project, root, jobs):
         if tries >= AUTO_RESUME_MAX:
             continue
         if str(job.get("reason") or "").startswith(board.STALL + E2E_WAIT):  # a capacity wait: one per tick, lock free
-            if checking or not e2e_queue_free():
+            if checking or e2e_resumed or not e2e_queue_free():
                 busy = True
-            elif not e2e_resumed and resume_refusal(project, root, job) is None and take_room():
+            elif resume_refusal(project, root, job) is None and take_room():
                 e2e_resumed = busy = True
+                if E2E_RESUMED is not None:
+                    E2E_RESUMED = True
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
             continue
@@ -1474,14 +1500,14 @@ def watchdog_tick():
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
-    global RESUME_ROOM
+    global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = False
-    RESUME_ROOM = board.ram_room()
+    RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
     try:
         for project, repo in board.projects().items():
             try:
@@ -1512,7 +1538,7 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     finally:
-        RESUME_ROOM = None
+        RESUME_ROOM, E2E_RESUMED = None, None
     played = False
     if not pending and candidates and board.live_sessions() == 0:
         try:
