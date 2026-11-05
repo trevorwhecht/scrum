@@ -3183,6 +3183,10 @@ class BoardTest(unittest.TestCase):
         waiting = board.cmd_new(self.root, "queued")
         t0 = 1_700_000_000
         folder = self.root / "jobs" / job
+        runs = self.root / "runs"
+        runs.mkdir()
+        stamp = datetime.fromtimestamp(t0 + 1200, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (runs / f"{stamp}-start-{job}.log").write_text("x")
         for rel, text, at in (("feature.md", "f\n", t0), ("spec.md", "s\n", t0 + 600),
                               ("round-1/head.txt", "abc\n", t0 + 4200), ("round-1/check.md", "CHECK: PASS\n", t0 + 4200),
                               ("round-2/head.txt", "abc\n", t0 + 7800),
@@ -3204,18 +3208,44 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn(f"| {job} | 3h20m | 10m | 3 | 1h00m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
+
+    def test_timing_build_start_from_run_log(self):
+        t0 = 1_700_000_000
+        self.assertIsNone(board._build_start(self.root, "j"))
+        p = self.write("j/spec.md", "s\n")
+        os.utime(p, (t0, t0))
+        self.write("j/round-1/head.txt", "h\n")
+        os.utime(self.root / "jobs/j/round-1/head.txt", (t0 + 3600, t0 + 3600))
+        runs = self.root / "runs"
+        runs.mkdir()
+
+        def stamp(at):
+            return datetime.fromtimestamp(at, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        row = lambda: board._timing_row(self.root, "j", {}, {})[0]
+        self.assertEqual(row()[3:5], ["0m", "1"])  # no log
+        self.assertEqual(row()[5], "1h00m")
+        (runs / "bad-start-j.log").write_text("x")
+        early = runs / f"{stamp(t0 - 60)}-start-j.log"  # earliest log is before spec.md: spec.md's mtime
+        early.write_text("x")
+        self.assertEqual((row()[3], row()[5]), ("0m", "1h00m"))
+        (runs / f"{stamp(t0 + 1200)}-start-j.log").write_text("x")
+        self.assertEqual((row()[3], row()[5]), ("0m", "1h00m"))
+        early.unlink()
+        (runs / f"{stamp(t0 + 1800)}-resume-j.log").write_text("x")  # not a start log
+        self.assertEqual((row()[3], row()[5]), ("20m", "40m"))
+        self.assertEqual(board._timing_row(self.root, "none", {}, {})[0][3], "-")
 
     def test_timing_row_no_change_cell(self):
         for job, heads in (("a", {1: "x", 2: "y", 3: "z"}), ("b", {1: "x", 2: "y", 4: "y"})):
             for n, h in heads.items():
                 self.write(f"{job}/round-{n}/head.txt", h + "\n")
-        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][5], "0")
+        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][6], "0")
         cells, _, _, count, _ = board._timing_row(self.root, "b", {}, {})
-        self.assertEqual((cells[5], count), ("1 (rounds 4)", 1))
+        self.assertEqual((cells[6], count), ("1 (rounds 4)", 1))
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
