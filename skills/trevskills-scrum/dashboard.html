@@ -16,6 +16,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-ap
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
 #status,#routing,#machine,#cooldownState,#e2eFull{color:var(--muted);font-size:12px}
+#status{display:inline-block;flex:0 0 26ch;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}  /* a fixed track: its text never moves the controls */
 #e2eFull .danger{color:var(--human)}
 #cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 .volwrap{position:relative;display:inline-flex;align-self:center}
@@ -23,7 +24,7 @@ h1{font-size:16px;margin:0}
 #volume[aria-pressed="true"] .waves{display:none}#volume[aria-pressed="false"] .cross{display:none}
 .volpop{display:none;position:absolute;top:100%;left:0;z-index:5;padding:0 10px;background:var(--card);border:1px solid var(--line);border-radius:6px}
 .volwrap:hover .volpop,.volwrap:focus-within .volpop{display:flex;align-items:center}#volumeLevel{width:140px;min-height:44px;margin:0;accent-color:var(--accent)}
-#machine .low{color:var(--changes)}#machine .danger{color:var(--human)}
+#machine .low{color:var(--changes)}#machine .danger,#routing .danger{color:var(--human)}
 #machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:9px;letter-spacing:-.5px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
 #machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
 #routing{white-space:nowrap;min-height:44px}
@@ -41,7 +42,7 @@ h1{font-size:16px;margin:0}
 .usage.windows{margin-top:16px}.usage.windows td{overflow-wrap:anywhere}.usage.windows th{overflow-wrap:normal;min-width:8ch}.usage.windows td:nth-child(2),.usage.windows thead th:nth-child(2){text-align:left;white-space:normal}
 main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .col h2 span{white-space:nowrap}
-.col h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+.col h2{white-space:nowrap;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
 .col.human h2{color:var(--human)}
 .card{display:block;width:100%;text-align:left;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);
   border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
@@ -129,13 +130,15 @@ input[type=text],textarea{font:inherit;font-size:14px;background:var(--bg);color
 textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 #backlog article{display:grid;gap:10px;padding-top:14px}
 #backlog .tabs{align-items:center}#backlog .tabs select{min-height:44px}
-#blAdd{display:flex;gap:6px;align-items:flex-start}
+#blAdd{display:flex;gap:6px;align-items:flex-start}#blAdd[hidden]{display:none}
+.btn[aria-busy="true"]{font-size:0}.btn[aria-busy="true"]::after{content:"";display:inline-block;width:14px;height:14px;vertical-align:middle;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 #blRunAll,#blRunAllAskme button{font:inherit;font-size:13px;min-height:44px;min-width:44px}  /* .btn look; .tabs button would make it mono */
 #blRunAllAskme{display:flex;gap:4px}#blRunAllAskme[hidden]{display:none}
 #blTriage summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--muted);font-size:13px}
 #blTriageBody{font-size:13px;overflow-wrap:anywhere}
 #blAdd textarea,#blList li textarea{flex:1;min-width:0;min-height:44px;resize:none;field-sizing:content;line-height:20px;padding:11px 8px}  /* one line empty, grows with the text */
-#blList li textarea:not(:focus){field-sizing:fixed;height:44px;white-space:nowrap;overflow:hidden}  /* a row collapses to one line until clicked */#blAdd .pts{min-height:44px;flex:none}
+#blList li textarea:not(:focus){max-height:52px;overflow:hidden}  /* a row shows two lines (border, top padding, 2 x 20px), wrapped between words, until clicked */#blAdd .pts{min-height:44px;flex:none}
 #blAdd .urg{font:inherit;font-size:13px;min-height:44px;flex:none;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px}
 #blList{list-style:none;margin:0;padding:0}
 #blList li{display:flex;gap:6px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)}
@@ -234,17 +237,19 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
   header>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}#filter{margin-left:0}
   header{gap:4px 6px;padding:6px 12px;align-items:center}#routing{flex:1 1 60%;padding-block:0}#filter,#laneFilter{flex:1 1 90px}#backlogBtn,#digestBtn,#agentsBtn,#aiBtn{flex:1 1 70px;white-space:nowrap}
-  #colPick{display:block;width:calc(100% - 32px);margin:0 16px 12px;min-height:44px;font-size:16px}.col:not(.pick){display:none}
+  #colPick{display:block;width:calc(100% - 32px);margin:0 16px 12px;min-height:44px;font-size:16px}#colPick:empty{display:none}.col:not(.pick){display:none}
+  #filter,#laneFilter,#rankBtn,#volume,#cooldown,#backlogBtn,#digestBtn,#agentsBtn,#aiBtn{min-height:44px}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
   #aiBody{grid-template-columns:minmax(0,1fr)}#aiCats{display:flex;overflow-x:auto;padding:10px 12px;border-bottom:1px solid var(--line)}
   #aiCats button{flex:none}#aiScope,#aiText{font-size:16px}
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#blAdd .urg,#filter,#laneFilter{font-size:16px}
-  #backlog .tabs{flex-wrap:nowrap}#blProject{min-width:0;flex:1 1 auto}#backlog .tabs .close{min-height:44px;min-width:44px}}
+  #blProject{min-width:0;flex:1 1 0}#backlog .tabs .close{min-height:44px;min-width:44px}#blRunAllAskme{order:1;flex-basis:100%}
+  #blAdd button[type=submit]{min-height:44px;min-width:44px}.pts{min-height:44px;font-size:16px}}
 </style>
 </head>
 <body>
-<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite">loading…</span>
+<header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite" title="loading…" data-agent-hint="Can't reach the server: open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py. No projects yet: run /trevskills-scrum in a repo and it shows up here.">loading…</span>
   <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, CPU load and free disk, from GET /api/machine on every 2 s poll. RAM is the first ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it. CPU is a second ring right after RAM: the 5-minute load average as a percent of all cores (a full arc is 100%, every core with one runnable thread), with the % inside, which can pass 100; new claims, resumes and auto-continue starts also wait above 150%, the ring is yellow within 10 points of that and red past it, grey with — when there is no reading, its tooltip gives the reading, the core count, busy % (CPU time busy, which also blocks above 90%) and the 150% limit, and Trevor's own Play, Resume and Run skip it. Every job launch (auto-resume, queued Plays, approve, rework) also waits above 500% CPU load; Trevor's Play and Resume skip that too. Trailing red text names a wait that no red reading already shows, such as the session ceiling. The usage segment is Claude's 5h and 7d used % from ~/.claude/usage.json and the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); usage: unknown means the file is missing or over 5 min old. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered. Fable near limit means 5h use reached 65% or 7d 75%, so new planner and spec-writer spawns use Opus and only the weekly digest still runs on Fable (Fable goes only to complex jobs); Fable paused, using Opus means 5h reached 80% or 7d 85%, so new spawns use Opus until the window resets. Server slow means a serve.py route's p95 over the last 5 minutes is 1000 ms or more, or a client dropped a connection, so polls may be piling up."></span>
   <button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists cool-down holds only new work, every automatic start of it: backlog claims (next, Run all, cloud-claim), Run-all and BigBoy parents' child claims (FIX tickets too), wake-waiting jobs and --then retries, auto continue, the next roadmap step and the bad-window digest (board.machine_ok with claim=True), and chat hand-offs go to the top of the backlog. Work already started finishes: auto-resumes, queued Plays, orphan respawns, a BigBoy parent's final review, and continue.py's Resume POSTs; nothing is stopped. Trevor's own Play, Resume, Setup done, closed-question answers, Run now and Digest still start work. While it is on, build and E2E lock waiters go nearest-the-finish-line first (board.lock_rank), a round-0 spec or build job parks at its next checkpoint (board.py cooldown-park; auto_resume restarts it after cool down), and once no job blocks a restart one full E2E run starts on each project's new main HEAD. The state text counts the headless sessions still running (board.live_sessions) and says Safe to restart: yes, or no with the jobs it waits on (serve.py restart_blockers: active, not paused, stalled, parked or limit-held). Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span><span id="e2eFull" hidden data-agent-hint="The last full E2E run on main per project, from board.e2eFull (serve.py e2e_full_record: scrum/e2e-full.json). Shows result, first 7 chars of the head and age; failed and error are red; a running record older than E2E_FULL_STALE shows as stale."></span>
   <button class="btn" id="routing" type="button" hidden data-agent-hint="Claude 5h and weekly used, from ~/.claude/usage.json (written by board.py statusline), and Codex 5h and weekly quota used, from the newest Codex rollout file. Refreshed every 60 s. Opens the Usage dialog."></button>
@@ -258,7 +263,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   <button class="btn" id="aiBtn" type="button">AI-Settings</button></header>
 <p class="error" id="checkoutAlert" role="alert" hidden></p>
 <select id="colPick" aria-label="Show stage"></select>
-<main id="board"></main>
+<main id="board"><p class="empty">Loading…</p></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="batchEdits"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
   <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
@@ -379,6 +384,8 @@ const getText = (url, prev) => timed(url, {cache: "no-store", headers: etags[url
 // Chrome's 6 connections per host.
 const single = fn => { let p = null; return () => p || (p = fn().finally(() => { p = null; })); };
 const SLOW = "Server is slow: showing the last good data.";
+// #status sits in a fixed, ellipsised track, so its full text goes in the title too.
+const setStatus = text => { const el = $("status"); if (el) el.textContent = el.title = text; };
 
 let projects = [], jobs = [], runs = {}, backlogs = {}, manuals = {}, roadmaps = {}, routes = {}, routesFinal = new Set(), lastText = "", filter = store.get("scrum.filter"), laneFilter = store.get("scrum.lane"), colPick = store.get("scrum.col");
 // No lane key = standard; a promoted fast job is standard too.
@@ -626,7 +633,7 @@ function render() {
   const cols = [...STAGES, ...new Set([...list.map(colOf), ...rcards.map(([c]) => c)].filter(s => !STAGES.includes(s)))];
   const count = s => list.filter(j => colOf(j) === s).length + rIn(s).length;
   // Empty stages stay visible but narrow, so the columns holding jobs get the room.
-  $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(96px,.5fr)").join(" ");
+  $("board").style.gridTemplateColumns = cols.map(s => count(s) ? "minmax(230px,2fr)" : "minmax(min-content,.5fr)").join(" ");
   // On a phone only the picked column shows: the stored pick while it is still a column, else needs-human when it holds a
   // card, else the first column holding one, else the first column. Options rebuild only when a label changes.
   const pick = cols.includes(colPick) ? colPick : count("needs-human") ? "needs-human" : cols.find(count) || cols[0];
@@ -651,10 +658,11 @@ function render() {
   if (moreFocused) $("board").querySelector("[data-more]")?.focus();
   if (kidsFocused) [...$("board").querySelectorAll("[data-kids-more]")].find(b => b.dataset.kidsMore === kidsFocused)?.focus();
   if (rmFocused) [...$("board").querySelectorAll("[data-roadmap]")].find(c => c.dataset.roadmap === rmFocused)?.focus();
-  const open = projects.filter(p => !filter || p === filter).reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
+  // A project whose backlog read failed with no last good body (null) has no count to show.
+  const counted = projects.filter(p => !filter || p === filter);
+  const open = counted.some(p => backlogs[p] === null) ? "—" : counted.reduce((n, p) => n + (backlogs[p] || []).filter(i => !i.done).length, 0);
   $("backlogBtn").textContent = `Backlog · ${open}`;
-  $("status").textContent = projects.length ? ""
-    : "No projects yet. Run /trevskills-scrum in a repo and it shows up here.";
+  setStatus(projects.length ? "" : "No projects yet.");
 }
 
 function renderSelect(sel, value, withAll) {
@@ -711,8 +719,8 @@ function renderCooldown(m) {
 function renderMachine(m) {
   const el = $("machine");
   if (!el) return;
-  el.hidden = !m;
-  if (!m) return;
+  el.hidden = false;
+  if (!m) return el.innerHTML = '<span class="danger" title="Couldn\'t load machine status.">—</span>';
   const part = (kind, label, v, unit) =>
     `<span class="${machineLevel(v, kind, m)}">${label} ${v == null ? "—" : Math.round(v) + unit}</span>`;
   // RAM is a ring: the filled arc is RAM in use, the free % sits inside it. Swap has no text of its own: it only
@@ -733,11 +741,12 @@ function renderMachine(m) {
   // serve.py's own health over the last 5 min (an older server sends no server key): the worst route's p95, dropped connections.
   const sv = m.server, worst = sv && sv.worst && sv.routes && sv.routes[sv.worst];
   el.innerHTML = [ring(level, ram == null ? 0 : Math.round(100 - ram), pctText(ram), "RAM", tip),
-    ring(cpuLevel, cpu == null ? 0 : Math.min(100, Math.round(cpu)), pctText(cpu), "CPU", cpuTip),
+    // At most 3 characters inside the ring: 100% or more shows whole multiples ("2x"); the exact % stays in the title.
+    ring(cpuLevel, cpu == null ? 0 : Math.min(100, Math.round(cpu)), cpu == null || Math.round(cpu) < 100 ? pctText(cpu) : Math.round(cpu / 100) + "x", "CPU", cpuTip),
     part("disk", "disk", m.free_disk_gb, " GB"), usagePart(m.usage)].filter(Boolean).join(" · ")
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "")
-    + (sv && sv.slow ? ` · <span class="danger">server slow: ${[worst && worst.p95_ms >= 1000 ? `${esc(sv.worst)} p95 ${esc(worst.p95_ms)} ms` : "",
-      sv.disconnects >= 1 ? `${esc(sv.disconnects)} dropped` : ""].filter(Boolean).join(" · ")}</span>` : "");
+    + (sv && sv.slow ? ` · <span class="danger" title="${esc([worst && worst.p95_ms >= 1000 ? `${sv.worst} p95 ${worst.p95_ms} ms` : "",
+      sv.disconnects >= 1 ? `${sv.disconnects} dropped` : ""].filter(Boolean).join(" · "))}">server slow</span>` : "");
 }
 
 // Every project's board.checkoutAlert (its live checkout cannot go live), one per line, whatever the project filter.
@@ -773,8 +782,8 @@ async function poll() {
   missed = 0;
   try {
     const res = await timed("api/projects", {cache: "no-store"});
-    if (res.status === 404) return $("status").textContent = STALE;
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (res.status === 404) { setStatus(STALE); return boardFailed(); }
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), {status: res.status});
     const list = await res.json();
     const ps = projects = list.map(p => p.name);
     projectHue = projectHues(projects);
@@ -782,7 +791,7 @@ async function poll() {
     if (filter && !projects.includes(filter)) filter = "";
     const [boards, items, checks, runList, roadmapList] = await Promise.all([
       Promise.all(ps.map(p => getJson(`p/${enc(p)}/board.json`, {jobs: []}))),
-      Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/backlog`, []))),
+      Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/backlog`, null, []))),
       Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/manual-checks`, []))),
       getJson("api/runs", []),
       Promise.all(ps.map(p => getJson(`api/p/${enc(p)}/roadmap`, null)))]);
@@ -810,7 +819,7 @@ async function poll() {
     if ($("rank")?.open) renderRank();
     const text = JSON.stringify([all, runs, backlogs, roadmaps, filter, routes, projectColour]);
     if (text !== lastText) {
-      jobs = all; lastText = text; render(); paintTags();
+      jobs = all; lastText = text; boardLoaded = true; render(); paintTags();
       const openJob = $("viewer").open && jobs.find(j => j.key === $("viewer").dataset.key);
       if (openJob && !$("actions").contains(document.activeElement)) renderActions(openJob);
       if (openJob) renderDiverged(openJob);
@@ -820,18 +829,22 @@ async function poll() {
     if (backlogChanged && $("backlog").open && !editingBacklog()) renderBacklog();
     if ($("digest").open) loadDigests();
     tickAgo();
-    if (missed) $("status").textContent = SLOW;
-    else if ($("status").textContent === SLOW) $("status").textContent = "";
+    if (missed) setStatus(SLOW);
+    else if ($("status").textContent === SLOW) setStatus("");
   } catch (e) {
-    $("status").textContent = `Can't reach the dashboard server (${e.message}). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py`;
+    setStatus(e.status ? `Server error (HTTP ${e.status}).` : "Can't reach the server.");
+    boardFailed();
   }
 }
+// main#board reads "Loading…" until the first poll renders it; a failed first poll says so, and a later one leaves it be.
+let boardLoaded = false;
+const boardFailed = () => { if (!boardLoaded && $("board")) $("board").innerHTML = '<p class="empty">Couldn\'t load the board.</p>'; };
 
 $("filter").addEventListener("change", e => { filter = e.target.value; store.set("scrum.filter", filter); lastText = ""; poll(); });
 $("laneFilter").value = laneFilter;
 if ($("laneFilter").value !== laneFilter) laneFilter = "";  // a stored value that is no longer an option
-$("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; store.set("scrum.lane", laneFilter); render(); });
-$("colPick").addEventListener("change", e => { colPick = e.target.value; store.set("scrum.col", colPick); render(); });
+$("laneFilter").addEventListener("change", e => { laneFilter = e.target.value; store.set("scrum.lane", laneFilter); if (boardLoaded) render(); });
+$("colPick").addEventListener("change", e => { colPick = e.target.value; store.set("scrum.col", colPick); if (boardLoaded) render(); });
 
 // spec.md's header lines (UI surface, Hard stops, Human setup, Lane) above the first "## " as plain labelled rows:
 // [head HTML, the markdown without those lines]. No header lines: ["", md] unchanged. Unknown values pass through.
@@ -1240,9 +1253,14 @@ function renderBacklog() {
   renderManual();
   $("blAdd").hidden = !projects.length;
   $("blRunAll").disabled = !projects.length;
-  if (!projects.length) return $("blList").innerHTML = '<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>';
-  const all = backlogs[blProject()] || [], open = all.filter(i => !i.done);
+  const list = $("blList");
+  if (!projects.length) list.dataset.agentHint = "Run /trevskills-scrum in a repo first.";
+  else delete list.dataset.agentHint;
+  if (!projects.length) return list.innerHTML = '<li class="note">No projects yet.</li>';
+  // undefined: no read has landed yet; null: the read failed with no last good body; a 404 (no such project) is [].
+  const got = backlogs[blProject()], all = got || [], open = all.filter(i => !i.done);
   $("blRunAll").disabled = !open.length;
+  if (!got) return list.innerHTML = `<li class="note">${got === null ? "Couldn't load the backlog." : "Loading…"}</li>`;
   $("blList").innerHTML = open.map((it, n) => `<li data-i="${it.index}"${it.setup?.length ? ' class="setup"' : ""}>
       <span class="grip" draggable="true" aria-hidden="true" data-agent-hint="Drag to reorder.">⋮⋮</span>
       <select class="pts p${it.points ?? "x"}" aria-label="Difficulty points" title="${esc(it.why || "Not estimated yet")}">
@@ -1314,12 +1332,14 @@ $("blAdd").points.innerHTML = ptsOptions(null);
 $("blAdd").points.addEventListener("change", e => paintPts(e.target));
 $("blAdd").addEventListener("submit", e => {
   e.preventDefault();
-  const form = e.target, points = form.points.value, urgency = form.urgency.value;
+  const form = e.target, points = form.points.value, urgency = form.urgency.value, add = form.querySelector("button[type=submit]");
+  if (add.getAttribute("aria-busy") === "true") return;  // a second Enter while the add is pending adds nothing
+  add.disabled = true; add.setAttribute("aria-busy", "true");
   backlogCall(async url => {
     await post(url, {op: "add", text: form.text.value, urgency, ...(points && {points: +points})});
     form.reset(); paintPts(form.points);
     if (urgency === "now") $("backlog").close();
-  });
+  }).finally(() => { add.removeAttribute("aria-busy"); add.disabled = uploads > 0; });
 });
 // Images dropped or pasted on the add input upload to scrum/attachments/ and append a [screenshot: path] token.
 const toBase64 = file => new Promise((ok, fail) => {
@@ -1341,7 +1361,7 @@ async function attachImages(files) {
       if (next.length > form.text.maxLength) $("blError").textContent = "Item is too long to add another screenshot";
       else form.text.value = next;
     } catch (err) { $("blError").textContent = err.message; }
-    finally { if (!--uploads) add.disabled = $("blProject").disabled = false; }
+    finally { if (!--uploads) { add.disabled = add.getAttribute("aria-busy") === "true"; $("blProject").disabled = false; } }
   }
 }
 $("blAdd").text.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); $("blAdd").requestSubmit(); } });
@@ -1452,7 +1472,7 @@ async function loadDigests() {
   if (dgProject() !== p) return;  // a newer project pick is already loading
   if (!data?.digests) {
     digestData = null; digestText = ""; $("dgList").innerHTML = "";  // no "loading…" under the error
-    return $("dgError").textContent = data || "Couldn't load digests. Is serve.py running?";
+    return $("dgError").textContent = data || "Couldn't load digests.";
   }
   const text = JSON.stringify(data);
   if (text === digestText) return;  // unchanged: keep the DOM (and focus) as it is
@@ -1658,7 +1678,7 @@ $("agentsBtn").addEventListener("click", async () => {
   const list = await getJson("api/agents", null, STALE);
   if (!Array.isArray(list)) {
     $("flow").innerHTML = "";
-    return $("agError").textContent = list || "Couldn't load agents. Is serve.py running?";
+    return $("agError").textContent = list || "Couldn't load agents.";
   }
   agents = list;
   if (!list.length) return $("flow").innerHTML = '<p class="empty">No agents</p>';  // no chart; #pipeBar stays hidden
@@ -1707,7 +1727,9 @@ const aiRefocus = (el, also) => { const a = document.activeElement; if (el && (!
 let aiFindings = null;  // the last Security scan; it covers every scope, so a scope change keeps it
 let aiAudit = null, aiOff = new Set();  // the current scope's audit, and rows Disabled on this visit (they offer Undo)
 let aiScopeId = "";  // the scope last loaded, so a blocked scope pick can put #aiScope back
-const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings. Is serve.py running?"; };
+// A failed write's line: the server's own error when it answered, else the network cause.
+const failText = (action, err) => err?.status ? `${action}: ${err.message}` : `${action}. Can't reach the server.`;
+const aiFail = () => { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't load AI settings."; };
 const aiRow = it => `<button class="node${it.status === "overridden" ? " over" : ""}" type="button" data-id="${esc(it.id)}">
     <b>${esc(it.name)}</b><span><span class="skill">${esc(it.scope)}</span>${it.status ? ` <span class="chip ${it.status === "wins" ? "PASS" : "pending"}">${esc(it.status)}</span>` : ""}</span>
     <span class="path">${esc(it.path)}</span></button>`;
@@ -1785,7 +1807,7 @@ async function renderFindings() {
   $("aiError").textContent = ""; $("aiList").innerHTML = AI_LOADING;
   const data = await getJson("api/ai-settings/security", null);
   if (aiCat !== "security" || !$("aiBack").hidden || aiFindings) return;  // moved on, or a newer scan already landed
-  if (!data?.findings) { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't run the security scan. Is serve.py running?"; return; }
+  if (!data?.findings) { $("aiList").innerHTML = ""; $("aiError").textContent = "Couldn't run the security scan."; return; }
   aiFindings = data.findings;
   renderAi();
 }
@@ -1823,7 +1845,7 @@ async function renderAudit() {
   $("aiError").textContent = ""; $("aiList").innerHTML = AI_LOADING;
   const data = await getJson(`api/ai-settings/audit?scope=${enc(sid)}`, null, {});
   if (aiCat !== "audit" || $("aiScope").value !== sid || !$("aiBack").hidden || aiAudit) return;  // moved on while loading
-  if (!data?.rows) { $("aiList").innerHTML = ""; $("aiError").textContent = data ? STALE : "Couldn't run the audit. Is serve.py running?"; return; }
+  if (!data?.rows) { $("aiList").innerHTML = ""; $("aiError").textContent = data ? STALE : "Couldn't run the audit."; return; }
   aiAudit = data;
   renderAi();
 }
@@ -1841,7 +1863,7 @@ $("aiList").addEventListener("click", async e => {
     if (aiAudit !== audit) return;
     b.disabled = false;
     $("aiError").textContent = err.status === 409 && /already running/.test(err.message) ? "Research is already running for this item."
-      : err.status === 409 ? err.message : "Couldn't start research. Is serve.py running?";
+      : err.status === 409 ? err.message : failText("Couldn't start research", err);
   }
 });
 $("aiList").addEventListener("click", async e => {
@@ -1857,9 +1879,9 @@ $("aiList").addEventListener("click", async e => {
     renderAudit();
     aiRefocus([...$("aiList").querySelectorAll("button[data-toggle]")].find(x => x.dataset.row === id)
       || [...$("aiList").querySelectorAll("button[data-research]")].find(x => x.dataset.research === id));
-  } catch {
+  } catch (err) {
     if (aiAudit !== audit) return;
-    b.disabled = false; $("aiError").textContent = "Couldn't change this setting. Is serve.py running?";
+    b.disabled = false; $("aiError").textContent = failText("Couldn't change this setting", err);
     aiRefocus(b);
   }
 });
@@ -1894,7 +1916,7 @@ async function aiWrite(route, body, busy, fail) {
   } catch (err) {
     if (!form.isConnected) return;
     $("aiStatus").textContent = "";
-    $("aiError").textContent = err.status === 409 ? "This file changed on disk. Go back and reopen it." : err.status === 400 ? err.message : fail;
+    $("aiError").textContent = err.status === 409 ? "This file changed on disk. Go back and reopen it." : err.status === 400 ? err.message : failText(fail, err);
   } finally {
     if (form.isConnected) { $("aiSave").disabled = $("aiText").value === aiItem.baseline; $("aiUndo").disabled = false; }
   }
@@ -1931,7 +1953,7 @@ $("aiList").addEventListener("submit", async e => {
       return;
     }
   }
-  const ok = await aiWrite("save", body, "Saving…", "Couldn't save. Is serve.py running?");
+  const ok = await aiWrite("save", body, "Saving…", "Couldn't save");
   if (form.isConnected) aiDisarm();
   if (!ok) return;
   if (AI_JSON.includes(aiItem.category)) {  // reformat to the saved file, unless the user typed on while it saved
@@ -1942,7 +1964,7 @@ $("aiList").addEventListener("submit", async e => {
 });
 $("aiList").addEventListener("click", async e => {
   if (e.target.id !== "aiUndo") return;
-  if (await aiWrite("undo", {version: aiItem.version}, "Undoing…", "Couldn't undo. Is serve.py running?")) {
+  if (await aiWrite("undo", {version: aiItem.version}, "Undoing…", "Couldn't undo")) {
     $("aiText").value = aiItem.content; aiItem.baseline = $("aiText").value; $("aiSave").disabled = true; aiDisarm();
     $("aiStatus").textContent = "Undone"; $("aiUndo").hidden = true;
   }
@@ -2063,14 +2085,16 @@ function windowRows(list) {
   }).join("")).join("");
 }
 // Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. A 404 (older
-// serve.py) or an error hides the button; an open Usage dialog keeps its last rows until a status arrives.
+// serve.py) or an error shows "Usage —" in red; an open Usage dialog keeps its last rows until a status arrives.
 let usage = null;
 async function loadRouting() {
-  const s = await getJson("api/routing-status", null);
-  $("routing").hidden = !s;
-  if (!s) return;
+  const s = await getJson("api/routing-status", null), el = $("routing");
+  if (!el) return;
+  el.hidden = false;
+  if (!s) { usage = null; el.title = "Couldn't load usage."; return el.innerHTML = '<span class="danger">Usage —</span>'; }
   usage = s;
-  $("routing").textContent = routingText(s);
+  el.removeAttribute("title");
+  el.textContent = routingText(s);
   $("usageRows").innerHTML = usageRows(s);
 }
 // Scorecards change once per window, so they are fetched only when the dialog opens. A reply that lands after the

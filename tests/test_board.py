@@ -95,6 +95,15 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.slug("[screenshot: /Users/a/b.png] Fix the login button"), "fix-the-login-button")
         self.assertEqual(board.slug("[screenshot: /a.png][screenshot: /b.png] Fix x"), "fix-x")
 
+    def test_short_title_cuts_at_word_with_ellipsis(self):
+        self.assertEqual(board.short_title("Fix the login button"), "Fix the login button")
+        self.assertEqual(board.short_title("x" * 60), "x" * 60)
+        self.assertEqual(board.short_title("Add a dark mode toggle, then fix it", n=30), "Add a dark mode toggle, then…")
+        self.assertEqual(board.short_title("Add a dark mode toggle, then fix it", n=25), "Add a dark mode toggle…")
+        self.assertEqual(board.short_title("L" * 70), "L" * 59 + "…")
+        self.assertEqual(board.short_title("word " * 30), "word " * 10 + "word…")
+        self.assertEqual(board.short_title("... " + "x" * 70, n=10), "... xxxxx…", "all punctuation before the space: hard cut")
+
     def test_new_with_only_screenshot_tags_gets_fallback_slug(self):
         self.assertEqual(board.cmd_new(self.root, "[screenshot: /x/y.png]"), "001-job")
 
@@ -1388,7 +1397,7 @@ class BoardTest(unittest.TestCase):
             self.spec_file(t).write_text(f"## Likely files\n- `{f}`\n")
         out = board.cmd_cloud_claim(self.root, 5)
         self.assertEqual([c["feature"] for c in out["claimed"]], ["Pre", long])
-        self.assertEqual(self.jobs()[1]["title"], "L" * 60)
+        self.assertEqual(self.jobs()[1]["title"], "L" * 59 + "…")
         self.assertTrue((self.root / "backlog.md").read_text().startswith("# Backlog\n- [ ] Blocked {needs #aaaa}\n"))
 
     def test_cloud_claim_skips_item_parked_on_human_setup(self):

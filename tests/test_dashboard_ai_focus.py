@@ -146,7 +146,7 @@ click(b); frame();
 pending.shift().rej(new Error("down")); await tick(); frame();
 console.log(JSON.stringify({same: document.activeElement === b, disabled: b.disabled, error: $("aiError").textContent}));
 """)
-        self.assertEqual(got, {"same": True, "disabled": False, "error": "Couldn't change this setting. Is serve.py running?"})
+        self.assertEqual(got, {"same": True, "disabled": False, "error": "Couldn't change this setting. Can't reach the server."})
 
     def test_no_focus_steal_when_user_moved(self):
         got = run(AUDIT + """

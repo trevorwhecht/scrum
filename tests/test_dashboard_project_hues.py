@@ -119,7 +119,7 @@ class Header(unittest.TestCase):
         got, = run('render(); console.log(JSON.stringify(els.status.textContent));', {"p": None})
         self.assertEqual(got, "")
         none, = run('render(); console.log(JSON.stringify(els.status.textContent));', {}, projects=())
-        self.assertEqual(none, "No projects yet. Run /trevskills-scrum in a repo and it shows up here.")
+        self.assertEqual(none, "No projects yet.")
 
 
 if __name__ == "__main__":

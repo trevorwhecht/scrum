@@ -148,7 +148,7 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, subprocess, sys, tempfile, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, string, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -329,6 +329,16 @@ def live(board, job_id, unpause=False):
 def slug(title):
     title = re.sub(r"\[screenshot:[^\]]*\]", " ", title, flags=re.I)  # the path would become the id
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].strip("-") or "job"
+
+
+def short_title(text, n=60) -> str:
+    """text when it fits in n chars, else cut at the last space in the first n-1 chars (trailing spaces and punctuation
+    stripped) plus "…"; with no such space, the first n-1 chars plus "…". Never longer than n."""
+    if len(text) <= n:
+        return text
+    head = text[:n - 1]
+    cut = head[:head.rfind(" ")].rstrip(" " + string.punctuation) if " " in head else ""
+    return (cut or head) + "…"
 
 
 def add_job(root, board, title, job_id=None):
@@ -656,7 +666,7 @@ def cmd_next(root, index=None):
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
-        job_id = add_job(root, board, item["text"][:60])
+        job_id = add_job(root, board, short_title(item["text"]))
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
@@ -692,7 +702,7 @@ def cmd_cloud_claim(root, n) -> dict:
             files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
             if not files or files & taken:
                 continue
-            job_id = add_job(root, board, item["text"][:60])
+            job_id = add_job(root, board, short_title(item["text"]))
             board["jobs"][-1]["cloudClaim"] = True  # keeps its files reserved until the dispatcher moves it to stage cloud
             take_spec(root, item["text"], job_id)
             claim_item(lines, item, job_id)
@@ -2980,7 +2990,7 @@ def parse_plan(text):
 def add_child(root, board, parent, t, depends_on, goal, plain=False):
     """Create one waiting child job for ticket t and write its feature.md (just t's text when plain).
     Caller holds the board lock."""
-    job_id = add_job(root, board, t["title"][:60])
+    job_id = add_job(root, board, short_title(t["title"]))
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
     feature = t["text"] + "\n" if plain else \
@@ -3050,7 +3060,7 @@ def cmd_runall_start(root):
         parent = board["jobs"][-1]
         kids, by_id = [], {}
         for item in todo:
-            t = {"ticket": None, "title": item["text"][:60], "text": item["text"], "parallel": True}
+            t = {"ticket": None, "title": short_title(item["text"]), "text": item["text"], "parallel": True}
             kids.append(add_child(root, board, parent, t, [], "", plain=True))
             take_spec(root, item["text"], kids[-1])
             claim_item(lines, item, kids[-1])

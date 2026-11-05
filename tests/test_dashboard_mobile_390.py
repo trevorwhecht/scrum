@@ -48,6 +48,14 @@ class DashboardMobile390Css(unittest.TestCase):
         self.assertIn("font-size:16px", decls(phone, "#colPick"))
         self.assertIn("min-height:44px", decls(phone, "#colPick"))
         self.assertIn("display:none", decls(outside, "#colPick"))
+        submit = decls(phone, "#blAdd button[type=submit]")
+        self.assertIn("min-height:44px", submit)
+        self.assertIn("min-width:44px", submit)
+        self.assertIn("min-height:44px", decls(phone, ".pts"))
+        self.assertIn("font-size:16px", decls(phone, ".pts"))
+        self.assertIn("display:none", decls(outside, "#blAdd[hidden]"))
+        self.assertIn("min-height:44px", decls(phone, "#backlogBtn"))
+        self.assertIn("min-height:44px", decls(phone, "#filter"))
 
     def test_header_desktop_unchanged(self):
         outside, phone = split(css())
