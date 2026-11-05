@@ -1,4 +1,4 @@
-import json, os, shlex, subprocess, tempfile, unittest
+import json, os, shlex, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +101,28 @@ class InstallTest(unittest.TestCase):
             self.assertFalse((home / "skills" / "trevskills-scrum").exists(), "a refusal must link nothing")
             self.assertFalse((home / "agents").exists(), "a refusal must create nothing")
             self.assertFalse((home / "codex").exists(), "a refusal must create nothing")
+
+    def test_install_refuses_inside_a_linked_worktree(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            git = lambda *a, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                                 check=True, capture_output=True, text=True)
+            (t / "main").mkdir()
+            shutil.copy(ROOT / "install.sh", t / "main" / "install.sh")
+            git("init", "-q", cwd=t / "main")
+            git("add", "install.sh", cwd=t / "main")
+            git("commit", "-q", "-m", "x", cwd=t / "main")
+            git("worktree", "add", "-q", str(t / "wt"), cwd=t / "main")
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_HOME", "CODEX_HOME")}
+            env["HOME"] = str(t / "home")
+            (t / "home").mkdir()
+            run = lambda d: subprocess.run(["bash", str(t / d / "install.sh")], env=env, capture_output=True, text=True)
+            result = run("wt")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("worktree", result.stderr)
+            self.assertEqual(list((t / "home").iterdir()), [], "a refusal must create nothing")
+            # the main checkout of the same repo is not refused (it fails later only on the missing agents/ etc.)
+            self.assertNotIn("worktree", run("main").stderr)
 
     def test_install_links_jev_rank(self):
         with tempfile.TemporaryDirectory() as t:
