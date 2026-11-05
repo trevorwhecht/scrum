@@ -3217,7 +3217,9 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn(f"| {job} | 3h20m | 10m | 10m | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |\n"
+                      "|---|---|---|---|---|---|---|---|---|---|\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
@@ -3235,17 +3237,17 @@ class BoardTest(unittest.TestCase):
         def stamp(at):
             return datetime.fromtimestamp(at, timezone.utc).strftime("%Y%m%d-%H%M%S")
         row = lambda: board._timing_row(self.root, "j", {}, {})[0]
-        self.assertEqual(row()[3:5], ["0m", "1"])  # no log
-        self.assertEqual(row()[5], "1h00m")
+        self.assertEqual(row()[3:6], ["0m", "-", "1"])  # no log
+        self.assertEqual(row()[6], "1h00m")
         (runs / "bad-start-j.log").write_text("x")
         early = runs / f"{stamp(t0 - 60)}-start-j.log"  # earliest log is before spec.md: spec.md's mtime
         early.write_text("x")
-        self.assertEqual((row()[3], row()[5]), ("0m", "1h00m"))
+        self.assertEqual((row()[3], row()[6]), ("0m", "1h00m"))
         (runs / f"{stamp(t0 + 1200)}-start-j.log").write_text("x")
-        self.assertEqual((row()[3], row()[5]), ("0m", "1h00m"))
+        self.assertEqual((row()[3], row()[6]), ("0m", "1h00m"))
         early.unlink()
         (runs / f"{stamp(t0 + 1800)}-resume-j.log").write_text("x")  # not a start log
-        self.assertEqual((row()[3], row()[5]), ("20m", "40m"))
+        self.assertEqual((row()[3], row()[6]), ("20m", "40m"))
         self.assertEqual(board._timing_row(self.root, "none", {}, {})[0][3], "-")
 
     def timing_cell(self, waits, files=((6600, "round-1/a.md"), (7200, "round-1/head.txt"))):
@@ -3254,7 +3256,7 @@ class BoardTest(unittest.TestCase):
         for at, rel in ((0, "spec.md"), *files):
             p = self.write(f"j/{rel}", "x\n")
             os.utime(p, (t0 + at, t0 + at))
-        return board._timing_row(self.root, "j", {}, {}, [t0 + w for w in waits])[0][5]
+        return board._timing_row(self.root, "j", {}, {}, [t0 + w for w in waits])[0][6]
 
     def test_timing_subtracts_e2e_wait(self):
         self.assertEqual(self.timing_cell([]), "2h00m")
@@ -3269,7 +3271,7 @@ class BoardTest(unittest.TestCase):
         os.utime(self.root / "jobs/j/spec.md", (t0, t0))
         os.utime(self.root / "jobs/j/round-1/head.txt", (t0 + 7200, t0 + 7200))
         waits = [board._epoch(q["date"]) for q in board._json_lines(self.root / "questions.log")]
-        self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][5], "1h40m")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][6], "1h40m")
 
     def test_timing_ignores_other_stalls(self):
         t0 = 1_700_000_000
@@ -3286,7 +3288,7 @@ class BoardTest(unittest.TestCase):
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
-        self.assertIn("| j | - | 0m | 0m | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
 
     def test_timing_wait_clamped_and_merged(self):
         self.assertEqual(self.timing_cell([6000, 6100]), "1h50m")  # overlapping spans count once
@@ -3297,9 +3299,19 @@ class BoardTest(unittest.TestCase):
         for job, heads in (("a", {1: "x", 2: "y", 3: "z"}), ("b", {1: "x", 2: "y", 4: "y"})):
             for n, h in heads.items():
                 self.write(f"{job}/round-{n}/head.txt", h + "\n")
-        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][6], "0")
+        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][7], "0")
         cells, _, _, count, _ = board._timing_row(self.root, "b", {}, {})
-        self.assertEqual((cells[6], count), ("1 (rounds 4)", 1))
+        self.assertEqual((cells[7], count), ("1 (rounds 4)", 1))
+
+    def test_timing_row_queue_gate_cell(self):
+        cell = lambda: board._timing_row(self.root, "j", {}, {})[0][4]
+        self.write("j/spec.md", "s\n")
+        self.assertEqual(cell(), "-")  # no file
+        gates = self.root / "jobs/j/queue-gates.txt"
+        gates.write_text("")
+        self.assertEqual(cell(), "-")  # empty file
+        gates.write_text("ram_room\ncpu_load\n")
+        self.assertEqual(cell(), "ram_room, cpu_load")
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
