@@ -2486,11 +2486,10 @@ class ContractTest(unittest.TestCase):
         wrong_q = self.ask_question(re.search(r"`(B ask [^`]+)`", wrong).group(1))
         self.assertTrue(dirty_q.startswith("Uncommitted change in <repo name>:"), dirty_q)
         self.assertTrue(wrong_q.startswith("<repo name> main checkout is on <branch>, not <default>"), wrong_q)
-        for phrase in ("git stash", "git commit", "Keep my changes and carry on, the recommended option",
+        for phrase in ("git stash", "/trevskills-commitpush", "Keep my changes and carry on, the recommended option",
                        "throws away this job"):
             self.assertIn(phrase, dirty_q, phrase)
-        for phrase in ("git push", "commit and push"):
-            self.assertIn(phrase, dirty_q, phrase)
+        self.assertNotIn("git commit", dirty_q)
         for phrase in ("git checkout <default>", "Carry on, the recommended option", "throws away this job"):
             self.assertIn(phrase, wrong_q, phrase)
         ahead = next(l for l in guard.splitlines() if "**Unpushed commits:**" in l)
