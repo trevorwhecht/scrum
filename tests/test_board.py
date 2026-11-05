@@ -5885,6 +5885,62 @@ class E2eSpecsTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
 
 
+class RenderPathsTest(unittest.TestCase):
+    """board.py render-paths: the app paths the diff's UI runtime files render, for the shared review render (job 652)."""
+
+    FILES = E2eSpecsTest.FILES
+    setUp, tearDown, git, project = E2eSpecsTest.setUp, E2eSpecsTest.tearDown, E2eSpecsTest.git, E2eSpecsTest.project
+
+    def commit(self, *rels):
+        for rel in rels:
+            p = self.repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text((p.read_text() if p.exists() else "export default () => null\n") + "// changed\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "edit")
+        return board.render_paths(self.repo, "main", self.pfile)
+
+    def test_render_paths_maps_routes_and_skips_dynamic(self):
+        self.assertEqual(self.commit("src/app/admin/views/Grid.tsx", "src/app/order/[id]/page.tsx",
+                                     "src/components/Price.tsx"),
+                         {"paths": ["/admin/views", "/pricing"], "skipped": ["/order/[id]: dynamic route"]})
+        out = self.commit(*[f"src/app/p{i}/page.tsx" for i in range(1, 10)])
+        self.assertEqual(out["paths"], ["/admin/views", "/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7"])
+        self.assertEqual(out["skipped"], ["/order/[id]: dynamic route", "/p8: over the 8-page cap",
+                                          "/p9: over the 8-page cap", "/pricing: over the 8-page cap"])
+        with self.assertRaises(SystemExit):
+            board.render_paths(self.repo, "-x", self.pfile)
+
+    def test_render_paths_falls_back_to_root(self):
+        self.assertEqual(self.commit("src/components/Orphan.tsx"), {"paths": ["/"], "skipped": []})
+        self.assertEqual(self.commit("src/app/order/[id]/page.tsx"),
+                         {"paths": ["/"], "skipped": ["/order/[id]: dynamic route"]})
+
+    def test_render_paths_empty_without_ui_files(self):
+        self.assertEqual(self.commit("e2e/pricing.spec.ts", "README.md"), {"paths": [], "skipped": []})
+        self.pfile.write_text("# Project\n- UI globs: none\n")
+        self.assertEqual(self.commit("src/components/Price.tsx"), {"paths": [], "skipped": []})
+        self.pfile.write_text("# Project\n")
+        self.assertEqual(board.render_paths(self.repo, "main", self.pfile), {"paths": [], "skipped": []})
+
+    def test_render_paths_cli(self):
+        self.assertIn("render-paths <id>", board.__doc__)
+        env = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "no-projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        root = Path(self.tmp.name) / "scrum"
+        job = board.cmd_new(root, "Render")
+        r = run_board("--dir", str(root), "render-paths", job)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"job {job} has no worktree on the board", r.stderr)
+        (root / "project.md").write_text("# Project\n- UI globs: *.tsx\n")
+        board.cmd_set(root, job, [f"worktree={self.repo}", "base=main"])
+        self.commit("src/components/Price.tsx")
+        r = run_board("--dir", str(root), "render-paths", job)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"paths": ["/pricing"], "skipped": []})
+
+
 class CheckReuseTest(unittest.TestCase):
     """board.py check-reuse: a round at an unchanged HEAD reuses the previous round's CHECK: PASS (job 613)."""
 
