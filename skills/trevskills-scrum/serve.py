@@ -159,6 +159,18 @@ LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one st
 GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
 
 
+def note_queue_gate(root, job_id, gate):
+    """Add `gate` (ram_room or cpu_load) to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column. It
+    outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error never blocks the queue."""
+    path = Path(root) / "jobs" / job_id / "queue-gates.txt"
+    try:
+        if gate not in (path.read_text(encoding="utf-8").split() if path.exists() else []):
+            with path.open("a", encoding="utf-8") as f:
+                f.write(gate + "\n")
+    except OSError:
+        pass
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
@@ -175,8 +187,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     if on_board:
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
-            if board.ram_room(floor=0) < 1 or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
+            ram_short = board.ram_room(floor=0) < 1
+            if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
+                note_queue_gate(root, job_id, "ram_room" if ram_short else "cpu_load")
             else:
                 proc, log = board.spawn(root, job_id, action, prompt, flags)
         with board.locked_board(root) as b:  # the live job, re-read under the lock

@@ -940,6 +940,47 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {job_id}",
                                                 "stage": "needs-human"})
 
+    # --- job 669: queue-gates.txt names the gate that queued a launch ---
+    def gate_spawn(self, job_id, ram=1, cpu=0.0, manual=False):
+        b = self.serve.board
+        with mock.patch.object(b, "ram_room", return_value=ram), mock.patch.object(b, "cpu_load_pct", return_value=cpu), \
+                mock.patch.object(b, "spawn", return_value=(mock.Mock(), f"runs/{job_id}-approve.log")):
+            return self.serve.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}",
+                                    manual=manual)
+
+    def gates_file(self, job_id):
+        return self.root / "jobs" / job_id / "queue-gates.txt"
+
+    def test_spawn_queue_records_ram_gate(self):
+        job_id = self.gate_job("RAM gate")
+        self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\n")
+
+    def test_spawn_queue_records_cpu_gate(self):
+        job_id = self.gate_job("CPU gate")
+        self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
+        self.assertEqual(self.gates_file(job_id).read_text(), "cpu_load\n")
+
+    def test_spawn_queue_gate_dedup(self):
+        job_id = self.gate_job("Gate dedup")
+        for _ in range(2):
+            self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\n")
+        self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\ncpu_load\n")
+        self.assertEqual(self.gate_spawn(job_id), f"runs/{job_id}-approve.log")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\ncpu_load\n")
+        other = self.gate_job("Gate never queued")
+        self.assertEqual(self.gate_spawn(other), f"runs/{other}-approve.log")
+        self.assertFalse(self.gates_file(other).exists())
+
+    def test_spawn_queue_gate_write_error_ignored(self):
+        job_id = self.gate_job("Gate write error")
+        self.gates_file(job_id).mkdir(parents=True)  # a folder in the file's place: open() raises IsADirectoryError
+        self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        self.assertIn("queued_launch", self.stage_of(job_id))
+        self.assertTrue(self.stage_of(job_id)["play_queued"])
+
     def test_resume_refuses_lilguy_job(self):
         b = self.serve.board
         refusal = {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "

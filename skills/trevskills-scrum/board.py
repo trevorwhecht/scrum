@@ -1551,14 +1551,18 @@ def _timing_row(root, job_id, job, stalls, waits=()):
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
     spec = spec_at - created if spec_at and created else None
-    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), str(len(rounds)), ", ".join(times) or "-",
+    try:  # serve.py note_queue_gate: the launch gates that queued it
+        gates = ", ".join((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()) or "-"
+    except OSError:
+        gates = "-"
+    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), ", ".join(times) or "-",
              f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits),
              str(stalls.get(job_id, 0))]
     return cells, wall, len(rounds), len(same), waits
 
 
 def write_timing(root, digest_id, jobs):
-    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, rounds, round times, no-change rounds = a
+    """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines),
     totals, and every job on every registered board (and this one) now stalled waiting on the E2E queue."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
@@ -1572,8 +1576,8 @@ def write_timing(root, digest_id, jobs):
             stalls[q["job"]] = stalls.get(q["job"], 0) + 1
     rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ())) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
-             "| Job | Wall | Spec | Queue | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
     lines += ["", "## Totals",
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
