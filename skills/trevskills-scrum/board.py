@@ -1489,17 +1489,32 @@ def _mtime(p):
         return None
 
 
+def _build_start(root, job_id):
+    """Epoch secs of the earliest runs/*-start-<job_id>.log (named by its UTC spawn time), else None."""
+    for p in sorted((Path(root) / "runs").glob(f"*-start-{job_id}.log")):
+        try:
+            return datetime.strptime(p.name[:15], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 def _timing_row(root, job_id, job, stalls):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), done is the board updatedAt; each round's time runs from the previous round's last file
-    (round 1: spec.md) to its own last file."""
+    (round 1: the build start, see _build_start) to its own last file."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
     wall = done - created if done and created else None
     rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*") if re.fullmatch(r"round-\d+", p.name) and p.is_dir())
-    times, heads, prev = [], [], spec_at or created
+    start = _build_start(root, job_id)
+    if spec_at and start and start >= spec_at:
+        queue = start - spec_at
+    else:
+        start, queue = spec_at, 0 if spec_at else None
+    times, heads, prev = [], [], start or created
     for n in rounds:
         rd = folder / f"round-{n}"
         end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
@@ -1512,7 +1527,7 @@ def _timing_row(root, job_id, job, stalls):
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
     spec = spec_at - created if spec_at and created else None
-    cells = [job_id, _mins(wall), _mins(spec), str(len(rounds)), ", ".join(times) or "-",
+    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), str(len(rounds)), ", ".join(times) or "-",
              f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits),
              str(stalls.get(job_id, 0))]
     return cells, wall, len(rounds), len(same), waits
@@ -1529,8 +1544,8 @@ def write_timing(root, digest_id, jobs):
             stalls[q["job"]] = stalls.get(q["job"], 0) + 1
     rows = [_timing_row(root, j, board.get(j, {}), stalls) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
-             "| Job | Wall | Spec | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Job | Wall | Spec | Queue | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
+             "|---|---|---|---|---|---|---|---|---|"]
     lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
     lines += ["", "## Totals",
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
