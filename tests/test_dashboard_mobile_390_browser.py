@@ -27,8 +27,8 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
       // Hold the bare first poll() and the first single(poll) tick; a third request only comes if that tick's run ended.
       await page.route("**/api/projects", route => { if (++requests > 2) { answered++; route.continue(); } });
       await page.goto(process.env.DASH_URL);
-      await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Can't reach the dashboard server"));
-      const before = {status: await page.textContent("#status"), requests, answered};
+      await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Can't reach the server"));
+      const before = {status: await page.textContent("#status"), board: await page.textContent("#board"), requests, answered};
       await page.waitForSelector(".card[data-key]", {timeout: 20000});
       const after = await page.evaluate(() => ({options: document.getElementById("colPick").options.length,
         shown: [...document.querySelectorAll("#board .col")].filter(c => c.getClientRects().length).length}));
@@ -195,7 +195,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_compact_390px(self):
         got = self.browse("header")
-        self.assertLessEqual(got["height"], 210, got)  # 358 before job 550; 204 after
+        self.assertLessEqual(got["height"], 220, got)  # 358 before job 550; 204 after; 215 with job 648's 44 px controls
         by = {c["id"]: c for c in got["children"]}
         self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
         for i in ("rankBtn", "cooldown"):
@@ -271,7 +271,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
     def test_first_poll_hang_recovers(self):
         got = self.browse("hang")
         before, after = got["before"], got["after"]
-        self.assertTrue(before["status"].startswith("Can't reach the dashboard server ("), got)
+        self.assertEqual(before["status"], "Can't reach the server.", got)
+        self.assertEqual(before["board"], "Couldn't load the board.", got)
         self.assertEqual(before["answered"], 0, got)
         self.assertGreaterEqual(after["requests"], 3, got)  # a new poll ran after the hung single(poll) tick
         self.assertGreater(after["options"], 0, got)

@@ -104,7 +104,7 @@ class DigestLogTest(unittest.TestCase):
                   ' const getJson = async () => null;\n' + fn
                   + '\nloadDigests().then(() => console.log(JSON.stringify([els.dgList.innerHTML, els.dgError.textContent, rendered])));')
         got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        self.assertEqual(got, ["", "Couldn't load digests. Is serve.py running?", 0])
+        self.assertEqual(got, ["", "Couldn't load digests.", 0])
 
     def test_diff_colours_use_theme_vars(self):
         css = DASHBOARD.read_text().split("<style>")[1].split("</style>")[0]

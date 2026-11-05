@@ -2906,8 +2906,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_backlog_header_nowrap_below_640(self):
         css = self.mobile_css()
-        self.assertRegex(css, r"#backlog \.tabs\{[^}]*flex-wrap:nowrap")
-        self.assertRegex(css, r"#blProject\{[^}]*min-width:0")
+        # The title row never wraps (the picker's basis is 0); only the armed Askme picker takes a row of its own.
+        self.assertRegex(css, r"#blProject\{[^}]*min-width:0;flex:1 1 0")
+        self.assertIn("#blRunAllAskme{order:1;flex-basis:100%}", css)
         self.assertRegex(css, r"#backlog \.tabs \.close\{[^}]*min-height:44px;min-width:44px")
 
     def test_board_column_min_zero_below_640(self):
@@ -3011,11 +3012,11 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_dashboard_names_stale_server(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         self.assertIn("Dashboard server is out of date. Restart serve.py.", text)
-        self.assertIn("Is serve.py running?", text)          # network failures keep the not-running copy
-        self.assertIn("Can't reach the dashboard server", text)
+        self.assertNotIn("Is serve.py running?", text)
+        self.assertIn("Can't reach the server.", text)
         for route in ("api/agents", "api/skills"):
             self.assertIn(f'getJson("{route}", null, STALE)', text, route)
-        self.assertIn('getJson(`api/p/${enc(p)}/backlog`, [])', text)  # per-project 404 stays "no such project"
+        self.assertIn('getJson(`api/p/${enc(p)}/backlog`, null, [])', text)  # per-project 404 stays "no such project"
 
     def test_security_finding_row_shows_rule_id(self):
         text = DASHBOARD.read_text()
@@ -3032,8 +3033,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         digests = text[text.index("function renderDigests"):]
         digests = digests[:digests.index("\n}")]
         self.assertIn('<p class="note">No projects</p>', digests)
-        self.assertIn("No projects yet. Run /trevskills-scrum in a repo and it shows up here.", text)  # board
-        self.assertIn('<li class="note">No projects yet. Run /trevskills-scrum in a repo first.</li>', text)  # backlog
+        self.assertIn('setStatus(projects.length ? "" : "No projects yet.")', text)  # board
+        self.assertIn('<li class="note">No projects yet.</li>', text)  # backlog
 
     def test_skill_untrusted_reasons_single_quoted(self):
         text = self.rules()

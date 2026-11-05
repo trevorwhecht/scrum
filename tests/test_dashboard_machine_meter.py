@@ -35,7 +35,7 @@ class MachineMeter(unittest.TestCase):
         self.assertLess(poll.index('api/machine'), poll.index('timed("api/projects"'),
                         "fetched before anything that can return early, on every poll")
         render = fn_body(text, "renderMachine")
-        self.assertIn("el.hidden = !m", render, "a failed or 404 fetch (null) hides the meter")
+        self.assertIn("el.hidden = false", render, "a failed or 404 fetch (null) keeps the meter, showing —")
         self.assertIn("if (!el) return", render, "tolerates a missing element")
         self.assertIn('"—"', render)
         self.assertEqual(render.count('class="ring '), 1, "RAM and CPU rings share one ring helper")
@@ -78,7 +78,7 @@ class MachineMeter(unittest.TestCase):
                   "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 144.6, verdict: null});\n"
                   "const cpuNear = el.innerHTML;\n"
                   "renderMachine(null);\n"
-                  "console.log(JSON.stringify({levels, ok, bad, gone: el.hidden, use, order, rings, sessions, swap, stale, cpu, cpuNear}));")
+                  "console.log(JSON.stringify({levels, ok, bad, gone: [el.hidden, el.innerHTML], use, order, rings, sessions, swap, stale, cpu, cpuNear}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok",
                                          "danger", "low", "low", "ok", "ok", "none"])
@@ -86,7 +86,7 @@ class MachineMeter(unittest.TestCase):
                                             + CPU_NONE + ' · <span class="ok">disk 120 GB</span>'])
         self.assertEqual(out["bad"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 3%" title="RAM 14% free · swap 3%">14%</span> RAM · '
                                      + CPU_NONE + ' · <span class="ok">disk 50 GB</span>', "the red ring already shows the RAM verdict")
-        self.assertTrue(out["gone"])
+        self.assertEqual(out["gone"], [False, '<span class="danger" title="Couldn\'t load machine status.">—</span>'])
         base = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span> · '
         self.assertEqual(out["use"], [base + '<span class="low">5h 93% · 7d 40% · allowance 1</span>',
                                       base + '<span class="danger">5h 100% · 7d — · allowance 0</span>',
@@ -105,10 +105,10 @@ class MachineMeter(unittest.TestCase):
                          + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>', "stale swap past 25% with no swap verdict turns the ring yellow, not red")
         ring40 = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM'
         self.assertEqual(out["cpu"], ring40 + ' · <span class="ring danger" role="img" style="--pct:100" aria-label="CPU load 168% of 8 cores · busy 51% · limit 150%" '
-                         'title="CPU load 168% of 8 cores · busy 51% · limit 150%">168%</span> CPU · <span class="ok">disk 100 GB</span>',
+                         'title="CPU load 168% of 8 cores · busy 51% · limit 150%">2x</span> CPU · <span class="ok">disk 100 GB</span>',
                          "the red CPU ring already shows the CPU verdict")
         self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU load 145% of 8 cores · busy — · limit 150%" '
-                         'title="CPU load 145% of 8 cores · busy — · limit 150%">145%</span> CPU · <span class="ok">disk 100 GB</span>')
+                         'title="CPU load 145% of 8 cores · busy — · limit 150%">1x</span> CPU · <span class="ok">disk 100 GB</span>')
 
     def test_machine_meter_server_slow(self):
         text = DASHBOARD.read_text()
@@ -137,9 +137,9 @@ class MachineMeter(unittest.TestCase):
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         base = ('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · '
                 + CPU_NONE + ' · <span class="ok">disk 100 GB</span>')
-        self.assertEqual(out, [base + ' · <span class="danger">server slow: GET /p/*/board.json p95 2400 ms</span>',
-                               base + ' · <span class="danger">server slow: 3 dropped</span>',
-                               base + ' · <span class="danger">server slow: GET /&lt;b&gt; p95 1500 ms · 1 dropped</span>',
+        self.assertEqual(out, [base + ' · <span class="danger" title="GET /p/*/board.json p95 2400 ms">server slow</span>',
+                               base + ' · <span class="danger" title="3 dropped">server slow</span>',
+                               base + ' · <span class="danger" title="GET /&lt;b&gt; p95 1500 ms · 1 dropped">server slow</span>',
                                base, base])
 
     def test_machine_meter_fable_text(self):
