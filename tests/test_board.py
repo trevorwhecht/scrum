@@ -508,7 +508,8 @@ class BoardTest(unittest.TestCase):
                 ("scrum-debugger, scrum-builder are not loaded as agent types in this session", "build",
                  "stalled: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
                 ("The scrum Agent Types not loaded here", "check", "stalled: The scrum Agent Types not loaded here"),
-                ("agent types are not loaded", "review", "stalled: agent types are not loaded")):
+                ("agent types are not loaded", "review", "stalled: agent types are not loaded"),
+                ("waiting on the Check queue", "check", "stalled: waiting on the Check queue")):
             with self.subTest(q=q, stage=stage):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, [f"stage={stage}"])
