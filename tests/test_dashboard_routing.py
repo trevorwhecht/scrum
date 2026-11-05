@@ -83,7 +83,7 @@ class WindowRows(unittest.TestCase):
     def test_no_scorecard_and_null_metrics(self):
         nulls = {"headline": None, "points_done": 0, "budget": {"used_pct": None}, "first_pass_rate": None,
                  "wasted_pct": None, "escapes": None, "resets_at": 100000}
-        out = self.rows([[{"project": "<script>x</script>", "windows": None},
+        out = self.rows([[{"project": "<script>x</script>", "windows": {}},
                           {"project": "b"},
                           {"project": "c", "windows": {"five_hour": nulls, "seven_day": None}}]])[0]
         self.assertEqual(out,
@@ -96,6 +96,27 @@ class WindowRows(unittest.TestCase):
             '<tr><th scope="row">c</th><td>Last 7d window: No scorecard yet</td></tr>')
         for word in ("undefined", "null", "NaN", "<script>"):
             self.assertNotIn(word, out)
+
+    def test_failed_fetch_reads_couldnt_load(self):
+        self.assertEqual(self.rows([[{"project": "a", "windows": None}]])[0],
+            '<tr><th scope="row">a</th><td>Last 5h window: Couldn&#39;t load scorecard</td></tr>'
+            '<tr><th scope="row">a</th><td>Last 7d window: Couldn&#39;t load scorecard</td></tr>')
+
+    def test_load_windows_404_is_empty_and_shows_loading(self):
+        text = DASHBOARD.read_text()
+        body = text[text.index("async function loadWindows()"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("getJson(`api/p/${enc(p)}/windows`, null, {})", body)
+        self.assertLess(body.index('<tr><td colspan="2">Loading…</td></tr>'), body.index("await Promise.all("))
+
+    def test_usage_numbers_left_aligned(self):
+        css = DASHBOARD.read_text().split("<style>")[1].split("</style>")[0]
+        rules = re.findall(r"([^{}]*\.usage td:nth-child\(2\)[^{}]*)\{([^}]*)\}", css)
+        self.assertTrue(rules)
+        for sel, body in rules:
+            self.assertNotIn("text-align:right", body, sel)
+        num = next(b for s, b in rules if "nth-child(3)" in s)
+        self.assertIn("tabular-nums", num)
 
 
 class UsageRows(unittest.TestCase):

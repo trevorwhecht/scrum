@@ -49,6 +49,12 @@ class JobModal(unittest.TestCase):
         self.assertIn("runs = runsByKey(runList);", text)
         self.assertNotIn("runs = Object.fromEntries", text)
 
+    def test_show_writes_loading_before_fetch(self):
+        text = DASHBOARD.read_text()
+        body = text[text.index("async function show(job, file)"):text.index("function open(job)")]
+        loading = body.index('$("doc").innerHTML = \'<p class="empty">Loading…</p>\';')
+        self.assertLess(loading, body.index("await fetch("))
+
     def test_modal_header_shows_job_id(self):
         self.assertEqual(run('jobTitle({id: "005-big", title: "Big <b>"})'),
                          '<span class="id">005-big</span> Big &lt;b&gt;')

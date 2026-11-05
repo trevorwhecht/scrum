@@ -18,6 +18,14 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     const mode = process.env.MODE;
     const page = await browser.newPage({viewport: mode === "phone" ? {width: 390, height: 844} : {width: 1440, height: 900}});
     await page.goto(process.env.DASH_URL);
+    if (mode === "empty") {
+      await page.route("**/api/agents", r => r.fulfill({json: []}));
+      await page.click("#agentsBtn");
+      await page.waitForFunction(() => !document.getElementById("flow").textContent.includes("loading"));
+      console.log(JSON.stringify(await page.evaluate(() => ({flow: document.getElementById("flow").innerHTML,
+        pipeBar: document.getElementById("pipeBar").hidden}))));
+      return;
+    }
     await page.click("#agentsBtn");
     await page.waitForSelector('#pipeTabs [data-tab="fast"]:visible');
     const open = async (tab, z) => {
@@ -113,6 +121,10 @@ class DashboardPipelinesBrowserTest(unittest.TestCase):
         for k in ("check", "promote"):
             self.assertGreaterEqual(got[k]["left"], got["flow"]["left"] - 0.5, got)
             self.assertLessEqual(got[k]["right"], got["flow"]["right"] + 0.5, got)
+
+    def test_empty_agents_one_line(self):
+        got = self.browse("empty")
+        self.assertEqual(got, {"flow": '<p class="empty">No agents</p>', "pipeBar": True})
 
     def test_loop_aligned_at_zooms(self):
         got = self.browse("loop")
