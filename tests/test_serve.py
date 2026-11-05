@@ -6003,6 +6003,8 @@ class AutoResumeTest(unittest.TestCase):
         self.serve = serve
         serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
+        reg = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.root / "projects.json"))  # no real project's board
+        reg.start(); self.addCleanup(reg.stop)
         self.jobs = []
         for jid, text in [("limit", "You've hit your limit \u00b7 resets 2am (America/Los_Angeles)"),
                           ("crash", "Traceback: something else broke"), ("paused", "hit your limit"), ("epoch", "rate_limit: rejected (five_hour) resets_at=1700000000")]:
@@ -6295,6 +6297,55 @@ class AutoResumeTest(unittest.TestCase):
                 mock.patch.object(s, "limit_reset", return_value=(False, None, False)), \
                 mock.patch.object(s, "net_error", return_value=False):
             self.assertEqual(self.sweep()[:1], ["q0"], "a check job stalled itself holds nothing")
+
+    def test_auto_resume_e2e_queue_one_resume_per_tick_across_projects(self):
+        s = self.serve
+        wait = {"id": "q", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"}
+        s.E2E_RESUMED = False
+        try:
+            with mock.patch.object(s, "e2e_queue_free", return_value=True), \
+                    mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
+                self.assertIs(s.auto_resume("p", self.root, [dict(wait)]), True)
+                self.assertIs(s.auto_resume("o", self.root, [dict(wait)]), True, "o waits on the tick's one resume")
+                self.assertEqual([c.args[0] for c in resume.call_args_list], ["p"])
+            self.assertNotIn("o/q", s.AUTO_RESUME, "waiting spends no try")
+        finally:
+            s.E2E_RESUMED = None
+
+    def test_auto_resume_e2e_queue_holds_while_another_project_job_in_check(self):
+        s = self.serve
+        orepo = Path(tempfile.mkdtemp()); (orepo / "scrum").mkdir()
+        (orepo / "scrum" / "board.json").write_text(json.dumps({"jobs": [{"id": "c", "stage": "check", "reason": None}]}))
+        md = orepo / "scrum" / "project.md"
+        self.jobs = [{"id": "q", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"}]
+        with mock.patch.object(s.board, "projects", return_value={"p": self.root.parent, "o": orepo}), \
+                mock.patch.object(s, "e2e_queue_free", return_value=True):
+            md.write_text("- Test: x\n- E2E: npx playwright test\n")
+            with mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False):
+                self.assertIs(s.auto_resume("p", self.root, self.jobs), True, "o's check job takes the lock soon")
+                self.assertEqual(resume.call_args_list, [])
+            self.assertNotIn("p/q", s.AUTO_RESUME, "holding spends no try")
+            md.write_text("- E2E: none\n")
+            self.assertEqual(self.sweep(), ["q"], "o runs no E2E: its check job holds nothing")
+            md.write_text("- Test: x\n")
+            self.assertEqual(self.sweep(), ["q"], "no E2E line: holds nothing")
+            md.write_text("- E2E: npx playwright test\n"); (orepo / "scrum" / "board.json").unlink()
+            self.assertEqual(self.sweep(), ["q"], "o's board is missing: skipped")
+            (orepo / "scrum" / "board.json").write_text("{not json")
+            self.assertEqual(self.sweep(), ["q"], "o's board is unreadable: skipped")
+
+    def test_auto_resume_e2e_queue_ignores_limit_held_check_job(self):
+        s = self.serve
+        held = {"id": "h", "stage": "check", "limitResetAt": time.time() + 3600, "reason": None}
+        orepo = Path(tempfile.mkdtemp()); (orepo / "scrum").mkdir()
+        (orepo / "scrum" / "board.json").write_text(json.dumps({"jobs": [held]}))
+        (orepo / "scrum" / "project.md").write_text("- E2E: npx playwright test\n")
+        self.jobs = [dict(held), {"id": "q", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"}]
+        with mock.patch.object(s.board, "projects", return_value={"o": orepo}), \
+                mock.patch.object(s, "e2e_queue_free", return_value=True), \
+                mock.patch.object(s, "resume_held", return_value=False) as rh:
+            self.assertEqual(self.sweep(), ["q"], "a limit-held check job, here or in o, runs nothing until its reset")
+        rh.assert_called_once()
 
     def test_auto_resume_standalone_stall_waits_for_machine(self):
         s = self.serve
@@ -7223,6 +7274,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
             spawn, _, _ = self.tick()
         self.assertEqual(len([c for c in spawn.call_args_list if c.args[3] == "resume"]), 1)
         self.assertIsNone(self.serve.RESUME_ROOM, "the budget only lives for one tick")
+        self.assertIsNone(self.serve.E2E_RESUMED, "the one-E2E-resume cap only lives for one tick")
         usage, now = self.repo / "usage.json", time.time()
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 99, "resets_at": now + 7200},
