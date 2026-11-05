@@ -1759,19 +1759,55 @@ def code_stamp() -> tuple:
 
 CODE_STAMP = code_stamp()
 RELOAD_REFUSED = None  # the stamp whose pre-flight failed: no retry until the files change again
+RELOAD_RUNS = "SCRUM_RELOAD_RUNS"  # env var carrying RUNS across reload_if_changed's execv
+
+
+class ReloadedProc:
+    """A run handed over by a reload: the Popen is gone, but the session is still this pid's child (execv keeps the
+    pid), so waitpid reaps it and gives the real exit code, as Popen.poll would."""
+
+    def __init__(self, pid, returncode=None):
+        self.pid, self.returncode = pid, returncode
+
+    def poll(self):
+        if self.returncode is None:
+            try:
+                pid, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:  # reaped elsewhere; Popen.poll reads ECHILD as 0 too
+                pid, status = self.pid, 0
+            if pid:
+                self.returncode = os.waitstatus_to_exitcode(status)
+        return self.returncode
+
+
+def restore_runs():
+    """Rebuild RUNS from the RELOAD_RUNS env var the old process left before its execv, then drop the var so no spawned
+    session or later reload inherits it. A malformed var is logged and ignored."""
+    data = os.environ.pop(RELOAD_RUNS, None)
+    if data is None:
+        return
+    try:
+        runs = {key: {**{k: v for k, v in r.items() if k not in ("pid", "exit")},
+                      "proc": ReloadedProc(int(r["pid"]), r.get("exit"))} for key, r in json.loads(data).items()}
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        print(f"serve.py: reload handoff ignored: {e!r}", file=sys.stderr, flush=True)
+        return
+    with RUNS_LOCK:
+        RUNS.update(runs)
+
+
+restore_runs()
 
 
 def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
-    """Re-exec this server in place when serve.py, board.py or route.py changed on disk since it started, the new code
-    imports (a --help pre-flight) and no dashboard-started run is live. Returns False whenever it does not exec."""
+    """Re-exec this server in place when serve.py, board.py or route.py changed on disk since it started and the new
+    code imports (a --help pre-flight), whatever runs are live: RUNS goes to the new process in RELOAD_RUNS
+    (restore_runs), so live sessions stay tracked and are never killed. Returns False whenever it does not exec."""
     global RELOAD_REFUSED
     try:
         stamp = code_stamp()
         if stamp == CODE_STAMP or stamp == RELOAD_REFUSED:
             return False
-        with RUNS_LOCK:
-            if any(r.get("proc") is not None and r["proc"].poll() is None for r in RUNS.values()):
-                return False
         argv = [sys.executable, str(HERE / "serve.py")]
         err = ""
         try:
@@ -1786,7 +1822,14 @@ def reload_if_changed(execv=os.execv, check=subprocess.run) -> bool:
             print(f"serve.py: new code fails to load, still running the old code: {last}", file=sys.stderr, flush=True)
             return False
         print("serve.py: code changed on disk, reloading", flush=True)
-        execv(sys.executable, [*argv, *sys.argv[1:]])
+        with RUNS_LOCK:  # held through execv, so no spawn adds a run after the snapshot
+            os.environ[RELOAD_RUNS] = json.dumps(
+                {key: {**{k: v for k, v in r.items() if k != "proc"}, "pid": r["proc"].pid, "exit": r["proc"].poll()}
+                 for key, r in RUNS.items()}, default=str)
+            try:
+                execv(sys.executable, [*argv, *sys.argv[1:]])
+            finally:  # reached only when execv fails or is a test double: no later spawn inherits the snapshot
+                os.environ.pop(RELOAD_RUNS, None)
         return True  # only reached when execv is a test double
     except Exception as e:  # the watchdog loop must go on whatever happens here
         print(f"serve.py: reload check: {e}", file=sys.stderr, flush=True)
