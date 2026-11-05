@@ -23,6 +23,8 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 ## serve.py (`skills/trevskills-scrum/serve.py`)
 - `Handler.route(project, root, rest, body)`: the dashboard POST API (`/attachments`, `/manual-checks`, `/backlog`, job actions). When you add or remove a job action, check which branch an unmatched action reaches.
 - `resume_refusal(project, root, job, manual=False)`: None or a `Refusal` (a str; `.blocker` set when a sibling blocks). It wraps the lilguy check, `board.machine_ok` and `board.resume_blocker`.
+- Trevor's click carries `manual=True` through every launch hop: `resume_job`, `start_ready`, `spawn`, and a queued launch, which keeps it as `play_queued_manual` for `play_queue_tick`. A hop that drops it makes his click wait on the CPU gate. Grep every caller of the hop you change for `manual=`.
+- `take_room()` spends one session of the watchdog tick's resume budget (`RESUME_ROOM`, None outside a tick); `spawn`'s own gate (`ram_room(floor=0)`, `MAX_LAUNCH_CPU_LOAD_PCT`) limits every launch.
 - `rework_job(project, root, job_id, feedback)`, `abort_job(project, root, job_id, requeue, cascade=False)`, `auto_resume(project, root, jobs)`.
 - `running(project, job_id)` only sees sessions serve.py started (its `RUNS` table); a liveness test also checks `board.session_alive_fn()`, as `parked_tree` does.
 - `board_busy(project, root, jobs, by_id, alive)`: work in flight for auto-continue; it skips `finished_bigboy`, `parked_parent` and `parked_tree` parents.
