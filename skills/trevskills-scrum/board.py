@@ -2943,6 +2943,21 @@ def cmd_statusline(text):
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
 
+def child_files(jobs_dir, job_id):
+    """A child's Likely files: from spec.md, or from feature.md (plan-apply's Parallel: paths) while it has no spec."""
+    for name in ("spec.md", "feature.md"):
+        if (f := Path(jobs_dir) / job_id / name).is_file():
+            return likely_files(f.read_text(encoding="utf-8", errors="replace"))
+    return set()
+
+
+def shared_files(a, b):
+    """The paths of a that clash with b: equal, or one is a folder holding the other (`src/app/` holds `src/app/x.ts`).
+    Of each clashing pair the longer path is kept."""
+    under = lambda p, q: q.startswith(p.rstrip("/") + "/")
+    return {max(p, q, key=len) for p in a for q in b if p == q or under(p, q) or under(q, p)}
+
+
 def likely_files(spec_text):
     """The backtick-quoted paths in a spec's `## Likely files` section, plus the first token of each bullet that has no backticks."""
     found = set()
@@ -2986,6 +3001,8 @@ def parse_plan(text):
         if bad := [d for d in deps if d not in names]:
             raise SystemExit(f"plan.md {name}: depends on unknown ticket {bad[0]}")
         t["depends"] = deps
+        # the backticked paths on a Parallel: yes line become the child's Likely files until its spec has some
+        t["paths"] = [p for p in dict.fromkeys(re.findall(r"`([^`\s]+)`", t["parallel"])) if PATH_RE.match(p)]
         for key in ("parallel", "exposure"):
             if not (m := re.match(r"(yes|no)\b", t[key], re.I)):
                 raise SystemExit(f"plan.md {name}: {key.capitalize()}: must start with yes or no")
@@ -3016,7 +3033,8 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
     feature = t["text"] + "\n" if plain else \
         f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
-        + (f"Human setup: {setup}\n" if setup else "")
+        + (f"Human setup: {setup}\n" if setup else "") \
+        + ("\n## Likely files\n" + "".join(f"- `{p}`\n" for p in t["paths"]) if t["parallel"] and t.get("paths") else "")
     (Path(root) / "jobs" / job_id / "feature.md").write_text(feature)
     board["jobs"][-1].update(stage="waiting", files=["feature.md"], parent=parent["id"], ticket=t["ticket"],
                              depends_on=depends_on, parallel=t["parallel"], setup=setup and "pending", setup_text=setup)
@@ -3341,16 +3359,17 @@ def live_sessions():
 
 def slot_conflict(k, busy, files):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
-    child id to its Likely files. The rules `ready` and `resume_blocker` share: parallel=no, or
-    no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file."""
+    child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
+    no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
+    (shared_files: a folder shares every file under it)."""
     busy = [o for o in busy if o["id"] != k["id"]]
     if not busy:
         return None
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
-    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(files[k['id']] & files[o['id']])}")
-             for o in busy if alone(o) or files[k["id"]] & files[o["id"]]]
+    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(shared_files(files[k['id']], files[o['id']]))}")
+             for o in busy if alone(o) or shared_files(files[k["id"]], files[o["id"]])]
     return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
 
 
@@ -3388,9 +3407,7 @@ def resume_blocker(root, job_id, live=()):
     kids = [jobs[k] for k in parent.get("children") or [] if k in jobs]
     if job not in kids:
         kids.append(job)
-    spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
-        if (jobs_dir / k["id"] / "spec.md").is_file() else ""
-    files = {k["id"]: likely_files(spec(k)) for k in kids}
+    files = {k["id"]: child_files(jobs_dir, k["id"]) for k in kids}
     # A sibling holds a slot only with a live session: `live`, or a WATCHED stage whose claude process is alive.
     # Needs-human, paused and limit-held (limitResetAt) siblings run nothing, so they never block each other.
     maybe = [k for k in kids if k["id"] not in live and k["id"] != job_id and not idle(k) and not k.get("limitResetAt")
@@ -3452,9 +3469,7 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                 cap = max(0, allow - n_live)
                 if not cap:  # no slot under the budget: held like a machine wait, never needs-human
                     machine = allow.reason
-        spec = lambda k: (jobs_dir / k["id"] / "spec.md").read_text(encoding="utf-8", errors="replace") \
-            if (jobs_dir / k["id"] / "spec.md").is_file() else ""
-        files = {k["id"]: likely_files(spec(k)) for k in kids}
+        files = {k["id"]: child_files(jobs_dir, k["id"]) for k in kids}
         busy = [k for k in kids if not idle(k) or k["id"] in live]
         # held kids run no session: when the taper leaves fewer slots than there are held kids, they yield their
         # overlap slot; busy itself is kept so the parent stays running and in_progress counts them
