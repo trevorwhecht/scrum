@@ -6159,7 +6159,7 @@ class AutoResumeTest(unittest.TestCase):
     def setUp(self):
         import serve
         self.serve = serve
-        serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
+        serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear(); serve.BUILD_CHECK_RETRIED.clear()
         self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
         reg = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.root / "projects.json"))  # no real project's board
         reg.start(); self.addCleanup(reg.stop)
@@ -6200,6 +6200,49 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.sweep(), [], "30 min backoff")
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(self.sweep(), [], "capped")
+
+    def bc_job(self, **extra):
+        return {"id": "bc", "stage": "needs-human", "reason": "Build check could not run: Build timed out",
+                "options": [{"key": "a", "label": "Try again", "command": "resume bc"},
+                            {"key": "b", "label": "Abort", "command": "abort"}], **extra}
+
+    def bc_sweep(self, jobs, **patches):
+        s = self.serve
+        with mock.patch.object(s, "answer_job") as ans, mock.patch.object(s, "running", return_value=patches.get("running", False)), \
+                mock.patch.object(s, "resume_refusal", return_value=patches.get("refusal")), \
+                mock.patch.object(s, "take_room", return_value=patches.get("room", True)):
+            return s.auto_resume("p", self.root, jobs), ans
+
+    def test_build_check_stop_is_retried_once(self):
+        self.jobs = [self.bc_job()]
+        busy, ans = self.bc_sweep(self.jobs)
+        self.assertIs(busy, True)
+        self.assertEqual([c.args[4] for c in ans.call_args_list], ["a"])
+        busy, ans = self.bc_sweep(self.jobs)
+        self.assertEqual(ans.call_args_list, [], "a second stop stays on Trevor")
+
+    def test_build_check_retry_skips_other_stops(self):
+        nores = self.bc_job(); nores["options"] = nores["options"][1:]
+        for job, kw in [(self.bc_job(paused=True), {}), (nores, {}), (self.bc_job(), {"running": True}),
+                        (self.bc_job(reason="Build check passed"), {}), (self.bc_job(reason="Pick one"), {})]:
+            self.assertEqual(self.bc_sweep([job], **kw)[1].call_args_list, [])
+
+    def test_build_check_retry_waits_for_room(self):
+        self.jobs = [self.bc_job()]
+        for kw in ({"refusal": "busy"}, {"room": False}):
+            self.assertEqual(self.bc_sweep(self.jobs, **kw)[1].call_args_list, [])
+        self.assertEqual(len(self.bc_sweep(self.jobs)[1].call_args_list), 1, "not marked spent")
+
+    def test_other_board_with_malformed_jobs_is_skipped(self):
+        s = self.serve
+        self.jobs = [{"id": "q", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"}]
+        for bad in ({"a": 1}, ["str"]):
+            orepo = Path(tempfile.mkdtemp()); (orepo / "scrum").mkdir()
+            (orepo / "scrum" / "board.json").write_text(json.dumps({"jobs": bad}))
+            (orepo / "scrum" / "project.md").write_text("- E2E: npx playwright test\n")
+            with mock.patch.object(s.board, "projects", return_value={"p": self.root.parent, "o": orepo}), \
+                    mock.patch.object(s, "e2e_queue_free", return_value=True):
+                self.assertEqual(self.sweep(), ["q"])
 
     NET = "API Error: Can't reach the API server \u2014 check your internet or DNS (ENOTFOUND)"
 

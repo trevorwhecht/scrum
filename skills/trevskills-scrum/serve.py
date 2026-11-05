@@ -500,6 +500,8 @@ AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit ou
 AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
 SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a hold on a bare clock time is capped here
 STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's non-limit resumes per stage (STALL_RESUMES)
+BUILD_CHECK_STOP = "Build check could not"  # a needs-human stop the scrum answers with its resume option once
+BUILD_CHECK_RETRIED: set[str] = set()  # "project/job id" already retried this way
 STALL_RESUMES = {"check": 2}  # resumes allowed per stage (default 1); re-running the check gate costs no builder work
 def stall_spent(key, stage):
     return sum(f"{key}/{stage}{n}" in STALL_RESUMED for n in ("", "#2")) >= STALL_RESUMES.get(stage, 1)
@@ -798,13 +800,23 @@ def auto_resume(project, root, jobs):
                 if any(check_job(j) for j in json.loads((repo / "scrum" / "board.json").read_text())["jobs"]):
                     checking = True
                     break
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
     for job in jobs:
         if job.get("paused"):
             continue
         if job.get("limitResetAt") and job["stage"] in board.WATCHED:
             busy = resume_held(project, root, job, jobs, now) or busy
+            continue
+        if job.get("stage") == "needs-human" and not board.stalled(job) \
+                and str(job.get("reason") or "").startswith(BUILD_CHECK_STOP) \
+                and f"{project}/{job['id']}" not in BUILD_CHECK_RETRIED and not running(project, job["id"]):
+            opt = next((o for o in job.get("options") or [] if isinstance(o, dict)
+                        and (option_command(o.get("command")) or ("",))[0] == "resume"), None)
+            if opt and resume_refusal(project, root, job) is None and take_room():
+                BUILD_CHECK_RETRIED.add(f"{project}/{job['id']}")  # Trevor's Try again, once; a second stop stays on him
+                busy = True
+                answer_job(project, root, job, jobs, opt.get("key"))
             continue
         if not board.stalled(job) or board.lilguy_in_checkout(job) or running(project, job["id"]):
             continue
