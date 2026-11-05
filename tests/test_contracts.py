@@ -1010,7 +1010,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23300, "newjob.md")
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 23950, "newjob.md")
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -1848,6 +1848,16 @@ class ContractTest(unittest.TestCase):
                       "the first-Check sync in **Check gate** and the retry sync in **approve**", text)
         self.assertNotIn("conflict step in **Merge** and the pre-build sync", text)
         self.assertNotIn("the one sanctioned", text)
+
+    def test_check_gate_locks_and_diff_lint(self):
+        check = self.lane("newjob").split("## Check gate")[1]
+        step2 = check[check.index("2. **Runtime files**"):check.index("\n3. ")]
+        self.assertIn('Test, Typecheck and Lint each run as `SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/'
+                      'check.lock" python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<command>\'`', step2)
+        self.assertIn("'waiting on the Check queue'", step2)
+        self.assertIn("`npx eslint --cache <changed .js/.jsx/.ts/.tsx/.mjs/.cjs files>`", step2)
+        self.assertIn("`eslint.config.*` or `.eslintrc*`", step2)
+        self.assertIn("`Lint: skipped, no lintable file in diff`", step2)
 
     def test_check_gate_syncs_main_on_round_one(self):
         check = self.lane("newjob").split("## Check gate")[1]

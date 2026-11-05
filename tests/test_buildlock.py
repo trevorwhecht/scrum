@@ -337,6 +337,65 @@ class BuildLockTest(unittest.TestCase):
         with open(self.lock, "a") as f:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if the lock was left held
 
+    def hold_path(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        p = subprocess.Popen([sys.executable, "-c", HOLD, str(path)], stdout=subprocess.PIPE, text=True)
+        self.procs.append(p)
+        self.assertEqual(p.stdout.readline(), "locked\n")
+        return p
+
+    def test_two_slots_run_two_at_once(self):
+        x = self.dir / "sub" / "x.lock"
+        go = self.dir / "go"
+        child = ("import os, sys, time\n"
+                 "open(sys.argv[1], 'w').close()\n"
+                 "while not os.path.exists(sys.argv[2]): time.sleep(0.05)\n")
+        env = {"SCRUM_BUILD_LOCK": str(x), "SCRUM_X_LOCK_SLOTS": "2", "SCRUM_BUILD_LOCK_TIMEOUT": "30"}
+        runs = [self.start_wrap(sys.executable, "-c", child, str(self.dir / f"r{i}"), str(go), **env)
+                for i in range(3)]
+        started = lambda: [i for i in range(3) if (self.dir / f"r{i}").exists()]
+        deadline = time.time() + 10
+        while len(started()) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(started()), 2)
+        time.sleep(1.5)
+        self.assertEqual(len(started()), 2)  # the third waits for a slot
+        self.assertEqual(sum(p.poll() is None for p in runs), 3)
+        self.assertTrue((self.dir / "sub" / "x.lock.0").exists())
+        self.assertTrue((self.dir / "sub" / "x.lock.1").exists())
+        self.assertFalse(x.exists())
+        go.touch()
+        for p in runs:
+            self.assertEqual(p.wait(timeout=10), 0)
+        self.assertEqual(started(), [0, 1, 2])
+
+    def test_slots_full_times_out_124(self):
+        x = self.dir / "sub" / "x.lock"
+        self.hold_path(self.dir / "sub" / "x.lock.0")
+        self.hold_path(self.dir / "sub" / "x.lock.1")
+        ran = self.dir / "ran"
+        r = self.run_wrap(sys.executable, "-c", f"open({str(ran)!r}, 'w')", SCRUM_BUILD_LOCK=str(x),
+                          SCRUM_X_LOCK_SLOTS="2", SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual(r.returncode, 124)
+        self.assertFalse(ran.exists())
+        self.assertIn(f"buildlock: timed out after 1 s waiting for the build lock ({x})", r.stderr)
+
+    def test_bad_slots_value_uses_default(self):
+        mod = load()
+        with mock.patch.dict(os.environ, {}):
+            for name in ("SCRUM_CHECK_LOCK_SLOTS", "SCRUM_BUILD_LOCK_SLOTS", "SCRUM_E2E_LOCK_SLOTS"):
+                os.environ.pop(name, None)
+            self.assertEqual(mod.slots(Path("/a/check.lock")), 2)
+            self.assertEqual(mod.slots(Path("/a/build.lock")), 1)
+            self.assertEqual(mod.slots(Path("/a/e2e.lock")), 1)
+            for bad in ("", "abc", "0", "-1", "1.5"):
+                os.environ["SCRUM_CHECK_LOCK_SLOTS"] = bad
+                os.environ["SCRUM_BUILD_LOCK_SLOTS"] = bad
+                self.assertEqual(mod.slots(Path("/a/check.lock")), 2, bad)
+                self.assertEqual(mod.slots(Path("/a/build.lock")), 1, bad)
+            os.environ["SCRUM_CHECK_LOCK_SLOTS"] = "3"
+            self.assertEqual(mod.slots(Path("/a/check.lock")), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
