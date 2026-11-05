@@ -217,7 +217,7 @@ def start_ready(project, root, parent_id, manual=False):
     the claims unless `manual` (Trevor's click)."""
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     for child in out["ready"]:
-        spawn(project, root, child, "start", f"/trevskills-scrum start {child}")
+        spawn(project, root, child, "start", f"/trevskills-scrum start {child}", manual=manual)
     return out
 
 
@@ -1768,15 +1768,18 @@ class ReloadedProc:
 
     def __init__(self, pid, returncode=None):
         self.pid, self.returncode = pid, returncode
+        self._lock = threading.Lock()  # Pause/Abort and the /api/runs poll may both reap: one waitpid at a time
 
     def poll(self):
         if self.returncode is None:
-            try:
-                pid, status = os.waitpid(self.pid, os.WNOHANG)
-            except ChildProcessError:  # reaped elsewhere; Popen.poll reads ECHILD as 0 too
-                pid, status = self.pid, 0
-            if pid:
-                self.returncode = os.waitstatus_to_exitcode(status)
+            with self._lock:
+                if self.returncode is None:  # the other poller may have reaped it while we waited
+                    try:
+                        pid, status = os.waitpid(self.pid, os.WNOHANG)
+                    except ChildProcessError:  # reaped elsewhere; Popen.poll reads ECHILD as 0 too
+                        pid, status = self.pid, 0
+                    if pid:
+                        self.returncode = os.waitstatus_to_exitcode(status)
         return self.returncode
 
 
