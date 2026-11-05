@@ -725,6 +725,16 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         fast = [l for l in lines if l.startswith("**Fast lane.**")]
         self.assertEqual(len(fast), 1)
+        for phrase in ("UI globs", "LANE=fast", "rendered by reviewers", "non-blocking"):
+            self.assertIn(phrase, rule[0], phrase)
+
+    def test_spec_writer_rendered_by_reviewers(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = [l for l in text.splitlines()
+                if l.startswith("- Acceptance criteria are numbered, observable and testable.")]
+        self.assertEqual(len(rule), 1)
+        for phrase in ("rendered by reviewers", "UI globs", "not `fast`"):
+            self.assertIn(phrase, rule[0], phrase)
 
     def test_review_code_has_security_checklist(self):
         text = (ROOT / "agents" / "scrum-review-code.md").read_text()
@@ -1316,7 +1326,9 @@ class ContractTest(unittest.TestCase):
                "never skip it, mark it fixme or leave it out, so it cannot pass without running.")
         manual = ("   - A criterion whose verify step says manual check, browser or DevTools is never human-only: "
                   "verify it yourself as the next bullet says; never leave it for Trevor, and never skip it "
-                  "because reviewers, the approver or the e2e run check it later or because of time.")
+                  "because reviewers, the approver or the e2e run check it later or because of time. "
+                  "A criterion whose verify step starts `rendered by reviewers` is the one exception: do not "
+                  "walk it, and write `rendered by reviewers` for it in build.md, never `NOT RUN`.")
         for line in (rmw, e2e, manual):
             self.assertEqual(text.count(line), 1, line)
         self.assertIn(b9 + "\n" + rmw + "\n" + step3, text)
