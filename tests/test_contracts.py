@@ -2027,6 +2027,33 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(probe.count("-m 15"), 2, "probe (a) and the probe (b) GET")
         self.assertIn("within 60 seconds of the start", probe)
 
+    def test_review_shared_render(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "review.md").read_text()
+        steps = self.section(text, "2. **Which reviewers run.**", "4. **WAIT FOR ALL.**")
+        render = next(l for l in steps.splitlines() if l.lstrip().startswith("- **Shared render"))
+        for phrase in ("Only when `round-$N/dev-url.txt` holds a URL, run `B render-paths $ID`",
+                       "render.py <url> \"$F/jobs/$ID/round-$N/render\" <paths>", "Bash timeout 300000",
+                       "`- Render auth: <repo-relative path>`", "--cookies \"$WT/<path>\"",
+                       "any other exit, or an empty `paths`, passes none"):
+            self.assertIn(phrase, render, phrase)
+        self.assertLess(steps.index("write `round-$N/dev-url.txt` containing exactly"), steps.index("B render-paths $ID"))
+        step3 = self.section(text, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
+        self.assertIn("When step 2's **Shared render** exited 0, the `scrum-review-ui` and `scrum-review-ux` spawns, and "
+                      "any step 4 re-spawn of them, also get `RENDER_DIR=$F/jobs/$ID/round-$N/render`; no other "
+                      "reviewer gets it.", step3)
+
+    def test_review_ui_ux_read_shared_render(self):
+        for name in ("ui", "ux"):
+            text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
+            para = next(l for l in text.splitlines() if l.startswith("**Shared render.**"))
+            self.assertLess(text.index("**Shared render.**"), text.index("**Signing in.**"), name)
+            for phrase in ("When your prompt has `RENDER_DIR=<dir>`, read `<dir>/manifest.json`",
+                           "its lines in `<dir>/console.log` instead of loading that page in step 2",
+                           "a page that is listed but not `ok`, or a changed screen not listed; and **Compare with the base.**",
+                           "the smoke check is done: start no server or Chrome",
+                           "never relaxes the `Rendered: no` / `VERDICT: CHANGES` rule or the BASE compare"):
+                self.assertIn(phrase, para, f"{name}: {phrase}")
+
     def test_review_ux_ui_dev_lock_reuse(self):
         stale = "Do not decline it as possibly stale."
         collision = ("If a server you reused this way stops answering before you finish, its owner (often the other "
