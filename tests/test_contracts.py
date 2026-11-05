@@ -1525,6 +1525,18 @@ class ContractTest(unittest.TestCase):
                       "(`scrum/project.md`).", digester)
         for phrase in ("ROUTING", "## Local routing", "Trust flip", '"roles"', "local runs", "local/routing.json"):
             self.assertNotIn(phrase, digester, phrase)
+        for phrase in ("**Backlog fallback.**", "**Time sinks.**", "## Time sinks", "Time sinks:"):
+            self.assertIn(phrase, digester, phrase)
+        fallback = digester[digester.index("**Backlog fallback.**"):]
+        fallback = fallback[:fallback.index("\n\n")]
+        for phrase in ('"kind": "backlog"', "open `- [ ]` item", "its job ids", "at-most-8 cap"):
+            self.assertIn(phrase, fallback, phrase)
+        for phrase in ("An entry with no `DEFAULT:` gets no proposal.", "An entry no text edit would fix gets no proposal."):
+            self.assertNotIn(phrase, digester, phrase)
+        self.assertIn("**Backlog fallback**", digester[digester.index("**Decide.**"):digester.index("**Default picks.**")])
+        weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
+        for phrase in ("**Time sinks**", "**Backlog fallback**", "Never a memory file, a new skill or a backlog proposal."):
+            self.assertIn(phrase, weekly, phrase)
 
     def test_skill_digest_flow(self):
         text = skill_text()
