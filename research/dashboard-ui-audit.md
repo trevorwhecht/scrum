@@ -32,25 +32,13 @@ Ranked: defects first, then rule failures, then polish.
 17. **Job modal, both, UB-36.** A pending answer or approve only disables the controls. With `/answer` hung, every `#actions .stop button` is `disabled=true` with no spinner. With `/approve` hung, "Confirm: merge into main" is disabled with no progress label. **Fix:** in `actionsHtml()`, show the shared spinner and a pending label on the clicked button. `defect`
 18. **Backlog, both, UB-34.** With no registered projects, the dialog shows "No projects yet." but still renders the `#blAdd` form and its + button, which have nothing to add to. **Fix:** hide or disable `#blAdd` when `projects` is empty. `defect`
 19. **Header, 390, UB-15.** `#filter` and `#laneFilter` measure 126 x 34. `#backlogBtn`, `#digestBtn`, `#agentsBtn` and `#aiBtn` measure 87 x 33. **Fix:** set `min-height:44px` on these header controls inside the 640 px media query. `defect`
-20. **Backlog, 390, UB-15 and UB-13.**
-    - Undersized targets: the `#blAdd` submit is 32 x 33, every `.pts` select is 46 x 32, and the `#blManual` checkboxes are 20 x 20.
-    - `.pts` uses a 12 px font, which triggers iOS zoom on focus.
-    
-    **Fix:** raise these controls to 44 px and set the `.pts` font to 16 px at 640 px and below. `defect`
+20. **Backlog, 390, UB-15 and UB-13.** Undersized targets: the `#blAdd` submit is 32 x 33, every `.pts` select is 46 x 32, and the `#blManual` checkboxes are 20 x 20; `.pts` also uses a 12 px font, which triggers iOS zoom on focus. **Fix:** raise these controls to 44 px and set the `.pts` font to 16 px at 640 px and below. `defect`
 21. **Job modal, 390, UB-15.** The "log" link in `#doc`/`#actions` measures 17 x 15. The done job's "PR ↗" link measures 32 x 44. **Fix:** pad both links to a 44 x 44 hit area. `defect`
 22. **Usage, both, UB-27.** `.usage td:nth-child(2)` and `td:nth-child(3)` (the 5h and Week numbers) are right-aligned. **Fix:** drop the `text-align:right` and keep `tabular-nums`. `defect`
 23. **Board, 1440, UB-7.** The live board is 31,282 px tall because a column of 140 waiting cards renders in full. `render()` pages only the done column (`DONE_STEP` with Load more). **Fix:** apply the same `DONE_STEP` paging to every column longer than the step. `defect`
-24. **AI-Settings, Digest and Pipelines, both, ui-copy.** Every failure ends in "Is serve.py running?", even when serve.py answered:
-    - `aiWrite()` maps a 500 to "Couldn't save. Is serve.py running?".
-    - The same wording is used by `aiFail()`, the security and audit loaders, `loadDigests()` and the `agentsBtn` handler.
-    
-    **Fix:** show the server's error text when there is a response, and use "Can't reach the server." only for a network failure. `defect`
+24. **AI-Settings, Digest and Pipelines, both, ui-copy.** Every failure ends in "Is serve.py running?", even when serve.py answered: `aiWrite()` maps a 500 to "Couldn't save. Is serve.py running?", and the same wording is used by `aiFail()`, the security and audit loaders, `loadDigests()` and the `agentsBtn` handler. **Fix:** show the server's error text when there is a response, and use "Can't reach the server." only for a network failure. `defect`
 25. **Header, both, ui-copy and UB-22.** The `poll()` catch writes a how-to into `#status`: "Can't reach the dashboard server (HTTP 500). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py". It also says "can't reach" when the server answered 500. **Fix:** show "Server error (500)" or "Can't reach the server", and move the how-to into `data-agent-hint`. `defect`
-26. **Header and Backlog, both, UB-22.** The empty-state lines carry instructions:
-    - `render()` shows "No projects yet. Run /trevskills-scrum in a repo and it shows up here."
-    - `renderBacklog()` shows "No projects yet. Run /trevskills-scrum in a repo first."
-    
-    **Fix:** cut both to "No projects yet." and move the instruction to `data-agent-hint`. `defect`
+26. **Header and Backlog, both, UB-22.** The empty-state lines carry instructions: `render()` shows "No projects yet. Run /trevskills-scrum in a repo and it shows up here." and `renderBacklog()` shows "No projects yet. Run /trevskills-scrum in a repo first." **Fix:** cut both to "No projects yet." and move the instruction to `data-agent-hint`. `defect`
 27. **Header, both, ui-copy.** `renderMachine()` prints serve.py diagnostics in red, for example "server slow: GET /p/*/board.json p95 1216 ms · 6 dropped". **Fix:** show only "server slow" and put the route, p95 and drop count in the title. `defect`
 28. **Header, both, UB-29 and UB-32.** Claude usage is shown twice with different labels. `renderMachine()` → `usagePart()` shows "5h — · 7d 76%", and `#routing` → `routingText()` shows "Claude 5h — · wk 76%". **Fix:** drop `usagePart()` from `#machine` and keep `#routing` as the one place. `redesign`
 
@@ -73,34 +61,10 @@ Ranked: defects first, then rule failures, then polish.
 ## Backlog items
 
 - Job modal (dialog#viewer) at 390 and 1440: the `#tabs` strip runs under the close button at 390, the `#doc` pane is blank while a file loads, answer and approve show no pending spinner, and the "log" and "PR" links are under 44 px. Covers ranks 1, 15, 17, 21 (UB-2, UB-33, UB-36, UB-15). Lane: fast, ~30 added lines in dashboard.html.
-- Backlog dialog (dialog#backlog, #blManual) at 390 and 1440:
-  - The armed Run-all Askme row clips `#blProject` and "Cancel".
-  - Each open fires a triage 404 console error.
-  - Add can double-submit while pending.
-  - Item rows are cut mid-word.
-  - A load error shows "Backlog is empty.".
-  - The add form shows with no projects.
-  - At 390, targets are under 44 px and `.pts` uses a 12 px font.
-  
-  Covers ranks 2, 3, 5, 8, 11, 18, 20 (UB-2, UB-33, UB-36, UB-34, UB-15, UB-13). Lane: standard, ~50 added lines in dashboard.html and serve.py.
+- Backlog dialog (dialog#backlog, #blManual) at 390 and 1440: the armed Run-all Askme row clips `#blProject` and "Cancel"; each open fires a triage 404 console error; Add can double-submit while pending; item rows are cut mid-word; a load error shows "Backlog is empty."; the add form shows with no projects; at 390, targets are under 44 px and `.pts` uses a 12 px font. Covers ranks 2, 3, 5, 8, 11, 18, 20 (UB-2, UB-33, UB-36, UB-34, UB-15, UB-13). Lane: standard, ~50 added lines in dashboard.html and serve.py.
 - Digest dialog (dialog#digest) at 390 and 1440: the error leaves "loading…" under `#dgError`, and proposal paths print in full. Covers ranks 4, 30 (UB-33, UB-4). Lane: fast, ~10 added lines in dashboard.html.
-- Board (main#board, card) at 1440 and 390:
-  - Empty-column headings wrap.
-  - Titles are cut at 60 characters mid-word.
-  - The board has no error or loading state.
-  - Long columns other than done do not page.
-  
-  Covers ranks 6, 7, 9, 10, 23 (UB-2, UB-33, UB-7). Lane: standard, ~45 added lines in dashboard.html and board.py.
-- Header (#status, #machine, #routing, filters) at 1440 and 390:
-  - #routing and #machine vanish on error.
-  - Controls jump rows as #status changes.
-  - The status line carries how-to copy and claims "can't reach" on a 500.
-  - The empty-state copy carries instructions.
-  - The server-slow text prints route diagnostics.
-  - The CPU ring text is cramped.
-  - Header controls at 390 are under 44 px.
-  
-  Covers ranks 14, 16, 19, 25, 26, 27, 31 (UB-33, UB-15, UB-22, UB-2, ui-copy). Lane: standard, ~40 added lines in dashboard.html.
+- Board (main#board, card) at 1440 and 390: empty-column headings wrap; titles are cut at 60 characters mid-word; the board has no error or loading state; long columns other than done do not page. Covers ranks 6, 7, 9, 10, 23 (UB-2, UB-33, UB-7). Lane: standard, ~45 added lines in dashboard.html and board.py.
+- Header (#status, #machine, #routing, filters) at 1440 and 390: #routing and #machine vanish on error; controls jump rows as #status changes; the status line carries how-to copy and claims "can't reach" on a 500; the empty-state copy carries instructions; the server-slow text prints route diagnostics; the CPU ring text is cramped; header controls at 390 are under 44 px. Covers ranks 14, 16, 19, 25, 26, 27, 31 (UB-33, UB-15, UB-22, UB-2, ui-copy). Lane: standard, ~40 added lines in dashboard.html.
 - Usage dialog (dialog#usage) at 390 and 1440: a failed or pending scorecard fetch reads "No scorecard yet", and the 5h and Week numbers are right-aligned. Covers ranks 12, 22 (UB-33, UB-27). Lane: fast, ~12 added lines in dashboard.html.
 - Pipelines dialog (dialog#agents) at 390 and 1440: an empty agent list draws an empty chart instead of one empty line. Covers rank 13 (UB-33). Lane: fast, ~6 added lines in dashboard.html.
 - AI-Settings dialog (dialog#aiSettings, #aiCats) at 390 and 1440, plus the same error copy in Digest and Pipelines: "Is serve.py running?" shows on server errors, and the `#aiCats` strip is cut at 390. Covers ranks 24, 29 (ui-copy, UB-2). Lane: fast, ~20 added lines in dashboard.html.
