@@ -8991,6 +8991,17 @@ class E2eFullTest(unittest.TestCase):
     def open_items(self):
         return [i["text"] for i in self.serve.board.read_backlog(self.root)[1] if not i["done"]]
 
+    def test_board_has_e2e_full(self):
+        (self.root / "board.json").write_text('{"jobs": []}')
+        self.assertIsNone(self.serve.board_with_activity(self.root, "repo")["e2eFull"])
+        for bad in ("{not json", "[1]"):
+            (self.root / "e2e-full.json").write_text(bad)
+            self.assertIsNone(self.serve.board_with_activity(self.root, "repo")["e2eFull"])
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": 5, "head": "abc", "result": "fail", "exit": 1, "failed": ["x"], "lastGreen": "def"}))
+        self.assertEqual(self.serve.board_with_activity(self.root, "repo")["e2eFull"],
+                         {"at": 5, "head": "abc", "result": "fail", "failed": ["x"]})
+
     def test_failures_reach_backlog_once(self):
         head = self.merge("Fix the cart")
         rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
