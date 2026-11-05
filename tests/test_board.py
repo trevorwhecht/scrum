@@ -3196,10 +3196,18 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn(f"| {job} | 3h20m | 10m | 3 | 1h00m, 1h00m, 1h00m | 2 | 1 | 1 |\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 3 | 1h00m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
+
+    def test_timing_row_no_change_cell(self):
+        for job, heads in (("a", {1: "x", 2: "y", 3: "z"}), ("b", {1: "x", 2: "y", 4: "y"})):
+            for n, h in heads.items():
+                self.write(f"{job}/round-{n}/head.txt", h + "\n")
+        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][5], "0")
+        cells, _, _, count, _ = board._timing_row(self.root, "b", {}, {})
+        self.assertEqual((cells[5], count), ("1 (rounds 4)", 1))
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),

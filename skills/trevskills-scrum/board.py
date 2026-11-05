@@ -1485,7 +1485,8 @@ def _mtime(p):
 
 
 def _timing_row(root, job_id, job, stalls):
-    """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. Created is feature.md's
+    """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. The no-change cell is the count and the later round of each
+    equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), done is the board updatedAt; each round's time runs from the previous round's last file
     (round 1: spec.md) to its own last file."""
     folder = Path(root) / "jobs" / job_id
@@ -1503,12 +1504,13 @@ def _timing_row(root, job_id, job, stalls):
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
         except OSError:
             heads.append("")
-    same = sum(1 for a, b in zip(heads, heads[1:]) if a and a == b)
+    same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
     spec = spec_at - created if spec_at and created else None
-    cells = [job_id, _mins(wall), _mins(spec), str(len(rounds)), ", ".join(times) or "-", str(same), str(waits),
+    cells = [job_id, _mins(wall), _mins(spec), str(len(rounds)), ", ".join(times) or "-",
+             f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits),
              str(stalls.get(job_id, 0))]
-    return cells, wall, len(rounds), same, waits
+    return cells, wall, len(rounds), len(same), waits
 
 
 def write_timing(root, digest_id, jobs):
