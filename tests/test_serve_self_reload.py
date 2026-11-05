@@ -1,6 +1,6 @@
-"""serve.py re-execs itself when serve.py, board.py or route.py change on disk, once the new code imports and no
-dashboard-started run is live."""
-import io, os, subprocess, sys, tempfile, unittest
+"""serve.py re-execs itself when serve.py, board.py or route.py change on disk, once the new code imports, whatever
+runs are live: RUNS is handed to the new process (restore_runs)."""
+import io, json, os, signal, subprocess, sys, tempfile, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 from pathlib import Path
@@ -20,8 +20,8 @@ import serve  # noqa: E402
 
 
 class FakeProc:
-    def __init__(self, codes):
-        self.codes = list(codes)
+    def __init__(self, codes, pid=4242):
+        self.codes, self.pid = list(codes), pid
 
     def poll(self):
         return self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
@@ -56,6 +56,9 @@ class SelfReloadTest(unittest.TestCase):
         p = mock.patch.object(sys, "argv", ["serve.py", "--port", "8799"])
         p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ)  # the RUNS handoff a reload leaves in os.environ stays in the test
+        p.start()
+        self.addCleanup(p.stop)
         self.out, self.err = io.StringIO(), io.StringIO()
 
     def bump(self, i=1, ns=2_000_000_000):
@@ -81,15 +84,91 @@ class SelfReloadTest(unittest.TestCase):
         execv.assert_not_called()
         check.assert_not_called()
 
-    def test_reload_waits_for_live_run(self):
+    def test_reload_does_not_wait_for_live_run(self):
         self.bump()
-        serve.RUNS["p/001"] = {"action": "start", "proc": FakeProc([None, 0])}
-        execv, check = mock.Mock(), mock.Mock(side_effect=ok_check)
-        self.assertFalse(self.call(execv, check))
-        execv.assert_not_called()
-        check.assert_not_called()
-        self.assertTrue(self.call(execv, check))
+        serve.RUNS["p/001"] = {"action": "start", "started": 5.0, "log": "runs/a.log", "proc": FakeProc([None])}
+        serve.RUNS["p/002"] = {"action": "resume", "started": 6.0, "log": "runs/b.log", "reason": "r", "handled": True,
+                               "proc": FakeProc([3], pid=4343)}
+        snaps = []
+        execv = mock.Mock(side_effect=lambda exe, argv: snaps.append(os.environ[serve.RELOAD_RUNS]))
+        self.assertTrue(self.call(execv, mock.Mock(side_effect=ok_check)))
         execv.assert_called_once()
+        self.assertEqual(json.loads(snaps[0]), {
+            "p/001": {"action": "start", "started": 5.0, "log": "runs/a.log", "pid": 4242, "exit": None},
+            "p/002": {"action": "resume", "started": 6.0, "log": "runs/b.log", "reason": "r", "handled": True,
+                      "pid": 4343, "exit": 3}})
+        self.assertNotIn(serve.RELOAD_RUNS, os.environ)  # execv returned (a double): no later spawn inherits it
+
+    def reload_and_restore(self):
+        """One reload with a recording execv, then the new process's restore_runs from the snapshot it was handed."""
+        self.bump()
+        snaps = []
+        self.assertTrue(self.call(lambda exe, argv: snaps.append(os.environ[serve.RELOAD_RUNS]), ok_check))
+        serve.RUNS.clear()  # the new process starts with an empty table
+        os.environ[serve.RELOAD_RUNS] = snaps[0]
+        serve.restore_runs()
+        self.assertNotIn(serve.RELOAD_RUNS, os.environ)
+
+    def live_child(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        return proc
+
+    def test_reload_keeps_live_run_tracked(self):
+        proc = self.live_child()
+        serve.RUNS["p/001"] = {"action": "start", "started": 1.0, "proc": proc, "log": "runs/x.log"}
+        self.reload_and_restore()
+        run = serve.RUNS["p/001"]
+        self.assertIsNot(run["proc"], proc)
+        self.assertEqual((run["proc"].pid, run["action"], run["started"], run["log"]), (proc.pid, "start", 1.0, "runs/x.log"))
+        self.assertTrue(serve.running("p", "001"))
+        self.assertEqual(serve.live_ids("p"), {"001"})
+        serve.stop("p", "001")  # Pause/Abort still reach the session's process group through .pid
+        end = time.time() + 5
+        while serve.running("p", "001") and time.time() < end:
+            time.sleep(0.05)
+        self.assertFalse(serve.running("p", "001"))
+        self.assertEqual(run["proc"].poll(), -signal.SIGTERM)  # the real code, as record_outcomes reads it
+        self.assertEqual(serve.live_ids("p"), set())
+
+    def test_play_resumes_paused_job_after_code_reload(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / "repo" / "scrum"
+        (root / "jobs").mkdir(parents=True)
+        job_id = serve.board.cmd_new(root, "Paused job")
+        data = json.loads((root / "board.json").read_text())
+        data["jobs"][0].update(stage="build", paused=True)
+        (root / "board.json").write_text(json.dumps(data))
+        live = self.live_child()
+        serve.RUNS["repo/" + job_id] = {"action": "start", "started": 1.0, "proc": FakeProc([0], pid=1), "log": "x"}
+        serve.RUNS["repo/other"] = {"action": "start", "started": 1.0, "proc": live, "log": "y"}
+        self.reload_and_restore()
+        with mock.patch.object(serve, "spawn", return_value="runs/r.log") as spawn:
+            code, out = serve.Handler.route(None, "repo", root, f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual((code, out), (202, {"id": job_id, "action": "resume"}))
+        spawn.assert_called_once_with("repo", root, job_id, "resume", f"/trevskills-scrum resume {job_id}", manual=True)
+        # a run still live across the reload is refused, never started a second time
+        serve.RUNS["repo/" + job_id] = serve.RUNS.pop("repo/other")
+        with mock.patch.object(serve, "spawn") as spawn:
+            code, _ = serve.Handler.route(None, "repo", root, f"/jobs/{job_id}/resume", {"manual": True})
+        self.assertEqual(code, 409)
+        spawn.assert_not_called()
+
+    def test_board_only_change_reloads_server(self):
+        self.bump(i=1)  # only board.py changed, as a Restart: none / Lilguy / Fast merge leaves it
+        execv = mock.Mock()
+        self.assertTrue(self.call(execv, mock.Mock(side_effect=ok_check)))
+        execv.assert_called_once_with(sys.executable, [sys.executable, str(serve.HERE / "serve.py"), "--port", "8799"])
+
+    def test_malformed_handoff_is_ignored(self):
+        os.environ[serve.RELOAD_RUNS] = "{not json"
+        with redirect_stderr(self.err):
+            serve.restore_runs()
+        self.assertEqual(serve.RUNS, {})
+        self.assertNotIn(serve.RELOAD_RUNS, os.environ)
+        self.assertIn("serve.py: reload handoff ignored:", self.err.getvalue())
 
     def test_broken_code_keeps_old_server(self):
         self.bump()
