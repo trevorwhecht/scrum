@@ -1161,19 +1161,21 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
 
 
-def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None) -> None:
+def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None, alive=None) -> None:
     """Delete node_modules and .next in the worktree of every done or aborted job, and only .next (node_modules stays
-    so a resume is fast) for a parked job (needs-human, paused or stalled) with no live session. Only under
+    so a resume is fast) for a parked job (needs-human, paused or stalled) with no live session (dashboard-spawned or
+    any other, per the `once` handle `alive`, scanned lazily). Only under
     repo/.claude/worktrees/ (never a lilguy job's main checkout). Errors are ignored, and a symlinked folder is left
     in place."""
     base = (repo / ".claude" / "worktrees").resolve()
+    alive = alive or once(lambda: board.session_alive_fn())
     for job in jobs:
         if not job.get("worktree"):
             continue
         if job.get("stage") in ("done", "aborted"):
             names = ("node_modules", ".next")
         elif ((job.get("stage") == "needs-human" or job.get("paused") or board.stalled(job))
-              and not (project and running(project, job["id"]))):
+              and not (project and running(project, job["id"])) and not alive()(job)):
             names = (".next",)
         else:
             continue
@@ -1490,7 +1492,7 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
-            prune_worktrees(repo, jobs, project)
+            prune_worktrees(repo, jobs, project, alive)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     try:
