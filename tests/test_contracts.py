@@ -1820,10 +1820,21 @@ class ContractTest(unittest.TestCase):
         s5 = s5[:s5.index("Record the returned agent id")]
         self.assertLess(s5.index('git -C "$WT" merge "$BASE" --no-edit'), s5.index("spawn `scrum-builder`"))
         self.assertIn('git -C "$WT" merge --abort', s5)
-        self.assertIn("never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job** "
-                      "and the retry sync in **approve**", text)
+        self.assertIn("never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job**, "
+                      "the first-Check sync in **Check gate** and the retry sync in **approve**", text)
         self.assertNotIn("conflict step in **Merge** and the pre-build sync", text)
         self.assertNotIn("the one sanctioned", text)
+
+    def test_check_gate_syncs_main_on_round_one(self):
+        check = self.lane("newjob").split("## Check gate")[1]
+        step1 = check[:check.index("2. **Runtime files**")]
+        self.assertLess(step1.index("B check-reuse"), step1.index("only when `N = 1`"))
+        self.assertIn("**Conflicts**", step1)
+        self.assertNotIn("git merge", step1.replace('git -C "$WT" merge --abort', ""))
+        self.assertIn('git -C "$WT" merge --abort', step1)
+        self.assertIn("do not resume the builder, do not `B ask`, and carry on to step 2 unmerged", step1)
+        self.assertIn("When `N > 1`", step1)
+        self.assertIn('git -C "$WT" merge "origin/$DEFAULT" --no-edit', self.lane("merge"))
 
     def test_approve_retry_syncs_branch_before_merge(self):
         approve = next(l for l in self.lane("commands").splitlines() if "**`/trevskills-scrum approve <id>`**" in l)
