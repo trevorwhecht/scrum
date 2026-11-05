@@ -990,18 +990,21 @@ const moreMenu = job => { const a = abortForm(job); return a ? `<details class="
 const PAUSABLE = ["spec", "build", "check", "review", "approve", "merging", "deploying", "plan", "running"];
 const pauseForm = job => !PAUSABLE.includes(job.stage) || heldByTrevor(job) ? "" : `<form data-act="pause"><button class="btn tall" type="submit">Pause</button></form>`;
 // A job stopped for a resumable reason (board.py RESUMABLE) resumes; one Trevor paused (board.py PAUSED_RE) shows it as Play.
-// When serve.py says a click would be refused (job.resumeRefusal), no button shows. The status line above already says
-// what blocks it; a paused or stalled job with no waitingOn also gets that refusal as a note in its panel.
+// Only a click serve.py would refuse outright (a 409: the lilguy refusal, or any refusal on a limit-held job) hides the
+// button; a paused or stalled job then gets that refusal as a note in its panel. A machine wait ("waiting: ") or a
+// sibling blocker (waitingOn) only queues the click, so the button stays. A queued job (play_queued) offers Start now:
+// the same {manual: true} click, which starts it past the CPU gate or keeps it queued.
 const RESUMABLE = ["stalled in ", "stalled: ", "bigboy off track", "bigboy review: main not updated", "bigboy blocked", "Base branch "];
 const PAUSED_RE = /^stalled in \w+: paused by Trevor/;
+const refusedOutright = job => !!job.resumeRefusal && (limitHeld(job) || !job.waitingOn && !String(job.resumeRefusal).startsWith("waiting: "));
 const resumeForm = job => {
   const reason = job.reason || "";
-  if (!RESUMABLE.some(p => reason.startsWith(p))) return "";
-  if (job.resumeRefusal) return !(job.paused || isStalled(job)) || job.waitingOn ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
-  return `<form data-act="resume"><button class="btn primary tall" type="submit">${PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
+  if (!job.play_queued && !RESUMABLE.some(p => reason.startsWith(p))) return "";
+  if (refusedOutright(job)) return !(job.paused || isStalled(job)) ? "" : `<p class="note" role="status">${esc(statusLine({...job, paused: false}))}</p>`;
+  return `<form data-act="resume"><button class="btn primary tall" type="submit">${job.play_queued ? "Start now" : PAUSED_RE.test(reason) ? "Play" : "Resume"}</button></form>`;
 };
 // A paused or stalled job (legacy needs-human shape included) takes the not-needs-human branch: Play or Resume goes there.
-const playForm = job => heldByTrevor(job) || isStalled(job) ? resumeForm(job) : "";
+const playForm = job => heldByTrevor(job) || isStalled(job) || job.play_queued ? resumeForm(job) : "";
 // Setup done: Trevor did a BigBoy child's manual setup; serve.py marks it and starts whatever is now ready.
 const setupForm = job => !setupWait(job) ? "" : `<form data-act="setup-done"><p class="note">Human setup: ${esc(job.setup_text || "—")}</p>
     <button class="btn primary tall" type="submit">Setup done</button></form>`;
@@ -1020,11 +1023,14 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
   merging: "Merging", deploying: "Deploying", cloud: "Running in cloud", running: "Running", waiting: "Queued"};
 // One plain line per job, on its card and under the modal title. job.waitingOn is serve.py's {ids, why} field, not the
 // waitingOn(job) helper above; its titles run parallel to ids. A Play the machine guard queued names the reading it waits
-// on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/".
+// on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/". Any other
+// queued job (paused, or in its own stage) reads as queued, never "Paused by you" or a doubled "Waiting: waiting:".
 // An answered or reworked needs-human job whose session runs reads as that run, not as a question; a Discuss session keeps the question.
 const answering = job => job.stage === "needs-human" && !!runs[job.key]?.alive && runs[job.key].action !== "discuss";
 const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && job.resumeRefusal
   ? `Waiting for CPU/RAM: ${noPaths(String(job.resumeRefusal).replace(/^waiting: /, "").split(" Fix: ")[0])}`
+  : !job.waitingOn && job.play_queued && !playQueued(job) && !["done", "aborted"].includes(job.stage)
+  ? String(job.resumeRefusal || "").startsWith("waiting: ") ? "Queued: starts when CPU/RAM frees up" : "Queued, starts next"
   : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
   : job.paused ? "Paused by you"
@@ -1106,7 +1112,7 @@ function actionsHtml(job, err) {
   // except off track, where Send back re-runs the tracker with Trevor's decision.
   // A stalled job (board.py watchdog) never finished review or approval, so it resumes instead of merging.
   const noRework = /^obsolete/.test(reason) || (!!job.children?.length && !/^bigboy off track/.test(reason)), canApprove = job.worktree && !/^(blocked|spec writer|obsolete|stalled)/.test(reason);
-  const resume = job.options?.length ? "" : resumeForm(job);
+  const resume = job.options?.length && !job.play_queued ? "" : resumeForm(job);
   return banner + kids + last + (job.options?.length ? "" : resume + (resume ? err : "")
     + (canApprove ? `<form data-act="approve">
       ${/Hard stop: schema/.test(reason) ? '<label><input type="checkbox" name="migrated"> I already ran /trevskills-migrate (skip it)</label>' : ""}

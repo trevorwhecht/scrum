@@ -246,22 +246,37 @@ class StopBox(unittest.TestCase):
             self.assertNotIn(gone, html)
 
     def test_play_hidden_when_refused(self):
+        """Only a click serve.py would refuse outright (409) hides Play/Resume; a machine wait or a sibling blocker
+        (waitingOn) would only queue the click, so the button stays (job 644)."""
         paused = {"key": "p/030-p", "project": "p", "id": "030-p", "stage": "build", "paused": True,
                   "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z"}
         stalled = {**ASKED, "stage": "check", "stalled": True, "reason": "stalled: no board update for 30 min. Fix: click Resume."}
-        refusal = "can't resume yet: 222. Fix: click Resume when 222 finish."
-        # The note names what blocks the click for a paused or stalled job with no waitingOn.
-        waiting = {**paused, "waitingOn": {"ids": ["222"], "why": "still running"}}
-        for job, label, want in ((paused, "Play", "Waiting: can&#39;t resume yet: 222."), (stalled, "Resume", "Waiting: can&#39;t resume yet: 222."), (waiting, "Play", None)):
+        refusal = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
+                   "/trevskills-commitpush, or discard it, then click Abort.")
+        note = '<p class="note" role="status">Waiting: lilguy job: there is no pipeline to resume.</p>'
+        for job, label in ((paused, "Play"), (stalled, "Resume")):
+            form = f'<form data-act="resume"><button class="btn primary tall" type="submit">{label}</button></form>'
             with self.subTest(label=label):
-                for missing in ({}, {"resumeRefusal": None}):
-                    html, = js(f"renderActions({json.dumps({**job, **missing})}); out(els.actions.innerHTML);")
-                    self.assertIn(f'<form data-act="resume"><button class="btn primary tall" type="submit">{label}</button></form>', html)
+                for kept in ({}, {"resumeRefusal": None},
+                             {"resumeRefusal": "waiting: swap used 40.0% of RAM (> 25%). Fix: click Resume once memory or disk frees up."},
+                             {"resumeRefusal": "can't resume yet: 222. Fix: click Resume when 222 finish.",
+                              "waitingOn": {"ids": ["222"], "why": "still running"}}):
+                    html, = js(f"renderActions({json.dumps({**job, **kept})}); out(els.actions.innerHTML);")
+                    self.assertIn(form, html, kept)
+                    self.assertNotIn('<p class="note" role="status">Waiting', html)
                 html, = js(f"renderActions({json.dumps({**job, 'resumeRefusal': refusal})}); out(els.actions.innerHTML);")
                 self.assertNotIn('data-act="resume"', html)
                 self.assertNotIn(f">{label}</button>", html)
-                if want: self.assertIn(f'<p class="note" role="status">{want}</p>', html)
-                else: self.assertNotIn('<p class="note" role="status">', html)
+                self.assertIn(note, html)
+
+    def test_sibling_blocked_paused_job_shows_play(self):
+        paused = {"key": "p/031-p", "project": "p", "id": "031-p", "stage": "build", "paused": True, "parent": "100-big",
+                  "reason": "stalled in build: paused by Trevor. Fix: click Play.", "updatedAt": "2026-01-01T00:00:00Z",
+                  "resumeRefusal": "can't resume yet: sibling 222-b shares serve.py. Fix: click Resume when 222-b finish.",
+                  "waitingOn": {"ids": ["222-b"], "why": "shares serve.py", "titles": ["Other job"]}}
+        html, status = js(f"renderActions({json.dumps(paused)}); out(els.actions.innerHTML); out(statusLine({json.dumps(paused)}));")
+        self.assertIn('<form data-act="resume"><button class="btn primary tall" type="submit">Play</button></form>', html)
+        self.assertEqual(status, "Waiting on 222-b Other job (shares serve.py)")
 
     def test_more_menu_open_state_stays_with_its_job(self):
         a, b = {**ASKED, "stage": "build", "reason": None}, {**ASKED, "key": "p/021-r", "id": "021-r", "stage": "build", "reason": None}
