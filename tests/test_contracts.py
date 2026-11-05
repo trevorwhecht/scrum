@@ -744,7 +744,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_jev_model_step(self):
         text = skill_text()
         new_job = self.section(text, "## New job", "## Run all")
-        for phrase in ("jev-gate.py model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
+        for phrase in ("jev-gate.py model", "jev-gate.py spec-model", "timeout 90000", "feature.md", "lilguy", "cloud", "scrum-builder"):
             self.assertIn(phrase, new_job, phrase)
         self.assertNotIn("## Done when", new_job)
 

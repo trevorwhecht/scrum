@@ -14,6 +14,7 @@ class JevModelGaps(unittest.TestCase):
     def test_skill_jev_model_before_spec_shortcut(self):
         new_job = (LANES / "newjob.md").read_text()
         self.assertLess(new_job.index("jev-gate.py model"), new_job.index("pre-written from the backlog"))
+        self.assertLess(new_job.index("jev-gate.py spec-model"), new_job.index("pre-written from the backlog"))
 
     def test_skill_resume_keeps_jev_model(self):
         merge = (LANES / "merge.md").read_text()

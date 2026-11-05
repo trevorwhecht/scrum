@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Jev decision for the pipeline. Never fails the caller: any error prints the step's fallback.
 
-usage: jev-gate.py <step> <job-dir>   (steps: model promote dupe approver reviewer-security reviewer-ui rank critical)
+usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical)
 stdout is one line, the decision. Every run appends to <job-dir>/jev.log:
 timestamp, step, question, raw answer, decision, elapsed seconds (tab-separated).
 """
@@ -15,6 +15,7 @@ import board, jev  # noqa: E402
 # step -> (question, cutoff, fallback)
 STEPS = {
     "model": ("How hard is this feature to implement", 1.5, "opus"),  # score index 0-3 = difficulty 1-4
+    "spec-model": ("How hard is this feature to implement", 2.0, "opus"),  # writing a spec is easier than building
     "promote": (None, None, "opus"),
     "dupe": ("Item {i} is the same task as the query", 0.8, "add"),
     "approver": ("This diff changes payment, pricing, billing, authentication, session, role or permission logic",
@@ -84,7 +85,7 @@ def decide(step, job, asked):
     """(question, raw answer, decision); question and raw are '-' when no Jev call was made.
     asked gets the question appended just before each Jev call, so main() can tell if one started."""
     q, cut, _ = STEPS[step]
-    if step == "model":
+    if step in ("model", "spec-model"):
         f = job / "feature.md"
         text = f.read_text() if f.exists() else ""
         if not text.strip():
