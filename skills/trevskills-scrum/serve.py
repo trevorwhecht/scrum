@@ -4188,6 +4188,8 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError:
                         pass  # mid-write or hand-broken: serve the raw bytes as before
                 return self.send(200, Path(target).read_bytes(), TYPES[Path(target).suffix])
+            if rel == "triage/latest.md":  # no triage report yet is normal, so the Backlog dialog logs no 404
+                return self.send(204, b"", TYPES[".md"])
         self.send_json(404, {"error": "not found"})
 
     @timed
@@ -4267,7 +4269,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = board.clean(body.get("text") or "", board.ITEM_MAX)
                     if not text:
                         raise SystemExit("backlog item text is empty")
-                    job_id = board.cmd_new(root, text[:60])
+                    job_id = board.cmd_new(root, board.short_title(text))
                     (root / "jobs" / job_id / "feature.md").write_text(text + "\n")
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
                     return 202, {"id": job_id, "feature": text}

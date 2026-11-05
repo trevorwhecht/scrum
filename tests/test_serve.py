@@ -111,6 +111,19 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.req("GET", bad)[0], 404, bad)
         self.assertEqual(self.req("GET", "/api/p/nope/backlog")[0], 404)
 
+    def test_missing_triage_report_is_204(self):
+        report = self.root / "triage" / "latest.md"
+        report.unlink(missing_ok=True)
+        self.addCleanup(report.unlink, missing_ok=True)
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/p/repo/triage/latest.md") as res:
+            self.assertEqual((res.status, res.read()), (204, b""))
+        report.parent.mkdir(exist_ok=True)
+        report.write_text("# Triage\n")
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/p/repo/triage/latest.md") as res:
+            self.assertEqual((res.status, res.read()), (200, b"# Triage\n"))
+        self.assertEqual(self.req("GET", "/p/repo/jobs/none/spec.md")[0], 404)
+        self.assertEqual(self.req("GET", "/p/nope/triage/latest.md")[0], 404)
+
     # --- project colour: `- Colour:` in scrum/project.md ---
     def project_md(self, data):
         """Write scrum/project.md as these bytes (None removes it); removed again after the test."""
