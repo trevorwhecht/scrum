@@ -49,7 +49,7 @@ class ExitedRunTest(unittest.TestCase):
             serve.RUNS[key] = {"action": "start", "started": time.time(), "proc": dead, "log": "runs/x.log"}
         self.addCleanup(lambda: serve.RUNS.pop(key, None))
 
-        def fake_spawn(project, root, jid, action, prompt, flags=()):
+        def fake_spawn(project, root, jid, action, prompt, flags=(), manual=False):
             proc = mock.Mock()
             proc.poll.return_value = None
             with serve.RUNS_LOCK:
