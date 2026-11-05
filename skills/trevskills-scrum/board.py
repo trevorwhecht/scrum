@@ -3001,8 +3001,8 @@ MAX_SWAP_PCT = 25  # ... or with more swap in use than this much of physical RAM
 MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-100 over all cores): under about 10% idle an
 #                       8-core Mac has less than one core free, where E2E runs and next dev start time out; below it more
 #                       sessions still add throughput. The load is gated too (MAX_CPU_LOAD_PCT): busy % misses threads
-#                       queued behind the cores, and the 5-minute average lets a post-reboot spike (681%) clear in minutes
-MAX_CPU_LOAD_PCT = 150  # ... or with the 5-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
+#                       queued behind the cores, and the 1-minute average lets a post-reboot spike (681%) clear in minutes
+MAX_CPU_LOAD_PCT = 150  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459)
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
 CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
@@ -3014,6 +3014,8 @@ MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (S
 #                   14, not 12: Trevor keeps it as a backstop until further notice in case the RAM reading misleads (job 284)
 SESSION_RAMP_SECS = 120  # ram_room: a session younger than this has not grown into its RAM yet, so free RAM % overstates
 #                          the room; two projects claiming within that minute both burst (the 2026-10-24 pile-up)
+MAX_YOUNG_SESSIONS = 2  # ram_room: at most this many sessions younger than SESSION_RAMP_SECS at once, so starts ramp 2 per
+#                         2 min and the CPU gates see each pair's load first (2026-11-04: 10 started on wake, load 70 on 8 cores)
 
 
 def free_ram_pct():
@@ -3098,14 +3100,15 @@ def cpu_busy_pct():
 
 
 def cpu_load_pct():
-    """The 5-minute load average as a percent of all cores (100 = one runnable thread per core), or None when unknown
-    (no getloadavg, or no core count). The kernel already smooths it, so no sample log. SCRUM_CPU_LOAD_PCT stands in
+    """The 1-minute load average as a percent of all cores (100 = one runnable thread per core), or None when unknown
+    (no getloadavg, or no core count). The kernel already smooths it, so no sample log; the 5-minute one read near 0
+    right after sleep, so a wake burst passed it. SCRUM_CPU_LOAD_PCT stands in
     for the reading."""
     fake = os.environ.get("SCRUM_CPU_LOAD_PCT")
     if fake:
         return float(fake)
     try:
-        load = os.getloadavg()[1]
+        load = os.getloadavg()[0]
     except (OSError, AttributeError):
         return None
     cores = os.cpu_count()
@@ -3188,7 +3191,7 @@ def machine_ok(path, manual=False, claim=False):
 def ram_room(floor=1):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
-    for but not used yet), never past MAX_SESSIONS in all, at least `floor`. An unknown reading allows 1, so a batch never
+    for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS."""
@@ -3197,8 +3200,8 @@ def ram_room(floor=1):
     if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
-    room = min(int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - sum(a < SESSION_RAMP_SECS for a in ages),
-               MAX_SESSIONS - len(ages))
+    young = sum(a < SESSION_RAMP_SECS for a in ages)
+    room = min(int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - young, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
     return max(floor, room) if floor else room
 
 
