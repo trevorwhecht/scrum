@@ -32,7 +32,7 @@
 
    `- Orchestrator model: <model>` is an optional, hand-added line: the `--model` for headless orchestrator sessions, meaning only the headless `start` and `resume` sessions (BigBoy children started by **BigBoy lane** step 3, and the dashboard's Run now, reopen, Resume and Play). It defaults to `sonnet`. `inherit` (any case) passes no `--model`, so the session keeps its default model. A blank or malformed value (not `^[A-Za-z0-9._-]+$`) also gives `sonnet`. Interactive sessions, approve, rework, digest, research and agent `model:` pins ignore it. First-run setup never writes it.
 
-   `- E2E: <command>` (optional, hand-added): an end-to-end test command the **Check gate** runs when the diff touches `UI globs`, and the BigBoy reviewer runs on main.
+   `- E2E: <command>` (optional, hand-added): an end-to-end test command the **Check gate** runs when the diff touches `UI globs` (standard jobs and bigboy children only; its **E2E lanes** rule), and the BigBoy reviewer runs on main.
 
    `- Cloud environment: <id>` (optional, hand-added): the claude.ai/code environment the **Cloud lane** starts sessions in.
 

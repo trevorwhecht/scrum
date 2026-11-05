@@ -1017,7 +1017,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 24250, "newjob.md")
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 24700, "newjob.md")
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3329,6 +3329,27 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, check, phrase)
         self.assertLess(check.index("B check-reuse $ID"), check.index("2. **Runtime files**"))
         self.assertNotIn("a full run outlasts the 600 s Bash timeout", check)
+
+    def test_e2e_runs_only_in_standard_and_bigboy_children(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        step2 = self.section(check, "2. **Runtime files**", "3. Write `round-$N/check.md`")
+        rule = "E2E runs only for a job whose `lane` is `standard` (or unset), or whose `parent` on the board is a `bigboy` job."
+        self.assertIn(rule, step2)
+        self.assertIn("`E2E: skipped, <lane> lane`", step2)
+        self.assertLess(step2.index(rule), step2.index("run `B e2e-specs $ID`"))
+        fast = self.section(skill_text(), "## Fast lane", "## Check gate")
+        self.assertIn("`scrum-review-e2e` when the Check gate's **E2E lanes** rule allows E2E", fast)
+        review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
+        step3 = self.section(review, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
+        self.assertIn("also spawn `scrum-review-e2e` only when the **Check gate**'s **E2E lanes** rule lets the job run E2E", step3)
+
+    def test_lilguy_check_runs_related_tests_only(self):
+        check = self.section(self.lane("lilguy"), "3. **Check.**", "4. **Route.**")
+        for phrase in ("npx jest --findRelatedTests --passWithNoTests <files>", "--diff-filter=d \"$BASE\"...HEAD`, and with no such file Test does not run",
+                       "any other test runner runs the full `Test:` command", "`Test: related only`",
+                       "`Build: skipped, lilguy lane`", "`E2E: skipped, lilguy lane`",
+                       "GitHub CI and the Vercel build still guard merge and deploy"):
+            self.assertIn(phrase, check, phrase)
 
     def test_e2e_reviewer_skips_checked_specs(self):
         review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
