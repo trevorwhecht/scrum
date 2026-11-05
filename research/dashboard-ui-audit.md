@@ -1,0 +1,118 @@
+Audited: origin/main 90d1ff1 at 1440 x 900 and 390 x 844 in headless Chromium. Job 616 (fewer columns) is in that SHA as 6fecb50 "Dashboard: fewer columns (Review, Shipping, cloud under Build) (#479)", found with `git log origin/main --oneline | grep -i "fewer columns"`. `dashboard.html` has not changed between 90d1ff1 and the live :8765 server's checkout.
+
+# Dashboard UI/UX audit (job 632)
+
+The walk covered `skills/trevskills-scrum/dashboard.html` against `ui-behaviour.md` and `ui-copy.md`. Loaded states came from the live :8765 dashboard, opened read-only. Empty, loading and error states were forced on a throwaway `serve.make_server(0)` with a temp registry, temp `CLAUDE_HOME` and temp usage files. Failed and hung requests were forced with Playwright `page.route`. No cross-tool Codex pass was run. Screenshots are in the job folder, not in the repo.
+
+## Findings
+
+Ranked: defects first, then rule failures, then polish.
+
+### Defects
+
+1. **Job modal, 390, UB-2.** The `#tabs` file-tab strip runs under the `.vhead` close button (`button.close`). The `spec.md` tab is cut off and covered by the button. **Fix:** give the close button its own spot in the `.vhead` title row and let `#tabs` wrap or scroll below it. `defect`
+2. **Backlog, 390, UB-2.** Clicking `#blRunAll` arms it and shows `#blRunAllAskme` (Cancel, Off, 1, 2, 3) in the same `.tabs` row. That squeezes `#blProject` down to just its arrow and clips the word "Cancel". **Fix:** wrap the Askme picker onto its own row under the dialog title at 640 px and below. `defect`
+3. **Backlog, both, UB-33.** Every time the dialog opens, `showProjectBacklog()` fetches `p/<project>/triage/latest.md`. A project with no triage report answers 404, which logs a console error on each open. **Fix:** let serve.py return 204 when there is no report and treat 204 as "no triage", or skip the fetch. `defect`
+4. **Digest, both, UB-33.** When `api/p/<p>/digests` fails, `loadDigests()` writes the `#dgError` message but leaves "loading…" in `#dgList` below it, so the dialog shows two states at once. **Fix:** clear `#dgList` whenever `loadDigests()` sets `#dgError`. `defect`
+5. **Backlog, both, UB-36.** While the add POST is in flight, the `#blAdd` submit button stays enabled and the textarea keeps its text. Measured mid-POST: `add disabled=false text=A new item`. A second Enter adds the item twice. **Fix:** disable the `#blAdd` submit and show a spinner until `backlogCall()` settles. `defect`
+6. **Board, 1440, UB-2.** An empty column gets the narrow `minmax(96px,.5fr)` track that `render()` sets. In it, the `.col h2` heading "NEEDS-HUMAN · 0" wraps to two lines, so its count sits lower than every other column's. **Fix:** set `white-space:nowrap` on `.col h2`, or raise the empty-column minimum to fit the longest stage name. `defect`
+7. **Board cards, both, UB-2.** Card titles are cut mid-word with no ellipsis, for example "...InkFormula table synced on demand f". The title is stored as `item["text"][:60]` by board.py `cmd_next` (also `add_child` and `cmd_runall_start`), and `card()` prints it as-is. **Fix:** keep the full title and clamp it in `card()` with CSS `line-clamp` and an ellipsis. `defect`
+8. **Backlog, both, UB-2.** An unfocused item row is collapsed to one line by `#blList li textarea:not(:focus)` (`white-space:nowrap;overflow:hidden`). Long items are cut mid-word with no ellipsis, for example "Stripe payments (C12): customer pays a 50% de". **Fix:** clamp the row to two lines with an ellipsis (`text-overflow:ellipsis` or `line-clamp`). `defect`
+
+### Rule failures
+
+9. **Board, both, UB-33.** When `/api/projects` returns 500 or cannot be reached on first load, the `poll()` catch puts the message in `#status` and `main#board` stays blank. At 390, `#colPick` also shows an empty option. **Fix:** render a one-line error state inside `main#board`, and keep `#colPick` on a valid stage. `defect`
+10. **Board, both, UB-33.** While `/api/projects` hangs, `main#board` is blank and the only sign of loading is "loading…" in `#status`. **Fix:** render empty `STAGES` columns, or one "Loading…" line in `main#board`, until the first poll lands. `defect`
+11. **Backlog, both, UB-33.** A failed `GET api/p/<p>/backlog` falls back to `[]` in `poll()`'s `getJson`. `renderBacklog()` then shows "Backlog is empty." and `#backlogBtn` shows "Backlog · 0": a load error looks like an empty backlog. There is also no loading line. **Fix:** tell a failed load apart from `[]` and render "Couldn't load the backlog." in `#blList`. `defect`
+12. **Usage, both, UB-33.** A failed `api/p/<p>/windows` fetch in `loadWindows()` passes `null` to `windowRows()`, which prints "No scorecard yet", so the error looks like the empty state. While the fetch is in flight, `#windowRows` is empty. **Fix:** have `windowRows()` print "Couldn't load" for a failed fetch and "Loading…" while it is pending. `defect`
+13. **Pipelines, both, UB-33.** When `api/agents` returns `[]`, `renderFlow()` still draws the full chart. Every agent slot is missing, leaving stacked double arrows between gate boxes, and no empty line is shown. **Fix:** when `agents` is empty, render one "No agents" line in `#flow` instead of the chart. `defect`
+14. **Header, both, UB-33.** On a failed `api/routing-status`, `loadRouting()` hides `#routing`. On a failed `/api/machine`, `#machine` disappears and only the generic SLOW text shows. Neither control has an error state. **Fix:** keep both visible, show "—" with an error tone, and give the reason in the title. `defect`
+15. **Job modal, both, UB-33.** While a file fetch hangs in `show()`, the `#doc` pane is blank with no loading line. **Fix:** write "Loading…" into `#doc` before the fetch starts. `defect`
+16. **Header, 1440, UB-33.** The header flex row wraps, so `#filter`, Rank, `#laneFilter`, the volume control and the dialog buttons jump between rows as the `#status` text changes length ("loading…", "Server is slow…", the long "Can't reach…" message). **Fix:** put `#status` on a fixed-width or ellipsised track so the controls keep their positions. `defect`
+17. **Job modal, both, UB-36.** A pending answer or approve only disables the controls. With `/answer` hung, every `#actions .stop button` is `disabled=true` with no spinner. With `/approve` hung, "Confirm: merge into main" is disabled with no progress label. **Fix:** in `actionsHtml()`, show the shared spinner and a pending label on the clicked button. `defect`
+18. **Backlog, both, UB-34.** With no registered projects, the dialog shows "No projects yet." but still renders the `#blAdd` form and its + button, which have nothing to add to. **Fix:** hide or disable `#blAdd` when `projects` is empty. `defect`
+19. **Header, 390, UB-15.** `#filter` and `#laneFilter` measure 126 x 34. `#backlogBtn`, `#digestBtn`, `#agentsBtn` and `#aiBtn` measure 87 x 33. **Fix:** set `min-height:44px` on these header controls inside the 640 px media query. `defect`
+20. **Backlog, 390, UB-15 and UB-13.**
+    - Undersized targets: the `#blAdd` submit is 32 x 33, every `.pts` select is 46 x 32, and the `#blManual` checkboxes are 20 x 20.
+    - `.pts` uses a 12 px font, which triggers iOS zoom on focus.
+    
+    **Fix:** raise these controls to 44 px and set the `.pts` font to 16 px at 640 px and below. `defect`
+21. **Job modal, 390, UB-15.** The "log" link in `#doc`/`#actions` measures 17 x 15. The done job's "PR ↗" link measures 32 x 44. **Fix:** pad both links to a 44 x 44 hit area. `defect`
+22. **Usage, both, UB-27.** `.usage td:nth-child(2)` and `td:nth-child(3)` (the 5h and Week numbers) are right-aligned. **Fix:** drop the `text-align:right` and keep `tabular-nums`. `defect`
+23. **Board, 1440, UB-7.** The live board is 31,282 px tall because a column of 140 waiting cards renders in full. `render()` pages only the done column (`DONE_STEP` with Load more). **Fix:** apply the same `DONE_STEP` paging to every column longer than the step. `defect`
+24. **AI-Settings, Digest and Pipelines, both, ui-copy.** Every failure ends in "Is serve.py running?", even when serve.py answered:
+    - `aiWrite()` maps a 500 to "Couldn't save. Is serve.py running?".
+    - The same wording is used by `aiFail()`, the security and audit loaders, `loadDigests()` and the `agentsBtn` handler.
+    
+    **Fix:** show the server's error text when there is a response, and use "Can't reach the server." only for a network failure. `defect`
+25. **Header, both, ui-copy and UB-22.** The `poll()` catch writes a how-to into `#status`: "Can't reach the dashboard server (HTTP 500). Open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py". It also says "can't reach" when the server answered 500. **Fix:** show "Server error (500)" or "Can't reach the server", and move the how-to into `data-agent-hint`. `defect`
+26. **Header and Backlog, both, UB-22.** The empty-state lines carry instructions:
+    - `render()` shows "No projects yet. Run /trevskills-scrum in a repo and it shows up here."
+    - `renderBacklog()` shows "No projects yet. Run /trevskills-scrum in a repo first."
+    
+    **Fix:** cut both to "No projects yet." and move the instruction to `data-agent-hint`. `defect`
+27. **Header, both, ui-copy.** `renderMachine()` prints serve.py diagnostics in red, for example "server slow: GET /p/*/board.json p95 1216 ms · 6 dropped". **Fix:** show only "server slow" and put the route, p95 and drop count in the title. `defect`
+28. **Header, both, UB-29 and UB-32.** Claude usage is shown twice with different labels. `renderMachine()` → `usagePart()` shows "5h — · 7d 76%", and `#routing` → `routingText()` shows "Claude 5h — · wk 76%". **Fix:** drop `usagePart()` from `#machine` and keep `#routing` as the one place. `redesign`
+
+### Polish
+
+29. **AI-Settings, 390, UB-2.** The `#aiCats` category strip scrolls sideways with no cue: the "Agents" button is cut at the right edge. **Fix:** let `#aiCats` wrap onto two rows at 640 px and below. `defect`
+30. **Digest, both, UB-4.** Each proposal in `renderDigests()` prints the target as a full absolute path (`/Users/trevorhecht/Developer/repos/...`), which takes 2 to 3 mono lines at 390. **Fix:** show the path relative to the repo or `~/.claude`, with the full path in the title. `defect`
+31. **Header, both, UB-2.** The CPU percentage inside the 32 px `#machine .ring` ("722%", "849%") is set in 9 px text that touches the ring's arc. **Fix:** cap the in-ring text at three characters (for example "7x") and keep the exact value in the title. `defect`
+32. **Board cards, both, UB-4.** `card()` prints the full mono job-id slug, for example "344-build-check-starts-docker-local-db-befor". It wraps to 2 or 3 lines and repeats the title. **Fix:** show only the job number on the card and keep the slug in the modal. `redesign`
+33. **Header, 390, UB-3.** The header, `#routing`, the filters, the four dialog buttons and `#colPick` take about 280 px of the 844 px screen before the first card. **Fix:** fold Backlog, Digest, Pipelines and AI-Settings into one menu button at 640 px and below. `redesign`
+34. **Usage, both, UB-4.** `windowRows()` writes each scorecard as a sentence ("Last 7d window: 393 points, 100% budget, 3.93/%. First pass 98%, waste 4%, 6 escapes"). Each project name is also repeated on two rows. **Fix:** use one row per project, with points, budget, first pass, waste and escapes as columns and a 5h/7d toggle. `redesign`
+35. **Job modal, both, UB-29.** `#viewerStatus` ("Waiting on you: Review limit") repeats the heading of the `stopBox()` box ("REVIEW LIMIT") right below it. **Fix:** hide `#viewerStatus` while `stopBox()` renders. `redesign`
+36. **AI-Settings, 390, UB-8.** With a short list, `dialog#aiSettings` renders as a band in the middle of the screen with the board visible above and below it. Other dialogs at 390 fill the screen. **Fix:** give `#aiSettings` the full `100dvh` height at 640 px and below, like `#agents`. `redesign`
+
+## Clean views
+
+- **Project rank (`dialog#rank`).** Checked loaded (live, and temp with 2 projects), empty ("No projects yet." on an empty registry) and the 409 error on a `data-dir` move ("projects.json changed; reload" in `#rankError`), at 1440 and 390. The dialog fills the screen at 390, every target is at least 44 px, and nothing escapes the shell. Rank fetches nothing of its own, so it has no separate loading state.
+- **Colour (`dialog#colour`).** Checked loaded (live and temp) and the 500 save error ("project.md is not writable" in `#colourError`, with the swatch reverted), at 1440 and 390. The dialog fills the screen at 390 and no control is under 44 px. The swatches are static, so there is no empty or loading state to force.
+
+## Backlog items
+
+- Job modal (dialog#viewer) at 390 and 1440: the `#tabs` strip runs under the close button at 390, the `#doc` pane is blank while a file loads, answer and approve show no pending spinner, and the "log" and "PR" links are under 44 px. Covers ranks 1, 15, 17, 21 (UB-2, UB-33, UB-36, UB-15). Lane: fast, ~30 added lines in dashboard.html.
+- Backlog dialog (dialog#backlog, #blManual) at 390 and 1440:
+  - The armed Run-all Askme row clips `#blProject` and "Cancel".
+  - Each open fires a triage 404 console error.
+  - Add can double-submit while pending.
+  - Item rows are cut mid-word.
+  - A load error shows "Backlog is empty.".
+  - The add form shows with no projects.
+  - At 390, targets are under 44 px and `.pts` uses a 12 px font.
+  
+  Covers ranks 2, 3, 5, 8, 11, 18, 20 (UB-2, UB-33, UB-36, UB-34, UB-15, UB-13). Lane: standard, ~50 added lines in dashboard.html and serve.py.
+- Digest dialog (dialog#digest) at 390 and 1440: the error leaves "loading…" under `#dgError`, and proposal paths print in full. Covers ranks 4, 30 (UB-33, UB-4). Lane: fast, ~10 added lines in dashboard.html.
+- Board (main#board, card) at 1440 and 390:
+  - Empty-column headings wrap.
+  - Titles are cut at 60 characters mid-word.
+  - The board has no error or loading state.
+  - Long columns other than done do not page.
+  
+  Covers ranks 6, 7, 9, 10, 23 (UB-2, UB-33, UB-7). Lane: standard, ~45 added lines in dashboard.html and board.py.
+- Header (#status, #machine, #routing, filters) at 1440 and 390:
+  - #routing and #machine vanish on error.
+  - Controls jump rows as #status changes.
+  - The status line carries how-to copy and claims "can't reach" on a 500.
+  - The empty-state copy carries instructions.
+  - The server-slow text prints route diagnostics.
+  - The CPU ring text is cramped.
+  - Header controls at 390 are under 44 px.
+  
+  Covers ranks 14, 16, 19, 25, 26, 27, 31 (UB-33, UB-15, UB-22, UB-2, ui-copy). Lane: standard, ~40 added lines in dashboard.html.
+- Usage dialog (dialog#usage) at 390 and 1440: a failed or pending scorecard fetch reads "No scorecard yet", and the 5h and Week numbers are right-aligned. Covers ranks 12, 22 (UB-33, UB-27). Lane: fast, ~12 added lines in dashboard.html.
+- Pipelines dialog (dialog#agents) at 390 and 1440: an empty agent list draws an empty chart instead of one empty line. Covers rank 13 (UB-33). Lane: fast, ~6 added lines in dashboard.html.
+- AI-Settings dialog (dialog#aiSettings, #aiCats) at 390 and 1440, plus the same error copy in Digest and Pipelines: "Is serve.py running?" shows on server errors, and the `#aiCats` strip is cut at 390. Covers ranks 24, 29 (ui-copy, UB-2). Lane: fast, ~20 added lines in dashboard.html.
+- Trevor decide: Header (#machine, #routing, dialog buttons) at 390 and 1440: drop the duplicate Claude usage in `#machine` and keep `#routing`, and fold Backlog, Digest, Pipelines and AI-Settings into one menu at 390 to win back about 280 px. Covers ranks 28, 33 (UB-29, UB-32, UB-3). Lane: standard, ~40 added lines in dashboard.html.
+- Trevor decide: Board cards (card) at 390 and 1440: show only the job number instead of the full mono slug that repeats the title. Covers rank 32 (UB-4). Lane: fast, ~5 added lines in dashboard.html.
+- Trevor decide: Usage dialog (dialog#usage) at 390 and 1440: replace the scorecard sentences with one row per project and points, budget, first pass, waste and escapes columns. Covers rank 34 (UB-4). Lane: fast, ~25 added lines in dashboard.html.
+- Trevor decide: Job modal (dialog#viewer) at 390 and 1440: hide `#viewerStatus` while the stop box repeats it. Covers rank 35 (UB-29). Lane: fast, ~3 added lines in dashboard.html.
+- Trevor decide: AI-Settings dialog (dialog#aiSettings) at 390: open full-height like Pipelines instead of a mid-screen band. Covers rank 36 (UB-8). Lane: fast, ~3 added lines in dashboard.html.
+
+## Already tracked
+
+- Job 616 (fewer columns, merged as 6fecb50, #479): at 1440 the run-all/roadmap columns (running, waiting) sit off-screen to the right of Done, behind `main{overflow-x:auto}`. The column set and order are 616's, so this audit raises no finding about them.
+- Job 629 (queued): showing the last full E2E run on main is not built yet. No finding about it is raised here.
+- Job 634 (queued): the Terminal batch card for project `.claude` edits is not built yet. No finding about it is raised here.
+- `scrum/backlog.md` has one open `- [ ]` line (removing the scrum-worker and ollama-env LaunchAgents). No item above duplicates it.
