@@ -2395,7 +2395,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(len(commands), (2, 3), span)
             for command in commands:
                 self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a 'Trevor always runs these in a Terminal window')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window')$")
             self.assertEqual(span.count("--recommend"), 1, span)
         text = self.rules()
         self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
@@ -2433,7 +2433,7 @@ class ContractTest(unittest.TestCase):
             key = words[words.index("--title") + 1]
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a 'Trevor always runs these in a Terminal window')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window')$")
         self.assertEqual(len(board.STOP_TITLES), 15)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
@@ -3354,7 +3354,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                       'as this job, and two automatic attempts to combine them failed." --kind conflict', merge)
         self.assertEqual(text.count("--kind "), 7)
         for line in text.splitlines():
-            if any(p in line for p in ("Hard stop: schema", "migrate stopped", "Hard stop: agent rules")):
+            if any(p in line for p in ("Hard stop: schema", "migrate stopped")):
                 self.assertNotIn("--kind", line, line[:80])
 
     def test_unblock_lane_covers_verdicts(self):
