@@ -2396,6 +2396,13 @@ class ContractTest(unittest.TestCase):
         self.assertLess(migrate.index("Auto-rework: duplicate column"), migrate.index("On any other stop"))
         self.assertIn("`rework.md`", (ROOT / "agents" / "scrum-digest-reader.md").read_text())
 
+    def test_migrate_drift_behind_main_merges_main(self):
+        migrate = self.section(skill_text(), "## Migrate", "## Merge")
+        for phrase in ("Auto-rework: behind main", "merge-base --is-ancestor", "Conflicts** sub-steps 1-4",
+                       "never rebase", "Never recommend declaring columns"):
+            self.assertIn(phrase, migrate)
+        self.assertLess(migrate.index("Auto-rework: behind main"), migrate.index("On any other stop"))
+
     def test_ask_questions_have_no_paths(self):
         for _, span in self.ask_spans():
             q = self.ask_question(span)
