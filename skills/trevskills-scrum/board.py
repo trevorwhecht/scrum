@@ -512,7 +512,7 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             line = format_item({"done": False, "points": None if points is KEEP else points,
                                 "priority": source_priority(by, 5 if top else priority, critical),
                                 "text": clean(text, ITEM_MAX), "job": None, "why": None,
-                                "setup": None if setup is None else setup_steps(setup), "by": by})
+                                "setup": None if setup is None else setup_steps(setup), "by": by, "id": new_item_id(items)})
             if top and items:
                 lines.insert(items[0]["line"], line)
             else:

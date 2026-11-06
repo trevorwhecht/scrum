@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, time, unittest
+import json, os, re, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -83,7 +83,7 @@ class SmallFixesTest(unittest.TestCase):
         end = time.time() + 10
         while time.time() < end and board.backlog_items(self.root)[0]["points"] is None:
             time.sleep(0.05)
-        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] [5] -dash <!-- several files -->\n")
+        self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", (self.root / "backlog.md").read_text()), "# Backlog\n- [ ] [5] -dash <!-- several files -->\n")
 
     def test_triage_skips_overlong_merge(self):
         backlog = "# Backlog\n- [ ] Alpha\n- [ ] Beta\n- [ ] Gamma\n- [ ] Delta\n"

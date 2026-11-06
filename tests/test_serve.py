@@ -440,7 +440,7 @@ class ServeTest(unittest.TestCase):
         with mock.patch.object(self.serve, "estimate"):
             code, items = self.req("POST", "/api/p/repo/backlog", {"op": "add", "text": text})
         self.assertEqual(code, 200)
-        self.assertIn(f"- [ ] {text} {{p:4}} {{by:t}}\n", (self.root / "backlog.md").read_text())
+        self.assertIn(f"- [ ] {text} {{p:4}} {{by:t}}\n", re.sub(r" \{#[a-z0-9]{4}\}", "", (self.root / "backlog.md").read_text()))
         with mock.patch.object(self.serve, "spawn"):
             code, out = self.req("POST", "/api/p/repo/backlog/run", {"index": items[-1]["index"]})
         self.assertEqual(code, 202)
@@ -463,7 +463,7 @@ class ServeTest(unittest.TestCase):
                                  (200, body["text"], 4, "t"))
         self.assertEqual(items[0]["by"], "t")
         before = path.read_text()
-        self.assertEqual(before, "# Backlog\n- [ ] T {p:5} {by:t}\n- [ ] [3] Dark mode\n- [ ] CSV export\n"
+        self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", before), "# Backlog\n- [ ] T {p:5} {by:t}\n- [ ] [3] Dark mode\n- [ ] CSV export\n"
                                  "- [ ] L {p:4} {by:t}\n- [ ] M {p:4} {by:t}\n- [ ] N {p:4} {by:t}\n")
         for bad in ("soon", "", "Next", 0, False, True, ["next"]):
             code, out = self.post_raw("/api/p/repo/backlog", {"op": "add", "text": "S", "urgency": bad})
@@ -499,7 +499,7 @@ class ServeTest(unittest.TestCase):
             time.sleep(0.2)
         self.assertEqual(code, 200)
         self.assertEqual((items[-1]["text"], items[-1]["points"]), ("Picked by hand", 8))
-        self.assertIn("- [ ] [8] Picked by hand {p:4} {by:t}\n", (self.root / "backlog.md").read_text())
+        self.assertIn("- [ ] [8] Picked by hand {p:4} {by:t}\n", re.sub(r" \{#[a-z0-9]{4}\}", "", (self.root / "backlog.md").read_text()))
         est.assert_not_called()
 
     def test_add_with_bad_points_rejected(self):
@@ -1265,7 +1265,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([i["text"] for i in self.serve.board.backlog_items(scrum)], ["Cli item A", "Cli item B"])
         self.assertTrue(self.wait_for(lambda: [i["points"] for i in self.serve.board.backlog_items(scrum)] == [5, 5], 10),
                         (scrum / "backlog.md").read_text())
-        self.assertEqual((scrum / "backlog.md").read_text(),
+        self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", (scrum / "backlog.md").read_text()),
                          "# Backlog\n- [ ] [5] Cli item A <!-- several files -->\n- [ ] [5] Cli item B <!-- several files -->\n")
 
     def test_backlog_add_library_call_spawns_no_estimate(self):
