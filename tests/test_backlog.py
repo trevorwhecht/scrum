@@ -1,4 +1,4 @@
-import hashlib, io, json, os, subprocess, sys, tempfile, unittest
+import hashlib, io, json, os, re, subprocess, sys, tempfile, unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
@@ -27,6 +27,9 @@ class BacklogTest(unittest.TestCase):
     def text(self):
         return (self.root / "backlog.md").read_text()
 
+    def plain(self):  # the text without the {#id} every new item gets (job 679)
+        return re.sub(r" \{#[a-z0-9]{4}\}", "", self.text())
+
     def test_items_parse_points_why_done_and_job(self):
         items = board.backlog_items(self.root)
         self.assertEqual([(i["done"], i["points"], i["text"], i["why"], i["job"]) for i in items], [
@@ -38,8 +41,9 @@ class BacklogTest(unittest.TestCase):
 
     def test_add_appends_and_keeps_other_lines(self):
         board.backlog_op(self.root, "add", text="  Export to PDF  ")
-        self.assertTrue(self.text().endswith("- [ ] Export to PDF\n"))
-        self.assertIn("some note the user wrote\n", self.text())
+        self.assertTrue(self.plain().endswith("- [ ] Export to PDF\n"))
+        self.assertIn("some note the user wrote\n", self.plain())
+        self.assertRegex(board.backlog_items(self.root)[-1]["id"], r"^[a-z0-9]{4}$")
 
     def test_add_rejects_empty_and_strips_comment_markers_and_newlines(self):
         with self.assertRaises(SystemExit):
@@ -133,14 +137,14 @@ class BacklogTest(unittest.TestCase):
     def test_backlog_add_top_is_claimed_next(self):
         (self.root / "backlog.md").write_text("# Backlog\n- [ ] A\n- [ ] [3] B {p:5}\n")
         self.assertEqual(self.add_cli("--top", "X"), (0, ""))
-        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n- [ ] [3] B {p:5}\n")
+        self.assertEqual(self.plain(), "# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n- [ ] [3] B {p:5}\n")
         self.assertEqual(self.claim(), "X")
 
     def test_newest_top_wins(self):
         (self.root / "backlog.md").write_text("# Backlog\nnote above\n- [ ] A\n- [ ] [3] B {p:5}\n")
         board.cmd_backlog_add(self.root, ["X"], top=True)
         board.cmd_backlog_add(self.root, ["Y"], top=True)
-        self.assertEqual(self.text(), "# Backlog\nnote above\n- [ ] Y {p:5} {by:t}\n- [ ] X {p:5} {by:t}\n- [ ] A\n"
+        self.assertEqual(self.plain(), "# Backlog\nnote above\n- [ ] Y {p:5} {by:t}\n- [ ] X {p:5} {by:t}\n- [ ] A\n"
                                       "- [ ] [3] B {p:5}\n")
         self.assertEqual(self.claim(), "Y")
         self.assertEqual(self.claim(), "X")
@@ -148,7 +152,7 @@ class BacklogTest(unittest.TestCase):
     def test_backlog_add_top_empty_and_conflict(self):
         (self.root / "backlog.md").write_text("# Backlog\n")
         board.cmd_backlog_add(self.root, ["X"], top=True)
-        self.assertEqual(self.text(), "# Backlog\n- [ ] X {p:5} {by:t}\n")
+        self.assertEqual(self.plain(), "# Backlog\n- [ ] X {p:5} {by:t}\n")
         before = self.text()
         code, err = self.add_cli("--top", "--priority", "3", "Z")
         self.assertNotEqual(code, 0)
@@ -732,16 +736,16 @@ class BacklogTest(unittest.TestCase):
             board.main(["--dir", str(self.root), "backlog-add", "--setup",
                         "Buy a Twilio number; Add TWILIO_TOKEN to .env", "Send SMS alerts (from 152-x)"])
         spawn.assert_called_once_with(self.root, ["Send SMS alerts (from 152-x)"])
-        self.assertTrue(self.text().endswith(
+        self.assertTrue(self.plain().endswith(
             "some note the user wrote\n"
             "- [ ] Send SMS alerts (from 152-x) {setup: Buy a Twilio number; Add TWILIO_TOKEN to .env}\n"))
         # split on ";", trimmed, empty steps dropped, braces removed
         board.cmd_backlog_add(self.root, ["Messy"], setup=" ;  Get {a} key ;; Set }DNS{ ;  ")
-        self.assertTrue(self.text().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n"))
+        self.assertTrue(self.plain().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n"))
         self.assertEqual(board.backlog_items(self.root)[-1]["setup"], ["Get a key", "Set DNS"])
         # without --setup nothing changes
         board.cmd_backlog_add(self.root, ["No setup here"])
-        self.assertTrue(self.text().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n- [ ] No setup here\n"))
+        self.assertTrue(self.plain().endswith("- [ ] Messy {setup: Get a key; Set DNS}\n- [ ] No setup here\n"))
 
     def test_backlog_add_setup_empty_checklist(self):
         before = self.text()
@@ -871,14 +875,14 @@ class BacklogTest(unittest.TestCase):
     def test_backlog_add_priority_flag(self):
         with mock.patch.object(board, "spawn_estimates"):
             board.main(["--dir", str(self.root), "backlog-add", "--priority", "4", "a", "b"])
-        self.assertTrue(self.text().endswith("some note the user wrote\n- [ ] a {p:3}\n- [ ] b {p:3}\n"))  # agent cap
+        self.assertTrue(self.plain().endswith("some note the user wrote\n- [ ] a {p:3}\n- [ ] b {p:3}\n"))  # agent cap
         board.backlog_op(self.root, "add", text="c", priority=4)
-        self.assertTrue(self.text().endswith("- [ ] b {p:3}\n- [ ] c {p:3}\n"))
+        self.assertTrue(self.plain().endswith("- [ ] b {p:3}\n- [ ] c {p:3}\n"))
         board.cmd_backlog_add(self.root, ["d"], setup="Buy a number", priority=2)
-        self.assertTrue(self.text().endswith("- [ ] d {p:2} {setup: Buy a number}\n"))
+        self.assertTrue(self.plain().endswith("- [ ] d {p:2} {setup: Buy a number}\n"))
         with mock.patch.object(board, "spawn_estimates"):
             board.main(["--dir", str(self.root), "backlog-add", "e"])
-        self.assertTrue(self.text().endswith("- [ ] d {p:2} {setup: Buy a number}\n- [ ] e\n"))
+        self.assertTrue(self.plain().endswith("- [ ] d {p:2} {setup: Buy a number}\n- [ ] e\n"))
 
     def test_backlog_add_priority_rejects_out_of_range(self):
         before = self.text()
@@ -974,13 +978,13 @@ class BacklogTest(unittest.TestCase):
         for args, line in cases:
             with self.subTest(args=args):
                 self.assertEqual(self.add_cli(*args), (0, ""))
-                self.assertTrue(self.text().endswith("\n" + line + "\n"), self.text())
+                self.assertTrue(self.plain().endswith("\n" + line + "\n"), self.plain())
         self.assertEqual(self.add_cli("--top", "X"), (0, ""))
-        self.assertTrue(self.text().startswith("# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n"))
+        self.assertTrue(self.plain().startswith("# Backlog\n- [ ] X {p:5} {by:t}\n- [ ] A\n"))
         board.backlog_op(self.root, "add", text="Op trevor", by="t")
         board.backlog_op(self.root, "add", text="Op agent", priority=5)
         board.backlog_op(self.root, "add", text="Op critical", critical=True)
-        self.assertTrue(self.text().endswith("- [ ] Op trevor {p:4} {by:t}\n- [ ] Op agent {p:3}\n- [ ] Op critical {p:5}\n"))
+        self.assertTrue(self.plain().endswith("- [ ] Op trevor {p:4} {by:t}\n- [ ] Op agent {p:3}\n- [ ] Op critical {p:5}\n"))
 
     def test_backlog_add_source_flag_conflicts(self):
         before = self.text()

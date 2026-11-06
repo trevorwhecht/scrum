@@ -2403,7 +2403,7 @@ class BoardTest(unittest.TestCase):
 
     def test_backlog_add_appends_unchecked_items(self):
         board.cmd_backlog_add(self.root, ["fix A (from 001-x)", "fix B (from 001-x)"])
-        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] fix A (from 001-x)\n- [ ] fix B (from 001-x)\n")
+        self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", (self.root / "backlog.md").read_text()), "# Backlog\n- [ ] fix A (from 001-x)\n- [ ] fix B (from 001-x)\n")
 
     # --- manual-checks.md: follow-ups only a human can do ---
     def test_manual_add_appends_unchecked_items(self):
