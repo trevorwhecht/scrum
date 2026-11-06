@@ -6567,6 +6567,12 @@ class RouteCheckTest(unittest.TestCase):
         self.assertEqual(self.lilguy({f"src/f{i}.py": "x\n" for i in range(11)}),
                          "more than 10 files with added lines (11)")
 
+    def test_route_check_lilguy_mechanical_ignores_size(self):
+        feature = "Rename\nLane: lilguy — mechanical rename\n"
+        self.assertIsNone(self.lilguy({f"src/f{i}.py": "x\n" * 5 for i in range(11)}, feature=feature))
+        self.assertEqual(self.lilguy({"skills/trevskills-scrum/SKILL.md": "x\n"}, feature=feature),
+                         "rules file skills/trevskills-scrum/SKILL.md not in feature.md")
+
     def test_route_check_lilguy_deletions_dont_count(self):
         self.big_base({f"src/f{i}.py": "x\n" * 50 for i in range(5)})
         self.git("rm", "-q", "src/f0.py", "src/f1.py", "src/f2.py")

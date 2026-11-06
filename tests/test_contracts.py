@@ -1017,7 +1017,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 24700, "newjob.md")
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 25050, "newjob.md")  # +fast lane related tests, job 678
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3343,13 +3343,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         step3 = self.section(review, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
         self.assertIn("also spawn `scrum-review-e2e` only when the **Check gate**'s **E2E lanes** rule lets the job run E2E", step3)
 
-    def test_lilguy_check_runs_related_tests_only(self):
+    def test_lilguy_check_skips_tests_fast_runs_related(self):
         check = self.section(self.lane("lilguy"), "3. **Check.**", "4. **Route.**")
-        for phrase in ("npx jest --findRelatedTests --passWithNoTests <files>", "--diff-filter=d \"$BASE\"...HEAD`, and with no such file Test does not run",
-                       "any other test runner runs the full `Test:` command", "`Test: related only`",
+        for phrase in ("`Test: skipped, lilguy lane`", "`Lane: lilguy — bug, cause pinned:` job runs only its repro test",
                        "`Build: skipped, lilguy lane`", "`E2E: skipped, lilguy lane`",
                        "GitHub CI and the Vercel build still guard merge and deploy"):
             self.assertIn(phrase, check, phrase)
+        self.assertNotIn("findRelatedTests", check)
+        self.assertIn("never promotes a `Lane: lilguy — mechanical` job", self.lane("lilguy"))
+        step2 = self.lane("newjob")
+        for phrase in ("**Fast lane Test** runs only the tests related to the diff", "npx jest --findRelatedTests --passWithNoTests <files>",
+                       "any other test runner runs the full `Test:` command", "`Test: related only`"):
+            self.assertIn(phrase, step2, phrase)
 
     def test_e2e_reviewer_skips_checked_specs(self):
         review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
