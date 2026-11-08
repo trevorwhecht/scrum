@@ -188,6 +188,21 @@ def held_over(queued_at, secs=RAM_HOLD_SECS):
         return False
 
 
+def mark_ram_hold(project, root, jobs, skip=None):
+    """Write ram_hold (the reading) on every job in `jobs` still play_queued and held over RAM_HOLD_SECS, except `skip`
+    (spawn already ruled on it). Re-checked on the live job under the lock; the stderr line prints the first time only."""
+    ids = [j["id"] for j in jobs if j.get("play_queued") and j["id"] != skip and held_over(j["play_queued"])]
+    if not ids:
+        return
+    hold = ram_hold_text()
+    with board.locked_board(root) as b:
+        for live in b["jobs"]:
+            if live["id"] in ids and held_over(live.get("play_queued")):
+                if "ram_hold" not in live:
+                    print(f"ram gate: {project}/{live['id']} held over 1h: {hold}", file=sys.stderr)
+                live["ram_hold"] = hold
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
@@ -371,7 +386,11 @@ def play_queue_tick(project, root, jobs) -> bool:
             if running(project, job["id"]) or job["stage"] != launch["stage"]:
                 unqueue(root, job)
                 continue
-            if not take_room() or spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
+            if not take_room():
+                mark_ram_hold(project, root, jobs)
+                return True
+            if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
+                mark_ram_hold(project, root, jobs, skip=job["id"])
                 return True
             started = True
             continue
@@ -381,10 +400,12 @@ def play_queue_tick(project, root, jobs) -> bool:
             continue
         refusal = resume_refusal(project, root, job, manual=manual)
         if refusal and refusal.startswith(board.MACHINE_WAIT):
+            mark_ram_hold(project, root, jobs)
             break
         if refusal:
             continue
         if not take_room() or not resume_job(project, root, job, jobs, manual=manual):
+            mark_ram_hold(project, root, jobs)
             return True
         unqueue(root, job)
         started = True
