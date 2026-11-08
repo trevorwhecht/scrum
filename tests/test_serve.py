@@ -1618,13 +1618,35 @@ class ServeTest(unittest.TestCase):
             self.batch_tick(job_id)
         self.assertEqual(rt.call_count, 1)
         self.assertNotIn("terminal_opened", self.stage_of(job_id))
+        self.assertTrue(self.stage_of(job_id).get("terminal_failed"))
+        self.edit_job(job_id, terminal_failed="2026-01-01T00:00:00+00:00")
         with mock.patch.object(self.serve, "answer_job", side_effect=SystemExit("job has no open question")):
             self.batch_tick(job_id)  # does not raise
         self.assertNotIn("terminal_opened", self.stage_of(job_id))
+        self.assertNotEqual(self.stage_of(job_id).get("terminal_failed"), "2026-01-01T00:00:00+00:00")
+        self.edit_job(job_id, terminal_failed="2026-01-01T00:00:00+00:00")
         with mock.patch.object(self.serve, "run_terminal", return_value=(200, {"message": "Opened"})) as rt:
             self.batch_tick(job_id)
         self.assertEqual(rt.call_count, 1, "the next tick retries")
         self.assertTrue(self.stage_of(job_id).get("terminal_opened"))
+
+    def test_terminal_batch_tick_backs_off_after_failed_open(self):
+        job_id = self.batch_job()
+        with mock.patch.object(self.serve, "run_terminal", return_value=(500, {"error": "x"})) as rt:
+            self.batch_tick(job_id)
+            self.batch_tick(job_id)
+        self.assertEqual(rt.call_count, 1, "a tick right after a failure does not retry")
+        self.edit_job(job_id, terminal_failed="2026-01-01T00:00:00+00:00")
+        with mock.patch.object(self.serve, "run_terminal", return_value=(200, {"message": "Opened"})) as rt:
+            self.batch_tick(job_id)
+        self.assertEqual(rt.call_count, 1)
+        job = self.stage_of(job_id)
+        self.assertTrue(job.get("terminal_opened"))
+        self.assertNotIn("terminal_failed", job)
+        bad = self.batch_job(terminal_failed="garbage")
+        with mock.patch.object(self.serve, "run_terminal", return_value=(200, {"message": "Opened"})) as rt:
+            self.batch_tick(bad)
+        self.assertEqual(rt.call_count, 1, "a malformed terminal_failed still opens")
 
     def test_terminal_batch_tick_skips_other_jobs(self):
         other = self.batch_job(title="Something else")

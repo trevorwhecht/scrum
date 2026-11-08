@@ -1623,14 +1623,18 @@ def claude_migrate(project, root):
             spawn(project, root, moved["id"], "resume", f"/trevskills-scrum resume {moved['id']}")
 
 
+TERMINAL_RETRY_SECS = 600  # a failed Terminal batch open waits this long before the next try
+
+
 def terminal_batch_tick(project, root, jobs):
     """Open each parked Terminal batch's `/trevskills-scrum lilguy <id>` window once, as clicking its option a does;
     Trevor still approves every .claude/ edit in that window. Claim-then-open: terminal_opened is set under the board
-    lock after a re-check of the live job, so two ticks never open two windows; a failed open clears it for a retry."""
+    lock after a re-check of the live job, so two ticks never open two windows; a failed open clears it and stamps terminal_failed, so the retry waits TERMINAL_RETRY_SECS."""
     def openable(j):
         opt = next((o for o in j.get("options") or [] if isinstance(o, dict) and o.get("key") == "a"), None)
         return (j.get("title") == board.TERMINAL_BATCH_TITLE and j.get("stage") == "needs-human"
                 and not j.get("terminal_opened") and opt and opt.get("command") == f"lilguy {j['id']}"
+                and not (held_over(j.get("terminal_failed"), -1) and not held_over(j["terminal_failed"], TERMINAL_RETRY_SECS))
                 and not running(project, j["id"]))
     for job in [j for j in jobs if openable(j)]:
         with board.locked_board(root) as b:
@@ -1648,7 +1652,11 @@ def terminal_batch_tick(project, root, jobs):
             with board.locked_board(root) as b:
                 if (j := next((j for j in b["jobs"] if j["id"] == live["id"]), None)):
                     j.pop("terminal_opened", None)
+                    j["terminal_failed"] = board.now()
         else:
+            with board.locked_board(root) as b:
+                if (j := next((j for j in b["jobs"] if j["id"] == live["id"]), None)):
+                    j.pop("terminal_failed", None)
             print(f"watchdog: {project}: opened Terminal batch {live['id']}", file=sys.stderr, flush=True)
 
 
