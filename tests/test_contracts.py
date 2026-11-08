@@ -1049,7 +1049,9 @@ class ContractTest(unittest.TestCase):
                        "Bash timeout 300000", '--storage-state "$WT/<path>"', "- Render auth: <repo-relative path>",
                        "--mask '<selectors>'", "- Visual mask: <selectors>", "On every outcome",
                        'worktree remove --force /tmp/scrum-base-$ID', "A non-zero exit, a failed probe or a missing "
-                       "`visual-diff.md`", "A skip never makes `CHECK: FAIL`"):
+                       "`visual-diff.md`", "A skip never makes `CHECK: FAIL`",
+                       "When `B render-paths $ID` printed a non-empty `skipped`",
+                       "rewrite a `VISUAL: same` first line as `VISUAL: unscored — uncaptured routes: <skipped>`"):
             self.assertIn(phrase, sec, phrase)
 
     def test_review_visual_diff_gating(self):
@@ -1069,7 +1071,7 @@ class ContractTest(unittest.TestCase):
             para = next(l for l in text.splitlines() if l.startswith("**Visual diff.**"))
             for phrase in ("`VISUAL_DIFF=<file>`", "Read only the crops it lists",
                            "as the HEAD-vs-BASE render of those pages at those widths",
-                           "only for an `unscored` or `over cap` pair, a changed screen not listed, or step 3's "
+                           "only for an `unscored`, `over cap` or `crop truncated` pair, a changed screen not listed, or step 3's "
                            "click-through when the spec says `Complex: yes`",
                            "A crop counts as **Compare with the base.** for its page",
                            "`Rendered: yes — <element> visible; …` line names the crops"):

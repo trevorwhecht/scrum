@@ -56,15 +56,17 @@ class VisualDiffTest(unittest.TestCase):
             d.mkdir()
             (d / "a").write_text(page.format(button))
             (d / "b").write_text(page.format(""))
+            mark = '<p style="color:#c00">Changed</p>' if side == "head" else "<p>Same</p>"
+            (d / "c").write_text(page.format(mark + '<div style="height:2400px"></div>' + mark))
             sites[side] = self.serve(d)
         out = self.tmp / "round-1" / "visual"
         r = self.run_script("--base", sites["base"], "--head", sites["head"], "--out", str(out),
-                            "--project-dir", PROJECT, "/a", "/b", timeout=240)
+                            "--project-dir", PROJECT, "/a", "/b", "/c", timeout=240)
         self.assertEqual(r.returncode, 0, r.stderr)
         res = json.loads((out / "results.json").read_text())
         self.assertEqual(res["status"], "ok")
         got = {(p["path"], p["width"]): p for p in res["pairs"]}
-        self.assertEqual(sorted(got), [("/a", 390), ("/a", 1440), ("/b", 390), ("/b", 1440)])
+        self.assertEqual(sorted(got), [("/a", 390), ("/a", 1440), ("/b", 390), ("/b", 1440), ("/c", 390), ("/c", 1440)])
         for w in (390, 1440):
             a, b = got[("/a", w)], got[("/b", w)]
             self.assertEqual(a["status"], "changed", a)
@@ -72,10 +74,21 @@ class VisualDiffTest(unittest.TestCase):
             self.assertTrue(Path(a["crop"]).is_file())
             self.assertEqual(b["status"], "same", b)
             self.assertIsNone(b["crop"])
+        for w in (390, 1440):  # changes 2400 px apart: the 1600 px crop cannot hold both, so reviewers must render it
+            c = got[("/c", w)]
+            self.assertEqual((c["status"], c["why"]), ("changed", "crop truncated"), c)
+            self.assertTrue(Path(c["crop"]).is_file())
+            self.assertEqual(self.png_height(c["crop"]), 1600)
+        self.assertIsNone(got[("/a", 390)]["why"])
         md = (self.tmp / "round-1" / "visual-diff.md").read_text().splitlines()
         self.assertEqual(md[0], "VISUAL: changed")
         self.assertIn(f"- /a 390: changed — crop {out / 'a-390.png'}", md)
         self.assertIn("- /b 1440: same", md)
+        self.assertIn(f"- /c 390: changed — crop truncated — crop {out / 'c-390.png'}", md)
+
+    @staticmethod
+    def png_height(path):
+        return int.from_bytes(Path(path).read_bytes()[20:24], "big")
 
     def serve(self, d):
         class Quiet(http.server.SimpleHTTPRequestHandler):

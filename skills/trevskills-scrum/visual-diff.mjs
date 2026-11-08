@@ -115,11 +115,15 @@ async function sideBySide(sharp, basePng, headPng, box, dest) {
     .png().toFile(dest);
 }
 
+// The padded diff box, capped at MAX_CROP_H tall; `truncated` when the cap cut part of the change off.
 function boundingBox(res, w, h) {
-  if (!res.diffLines?.length || !res.diffCols?.length) return { left: 0, top: 0, width: w, height: Math.min(h, MAX_CROP_H) };
+  if (!res.diffLines?.length || !res.diffCols?.length) {
+    return { left: 0, top: 0, width: w, height: Math.min(h, MAX_CROP_H), truncated: h > MAX_CROP_H };
+  }
   const top = Math.max(0, res.diffLines[0] - PAD), bottom = Math.min(h, res.diffLines.at(-1) + 1 + PAD);
   const left = Math.max(0, res.diffCols[0] - PAD), right = Math.min(w, res.diffCols.at(-1) + 1 + PAD);
-  return { left, top, width: right - left, height: Math.min(bottom - top, MAX_CROP_H) };
+  return { left, top, width: right - left, height: Math.min(bottom - top, MAX_CROP_H),
+    truncated: bottom - top > MAX_CROP_H };
 }
 
 async function run(opts, deps) {
@@ -172,8 +176,12 @@ async function run(opts, deps) {
           continue;
         }
         const m = await deps.sharp(base.buf).metadata();
-        const box = res.reason === "layout-diff" ? { left: 0, top: 0, width: 100000, height: MAX_CROP_H }
+        const tallest = Math.max(m.height, (await deps.sharp(head.buf).metadata()).height);
+        const box = res.reason === "layout-diff"
+          ? { left: 0, top: 0, width: 100000, height: MAX_CROP_H, truncated: tallest > MAX_CROP_H }
           : boundingBox(res, m.width, m.height);
+        // A cut-off crop never stands in for the page: reviewers render a `crop truncated` pair themselves.
+        if (box.truncated) pair.why = pair.why ? `${pair.why} — crop truncated` : "crop truncated";
         pair.crop = path.join(out, `${slug(p)}-${width}.png`);
         await sideBySide(deps.sharp, base.buf, head.buf, box, pair.crop);
       }
