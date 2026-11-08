@@ -732,7 +732,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         fast = [l for l in lines if l.startswith("**Fast lane.**")]
         self.assertEqual(len(fast), 1)
-        for phrase in ("UI globs", "LANE=fast", "rendered by reviewers", "non-blocking"):
+        for phrase in ("UI globs", "fast lane spawn its one UI reviewer", "rendered by reviewers", "non-blocking"):
             self.assertIn(phrase, rule[0], phrase)
 
     def test_spec_writer_rendered_by_reviewers(self):
