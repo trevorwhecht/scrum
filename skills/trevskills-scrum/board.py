@@ -1854,6 +1854,7 @@ CARRIED = "VERDICT: PASS\nCarried forward from round {}: no blocking findings.\n
 UI_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
 SECURITY_SKIP = "VERDICT: PASS\nSkipped by orchestrator: no sensitive files in diff.\n"
 DELETION_SKIP = "VERDICT: PASS\nSkipped by orchestrator: diff is at least 90% deletions.\n"
+VISUAL_SKIP = "VERDICT: PASS\nSkipped by orchestrator: visual diff found every captured pair identical and the spec says no visual change.\n"
 
 
 def ui_globs(root):
@@ -1903,7 +1904,7 @@ def _names(wt, *args):
 
 
 ORCH_REVIEW_RE = re.compile(
-    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP)) + "|"
+    "|".join(re.escape(t) for t in (UI_SKIP, SECURITY_SKIP, DELETION_SKIP, VISUAL_SKIP)) + "|"
     + re.escape(CARRIED).replace(r"\{\}", r"\d+"))
 
 
@@ -2190,6 +2191,29 @@ def cmd_check_reuse(root, job_id) -> dict:
     return {"reused": n - 1}
 
 
+def _visual_skip(root, job_id, rd) -> bool:
+    """True when rd/visual-diff.md's first line is exactly `VISUAL: same` and spec.md says `UI surface: no` and
+    `Complex: no` (the Check gate's Visual diff found nothing on screen changed and none was asked for)."""
+    try:
+        first = (rd / "visual-diff.md").read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        spec = (Path(root) / "jobs" / job_id / "spec.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    fields = [re.search(rf"^\s*{f}:(.*)$", spec, re.M) for f in ("UI surface", "Complex")]
+    return first == ["VISUAL: same"] and all(m and m.group(1).strip().lower() == "no" for m in fields)
+
+
+def _apply_visual_skip(root, job_id, rd, spawn, keep=()):
+    """spawn minus each spawned ui/ux role not in `keep`, after writing its VISUAL_SKIP file, when _visual_skip holds;
+    else spawn unchanged."""
+    if not _visual_skip(root, job_id, rd):
+        return spawn
+    for r in ("ui", "ux"):
+        if r in spawn and r not in keep:
+            (rd / f"review-{r}.md").write_text(VISUAL_SKIP, encoding="utf-8")
+    return [r for r in spawn if r not in ("ui", "ux") or r in keep]
+
+
 def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     """{"spawn": reviewers to spawn in REVIEWERS order, "since": SINCE sha or None}. Writes the round's carried-forward
     (incremental) or UI/UX (no UI file) and security skip files (full); never writes
@@ -2209,12 +2233,14 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         and not base.startswith("-") else None
     if inc:
         since, verdicts = inc
-        extra = _rework_roles(rd.parent / f"round-{n - 1}") | _unrendered_roles(root, rd.parent, n, wt, base)
+        rework = _rework_roles(rd.parent / f"round-{n - 1}")
+        extra = rework | _unrendered_roles(root, rd.parent, n, wt, base)
         spawn = [r for r in REVIEWERS if verdicts[r] == "CHANGES" or r in extra]
         rd.mkdir(parents=True, exist_ok=True)
         for r in REVIEWERS:
             if r not in spawn:
                 (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
+        spawn = _apply_visual_skip(root, job_id, rd, spawn, keep=rework)
         _drop_stale(rd, spawn)
         return {"spawn": spawn, "since": since}
     spawn = list(REVIEWERS)
@@ -2231,6 +2257,8 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         for r, text in skips.items():
             (rd / f"review-{r}.md").write_text(text, encoding="utf-8")
         spawn = [r for r in REVIEWERS if r not in skips]
+    if rd.is_dir():  # no round folder means no visual-diff.md
+        spawn = _apply_visual_skip(root, job_id, rd, spawn)
     _drop_stale(rd, spawn)
     return {"spawn": spawn, "since": None}
 
