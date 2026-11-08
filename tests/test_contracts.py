@@ -2098,6 +2098,14 @@ class ContractTest(unittest.TestCase):
                        f"ls JOB_DIR/round-ROUND/review-{name}.md", "A verdict only in chat does not count"):
             self.assertIn(phrase, text, f"{name}: {phrase}")
 
+    def test_ui_reviewer_rendered_misread_rules(self):
+        text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        for phrase in ("removes or changes JSX props, conditions or data mapping that decide which rows",
+                       "`n/a` stays only for comments, types, imports and unused-code removal",
+                       "A control behind sign-in or inside a modal/dialog is reached by signing in",
+                       "that gate alone is never `Rendered: no` and never a `[blocking]` finding"):
+            self.assertIn(phrase, text, phrase)
+
     def test_reviewers_rendered_blocked_non_blocking(self):
         for name in ("ux", "ui"):
             text = (ROOT / "agents" / f"scrum-review-{name}.md").read_text()
