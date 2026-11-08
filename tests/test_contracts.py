@@ -3332,6 +3332,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for title, name in (("Run all", "runall"), ("Debug", "debug"), ("BigBoy", "bigboy"), ("Roadmap", "roadmap"), ("Lilguy", "lilguy"), ("Cloud", "cloud"), ("Digest", "digest")):
             heading = "## Run all" if name == "runall" else "## Digest" if name == "digest" else f"## {title} lane"
             body = [l for l in self.h2(text, heading).splitlines()[2:] if l.strip()]
+            if name == "lilguy":  # +parked Terminal batch default, digest 062 p1, job 716
+                self.assertEqual(len(body), 2, title)
+                self.assertIn("default answer is `Run it in a Terminal window`", body.pop())
             self.assertEqual(body, [f"Read `$HOME/.claude/skills/trevskills-scrum/lanes/{name}.md` when this lane runs."], title)
         heads = ["Run all", "Fast lane", "Debug lane", "BigBoy lane", "Roadmap lane", "Lilguy lane", "Cloud lane", "Check gate"]
         order = [text.index(f"\n## {h}\n") for h in ["New job", *heads]]
