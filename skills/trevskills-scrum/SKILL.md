@@ -127,6 +127,8 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/roadmap.md` when this lane run
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/lilguy.md` when this lane runs.
 
+The parked `Terminal batch: project .claude edits` job's default answer is `Run it in a Terminal window`: serve.py's terminal_batch_tick opens its `lilguy <id>` window itself, so no run waits on that click, and Trevor still approves each `.claude/` edit there.
+
 ## Cloud lane
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/cloud.md` when this lane runs.
