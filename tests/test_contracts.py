@@ -1440,9 +1440,12 @@ class ContractTest(unittest.TestCase):
                     "every route method that writes it) and add it to each, or cite in build.md why one is "
                     "left out. For a new endpoint or tab, test it once as every role that can open the "
                     "screen (admin and employee), not only admin.")
-        for line in (rmw, e2e, manual, siblings):
+        stop_trust = ("   - When you stop trusting a client-sent field on one route method, grep every route and "
+                      "method (POST, PUT, PATCH, submit) that reads that field or passes it to the same helper "
+                      "and apply the same fix, or cite in build.md why one is left out.")
+        for line in (rmw, e2e, manual, siblings, stop_trust):
             self.assertEqual(text.count(line), 1, line)
-        self.assertIn(b9 + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
+        self.assertIn(b9 + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
