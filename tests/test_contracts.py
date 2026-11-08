@@ -1832,9 +1832,9 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("(empty, zero, not allowed, malformed, or state left over from an earlier run, re-run, "
                        "rework or abort) and turn each into a criterion.",
-                       "this is the early warning. Flag `auth` or `secrets` only when the change edits that "
-                       "handling itself; reading, scanning or displaying config files that may hold secrets "
-                       "is not a hard stop."):
+                       "this is the early warning. Flag `money`, `auth` or `secrets` only when the change edits "
+                       "that handling itself; reading, scanning or displaying config files that may hold secrets, "
+                       "or restyling or swapping a component on a payment or auth screen, is not a hard stop."):
             self.assertEqual(text.count(phrase), 1, phrase)
         self.assertNotIn("malformed) and turn", text)
 
