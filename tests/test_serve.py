@@ -981,6 +981,57 @@ class ServeTest(unittest.TestCase):
         self.assertIn("queued_launch", self.stage_of(job_id))
         self.assertTrue(self.stage_of(job_id)["play_queued"])
 
+    # --- job 692: ram_hold names what holds a launch at the RAM gate after 1h ---
+    def held_job(self, title, hours):
+        job_id = self.gate_job(title)
+        queued = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+        self.edit_job(job_id, play_queued=queued)
+        return job_id
+
+    def ram_spawn(self, job_id, sessions=14, free=12.0, **kw):
+        b = self.serve.board
+        err = io.StringIO()
+        with mock.patch.object(b, "session_ages", return_value=[500] * sessions), \
+                mock.patch.object(b, "free_ram_pct", return_value=free), contextlib.redirect_stderr(err):
+            out = self.gate_spawn(job_id, **kw)
+        return out, err.getvalue()
+
+    def test_spawn_ram_hold_after_1h(self):
+        job_id = self.held_job("RAM hold", 2)
+        lines = []
+        for _ in range(2):
+            out, err = self.ram_spawn(job_id, ram=0)
+            self.assertIsNone(out)
+            lines += err.splitlines()
+        self.assertEqual(self.stage_of(job_id)["ram_hold"], "14 sessions running, 12% RAM free")
+        self.assertEqual(lines, [f"ram gate: repo/{job_id} held over 1h: 14 sessions running, 12% RAM free"])
+
+    def test_spawn_no_ram_hold_under_1h(self):
+        young = self.held_job("RAM hold young", 0.5)
+        self.assertEqual(self.ram_spawn(young, ram=0), (None, ""))
+        self.assertNotIn("ram_hold", self.stage_of(young))
+        cpu = self.held_job("CPU hold old", 2)
+        self.assertEqual(self.ram_spawn(cpu, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1), (None, ""))
+        self.assertNotIn("ram_hold", self.stage_of(cpu))
+
+    def test_spawn_ram_hold_cleared(self):
+        started = self.held_job("RAM hold then start", 2)
+        self.ram_spawn(started, ram=0)
+        self.assertIn("ram_hold", self.stage_of(started))
+        self.assertEqual(self.ram_spawn(started)[0], f"runs/{started}-approve.log")
+        self.assertNotIn("ram_hold", self.stage_of(started))
+        dropped = self.held_job("RAM hold then unqueue", 2)
+        self.ram_spawn(dropped, ram=0)
+        self.assertIn("ram_hold", self.stage_of(dropped))
+        self.serve.unqueue(self.root, self.stage_of(dropped))
+        self.assertNotIn("ram_hold", self.stage_of(dropped))
+
+    def test_spawn_ram_hold_unknown_ram(self):
+        job_id = self.held_job("RAM hold unknown", 2)
+        out, err = self.ram_spawn(job_id, sessions=3, free=None, ram=0)
+        self.assertIsNone(out)
+        self.assertEqual(self.stage_of(job_id)["ram_hold"], "3 sessions running, RAM unknown")
+
     def test_resume_refuses_lilguy_job(self):
         b = self.serve.board
         refusal = {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "

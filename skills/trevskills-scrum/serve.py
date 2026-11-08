@@ -171,16 +171,35 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
+RAM_HOLD_SECS = 3600  # a launch the RAM gate holds longer than this names the reading on the job (ram_hold)
+
+
+def ram_hold_text():
+    """What holds a launch at the RAM gate: "<n> sessions running, <x>% RAM free" (RAM unknown when unread)."""
+    free = board.free_ram_pct()
+    return f"{len(board.session_ages())} sessions running, " + ("RAM unknown" if free is None else f"{free:.0f}% RAM free")
+
+
+def held_over(queued_at, secs=RAM_HOLD_SECS):
+    """True when play_queued (an ISO time) is more than `secs` old; a missing or malformed time is False."""
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(queued_at)).total_seconds() > secs
+    except (TypeError, ValueError):
+        return False
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
     RAM) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
-    None. A start clears both fields, whichever path launched it."""
-    reason, on_board = None, False
+    None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
+    play_queued) writes ram_hold, the reading, and logs it to stderr the first time."""
+    reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
-            reason = board.find(board.read_board(root), job_id).get("reason")
+            job = board.find(board.read_board(root), job_id)
+            reason, queued_at = job.get("reason"), job.get("play_queued")
             on_board = True
         except (SystemExit, OSError, ValueError):
             pass
@@ -191,6 +210,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
                 note_queue_gate(root, job_id, "ram_room" if ram_short else "cpu_load")
+                if ram_short and held_over(queued_at):
+                    hold = ram_hold_text()
             else:
                 proc, log = board.spawn(root, job_id, action, prompt, flags)
         with board.locked_board(root) as b:  # the live job, re-read under the lock
@@ -200,10 +221,17 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 live.setdefault("queued_launch", {"action": action, "prompt": prompt, "stage": live.get("stage")})
                 if manual:  # Trevor's click: play_queue_tick re-runs it past the CPU gate, as he sent it
                     live["play_queued_manual"] = True
+                if live and hold and held_over(live.get("play_queued")):  # re-checked on the live job
+                    if "ram_hold" not in live:
+                        print(f"ram gate: {project}/{job_id} held over 1h: {hold}", file=sys.stderr)
+                    live["ram_hold"] = hold
+                else:  # a CPU hold, or a young one: no stale RAM reading
+                    live.pop("ram_hold", None)
             else:
                 live.pop("play_queued", None)
                 live.pop("play_queued_manual", None)
                 live.pop("queued_launch", None)
+                live.pop("ram_hold", None)
         if proc is None:
             return None
     else:
@@ -318,13 +346,14 @@ PLAY_QUEUED = "queued, starts next"
 
 
 def unqueue(root, job):
-    """Drop the job's play_queued flag (with its play_queued_manual marker) and queued_launch, when it has one."""
+    """Drop the job's play_queued flag (with its play_queued_manual marker and ram_hold) and queued_launch, when it has one."""
     if job.get("play_queued") or job.get("queued_launch"):
         with board.locked_board(root) as b:
             live = board.find(b, job["id"])
             live.pop("play_queued", None)
             live.pop("play_queued_manual", None)
             live.pop("queued_launch", None)
+            live.pop("ram_hold", None)
 
 
 def play_queue_tick(project, root, jobs) -> bool:

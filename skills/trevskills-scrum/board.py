@@ -746,6 +746,7 @@ def abort_job(root, job, requeue, reason):
     job.pop("play_queued", None)  # nor started by serve.py's Play queue
     job.pop("play_queued_manual", None)
     job.pop("queued_launch", None)
+    job.pop("ram_hold", None)
     if requeue:
         requeue_job(root, job, folder, feature)
     job["files"] = job_files(folder)  # after the spec move, so it never names a file that left the folder
@@ -4657,6 +4658,7 @@ def cmd_pause(root, job_id):
             j.pop("play_queued", None)  # a pause cancels a queued Play
             j.pop("play_queued_manual", None)
             j.pop("queued_launch", None)
+            j.pop("ram_hold", None)
             if j.get("autoPlayed"):
                 j["holdPause"] = True  # re-paused after an auto-play: deliberate, so the watchdog leaves it paused
         return [j["id"] for j in hit]
