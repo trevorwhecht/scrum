@@ -5608,7 +5608,7 @@ class ReviewPlanTest(unittest.TestCase):
             self.visual("VISUAL: same", n=2)
             out = board.cmd_review_plan(self.root, self.job, incremental=True)
             self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": since})
-            self.assertNotEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+            self.assertFalse((self.rdir(2) / "review-ux.md").exists())
 
     def test_review_plan_visual_same_keeps_changes_role(self):
         since = self.round_one(self.MIXED)
@@ -5619,7 +5619,7 @@ class ReviewPlanTest(unittest.TestCase):
         self.visual("VISUAL: same", n=2)
         out = board.cmd_review_plan(self.root, self.job, incremental=True)
         self.assertEqual(out, {"spawn": ["security", "ux", "code"], "since": since})
-        self.assertNotEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+        self.assertFalse((self.rdir(2) / "review-ux.md").exists())
         self.assertNotEqual(self.read(2, "ui"), self.VISUAL_SKIP)  # PASS role stays carried, not visual-skipped
 
     def test_review_plan_visual_same_but_ui_surface_yes_spawns(self):
