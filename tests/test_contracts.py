@@ -1034,7 +1034,9 @@ class ContractTest(unittest.TestCase):
     def test_check_gate_visual_diff(self):
         newjob, review = self.lane("newjob"), self.lane("review")
         step5 = next(l for l in newjob.splitlines() if l.startswith("5. If it says PASS"))
-        for phrase in ("unless the job's `lane` is `fast`", "`lanes/review.md`'s **Visual diff (Check gate)**",
+        self.assertNotIn("`fast`", step5)
+        self.assertNotIn("never in the fast lane", review)
+        for phrase in ("`lanes/review.md`'s **Visual diff (Check gate)**",
                        "a check reused by `B check-reuse` also reaches it", "then go to **Review**"):
             self.assertIn(phrase, step5, phrase)
         sec = review.split("\n## Visual diff (Check gate)\n")[1].split("\n## ")[0]
@@ -1575,6 +1577,10 @@ class ContractTest(unittest.TestCase):
         for phrase in ("scrum-review-ui", "scrum-review-e2e", "E2E:", "UI globs"):
             self.assertIn(phrase, fast, phrase)
         self.assertNotIn("UI globs", self.section(fast, "After `CHECK: PASS`", "2. **Review.**"))
+        for phrase in ("`round-$N/visual-diff.md`'s first line is exactly `VISUAL: same`", "`UI surface:` line is `no`",
+                       "Skipped by orchestrator: visual diff found every captured pair identical and the spec says no visual change.",
+                       "Any other first line or `UI surface: yes` spawns it"):
+            self.assertIn(phrase, fast, phrase)
         route = fast[fast.index("3. **Route:**"):]
         self.assertIn("both spawned reviewers passed", route)
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
