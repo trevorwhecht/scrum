@@ -58,7 +58,7 @@ If the job's `lane` is `fast`, see **Fast lane** instead of this section.
 
 ## Visual diff (Check gate)
 
-Runs from **Check gate** step 5 on `CHECK: PASS`, never in the fast lane, then goes to **Review**. A skip never makes `CHECK: FAIL`.
+Runs from **Check gate** step 5 on `CHECK: PASS`, then goes to **Review**. A skip never makes `CHECK: FAIL`.
 
 1. Run `rm -rf "$F/jobs/$ID/round-$N/visual" "$F/jobs/$ID/round-$N/visual-diff.md"` (state left from an earlier attempt). Go on only when all of these hold: a runtime file (the Check gate's runtime-file rule) matches `UI globs`; `project.md`'s `Dev command:` is present and not `none`; `B render-paths $ID` prints a non-empty `paths`. Otherwise write `round-$N/visual-diff.md` as `VISUAL: skipped — <which condition failed>` and go to **Review**.
 2. **Servers.** Start a HEAD server from `$WT`, and a BASE server from `git -C "$WT" worktree add --detach /tmp/scrum-base-$ID $BASE` after running PROJECT's `Install` there with `HOME`, `CLAUDE_HOME` and `CODEX_HOME` inside a fresh `$T` of its own. Both use **Review** step 2's **Shared dev server** start and Probe rules (`B dev-clear $ID`, a free port never 3001 or 8765, serve.py `$T` isolation; logs go to `round-$N/dev.log` and `round-$N/dev-base.log`), but write no `dev-url.txt`.
