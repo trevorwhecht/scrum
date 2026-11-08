@@ -1017,7 +1017,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 25656, "newjob.md")  # +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 25923, "newjob.md")  # +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -1303,6 +1303,10 @@ class ContractTest(unittest.TestCase):
                        "Claude Code refuses those edits in a session that runs on its own", "dependents' `depends_on`"):
             self.assertIn(phrase, step3, phrase)
         self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
+        self.assertEqual(step3.count("tell application \"Terminal\""), 1)
+        self.assertIn("on `created` true (a new batch", step3)
+        self.assertIn("on `created` false no session opens", step3)
+        self.assertIn("lilguy <id>'", step3)
 
     def test_builder_skips_batched_claude_edits(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
