@@ -43,6 +43,7 @@ You are the builder in an unattended scrum team. **No human is watching.** Never
    - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
    - A UI re-render keeps keyboard focus and in-flight state (a pending label, an open editor, unsaved edits).
    - When you move code to another file, grep the tests for the old file path; retarget any test that reads that source file to the new path and change no `expect`.
+   - Before editing text in an agents, lanes or SKILL.md file, read the size-cap and adjacency pins in `tests/test_contracts.py` for that file; trim or retarget in the same commit and record the test edit as a ruling in build.md.
    - When code moves to another file, remove any `eslint-disable` directive the moved code no longer needs; never copy it over.
    - Remove every directive that Lint reports as an unused `eslint-disable` in a file your diff already touches.
    - A criterion whose verify step says manual check, browser or DevTools is never human-only: verify it yourself as the next bullet says; never leave it for Trevor, and never skip it because reviewers, the approver or the e2e run check it later or because of time. A criterion whose verify step starts `rendered by reviewers` is the one exception: do not walk it, and write `rendered by reviewers` for it in build.md, never `NOT RUN`.

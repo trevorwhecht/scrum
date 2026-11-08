@@ -1417,7 +1417,10 @@ class ContractTest(unittest.TestCase):
         self.assertIn(step2 + "\n" + code_map + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n   - New markup", text)
         self.assertIn(bad_json + "\n" + b8 + "\n" + b9 + "\n", text)
         self.assertIn(must_fail + "\n" + b4 + "\n", text)
-        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n   - When code moves", text)
+        pins = ("   - Before editing text in an agents, lanes or SKILL.md file, read the size-cap and "
+                "adjacency pins in `tests/test_contracts.py` for that file; trim or retarget in the same "
+                "commit and record the test edit as a ruling in build.md.")
+        self.assertIn(handoff + "\n" + b5 + "\n" + b6 + "\n" + pins + "\n   - When code moves", text)
         self.assertIn("\n" + running_app, text)
 
     def test_builder_rules_digest_011_015_026(self):
