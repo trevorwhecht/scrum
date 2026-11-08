@@ -2103,13 +2103,15 @@ class BoardTest(unittest.TestCase):
         for job_id in (paused, aborted):
             board.cmd_set(self.root, job_id, ["stage=build"])
             with board.locked_board(self.root) as b:
-                board.find(b, job_id).update(play_queued="2026-11-04T16:19:36Z", queued_launch=launch)
+                board.find(b, job_id).update(play_queued="2026-11-04T16:19:36Z", queued_launch=launch,
+                                             ram_hold="14 sessions running, 12% RAM free")
         with mock.patch.object(board, "play"):
             board.cmd_pause(self.root, paused)
         board.cmd_abort(self.root, aborted, False)
         for job in self.jobs():
             self.assertNotIn("queued_launch", job, job["id"])
             self.assertNotIn("play_queued", job, job["id"])
+            self.assertNotIn("ram_hold", job, job["id"])
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ready_claims_only_up_to_ram_room(self):
