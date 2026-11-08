@@ -1032,6 +1032,79 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(out)
         self.assertEqual(self.stage_of(job_id)["ram_hold"], "3 sessions running, RAM unknown")
 
+    # --- job 697: play_queue_tick writes ram_hold on every queued job it stops before ---
+    def queued_launch_job(self, title, hours):
+        job_id = self.held_job(title, hours)
+        self.edit_job(job_id, queued_launch={"action": "approve", "prompt": "p", "stage": "needs-human"})
+        return job_id
+
+    def tick_ram(self, ids, spawn=None, take_room=True, **patches):
+        """play_queue_tick over the board's `ids` jobs with 14 sessions / 12% RAM free. Returns (result, stderr)."""
+        s, b = self.serve, self.serve.board
+        jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in ids]
+        err = io.StringIO()
+        with mock.patch.object(b, "session_ages", return_value=[500] * 14), mock.patch.object(b, "free_ram_pct", return_value=12.0), \
+                mock.patch.object(s, "running", return_value=False), mock.patch.object(s, "take_room", return_value=take_room), \
+                mock.patch.object(s, "spawn", return_value=spawn), contextlib.redirect_stderr(err):
+            for name, val in patches.items():
+                stack = mock.patch.object(s, name, **val)
+                stack.start()
+                self.addCleanup(stack.stop)
+            out = s.play_queue_tick("repo", self.root, jobs)
+        return out, err.getvalue()
+
+    def test_play_queue_tick_ram_hold_budget_spent(self):
+        job_id = self.queued_launch_job("Budget spent", 2)
+        self.assertEqual(self.tick_ram([job_id], take_room=False)[0], True)
+        self.assertEqual(self.stage_of(job_id)["ram_hold"], "14 sessions running, 12% RAM free")
+
+    def test_play_queue_tick_ram_hold_after_refused_spawn(self):
+        first = self.queued_launch_job("Refused first", 3)
+        later = self.queued_launch_job("Waits behind", 2)
+        self.assertTrue(self.tick_ram([first, later])[0])
+        self.assertNotIn("ram_hold", self.stage_of(first))  # spawn ruled on it
+        self.assertEqual(self.stage_of(later)["ram_hold"], "14 sessions running, 12% RAM free")
+
+    def test_play_queue_tick_ram_hold_machine_wait(self):
+        ids = []
+        for i in range(2):
+            ids.append(self.held_job(f"Machine wait {i}", 2 + i))
+            self.edit_job(ids[-1], stage="build", reason="stalled")
+        wait = {"return_value": self.serve.board.MACHINE_WAIT + "low RAM"}
+        out, _ = self.tick_ram(ids, resume_refusal=wait, resumable={"return_value": True})
+        self.assertFalse(out)
+        for job_id in ids:
+            self.assertEqual(self.stage_of(job_id)["ram_hold"], "14 sessions running, 12% RAM free")
+
+    def test_play_queue_tick_no_ram_hold_young(self):
+        young = self.queued_launch_job("Young", 0.5)
+        bad = self.queued_launch_job("Malformed", 2)
+        self.edit_job(bad, play_queued="not a time")
+        self.assertEqual(self.tick_ram([young, bad], take_room=False), (True, ""))
+        for job_id in (young, bad):
+            self.assertNotIn("ram_hold", self.stage_of(job_id))
+
+    def test_play_queue_tick_ram_hold_skips_unqueued(self):
+        gone = self.queued_launch_job("Unqueued meanwhile", 2)
+        kept = self.queued_launch_job("Still queued", 2)
+        jobs_ids = [gone, kept]
+        s = self.serve
+        snapshot = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in jobs_ids]
+        s.unqueue(self.root, self.stage_of(gone))  # removed after the snapshot
+        with mock.patch.object(s.board, "session_ages", return_value=[]), mock.patch.object(s.board, "free_ram_pct", return_value=50.0):
+            s.mark_ram_hold("repo", self.root, snapshot)
+        self.assertNotIn("ram_hold", self.stage_of(gone))
+        self.assertEqual(self.stage_of(kept)["ram_hold"], "0 sessions running, 50% RAM free")
+
+    def test_play_queue_tick_ram_hold_logs_once(self):
+        job_id = self.queued_launch_job("Log once", 2)
+        lines = []
+        for _ in range(2):
+            lines += self.tick_ram([job_id], take_room=False)[1].splitlines()
+        self.assertEqual(lines, [f"ram gate: repo/{job_id} held over 1h: 14 sessions running, 12% RAM free"])
+        self.serve.unqueue(self.root, self.stage_of(job_id))
+        self.assertNotIn("ram_hold", self.stage_of(job_id))
+
     def test_resume_refuses_lilguy_job(self):
         b = self.serve.board
         refusal = {"error": "lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main "
