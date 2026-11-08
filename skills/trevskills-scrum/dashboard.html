@@ -1040,9 +1040,12 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
 // waitingOn(job) helper above; its titles run parallel to ids. A Play the machine guard queued names the reading it waits
 // on, without serve.py's "waiting: " prefix; its fixed label sits outside noPaths, which would cut "CPU/". Any other
 // queued job (paused, or in its own stage) reads as queued, never "Paused by you" or a doubled "Waiting: waiting:".
+// A launch spawn's RAM gate held over 1h names its reading (serve.py ram_hold), next to the Start now button.
 // An answered or reworked needs-human job whose session runs reads as that run, not as a question; a Discuss session keeps the question.
 const answering = job => job.stage === "needs-human" && !!runs[job.key]?.alive && runs[job.key].action !== "discuss";
-const statusLine = job => !job.waitingOn && !job.paused && playQueued(job) && job.resumeRefusal
+const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !["done", "aborted"].includes(job.stage)
+  ? `Waiting for RAM: ${job.ram_hold}`
+  : !job.waitingOn && !job.paused && playQueued(job) && job.resumeRefusal
   ? `Waiting for CPU/RAM: ${noPaths(String(job.resumeRefusal).replace(/^waiting: /, "").split(" Fix: ")[0])}`
   : !job.waitingOn && job.play_queued && !playQueued(job) && !["done", "aborted"].includes(job.stage)
   ? String(job.resumeRefusal || "").startsWith("waiting: ") ? "Queued: starts when CPU/RAM frees up" : "Queued, starts next"

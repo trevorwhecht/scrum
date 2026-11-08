@@ -173,6 +173,17 @@ class PlayQueued(unittest.TestCase):
                                 "Queued: starts when CPU/RAM frees up"],
                                "Queued: starts when CPU/RAM frees up", "Paused by you"])
 
+    def test_status_line_ram_hold(self):
+        """Job 692: a launch the RAM gate held over 1h names the reading (serve.py ram_hold); without it, unchanged."""
+        hold = "14 sessions running, 12% RAM free"
+        build = {"key": "p/212-r", "project": "p", "id": "212-r", "title": "R", "stage": "build",
+                 "play_queued": "2026-10-25T10:00:00Z", "updatedAt": "2026-10-25T10:00:00Z"}
+        got = run(f"""const b = {json.dumps(build)}, q = {json.dumps(QUEUED)}, h = {json.dumps(hold)};
+            out([{{...b, ram_hold: h}}, b, {{...q, ram_hold: h}}, q, {{...b, stage: "done", ram_hold: h}}].map(statusLine));""")
+        self.assertEqual(got, [["Waiting for RAM: 14 sessions running, 12% RAM free", "Queued, starts next",
+                                "Waiting for RAM: 14 sessions running, 12% RAM free",
+                                "Waiting for CPU/RAM: swap used 28.1% of RAM (> 25%).", "Done"]])
+
     def test_missing_job_file_tab_hidden(self):
         job = {**STUCK, "files": ["feature.md", "plan.md"]}
         notfound = 'fetchImpl = async url => url.endsWith("feature.md") ? {ok: false, status: 404, text: async () => "nope"} : {ok: true, status: 200, text: async () => "# plan"};'
