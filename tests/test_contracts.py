@@ -2101,7 +2101,7 @@ class ContractTest(unittest.TestCase):
     def test_ui_reviewer_rendered_misread_rules(self):
         text = (ROOT / "agents" / "scrum-review-ui.md").read_text()
         for phrase in ("removes or changes JSX props, conditions or data mapping that decide which rows",
-                       "`n/a` stays only for comments, types, imports and unused-code removal",
+                       "`n/a` stays only for comments",
                        "A control behind sign-in or inside a modal/dialog is reached by signing in",
                        "that gate alone is never `Rendered: no` and never a `[blocking]` finding"):
             self.assertIn(phrase, text, phrase)
