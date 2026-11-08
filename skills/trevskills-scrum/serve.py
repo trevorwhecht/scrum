@@ -1602,6 +1602,35 @@ def claude_migrate(project, root):
             spawn(project, root, moved["id"], "resume", f"/trevskills-scrum resume {moved['id']}")
 
 
+def terminal_batch_tick(project, root, jobs):
+    """Open each parked Terminal batch's `/trevskills-scrum lilguy <id>` window once, as clicking its option a does;
+    Trevor still approves every .claude/ edit in that window. Claim-then-open: terminal_opened is set under the board
+    lock after a re-check of the live job, so two ticks never open two windows; a failed open clears it for a retry."""
+    def openable(j):
+        opt = next((o for o in j.get("options") or [] if isinstance(o, dict) and o.get("key") == "a"), None)
+        return (j.get("title") == board.TERMINAL_BATCH_TITLE and j.get("stage") == "needs-human"
+                and not j.get("terminal_opened") and opt and opt.get("command") == f"lilguy {j['id']}"
+                and not running(project, j["id"]))
+    for job in [j for j in jobs if openable(j)]:
+        with board.locked_board(root) as b:
+            live = next((j for j in b["jobs"] if j["id"] == job["id"]), None)
+            if not live or not openable(live):
+                continue
+            live["terminal_opened"] = board.now()
+            live = dict(live)
+        try:
+            code, _ = answer_job(project, root, live, jobs, "a")
+        except (Exception, SystemExit) as e:
+            code = None
+            print(f"watchdog: {project}: terminal batch {live['id']}: {e}", file=sys.stderr, flush=True)
+        if code != 200:
+            with board.locked_board(root) as b:
+                if (j := next((j for j in b["jobs"] if j["id"] == live["id"]), None)):
+                    j.pop("terminal_opened", None)
+        else:
+            print(f"watchdog: {project}: opened Terminal batch {live['id']}", file=sys.stderr, flush=True)
+
+
 def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
@@ -1609,6 +1638,7 @@ def watchdog_tick():
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project. Then resume
        BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick), and start a due full E2E run on
        the main checkout (e2e_full_tick).
+       Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick).
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
@@ -1649,6 +1679,10 @@ def watchdog_tick():
                 resumed = main_ff_tick(project, repo, root, jobs) or resumed
                 busy[project] = resumed or busy[project]
                 pending = pending or resumed
+                try:  # its own guard: a batch-window failure must not skip auto-play candidates or e2e
+                    terminal_batch_tick(project, root, jobs)
+                except (Exception, SystemExit) as e:
+                    print(f"watchdog: {project}: terminal batch: {e}", file=sys.stderr, flush=True)
                 candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
                                and j["stage"] not in ("done", "aborted") and not running(project, j["id"])
                                and not j.get("holdPause") and not by_id.get(j.get("parent"), {}).get("paused")]

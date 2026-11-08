@@ -1507,6 +1507,66 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["question"], [o["command"] for o in job["options"]]),
                          ("needs-human", "Which way?", ["lilguy 77", "abort 77 --cascade"]))
 
+    def batch_job(self, **fields):
+        """A parked Terminal batch job, as board.claude_batch parks it; aborted after the test so no later tick opens it.
+        Returns its id."""
+        job_id = self.asked("x", "y")
+        self.edit_job(job_id, **{"title": "Terminal batch: project .claude edits",
+                                 "options": [{"key": "a", "label": "Run it in a Terminal window", "command": f"lilguy {job_id}"},
+                                             {"key": "b", "label": "Remove this job", "command": f"abort {job_id} --cascade"}],
+                                 **fields})
+        self.addCleanup(self.edit_job, job_id, stage="aborted")
+        return job_id
+
+    def batch_tick(self, *ids):
+        """One terminal_batch_tick over these jobs only (the shared board holds other tests' jobs)."""
+        jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in ids]
+        return self.serve.terminal_batch_tick("repo", self.root, jobs)
+
+    def test_terminal_batch_tick_opens_window(self):
+        job_id = self.batch_job()
+        seen = []
+
+        def run(cmd, **kw):  # the window command: records whether terminal_opened was already claimed on the board
+            seen.append((cmd[-1], "terminal_opened" in self.stage_of(job_id)))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=run) as sub:
+            self.batch_tick(job_id)
+            self.assertEqual(seen, [(f"/trevskills-scrum lilguy {job_id}", True)])
+            self.assertEqual(sub.call_args.args[0][:2], ["osascript", "-e"])
+            self.assertTrue(self.stage_of(job_id).get("terminal_opened"))
+            self.batch_tick(job_id)
+        self.assertEqual(len(seen), 1, "a second tick opens no second window")
+        self.assertEqual(self.stage_of(job_id)["stage"], "needs-human")
+
+    def test_terminal_batch_tick_retries_after_failed_open(self):
+        job_id = self.batch_job()
+        with mock.patch.object(self.serve, "run_terminal", return_value=(500, {"error": "couldn't open the terminal"})) as rt:
+            self.batch_tick(job_id)
+        self.assertEqual(rt.call_count, 1)
+        self.assertNotIn("terminal_opened", self.stage_of(job_id))
+        with mock.patch.object(self.serve, "answer_job", side_effect=SystemExit("job has no open question")):
+            self.batch_tick(job_id)  # does not raise
+        self.assertNotIn("terminal_opened", self.stage_of(job_id))
+        with mock.patch.object(self.serve, "run_terminal", return_value=(200, {"message": "Opened"})) as rt:
+            self.batch_tick(job_id)
+        self.assertEqual(rt.call_count, 1, "the next tick retries")
+        self.assertTrue(self.stage_of(job_id).get("terminal_opened"))
+
+    def test_terminal_batch_tick_skips_other_jobs(self):
+        other = self.batch_job(title="Something else")
+        built = self.batch_job(stage="build")
+        live = self.batch_job()
+        opened = self.batch_job(terminal_opened="2026-11-01T00:00:00")
+        wrong = self.batch_job()
+        self.edit_job(wrong, options=[{"key": "a", "label": "Run it", "command": "lilguy 999-other"}])
+        with mock.patch.object(self.serve, "run_terminal") as rt, \
+                mock.patch.object(self.serve, "running", side_effect=lambda p, j: j == live):
+            self.batch_tick(other, built, live, opened, wrong)
+        rt.assert_not_called()
+        for j in (other, built, live, wrong):
+            self.assertNotIn("terminal_opened", self.stage_of(j))
+
     def test_answer_resume_refusal(self):
         lil = self.asked("resume 1", lane="lilguy")
         code, out, m = self.answer(lil, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
