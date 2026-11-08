@@ -3463,6 +3463,18 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
+def note_queue_gate(root, job_id, gate):
+    """Add `gate` to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column (serve.py's note_queue_gate
+    writes ram_room and cpu_load the same way). A write error never blocks the queue."""
+    path = Path(root) / "jobs" / job_id / "queue-gates.txt"
+    try:
+        if gate not in (path.read_text(encoding="utf-8").split() if path.exists() else []):
+            with path.open("a", encoding="utf-8") as f:
+                f.write(gate + "\n")
+    except OSError:
+        pass
+
+
 def cmd_ready(root, parent_id, live=(), manual=False):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). Cool-down holds every claim (Run-all and
@@ -3513,10 +3525,17 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         for k in kids if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
-            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") \
-                    or any(stage.get(dep) != "done" for dep in k.get("depends_on") or []):
+            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake"):
                 continue
-            if slot_conflict(k, slots, files):
+            undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
+            if undone:
+                for dep in undone:
+                    note_queue_gate(root, k["id"], f"depends_on:{dep}")
+                continue
+            hit = slot_conflict(k, slots, files)
+            if hit:
+                for g in ["runs_alone"] if hit[0] == "this job runs alone" else [f"overlap:{i}" for i in hit[1]]:
+                    note_queue_gate(root, k["id"], g)
                 continue
             if first:  # a claim is due, but held like a machine wait (never needs-human) until those are dealt with
                 machine = f"{first} paused job needs Play or Abort first" if first == 1 \

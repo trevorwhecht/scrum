@@ -914,6 +914,23 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_cmd_ready_notes_queue_gates(self):
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
+            if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
+        parent, (c1, c2, c3) = self.three()
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/a.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # no duplicate line on the second call
+        self.assertEqual(gates(c1), [])  # claimed: no gate
+        self.assertEqual(gates(c2), [f"overlap:{c1}"])
+        self.assertEqual(gates(c3), [f"depends_on:{c1}", f"depends_on:{c2}"])
+        parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(d1, "src/x.py")
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(gates(d2), ["runs_alone"])
+
     def test_ready_waiting_children_use_plan_paths(self):
         # Job 673: a waiting child has no spec.md; its plan's Parallel: paths stand in as its Likely files.
         plan = lambda: self.plan(self.ticket(1, parallel="yes — touches only `src/app/(pages)/`"),
