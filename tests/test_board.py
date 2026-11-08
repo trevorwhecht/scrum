@@ -5607,8 +5607,20 @@ class ReviewPlanTest(unittest.TestCase):
             self.commit("src/a.py", "a = 3\n")
             self.visual("VISUAL: same", n=2)
             out = board.cmd_review_plan(self.root, self.job, incremental=True)
-            self.assertEqual(out, {"spawn": ["security", "ui", "code"], "since": since})
-            self.assertEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+            self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": since})
+            self.assertNotEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+
+    def test_review_plan_visual_same_keeps_changes_role(self):
+        since = self.round_one(self.MIXED)
+        (self.rdir(1) / "decision.md").write_text("REWORK\n## Rulings\n- fix-now render-only: code must fix\n")
+        (self.rdir(1) / "review-ui.md").write_text("VERDICT: PASS\nstuff\n")
+        (self.rdir(1) / "review-ux.md").write_text("VERDICT: CHANGES\nstuff\n")
+        self.commit("src/a.py", "a = 3\n")
+        self.visual("VISUAL: same", n=2)
+        out = board.cmd_review_plan(self.root, self.job, incremental=True)
+        self.assertEqual(out, {"spawn": ["security", "ux", "code"], "since": since})
+        self.assertNotEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+        self.assertNotEqual(self.read(2, "ui"), self.VISUAL_SKIP)  # PASS role stays carried, not visual-skipped
 
     def test_review_plan_visual_same_but_ui_surface_yes_spawns(self):
         self.commit("web/page.html", "<p>x</p>\n")

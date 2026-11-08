@@ -2240,7 +2240,7 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
         for r in REVIEWERS:
             if r not in spawn:
                 (rd / f"review-{r}.md").write_text(CARRIED.format(n - 1), encoding="utf-8")
-        spawn = _apply_visual_skip(root, job_id, rd, spawn, keep=rework)
+        spawn = _apply_visual_skip(root, job_id, rd, spawn, keep=rework | {r for r in REVIEWERS if verdicts[r] == "CHANGES"})
         _drop_stale(rd, spawn)
         return {"spawn": spawn, "since": since}
     spawn = list(REVIEWERS)
