@@ -1030,6 +1030,82 @@ class ContractTest(unittest.TestCase):
         for phrase in ("Steps 0-7 only", "never Step 8", "needs migration: <spec>", "not a **Cloud lane** session"):
             self.assertIn(phrase, sec)
 
+    # --- job 681: Check gate visual diff ---
+    def test_check_gate_visual_diff(self):
+        newjob, review = self.lane("newjob"), self.lane("review")
+        step5 = next(l for l in newjob.splitlines() if l.startswith("5. If it says PASS"))
+        for phrase in ("unless the job's `lane` is `fast`", "`lanes/review.md`'s **Visual diff (Check gate)**",
+                       "a check reused by `B check-reuse` also reaches it", "then go to **Review**"):
+            self.assertIn(phrase, step5, phrase)
+        sec = review.split("\n## Visual diff (Check gate)\n")[1].split("\n## ")[0]
+        for phrase in ('rm -rf "$F/jobs/$ID/round-$N/visual" "$F/jobs/$ID/round-$N/visual-diff.md"',
+                       "a runtime file (the Check gate's runtime-file rule) matches `UI globs`",
+                       "`Dev command:` is present and not `none`", "`B render-paths $ID` prints a non-empty `paths`",
+                       "`VISUAL: skipped — <which condition failed>`",
+                       'git -C "$WT" worktree add --detach /tmp/scrum-base-$ID $BASE', "**Shared dev server** start and Probe",
+                       "`B dev-clear $ID`", "never 3001 or 8765", "write no `dev-url.txt`",
+                       'node "$HOME/.claude/skills/trevskills-scrum/visual-diff.mjs" --base <base-url> --head <head-url> '
+                       '--out "$F/jobs/$ID/round-$N/visual" --project-dir "$WT" <paths>',
+                       "Bash timeout 300000", '--storage-state "$WT/<path>"', "- Render auth: <repo-relative path>",
+                       "--mask '<selectors>'", "- Visual mask: <selectors>", "On every outcome",
+                       'worktree remove --force /tmp/scrum-base-$ID', "A non-zero exit, a failed probe or a missing "
+                       "`visual-diff.md`", "A skip never makes `CHECK: FAIL`",
+                       "When `B render-paths $ID` printed a non-empty `skipped`",
+                       "rewrite a `VISUAL: same` first line as `VISUAL: unscored — uncaptured routes: <skipped>`"):
+            self.assertIn(phrase, sec, phrase)
+
+    def test_review_visual_diff_gating(self):
+        review = self.lane("review")
+        shared = next(l for l in review.splitlines() if "**Shared dev server (once per round" in l)
+        self.assertIn("not both `round-$N/visual-diff.md` starts `VISUAL: changed` and the spec's `Complex:` line is "
+                      "not `yes`", shared)
+        step3 = next(l for l in review.splitlines() if l.startswith("3. Spawn **in ONE message**"))
+        self.assertIn("starts `VISUAL: changed` or `VISUAL: unscored`, the `scrum-review-ui` and `scrum-review-ux` "
+                      "spawns, and any step 4 re-spawn of them, also get `VISUAL_DIFF=$F/jobs/$ID/round-$N/visual-diff.md`; "
+                      "no other reviewer gets it", step3)
+
+    def test_review_ui_ux_read_visual_diff(self):
+        for name in ("review-ui", "review-ux"):
+            text = (ROOT / "agents" / f"scrum-{name}.md").read_text()
+            self.assertLess(text.index("\n**Visual diff.**"), text.index("\n**Signing in.**"), name)
+            para = next(l for l in text.splitlines() if l.startswith("**Visual diff.**"))
+            for phrase in ("`VISUAL_DIFF=<file>`", "Read only the crops it lists",
+                           "as the HEAD-vs-BASE render of those pages at those widths",
+                           "only for an `unscored`, `over cap` or `crop truncated` pair, a changed screen not listed, or step 3's "
+                           "click-through when the spec says `Complex: yes`",
+                           "A crop counts as **Compare with the base.** for its page",
+                           "`Rendered: yes — <element> visible; …` line names the crops"):
+                self.assertIn(phrase, para, f"{name}: {phrase}")
+
+    def test_builder_no_screenshot_harness(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        line = next(l for l in text.splitlines() if "A criterion that needs the running app" in l)
+        for phrase in ("a throwaway script in `/tmp` that clicks and reads the page, with one screenshot per width",
+                       "Never write a screenshot-capture or pixel-diff harness (no BASE-vs-HEAD capture script, no image "
+                       "diff): the Check gate's Visual diff does that."):
+            self.assertIn(phrase, line, phrase)
+        self.assertEqual(text.count("pixel-diff harness"), 1)
+
+    def test_render_only_rework_skips_builder(self):
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        rule = next(l for l in approver.splitlines() if l.startswith("**UI must be rendered.**"))
+        for phrase in ("(Rulings: `fix-now render-only` — the UX and UI reviewers must render",
+                       "`Skipped by orchestrator: visual diff found every captured pair identical` file counts like a "
+                       "checked `Rendered: n/a` line"):
+            self.assertIn(phrase, rule, phrase)
+        changed = next(l for l in approver.splitlines() if l.startswith("A changed screen or state that no latest-round"))
+        for phrase in ("REWORK with a `fix-now render-only` ruling", "Write `fix-now render-only` instead of `fix-now`",
+                       "without resuming the builder"):
+            self.assertIn(phrase, changed, phrase)
+        review = self.lane("review")
+        rework = next(l for l in review.splitlines() if l.startswith("   - `REWORK` (first time)"))
+        for phrase in ("grep -i 'fix-now' decision.md | grep -vic 'render-only'` prints `0` and at least one `fix-now` "
+                       "line exists, do not resume the builder", "`B check-reuse` reuses the PASS at the unchanged HEAD",
+                       "the Visual diff re-runs", "`review-plan` re-spawns the named roles",
+                       "Any other REWORK: resume the builder"):
+            self.assertIn(phrase, rework, phrase)
+        self.assertLess(rework.index("limit=$((N+1)) stage=build"), rework.index("**Render-only:**"))
+
     def test_review_agents_base_render_before_additive(self):
         agents = {n: (ROOT / "agents" / f"scrum-{n}.md").read_text() for n in ("review-ui", "review-ux")}
         phrase = "is never called additive"

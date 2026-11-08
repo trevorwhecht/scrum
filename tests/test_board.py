@@ -5564,6 +5564,60 @@ class ReviewPlanTest(unittest.TestCase):
             self.assertEqual(out["spawn"], ["security", "code"])
             self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
 
+    # --- job 681: Check gate visual diff ---
+    VISUAL_SKIP = ("VERDICT: PASS\nSkipped by orchestrator: visual diff found every captured pair identical and the "
+                   "spec says no visual change.\n")
+
+    def visual(self, first_line, ui_surface="no", complex_="no", n=1):
+        (self.root / "jobs" / self.job / "spec.md").write_text(
+            f"# Spec\nUI surface: {ui_surface}\nHard stops: none\nComplex: {complex_}\n")
+        self.rdir(n).mkdir(parents=True, exist_ok=True)
+        if first_line is not None:
+            (self.rdir(n) / "visual-diff.md").write_text(f"{first_line}\n- / 390: same\n")
+
+    def test_review_plan_visual_same_skips_ui_ux(self):
+        self.commit("web/page.html", "<p>x</p>\n")
+        self.visual("VISUAL: same")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out, {"spawn": ["code"], "since": None})
+        self.assertEqual(self.read(1, "ui"), self.VISUAL_SKIP)
+        self.assertEqual(self.read(1, "ux"), self.VISUAL_SKIP)
+        with self.subTest("incremental keeps a rework role"):
+            since = self.round_one(self.MIXED)
+            (self.rdir(1) / "decision.md").write_text("REWORK\n## Rulings\n- fix-now render-only: ui must render\n")
+            (self.rdir(1) / "review-ui.md").write_text("VERDICT: PASS\nstuff\n")
+            (self.rdir(1) / "review-ux.md").write_text("VERDICT: CHANGES\nstuff\n")
+            self.commit("src/a.py", "a = 3\n")
+            self.visual("VISUAL: same", n=2)
+            out = board.cmd_review_plan(self.root, self.job, incremental=True)
+            self.assertEqual(out, {"spawn": ["security", "ui", "code"], "since": since})
+            self.assertEqual(self.read(2, "ux"), self.VISUAL_SKIP)
+
+    def test_review_plan_visual_same_but_ui_surface_yes_spawns(self):
+        self.commit("web/page.html", "<p>x</p>\n")
+        for ui, cx in (("yes", "no"), ("no", "yes")):
+            with self.subTest(ui_surface=ui, complex=cx):
+                self.visual("VISUAL: same", ui_surface=ui, complex_=cx)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+                self.assertFalse((self.rdir(1) / "review-ui.md").exists())
+
+    def test_review_plan_visual_changed_spawns(self):
+        self.commit("web/page.html", "<p>x</p>\n")
+        for line in ("VISUAL: changed", "VISUAL: unscored", "VISUAL: skipped — odiff-bin not installed",
+                     "VISUAL: same — but more"):
+            with self.subTest(line=line):
+                self.visual(line)
+                out = board.cmd_review_plan(self.root, self.job)
+                self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+
+    def test_review_plan_visual_missing_spawns(self):
+        self.commit("web/page.html", "<p>x</p>\n")
+        self.visual(None)
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["ux", "ui", "code"])
+        self.assertEqual(self.files(1), ["review-security.md"])
+
     # --- AC 3 ---
     def test_review_plan_ui_skip_when_no_ui_files(self):
         self.commit("src/a.py", "a = 2\n")
