@@ -34,7 +34,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - **Confirm every Codex finding before keeping it.** Open the cited lines, check the trigger scenario is real, and drop anything you can't confirm.
 - Codex never reads spec.md: a Codex finding about a case the spec's `Out:` excludes, about a behaviour an acceptance criterion or `## Assumptions` line chooses, or that an open `scrum/backlog.md` item already covers, goes under Notes or `## Out of scope`, never `[blocking]`.
 - A spec line that only picks a mechanism or heuristic ("reuse the existing running() check", "one resume per tick") does not accept that mechanism's confirmed gap: map such a Codex finding by its severity below, unless the spec names that gap as accepted.
-- Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes.
+- Map each surviving finding into your output, tagged `(codex)`: P0/P1 with confidence ≥ 0.8 → `[blocking]`; P2/P3 → `[minor]` or Notes, except a confirmed P2 whose trigger writes wrong stored data or shows a wrong total or count (a re-run that double-counts, rows for the same item not summed) → `[blocking]`.
 - Run Codex in every round, round 2 and later included.
 - Before you write `review-code.md`, wait for the background Codex command to exit or reach its 10-minute timeout. Finishing your own review first is never a skip reason, and "still running" is never a skip reason either.
 - If Codex errors, refuses, runs out of quota, times out, or writes no `codex-review.md`, write `codex: skipped — <reason>` under Notes.
