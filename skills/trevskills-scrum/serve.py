@@ -1417,6 +1417,68 @@ def prune_worktrees(repo: Path, jobs: list[dict], project: str | None = None, al
                 shutil.rmtree(wt / name, ignore_errors=True)
 
 
+def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
+    """Free disk on a machine_ok free-disk refusal: `git worktree remove --force` the worktree of every done or aborted
+    job that resolves strictly inside repo/.claude/worktrees/ and exists as a folder, then `git worktree prune` once.
+    Never a symlinked folder, a path outside that base (a lilguy job's main checkout) or a path a job not done or
+    aborted also names. A failed remove (a locked worktree) is skipped. Branches stay. Returns the folders removed."""
+    base = (repo / ".claude" / "worktrees").resolve()
+    final = ("done", "aborted")
+    keep = {Path(j["worktree"]).resolve() for j in jobs if j.get("worktree") and j.get("stage") not in final}
+    removed = 0
+    for job in jobs:
+        if job.get("stage") not in final or not job.get("worktree"):
+            continue
+        wt = Path(job["worktree"]).resolve()
+        if Path(job["worktree"]).is_symlink() or wt in keep or base not in wt.parents or not wt.is_dir():
+            continue
+        if not git_run(repo, "worktree", "remove", "--force", "--", str(wt)).returncode:
+            removed += 1
+    git_run(repo, "worktree", "prune")
+    return removed
+
+
+ACTIONS_ALERT_EVERY = 600  # seconds between one repo's actions_alert gh checks (run by the watchdog only)
+ACTIONS_ALERT: dict[str, tuple[float, str | None]] = {}  # str(repo) -> (checked at, alert or None)
+
+
+def gh_json(repo: Path, *args):
+    """`gh <args>` run in repo, its stdout parsed as JSON; None when gh is missing, exits non-zero, runs past 20 s or
+    prints no JSON."""
+    try:
+        r = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def actions_alert(repo: Path) -> str | None:
+    """One line starting with repo's folder name when GitHub Actions is failing it, else None (also when gh fails).
+    (a) The newest completed run failed and every job gh run view lists has 0 steps: GitHub refused to start it
+    (billing or spending limit). (b) Per workflow, the newest completed `schedule` run failed, started up wrong or
+    timed out. gh run list is newest first, so a later success (or a later run that started steps) clears each."""
+    runs = gh_json(repo, "run", "list", "--limit", "20", "--json", "databaseId,workflowName,event,conclusion,status,createdAt")
+    if not isinstance(runs, list):
+        return None
+    done = [r for r in runs if isinstance(r, dict) and r.get("status") == "completed"]
+    parts = []
+    rid = done[0].get("databaseId") if done else None
+    if done and done[0].get("conclusion") == "failure" and isinstance(rid, int) and rid > 0:  # never a "-" argv value
+        view = gh_json(repo, "run", "view", str(rid), "--json", "jobs")
+        jobs = view.get("jobs") if isinstance(view, dict) else None
+        if isinstance(jobs, list) and jobs and all(isinstance(j, dict) and not j.get("steps") for j in jobs):
+            parts.append("GitHub Actions refused to start runs because account payments failed or the spending limit "
+                         "was reached. Fix it under Billing & plans on GitHub.")
+    newest: dict[str, str] = {}
+    for r in done:
+        if r.get("event") == "schedule":
+            newest.setdefault(str(r.get("workflowName")), r.get("conclusion"))
+    failed = [f'"{w}"' for w, c in newest.items() if c in ("failure", "startup_failure", "timed_out")]
+    if failed:
+        parts.append(f"Last scheduled run failed: {', '.join(failed)}.")
+    return f"{Path(repo).name}: {' '.join(parts)}" if parts else None
+
+
 KEEP_PORTS = board.KEEP_PORTS
 DOCKER_IDLE_WAIT = 600  # seconds every Docker project stays idle before Docker Desktop is quit
 DOCKER_IDLE_SINCE: float | None = None  # first tick on which every Docker project was idle; a restart resets it
@@ -1664,7 +1726,8 @@ def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
-       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project. Then resume
+       from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project (a free-disk
+       refusal first runs reclaim_disk on that project and checks again). Then resume
        BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick), and start a due full E2E run on
        the main checkout (e2e_full_tick).
        Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick).
@@ -1672,7 +1735,7 @@ def watchdog_tick():
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
-       tick.
+       tick, and actions_alert refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
@@ -1683,7 +1746,7 @@ def watchdog_tick():
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
-    pending = False
+    pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
     try:
         for project, repo in board.projects().items():
@@ -1701,7 +1764,13 @@ def watchdog_tick():
                 by_id = {j["id"]: j for j in jobs}
                 busy[project] = board_busy(project, root, jobs, by_id, alive)
                 seen.append((project, repo, root, jobs, flagged))
-                if RESUME_ROOM and board.machine_ok(root):
+                # disk_short: a free-disk refusal keeps checking later projects, so each reclaims its own worktrees
+                refused = board.machine_ok(root) if RESUME_ROOM or disk_short else None
+                if refused and refused.startswith("free disk"):
+                    reclaim_disk(repo, jobs)
+                    refused = board.machine_ok(root)
+                    disk_short = bool(refused and refused.startswith("free disk"))
+                if refused:
                     RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
                 resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
                 resumed = auto_resume(project, root, jobs) or resumed
@@ -1742,6 +1811,12 @@ def watchdog_tick():
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
             prune_worktrees(repo, jobs, project, alive)
+            try:  # its own guard: a gh failure must not skip the next project
+                hit = ACTIONS_ALERT.get(str(repo))
+                if not hit or time.time() - hit[0] >= ACTIONS_ALERT_EVERY:
+                    ACTIONS_ALERT[str(repo)] = (time.time(), actions_alert(repo))
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: actions alert: {e}", file=sys.stderr, flush=True)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     try:
@@ -2938,7 +3013,8 @@ def board_with_activity(root, project):
     waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
     `nextRetryAt` (epoch seconds, or None). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
-    cannot go live, or None) and `e2eFull` (the full-E2E record's at, head, result, failed, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
+    None) and `e2eFull` (the full-E2E record's at, head, result, failed, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -2969,6 +3045,7 @@ def board_with_activity(root, project):
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
+    data["actionsAlert"] = (ACTIONS_ALERT.get(str(root.parent)) or (0, None))[1]  # the watchdog's cache; never gh here
     rec = e2e_full_record(root)  # the dashboard's "E2E main" header line
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
     return data

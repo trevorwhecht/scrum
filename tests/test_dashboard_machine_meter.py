@@ -77,8 +77,10 @@ class MachineMeter(unittest.TestCase):
                   "const cpu = el.innerHTML;\n"
                   "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, cpu_load_pct: 144.6, verdict: null});\n"
                   "const cpuNear = el.innerHTML;\n"
+                  "renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 8.1, verdict: 'free disk 8.1 GB (< 10 GB)'});\n"
+                  "const disk = el.innerHTML;\n"
                   "renderMachine(null);\n"
-                  "console.log(JSON.stringify({levels, ok, bad, gone: [el.hidden, el.innerHTML], use, order, rings, sessions, swap, stale, cpu, cpuNear}));")
+                  "console.log(JSON.stringify({levels, ok, bad, gone: [el.hidden, el.innerHTML], use, order, rings, sessions, swap, stale, cpu, cpuNear, disk}));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok",
                                          "danger", "low", "low", "ok", "ok", "none"])
@@ -109,6 +111,11 @@ class MachineMeter(unittest.TestCase):
                          "the red CPU ring already shows the CPU verdict")
         self.assertEqual(out["cpuNear"], ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU load 145% of 8 cores · busy — · limit 150%" '
                          'title="CPU load 145% of 8 cores · busy — · limit 150%">1x</span> CPU · <span class="ok">disk 100 GB</span>')
+
+        self.assertEqual(out["disk"], ring40 + ' · ' + CPU_NONE + ' · <span class="danger">disk 8 GB, launches wait for 10 GB free</span>',
+                         "a red disk reading says launches wait on it and names the limit")
+        meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
+        self.assertIn("launches wait for 10 GB free", meter, "the hint names the disk segment's wait text")
 
     def test_machine_meter_server_slow(self):
         text = DASHBOARD.read_text()

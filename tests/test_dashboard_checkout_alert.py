@@ -26,6 +26,20 @@ class CheckoutAlert(unittest.TestCase):
     def test_all_null_hidden(self):
         self.assertEqual(render([{"jobs": [], "checkoutAlert": None}, {"jobs": []}]), {"innerHTML": "", "hidden": True})
 
+    def test_actions_alert_alone(self):
+        el = render([{"jobs": [], "checkoutAlert": None, "actionsAlert": 'onewitharts: Last scheduled run failed: "<Backup>".'}])
+        self.assertEqual(el, {"innerHTML": "onewitharts: Last scheduled run failed: &quot;&lt;Backup&gt;&quot;.", "hidden": False})
+
+    def test_checkout_and_actions_alert_two_lines(self):
+        el = render([{"jobs": [], "checkoutAlert": "9-x merged, not live: fast-forward failed.",
+                      "actionsAlert": "onewitharts: GitHub Actions refused to start runs."}])
+        self.assertEqual(el, {"innerHTML": "9-x merged, not live: fast-forward failed.<br>"
+                                           "onewitharts: GitHub Actions refused to start runs.", "hidden": False})
+
+    def test_all_null_with_actions_alert_hidden(self):
+        self.assertEqual(render([{"jobs": [], "checkoutAlert": None, "actionsAlert": None}, None]),
+                         {"innerHTML": "", "hidden": True})
+
     def test_element_sits_between_header_and_board(self):
         self.assertIn('</header>\n<p class="error" id="checkoutAlert" role="alert" hidden></p>\n'
                       '<select id="colPick" aria-label="Show stage"></select>\n<main id="board">',
