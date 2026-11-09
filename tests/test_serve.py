@@ -9052,6 +9052,246 @@ class CheckoutAlertTest(unittest.TestCase):
             self.assertEqual(g.call_count, 4)
 
 
+class ActionsAlertTest(unittest.TestCase):
+    """Job 725: actions_alert reads gh run list (and gh run view for a failed newest run) and says when GitHub refused
+    to start runs or a scheduled workflow's newest run failed; the watchdog caches it, board_with_activity only reads it."""
+
+    REFUSED = ("onewitharts: GitHub Actions refused to start runs because account payments failed or the spending limit "
+               "was reached. Fix it under Billing & plans on GitHub.")
+    BACKUP = 'Last scheduled run failed: "Backup production database".'
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.ACTIONS_ALERT.clear()
+        self.addCleanup(serve.ACTIONS_ALERT.clear)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "onewitharts"
+        (self.repo / "scrum").mkdir(parents=True)
+
+    @staticmethod
+    def run_(rid, wf, event, conclusion, status="completed"):
+        return {"databaseId": rid, "workflowName": wf, "event": event, "conclusion": conclusion, "status": status,
+                "createdAt": f"2026-11-09T0{rid}:00:00Z"}
+
+    def alert(self, runs, steps=None):
+        """actions_alert with gh mocked: runs is gh run list's list (newest first), steps maps a run id to its jobs'
+        step counts for gh run view. Returns (alert, the argv of every gh call)."""
+        calls = []
+
+        def fake(argv, **kw):
+            calls.append((argv, kw))
+            if argv[:3] == ["gh", "run", "list"]:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(runs), "")
+            jobs = [{"name": f"j{i}", "steps": [{"name": "s"}] * n} for i, n in enumerate(steps[int(argv[3])])]
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"jobs": jobs}), "")
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=fake):
+            out = self.serve.actions_alert(self.repo)
+        for _, kw in calls:
+            self.assertEqual(kw["cwd"], self.repo)
+            self.assertEqual(kw["timeout"], 20)
+        return out, [argv for argv, _ in calls]
+
+    def test_refused_run_alerts(self):
+        out, calls = self.alert([self.run_(3, "CI", "pull_request", None, "in_progress"),
+                                 self.run_(2, "CI", "pull_request", "failure"), self.run_(1, "CI", "push", "success")],
+                                {2: [0, 0]})
+        self.assertEqual(out, self.REFUSED)
+        self.assertEqual(calls, [["gh", "run", "list", "--limit", "20", "--json",
+                                  "databaseId,workflowName,event,conclusion,status,createdAt"],
+                                 ["gh", "run", "view", "2", "--json", "jobs"]])
+
+    def test_failure_with_steps_is_not_refusal(self):
+        out, _ = self.alert([self.run_(2, "CI", "pull_request", "failure")], {2: [0, 3]})
+        self.assertIsNone(out)
+        out, _ = self.alert([self.run_(2, "CI", "pull_request", "failure")], {2: []})
+        self.assertIsNone(out, "a run with no jobs listed is not a refusal")
+
+    def test_scheduled_failure_alerts(self):
+        out, calls = self.alert([self.run_(4, "CI", "push", "success"),
+                                 self.run_(3, "Backup production database", "schedule", "failure"),
+                                 self.run_(2, "Nightly", "schedule", "timed_out"),
+                                 self.run_(1, "Backup production database", "schedule", "success")])
+        self.assertEqual(out, 'onewitharts: Last scheduled run failed: "Backup production database", "Nightly".')
+        self.assertEqual(len(calls), 1, "no gh run view when the newest completed run did not fail")
+        out, _ = self.alert([self.run_(1, "Weekly", "schedule", "startup_failure")])
+        self.assertEqual(out, 'onewitharts: Last scheduled run failed: "Weekly".')
+
+    def test_both_in_one_string(self):
+        out, _ = self.alert([self.run_(2, "Backup production database", "schedule", "failure")], {2: [0]})
+        self.assertEqual(out, self.REFUSED + " " + self.BACKUP)
+
+    def test_later_success_clears(self):
+        out, _ = self.alert([self.run_(3, "Backup production database", "schedule", "success"),
+                             self.run_(2, "Backup production database", "schedule", "failure")], {2: [0]})
+        self.assertIsNone(out, "a later scheduled success clears both the refusal and the scheduled failure")
+        out, _ = self.alert([self.run_(4, "CI", "pull_request", "failure"), self.run_(3, "CI", "pull_request", "failure")],
+                            {4: [2], 3: [0]})
+        self.assertIsNone(out, "a later run that started steps clears an older refusal")
+
+    def test_all_green_no_alert(self):
+        out, calls = self.alert([self.run_(2, "CI", "push", "success"),
+                                 self.run_(1, "Backup production database", "schedule", "success")])
+        self.assertIsNone(out)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(self.alert([])[0])
+
+    def test_gh_failure_no_alert(self):
+        bad = [FileNotFoundError("gh"), subprocess.TimeoutExpired(["gh"], 20),
+               subprocess.CompletedProcess(["gh"], 1, "", "no git remotes found"),
+               subprocess.CompletedProcess(["gh"], 0, "not json", ""),
+               subprocess.CompletedProcess(["gh"], 0, '{"runs": []}', "")]
+        for b in bad:
+            with self.subTest(b=b), mock.patch.object(self.serve.subprocess, "run", side_effect=[b]):
+                self.assertIsNone(self.serve.actions_alert(self.repo))
+        runs = json.dumps([self.run_(2, "CI", "pull_request", "failure")])
+        for b in bad:
+            with self.subTest(view=b), mock.patch.object(self.serve.subprocess, "run",
+                                                         side_effect=[subprocess.CompletedProcess(["gh"], 0, runs, ""), b]):
+                self.assertIsNone(self.serve.actions_alert(self.repo), "a failed gh run view gives no refusal")
+
+    def tick(self):
+        (self.repo / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+        with mock.patch.object(self.serve.board, "projects", return_value={"p725": self.repo}), \
+                mock.patch.object(self.serve, "spawn"), \
+                mock.patch.object(self.serve.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}):
+            self.serve.watchdog_tick()
+
+    def test_watchdog_throttles(self):
+        with mock.patch.object(self.serve, "actions_alert", return_value="onewitharts: x") as gh:
+            self.tick()
+            self.tick()
+            self.assertEqual(gh.call_count, 1, "two ticks within 10 minutes run gh once")
+            self.assertEqual(gh.call_args.args, (self.repo,))
+            self.assertEqual(self.serve.ACTIONS_ALERT[str(self.repo)][1], "onewitharts: x")
+            self.serve.ACTIONS_ALERT[str(self.repo)] = (time.time() - 601, "onewitharts: x")
+            gh.return_value = None
+            self.tick()
+            self.assertEqual(gh.call_count, 2, "an entry older than 600 s is refreshed")
+            self.assertIsNone(self.serve.ACTIONS_ALERT[str(self.repo)][1])
+        with mock.patch.object(self.serve, "actions_alert", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve, "prune_worktrees") as prune:
+            self.serve.ACTIONS_ALERT.clear()
+            with mock.patch("sys.stderr", new=io.StringIO()):
+                self.tick()
+            self.assertEqual(prune.call_count, 1, "an actions_alert failure stays in its own guard")
+
+    def test_board_reads_cache_only(self):
+        root = self.repo / "scrum"
+        (root / "board.json").write_text(json.dumps({"jobs": []}))
+        with mock.patch.object(self.serve, "actions_alert") as gh:
+            self.assertIsNone(self.serve.board_with_activity(root, "p725")["actionsAlert"])
+            self.serve.ACTIONS_ALERT[str(self.repo)] = (time.time(), "onewitharts: cached")
+            self.assertEqual(self.serve.board_with_activity(root, "p725")["actionsAlert"], "onewitharts: cached")
+            gh.assert_not_called()
+
+
+class ReclaimDiskTest(unittest.TestCase):
+    """Job 725: on a free-disk refusal the watchdog removes done/aborted jobs' worktrees under .claude/worktrees/, prunes,
+    and re-checks the machine."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        self.git(self.tmp, "init", "-q", "-b", "main", str(self.repo))
+        self.git(self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first")
+        self.base = self.repo / ".claude" / "worktrees"
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+
+    def wt(self, name, inside=True):
+        path = (self.base if inside else self.tmp) / name
+        self.git(self.repo, "worktree", "add", "-q", "-b", f"b-{name}", str(path))
+        return path
+
+    def listed(self):
+        return self.git(self.repo, "worktree", "list", "--porcelain").stdout
+
+    def test_removes_only_done_and_aborted_inside_base(self):
+        done, aborted, live, shared, outside, target = (self.wt("done"), self.wt("aborted"), self.wt("live"),
+                                                        self.wt("shared"), self.wt("outside", inside=False), self.wt("target"))
+        link = self.base / "link"
+        link.symlink_to(target)
+        jobs = [{"id": "1", "stage": "done", "worktree": str(done)},
+                {"id": "2", "stage": "aborted", "worktree": str(aborted)},
+                {"id": "3", "stage": "running", "worktree": str(live)},
+                {"id": "4", "stage": "done", "worktree": str(shared)},
+                {"id": "5", "stage": "needs-human", "worktree": str(shared)},
+                {"id": "6", "stage": "done", "worktree": str(outside)},
+                {"id": "7", "stage": "done", "worktree": str(self.repo)},
+                {"id": "8", "stage": "done", "worktree": str(link)},
+                {"id": "9", "stage": "done"}]
+        self.assertEqual(self.serve.reclaim_disk(self.repo, jobs), 2)
+        self.assertFalse(done.exists())
+        self.assertFalse(aborted.exists())
+        for kept in (live, shared, outside, target, link, self.repo):
+            self.assertTrue(kept.is_dir(), kept)
+        self.assertNotIn(str(done), self.listed())
+        self.assertIn(str(live), self.listed())
+        self.assertIn("refs/heads/b-done", self.git(self.repo, "branch", "--list", "--format=refs/heads/%(refname:short)").stdout,
+                      "the branch stays")
+
+    def test_rerun_is_noop(self):
+        done = self.wt("done")
+        jobs = [{"id": "1", "stage": "done", "worktree": str(done)}]
+        self.assertEqual(self.serve.reclaim_disk(self.repo, jobs), 1)
+        self.assertEqual(self.serve.reclaim_disk(self.repo, jobs), 0)
+
+    def test_remove_failure_skipped(self):
+        locked, other = self.wt("locked"), self.wt("other")
+        self.git(self.repo, "worktree", "lock", str(locked))
+        jobs = [{"id": "1", "stage": "done", "worktree": str(locked)}, {"id": "2", "stage": "aborted", "worktree": str(other)}]
+        self.assertEqual(self.serve.reclaim_disk(self.repo, jobs), 1)
+        self.assertTrue(locked.is_dir())
+        self.assertFalse(other.exists())
+
+    def tick(self, verdicts):
+        """One watchdog tick on self.repo with board.machine_ok answering verdicts in turn (then None) for the
+        watchdog's own check; returns (reclaim_disk mock, RESUME_ROOM as auto_resume saw it, the gate's calls)."""
+        root = self.repo / "scrum"
+        root.mkdir(exist_ok=True)
+        jobs = [{"id": "1", "stage": "done", "worktree": str(self.base / "x")}]
+        (root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        gate, seen = [], []
+        answers = list(verdicts)
+
+        def machine_ok(path, **kw):
+            if kw:
+                return None
+            gate.append(path)
+            return answers.pop(0) if answers else None
+        with mock.patch.object(self.serve.board, "projects", return_value={"p725": self.repo}), \
+                mock.patch.object(self.serve.board, "ram_room", return_value=3), \
+                mock.patch.object(self.serve.board, "machine_ok", side_effect=machine_ok), \
+                mock.patch.object(self.serve, "actions_alert", return_value=None), \
+                mock.patch.object(self.serve, "spawn"), \
+                mock.patch.object(self.serve, "auto_resume", side_effect=lambda *a: seen.append(self.serve.RESUME_ROOM)), \
+                mock.patch.object(self.serve.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}), \
+                mock.patch.object(self.serve, "reclaim_disk", return_value=1) as reclaim:
+            self.serve.watchdog_tick()
+        return reclaim, seen[0], gate, jobs
+
+    def test_watchdog_reclaims_on_disk_refusal_only(self):
+        reclaim, room, gate, jobs = self.tick(["free disk 8.1 GB (< 10 GB)", None])
+        self.assertEqual([c.args for c in reclaim.call_args_list], [(self.repo, jobs)])
+        self.assertEqual(len(gate), 2, "machine_ok re-checked after reclaiming")
+        self.assertEqual(room, 3, "the new verdict passed, so the resume budget stays")
+        reclaim, room, gate, _ = self.tick(["free disk 8.1 GB (< 10 GB)", "free disk 9.0 GB (< 10 GB)"])
+        self.assertEqual(reclaim.call_count, 1)
+        self.assertEqual(room, 0, "still short of disk: nothing resumes")
+        reclaim, room, gate, _ = self.tick(["free RAM 14% (< 20%)"])
+        reclaim.assert_not_called()
+        self.assertEqual((room, len(gate)), (0, 1))
+        reclaim, room, _, _ = self.tick([])
+        reclaim.assert_not_called()
+        self.assertEqual(room, 3)
+
+
 class WeeklyTest(unittest.TestCase):
     """weekly_tick and weekly_ask, on the DigestTest fake home: "reg" (home of the weekly run) and "other" registered."""
     get, post, backups, rule = AiSettingsTest.get, AiSettingsTest.post, AiSettingsTest.backups, DigestTest.rule
