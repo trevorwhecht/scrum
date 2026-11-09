@@ -1457,9 +1457,11 @@ def actions_alert(repo: Path) -> str | None:
     (a) The newest completed run failed and every job gh run view lists has 0 steps: GitHub refused to start it
     (billing or spending limit). (b) Per workflow, the newest completed `schedule` run failed, started up wrong or
     timed out. gh run list is newest first, so a later success (or a later run that started steps) clears each."""
-    runs = gh_json(repo, "run", "list", "--limit", "20", "--json", "databaseId,workflowName,event,conclusion,status,createdAt")
+    cols = "databaseId,workflowName,event,conclusion,status,createdAt"
+    runs = gh_json(repo, "run", "list", "--limit", "20", "--json", cols)
     if not isinstance(runs, list):
         return None
+    sched = gh_json(repo, "run", "list", "--event", "schedule", "--limit", "20", "--json", cols)
     done = [r for r in runs if isinstance(r, dict) and r.get("status") == "completed"]
     parts = []
     rid = done[0].get("databaseId") if done else None
@@ -1470,8 +1472,8 @@ def actions_alert(repo: Path) -> str | None:
             parts.append("GitHub Actions refused to start runs because account payments failed or the spending limit "
                          "was reached. Fix it under Billing & plans on GitHub.")
     newest: dict[str, str] = {}
-    for r in done:
-        if r.get("event") == "schedule":
+    for r in sched if isinstance(sched, list) else []:
+        if isinstance(r, dict) and r.get("status") == "completed" and r.get("event") == "schedule":
             newest.setdefault(str(r.get("workflowName")), r.get("conclusion"))
     failed = [f'"{w}"' for w, c in newest.items() if c in ("failure", "startup_failure", "timed_out")]
     if failed:
@@ -3740,9 +3742,16 @@ def fence(text: str) -> str:
     return f"{tick}\n{text}\n{tick}"
 
 
-def digest_item_spec(digest_id: str, prop: dict, rel: str, edits: Sequence[tuple[dict, str]] = ()) -> str:
+def digest_item_spec(digest_id: str, prop: dict, rel: str, edits: Sequence[tuple[dict, str]] = (),
+                     *, repo: Path | None = None) -> str:
     """The pre-written spec.md for a queued proposal: self-contained (no local path), so a cloud session can build it.
-    edits: (edit proposal, repo-relative path) pairs folded into a skill's spec (skill branch only)."""
+    edits: (edit proposal, repo-relative path) pairs folded into a skill's spec (skill branch only).
+    repo: when given and it has tests/test_contracts.py, an agents/skills/lanes target also lists that test file."""
+    pins = bool(repo and (Path(repo) / "tests" / "test_contracts.py").is_file()
+                and any(Path(x).parts[:1] in (("agents",), ("skills",), ("lanes",)) for x in [rel, *(e for _, e in edits)]))
+    more_files = "- `tests/test_contracts.py`\n" if pins else ""
+    more_assume = ("- `tests/test_contracts.py` pins the old text of these files; change those pins in the same commit.\n"
+                   if pins else "")
     why = prop["why"].strip()
     if prop["kind"] == "skill":
         scope = "".join(f"- `{erel}`: swap the old text under `### {e['id']} {erel}` for its new text, once.\n" for e, erel in edits)
@@ -3758,16 +3767,16 @@ def digest_item_spec(digest_id: str, prop: dict, rel: str, edits: Sequence[tuple
                 f"New content:\n{fence(prop['new'])}\n\n{pairs}## Acceptance criteria\n"
                 f"1. create `{rel}` with exactly the new content (the fenced block above, byte for byte); "
                 f"if `{rel}` already exists, the job is obsolete: change nothing and say so in build.md. "
-                f"(verify: compare the file to the fenced block)\n{crit}\n## Likely files\n- `{rel}`\n{files}\n## Assumptions\n"
-                f"- The content is the digest proposal; do not reword it.\n")
+                f"(verify: compare the file to the fenced block)\n{crit}\n## Likely files\n- `{rel}`\n{files}{more_files}\n## Assumptions\n"
+                f"- The content is the digest proposal; do not reword it.\n{more_assume}")
     return (f"# Apply digest {digest_id} {prop['id']} to {rel}\nUI surface: no\nHard stops: none\nLane: fast\n\n"
             f"## Problem\nDigest {digest_id} proposal {prop['id']} changes `{rel}`. Why:\n\n{why}\n\n"
             f"## Scope\nIn:\n- `{rel}`: swap the old text below for the new text, once.\n\nOut:\n- Any other change.\n\n"
             f"Old text:\n{fence(prop['old'])}\n\nNew text:\n{fence(prop['new'])}\n\n## Acceptance criteria\n"
             f"1. replace the one occurrence of the old text in `{rel}` with the new text (the fenced blocks above, byte for byte); "
             f"if the old text does not occur exactly once, the job is obsolete: change nothing and say so in build.md. "
-            f"(verify: diff `{rel}`)\n\n## Likely files\n- `{rel}`\n\n## Assumptions\n"
-            f"- The old and new text are the digest proposal; do not reword them.\n")
+            f"(verify: diff `{rel}`)\n\n## Likely files\n- `{rel}`\n{more_files}\n## Assumptions\n"
+            f"- The old and new text are the digest proposal; do not reword them.\n{more_assume}")
 
 
 def queue_digest_item(scrum, text, spec):
@@ -3791,7 +3800,7 @@ def digest_queue_skill(root: Path, digest_id: str, prop: dict, edits: Sequence[d
         text = (f"Create digest {digest_id} {prop['id']} skill at {rel} and apply "
                 + ", ".join(f"digest {digest_id} {e['id']}" for e, _ in pairs)
                 + f" to {', '.join(erel for _, erel in pairs)}: {prop['why']}")
-    queue_digest_item(repo_of(prop["target"])[0] / "scrum", text, digest_item_spec(digest_id, prop, rel, pairs))
+    queue_digest_item(repo_of(prop["target"])[0] / "scrum", text, digest_item_spec(digest_id, prop, rel, pairs, repo=repo_of(prop["target"])[0]))
     return None
 
 
@@ -3800,7 +3809,7 @@ def digest_queue_repo_edit(digest_id: str, prop: dict, where: tuple[Path, str] |
     where: its (repo, rel) as resolved before digest_apply, whose fast-forward may have re-pointed the target."""
     repo, rel = where or repo_of(prop["target"])
     queue_digest_item(repo / "scrum", f"Apply digest {digest_id} {prop['id']} to {rel}: {prop['why']}",
-                      digest_item_spec(digest_id, prop, rel))
+                      digest_item_spec(digest_id, prop, rel, repo=repo))
 
 
 def digest_write_global(prop: dict) -> str | None:
@@ -4221,7 +4230,7 @@ def weekly_ask(digest_id: str) -> dict:
         d = scrum / "jobs" / job_id
         (d / "feature.md").write_text(f"# {title}\n\n{p['why'].strip()}\n\nFrom weekly digest {digest_id}.\n", encoding="utf-8")
         if where:
-            (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel), encoding="utf-8")
+            (d / "spec.md").write_text(digest_item_spec(f"weekly-{digest_id}", p, rel, repo=repo), encoding="utf-8")
             board.cmd_ask(scrum, job_id, f"Weekly digest {digest_id} {p['id']} proposes an edit to {rel} in {project}: {why}. "
                           "Build it runs it as a normal job, Skip it drops it.", [f"Build it=resume {job_id}", f"Skip it=abort {job_id}"],
                           title="DIGEST")

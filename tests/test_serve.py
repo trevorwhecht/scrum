@@ -6290,6 +6290,35 @@ class DigestTest(unittest.TestCase):
         self.assertIn("### p2 agents/a.md\nWhy: Seen in 001-a and 002-b (p2).\n\nOld text:\n```\no\n```\n\nNew text:\n```\nn\n```", spec)
         self.assertIn("obsolete: skip it", spec)
 
+    def test_digest_item_spec_lists_contract_tests(self):
+        R = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, R, True)
+        bare = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, bare, True)
+        (R / "tests").mkdir()
+        (R / "tests" / "test_contracts.py").write_text("")
+        line = "- `tests/test_contracts.py`\n"
+        pins = "pins the old text of these files; change those pins in the same commit"
+        for rel in ("agents/a.md", "skills/s/SKILL.md", "lanes/l.md"):
+            with self.subTest(rel=rel):
+                spec = self.serve.digest_item_spec("001", self.prop("p1", "/r/" + rel, old="o", new="n", kind="edit"), rel, repo=R)
+                self.assertEqual(spec.count(line), 1)
+                self.assertIn(f"## Likely files\n- `{rel}`\n{line}", spec)
+                self.assertIn(pins, spec.split("## Assumptions")[1])
+        plain = self.serve.digest_item_spec("001", self.prop("p1", "/r/serve.py", old="o", new="n", kind="edit"), "serve.py")
+        self.assertNotIn("test_contracts", plain)
+        for repo, rel in ((R, "serve.py"), (bare, "agents/a.md"), (None, "agents/a.md")):
+            with self.subTest(repo=repo, rel=rel):
+                self.assertNotIn("test_contracts", self.serve.digest_item_spec(
+                    "001", self.prop("p1", "/r/" + rel, old="o", new="n", kind="edit"), rel, repo=repo))
+        sk = self.skill("p1", "/r/skills/foo/SKILL.md")
+        edit = self.prop("p2", "/r/agents/a.md", old="o", new="n")
+        spec = self.serve.digest_item_spec("001", sk, "skills/foo/SKILL.md", [(edit, "agents/a.md")], repo=R)
+        self.assertEqual(spec.count(line), 1)
+        self.assertEqual(spec.count(pins), 1)
+        spec = self.serve.digest_item_spec("001", sk, "other/foo/SKILL.md", [(edit, "agents/a.md")], repo=R)
+        self.assertEqual(spec.count(line), 1, "a paired edit under agents/ alone triggers it")
+
     def test_digest_auto_skips_paired_edit_it_cannot_queue(self):
         self.git_repo(files=("agents/scrum-builder.md",))
         self.contract_tests()
@@ -9075,7 +9104,7 @@ class ActionsAlertTest(unittest.TestCase):
         return {"databaseId": rid, "workflowName": wf, "event": event, "conclusion": conclusion, "status": status,
                 "createdAt": f"2026-11-09T0{rid}:00:00Z"}
 
-    def alert(self, runs, steps=None):
+    def alert(self, runs, steps=None, sched=None):
         """actions_alert with gh mocked: runs is gh run list's list (newest first), steps maps a run id to its jobs'
         step counts for gh run view. Returns (alert, the argv of every gh call)."""
         calls = []
@@ -9083,7 +9112,7 @@ class ActionsAlertTest(unittest.TestCase):
         def fake(argv, **kw):
             calls.append((argv, kw))
             if argv[:3] == ["gh", "run", "list"]:
-                return subprocess.CompletedProcess(argv, 0, json.dumps(runs), "")
+                return subprocess.CompletedProcess(argv, 0, json.dumps(runs if "--event" not in argv or sched is None else sched), "")
             jobs = [{"name": f"j{i}", "steps": [{"name": "s"}] * n} for i, n in enumerate(steps[int(argv[3])])]
             return subprocess.CompletedProcess(argv, 0, json.dumps({"jobs": jobs}), "")
         with mock.patch.object(self.serve.subprocess, "run", side_effect=fake):
@@ -9098,8 +9127,9 @@ class ActionsAlertTest(unittest.TestCase):
                                  self.run_(2, "CI", "pull_request", "failure"), self.run_(1, "CI", "push", "success")],
                                 {2: [0, 0]})
         self.assertEqual(out, self.REFUSED)
-        self.assertEqual(calls, [["gh", "run", "list", "--limit", "20", "--json",
-                                  "databaseId,workflowName,event,conclusion,status,createdAt"],
+        cols = "databaseId,workflowName,event,conclusion,status,createdAt"
+        self.assertEqual(calls, [["gh", "run", "list", "--limit", "20", "--json", cols],
+                                 ["gh", "run", "list", "--event", "schedule", "--limit", "20", "--json", cols],
                                  ["gh", "run", "view", "2", "--json", "jobs"]])
 
     def test_failure_with_steps_is_not_refusal(self):
@@ -9114,7 +9144,7 @@ class ActionsAlertTest(unittest.TestCase):
                                  self.run_(2, "Nightly", "schedule", "timed_out"),
                                  self.run_(1, "Backup production database", "schedule", "success")])
         self.assertEqual(out, 'onewitharts: Last scheduled run failed: "Backup production database", "Nightly".')
-        self.assertEqual(len(calls), 1, "no gh run view when the newest completed run did not fail")
+        self.assertEqual(len(calls), 2, "no gh run view when the newest completed run did not fail")
         out, _ = self.alert([self.run_(1, "Weekly", "schedule", "startup_failure")])
         self.assertEqual(out, 'onewitharts: Last scheduled run failed: "Weekly".')
 
@@ -9134,8 +9164,26 @@ class ActionsAlertTest(unittest.TestCase):
         out, calls = self.alert([self.run_(2, "CI", "push", "success"),
                                  self.run_(1, "Backup production database", "schedule", "success")])
         self.assertIsNone(out)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertIsNone(self.alert([])[0])
+
+    def test_schedule_failure_missing_from_unfiltered_list(self):
+        push = [self.run_(9, "CI", "push", "success")]
+        fail = self.run_(3, "Backup production database", "schedule", "failure")
+        out, _ = self.alert(push, sched=[fail])
+        self.assertEqual(out, "onewitharts: " + self.BACKUP)
+        out, _ = self.alert(push, sched=[self.run_(4, "Backup production database", "schedule", "success"), fail])
+        self.assertIsNone(out, "a later scheduled success in the schedule list clears it")
+
+    def test_schedule_query_failure_keeps_refusal(self):
+        runs = json.dumps([self.run_(2, "CI", "pull_request", "failure")])
+        view = json.dumps({"jobs": [{"name": "j", "steps": []}]})
+        ok = lambda out: subprocess.CompletedProcess(["gh"], 0, out, "")
+        bad = subprocess.CompletedProcess(["gh"], 1, "", "boom")
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=[ok(runs), bad, ok(view)]):
+            self.assertEqual(self.serve.actions_alert(self.repo), self.REFUSED)
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=[bad, ok(runs)]):
+            self.assertIsNone(self.serve.actions_alert(self.repo))
 
     def test_gh_failure_no_alert(self):
         bad = [FileNotFoundError("gh"), subprocess.TimeoutExpired(["gh"], 20),
@@ -9148,7 +9196,8 @@ class ActionsAlertTest(unittest.TestCase):
         runs = json.dumps([self.run_(2, "CI", "pull_request", "failure")])
         for b in bad:
             with self.subTest(view=b), mock.patch.object(self.serve.subprocess, "run",
-                                                         side_effect=[subprocess.CompletedProcess(["gh"], 0, runs, ""), b]):
+                                                         side_effect=[subprocess.CompletedProcess(["gh"], 0, runs, ""),
+                                                                      subprocess.CompletedProcess(["gh"], 0, runs, ""), b]):
                 self.assertIsNone(self.serve.actions_alert(self.repo), "a failed gh run view gives no refusal")
 
     def tick(self):
