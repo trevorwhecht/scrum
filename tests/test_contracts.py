@@ -1452,7 +1452,11 @@ class ContractTest(unittest.TestCase):
                       "and apply the same fix, or cite in build.md why one is left out.")
         for line in (rmw, e2e, manual, siblings, stop_trust):
             self.assertEqual(text.count(line), 1, line)
-        self.assertIn(b9 + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
+        agree = ("   - When one value feeds two places that must agree (a header and its body, the pricing "
+                 "engine input and the stored copy), compute it once, pass both the same normalised value, "
+                 "and add a test that asserts the two match.")
+        self.assertEqual(text.count(agree), 1)
+        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
