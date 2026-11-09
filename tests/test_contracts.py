@@ -740,7 +740,7 @@ class ContractTest(unittest.TestCase):
         rule = [l for l in text.splitlines()
                 if l.startswith("- Acceptance criteria are numbered, observable and testable.")]
         self.assertEqual(len(rule), 1)
-        for phrase in ("rendered by reviewers", "UI globs", "not `fast`"):
+        for phrase in ("rendered by reviewers", "UI globs", "on any lane"):
             self.assertIn(phrase, rule[0], phrase)
 
     def test_review_code_has_security_checklist(self):
