@@ -544,8 +544,8 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 409, {"error": f"unknown option command: {picked.get('command')}"}
     verb, arg = parsed
     if verb == "lilguy":  # Trevor approves each .claude/ edit in the window; a failed launch leaves the question open
-        return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
-                                             f"/trevskills-scrum lilguy {job_id}"), "Opened in a new Terminal window.")])
+        return run_terminal([(osa_job_window(root.parent, job_id, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
+                                             f"/trevskills-scrum lilguy {job_id}"), "Opened in a Terminal window.")])
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
     if verb == "approve":
@@ -3113,8 +3113,18 @@ def osa_new_window(cwd, *words):
     return ["osascript", "-e", NEW_WINDOW_SCRIPT, str(cwd), *words]
 
 
+JOB_WINDOW = Path(__file__).with_name("job-window.applescript")
+
+
+def osa_job_window(cwd, job_id, *words):
+    """Focus the Terminal tab titled `scrum <job_id>`, or run the words in it or a new window (job-window.applescript)."""
+    return ["osascript", str(JOB_WINDOW), str(cwd), job_id, *words]
+
+
 def run_terminal(tries):
     """Try each (cmd, message) in turn; a tab script that finds no tab ("missing") falls through to the next."""
+    if "unittest" in sys.modules:  # a test that reaches here would open a real Terminal window
+        raise RuntimeError("run_terminal refused under unittest; mock it")
     for cmd, message in tries:
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
