@@ -22,6 +22,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `spec.md`'s `## Assumptions` and `## Likely files` sections
 - `DIGEST_DIR/pipeline-fit.json`, read once per digest: the orchestrator wrote it with `board.py pipeline-fit`. One entry per job: `id`, `lane`, `agents`, `added`, `deleted`, `files`, `verdicts` (per round, per reviewer), `fix_rounds`, `over_routed`, `fit`.
 - `DIGEST_DIR/windows.json`, read once per digest: `board.py digest-start` wrote it. A JSON list of usage-window scorecards, one per closed window, with `window`, `resets_at`, `headline`, `points_done`, `wasted_pct`, `lane_fit.over_routed_pct`, `cache_hit_rate`, `first_pass_rate`, `escapes` and `budget` (`used_pct`, `hit_90_at`, `left_at_reset_pct`, `cap_idle_secs`).
+- `DIGEST_DIR/health.json`, read once per digest: `board.py process-health` wrote it. `metrics` maps each of 10 fixed metric names to `value`, `previous`, `limit`, `jobs` (job ids, or window names for the window metrics) and `flag` (`worse`, `over twice` or null); `test_waste_jobs` also has `minutes`.
 - `DIGEST_DIR/timing.md`, read once per digest: `board.py digest-start` wrote it. One table row per claimed job (`Job`, `Wall`, `Spec`, `Queue`, `Queue gate` (the launch gates that queued it: `ram_room`, `cpu_load`, or `-`), `Rounds`, `Round times`, `No-change rounds`, `E2E lock waits`, `Stalls`), a `## Totals` line, and `## Waiting on the E2E queue`: jobs on any registered board stalled on the E2E lock right now, with how long.
 - `DIGEST_DIR/pulse.md`, read once per digest: `board.py digest-start` wrote it from the serve.py watchdog's one-line-a-minute pulse log since the last digest: idle minutes with claimable work, peak sessions, peak CPU load, claims during cool down, claims while CPU load over 500%, and non-focus minutes. It says `No pulse lines` when the log had none.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
@@ -66,6 +67,8 @@ In every `questions.log`, count only lines dated within 7 days of the newest `da
     ## Time sinks
     - <count> × <one-line cause, e.g. E2E lock waits, no-change rounds, long wall time> — <total time lost> — jobs: <id>, <id>, ...
       Source: timing.md; example: "<the timing.md row or line it comes from>"
+    ## Process health
+    - <metric>: <value> (previous <previous>, limit <limit>) — jobs: <ids> — <flag>
     ## Pulse
     Idle with claimable work: <m> min (longest <m> min) · peak sessions: <n> · peak CPU load: <pct>% · claims during cool down: <n> (<projects and job numbers>) · claims while CPU load over 500%: <n> · non-focus: <m> min (focus: <name>)
 
@@ -116,6 +119,8 @@ For `## Pipeline fit`, use `DIGEST_DIR/pipeline-fit.json`:
 For `## Usage windows`, use `DIGEST_DIR/windows.json`: one line per scorecard, in file order, and a null or missing field is written `-`. Write `None` under the section when the file is missing, not valid JSON, or an empty list. This section is exempt from the 2 or more different jobs rule.
 
 For `## Time sinks`, use `DIGEST_DIR/timing.md`. Group the time lost by cause: E2E lock waits (`E2E lock waits` above 0, plus every job under `## Waiting on the E2E queue`), no-change rounds (a round re-run on the same head; count its round time as lost), stalls, and any one stage or round that took far longer than the others. Keep a cause only when it cost 3 or more different jobs or more than about 1 h in total. Sort by count, highest first. Write `None` when no cause qualifies or the file is missing. This section is exempt from the 2 or more different jobs rule.
+
+For `## Process health`, use `DIGEST_DIR/health.json`: one line per metric, in file order. A null value, previous or flag is written `-`, except that a null flag is left off with its ` — `. For `test_waste_jobs`, add ` · <minutes> min` after the value. Write `None` under the section when the file is missing or not valid JSON. This section is exempt from the 2 or more different jobs rule.
 
 For `## Pulse`, use `DIGEST_DIR/pulse.md`: copy its figures into the template line as written, never recomputed or rounded. Write `None` under the section when the file is missing or says `No pulse lines`. This section is exempt from the 2 or more different jobs rule.
 

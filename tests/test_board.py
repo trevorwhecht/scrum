@@ -7682,6 +7682,180 @@ class PipelineFitTest(unittest.TestCase):
             self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
 
 
+class ProcessHealthTest(unittest.TestCase):
+    """board.py process-health: 10 fixed metrics for one digest's claimed jobs, compared with the previous digest."""
+
+    NAMES = ["stops_per_job", "resume_abort_stops", "waiting_on_job_stops", "unreadable_asks", "cheaper_lane_jobs",
+             "test_waste_jobs", "fable_misuse", "unused_windows", "overburned_windows", "not_shipped"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        (self.root / "project.md").write_text("- UI globs: skills/trevskills-scrum/dashboard.html\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def put(self, rel, text):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def lines(self, rel, rows):
+        self.put(rel, "".join((r if isinstance(r, str) else json.dumps(r)) + "\n" for r in rows))
+
+    def board(self, *jobs):
+        self.put("board.json", json.dumps({"jobs": [dict(zip(("id", "stage", "lane", "pr", "reason"), j)) for j in jobs]}))
+
+    def digest(self, n, *ids):
+        self.put(f"digests/{n}/jobs.txt", "".join(f"{i}\n" for i in ids))
+
+    def run_health(self, n):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = board.main(["--dir", str(self.root), "process-health", n])
+        self.assertIn(code, (0, None))
+        got = json.loads(out.getvalue())
+        self.assertEqual(json.loads((self.root / "digests" / n / "health.json").read_text()), got)
+        return got
+
+    def test_metrics_from_fixture_jobs(self):
+        self.board(("101-alpha", "done", "standard", "", "merged"),
+                   ("102-beta", "done", "fast", "https://github.com/x/y/pull/1", "merged, not live: deploy failed"),
+                   ("103-gamma", "done", "standard", "https://github.com/x/y/pull/2", "merged"),
+                   ("104-delta", "done", "lilguy", None, "merged"),
+                   ("199-other", "done", "standard", None, "merged"))
+        self.digest("001", "101-alpha", "102-beta", "103-gamma", "104-delta")
+        self.put("jobs/101-alpha/spec.md", "# a\n## Likely files\n- `skills/trevskills-scrum/board.py`\n")
+        self.put("jobs/101-alpha/round-1/review-e2e.md", "VERDICT: PASS\nran the specs\n")
+        self.put("jobs/102-beta/spec.md", "# b\n## Likely files\n- `skills/trevskills-scrum/dashboard.html`\n")
+        self.put("jobs/102-beta/round-1/review-ui.md", "VERDICT: PASS\nlooks fine\n")
+        self.put("jobs/103-gamma/feature.md", "# c\nComplex: yes\n")
+        self.put("jobs/103-gamma/spec.md", "# c\n## Likely files\n- `skills/trevskills-scrum/dashboard.html`\n")
+        self.put("jobs/103-gamma/round-1/review-ux.md", "VERDICT: PASS\nreal ux review\n")
+        self.put("jobs/103-gamma/round-1/review-ui.md", board.UI_SKIP)
+        self.lines("jobs/101-alpha/routing.log", [
+            {"role": "review-e2e", "duration_s": 300, "model": "sonnet"},
+            {"role": "builder", "duration_s": 999, "model": "claude-fable-5-1"},
+            {"role": "scrum-review-ui", "duration_s": 150}, "not json"])
+        self.lines("jobs/102-beta/routing.log", [{"role": "review-ux", "duration_s": 90},
+                                                 {"role": "spec-writer", "model": "claude-fable-5-1"}])
+        self.lines("jobs/103-gamma/routing.log", [{"role": "review-ui", "duration_s": 600},
+                                                  {"role": "planner", "model": "claude-fable-5-1"}])
+        self.put("jobs/101-alpha/fable.log", "2026-11-01T00:00:00\tspec-writer\tfable\t5h 1%\t7d 1%\tok\n")
+        self.put("jobs/102-beta/fable.log", "2026-11-01T00:00:00\tplanner\topus\t5h 1%\t7d 1%\tlow\n")
+        self.put("jobs/103-gamma/fable.log", "2026-11-01T00:00:00\tplanner\tfable\t5h 1%\t7d 1%\tok\n")
+        self.put("jobs/199-other/fable.log", "2026-11-01T00:00:00\tbuilder\tfable\t5h 1%\t7d 1%\tok\n")
+        long_q = " ".join(["word"] * 41)
+        self.lines("questions.log", [
+            {"job": "101-alpha", "kind": "ask", "question": "Resume it?", "reason": "Resume it?",
+             "options": [{"command": "resume 101-alpha"}, {"command": "abort 101-alpha"}]},
+            {"job": "101-alpha", "kind": "stall", "reason": "stalled: blocked on sibling 102-beta"},
+            {"job": "102-beta", "kind": "ask", "question": "See .claude/skills/x/SKILL.md first?",
+             "options": [{"command": "approve 102-beta"}, {"command": "abort 102-beta"}]},
+            {"job": "102-beta", "question": "Waiting for job 101 to merge?",
+             "options": [{"command": "resume 102-beta"}, {"command": "abort 102-beta --requeue"}]},
+            {"job": "103-gamma", "kind": "round-limit", "question": "rule 4 again", "unblock": 1},
+            {"job": "103-gamma", "pick": "resume"},
+            {"job": "103-gamma", "kind": "ask", "question": long_q, "options": [{"command": "approve 103-gamma"}]},
+            {"job": "103-gamma", "kind": "machine", "reason": "swap used 80%"},
+            {"job": "199-other", "kind": "ask", "question": "Resume? rule 9",
+             "options": [{"command": "resume 199-other"}, {"command": "abort 199-other"}]}, "garbage"])
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "101-alpha", "added": 50, "files": 3},
+            {"id": "102-beta", "lane": "fast", "added": 20, "files": 2},
+            {"id": "103-gamma", "lane": "standard", "added": 500, "files": 4},
+            {"id": "104-delta", "lane": "lilguy", "added": 5, "files": 1},
+            {"id": "199-other", "lane": "standard", "added": 1, "files": 1}]}))
+        self.put("digests/001/windows.json", json.dumps([
+            {"window": "five_hour", "resets_at": 1000000,
+             "budget": {"left_at_reset_pct": 40, "cap_idle_secs": 0, "hit_90_at": None}},
+            {"window": "seven_day", "resets_at": 2000000,
+             "budget": {"left_at_reset_pct": 5, "cap_idle_secs": 0, "hit_90_at": 1992800}},
+            {"window": "five_hour", "resets_at": 3000000,
+             "budget": {"left_at_reset_pct": 15, "cap_idle_secs": 120, "hit_90_at": 2999940}},
+            {"window": "five_hour", "resets_at": 4000000,
+             "budget": {"left_at_reset_pct": 10, "cap_idle_secs": 0, "hit_90_at": 3998200}}]))
+        got = self.run_health("001")
+        self.assertEqual((got["digest"], got["previous"]), ("001", None))
+        m = got["metrics"]
+        self.assertEqual(list(m), self.NAMES)
+        want = {
+            "stops_per_job": (1.5, 0.5, ["101-alpha", "102-beta", "103-gamma"]),
+            "resume_abort_stops": (2, 0, ["101-alpha", "102-beta"]),
+            "waiting_on_job_stops": (2, 0, ["101-alpha", "102-beta"]),
+            "unreadable_asks": (2, 0, ["102-beta", "103-gamma"]),
+            "cheaper_lane_jobs": (2, 0, ["101-alpha", "102-beta"]),
+            "test_waste_jobs": (2, 0, ["101-alpha", "102-beta"]),
+            "fable_misuse": (3, 0, ["101-alpha", "102-beta"]),
+            "unused_windows": (1, 0, ["five_hour-1000000"]),
+            "overburned_windows": (2, 0, ["five_hour-3000000", "seven_day-2000000"]),
+            "not_shipped": (2, 0, ["101-alpha", "102-beta"]),
+        }
+        for name, (value, limit, jobs) in want.items():
+            self.assertEqual((m[name]["value"], m[name]["limit"], m[name]["jobs"]), (value, limit, jobs), name)
+            self.assertEqual((m[name]["previous"], m[name]["flag"]), (None, None), name)
+        self.assertEqual(m["test_waste_jobs"]["minutes"], 9)
+
+    def test_previous_and_flags(self):
+        self.board(("101-alpha", "done", "standard", None, "merged"))
+        self.lines("questions.log", [{"job": "101-alpha", "kind": "stall", "reason": "stalled in build"}])
+        self.digest("001", "101-alpha")
+        self.put("digests/001/health.json", json.dumps({"digest": "001", "previous": None, "metrics": {
+            "stops_per_job": {"value": 0.25}, "not_shipped": {"value": 3}, "cheaper_lane_jobs": {"value": 0}}}))
+        self.digest("002", "101-alpha")
+        self.put("digests/002/error.md", "digester produced no valid proposals\n")
+        self.put("digests/002/health.json", json.dumps({"digest": "002", "previous": None, "metrics": {
+            "stops_per_job": {"value": 5}, "not_shipped": {"value": 0}}}))
+        self.digest("003", "101-alpha")
+        got = self.run_health("003")
+        self.assertEqual(got["previous"], "001")
+        m = got["metrics"]
+        self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["previous"], m["stops_per_job"]["flag"]),
+                         (1.0, 0.25, "worse"))
+        self.assertEqual((m["not_shipped"]["value"], m["not_shipped"]["previous"], m["not_shipped"]["flag"]),
+                         (1, 3, "over twice"))
+        self.assertEqual((m["cheaper_lane_jobs"]["previous"], m["cheaper_lane_jobs"]["flag"]), (0, None))
+        self.assertEqual((m["unused_windows"]["previous"], m["unused_windows"]["flag"]), (None, None))
+        fresh = Path(self.tmp.name) / "fresh"
+        self.root = fresh
+        self.root.mkdir()
+        self.board(("101-alpha", "done", "standard", None, "merged"))
+        self.digest("001", "101-alpha")
+        got = self.run_health("001")
+        self.assertIsNone(got["previous"])
+        for name in self.NAMES:
+            self.assertEqual((got["metrics"][name]["previous"], got["metrics"][name]["flag"]), (None, None), name)
+
+    def test_missing_inputs_give_zero(self):
+        self.board(("101-alpha", "done", "lilguy", None, "merged"))
+        self.digest("001")
+        for name, text in (("pipeline-fit.json", "not json"), ("windows.json", "{"), ("questions.log", "garbage")):
+            self.put(f"digests/001/{name}" if name.endswith(".json") else name, text)
+        got = self.run_health("001")["metrics"]
+        self.assertIsNone(got["stops_per_job"]["value"])
+        for name in self.NAMES[1:]:
+            self.assertEqual((got[name]["value"], got[name]["jobs"]), (0, []), name)
+        self.assertEqual(got["test_waste_jobs"]["minutes"], 0)
+        self.digest("002", "101-alpha")
+        got = self.run_health("002")["metrics"]
+        self.assertEqual(got["stops_per_job"]["value"], 0.0)
+        for name in self.NAMES[1:]:
+            self.assertEqual(got[name]["value"], 0, name)
+
+    def test_unknown_digest_fails(self):
+        self.digest("001")
+        for bad in ("1", "../x", "999"):
+            with self.assertRaises(SystemExit, msg=bad) as cm:
+                board.cmd_process_health(self.root, bad)
+            self.assertEqual(str(cm.exception.code), f"no digest {bad!r}")
+        r = run_board("--dir", str(self.root), "process-health", "999")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no digest '999'", r.stderr)
+        self.assertIn("process-health <NNN>", board.__doc__)
+
+
 class WindowReportTest(unittest.TestCase):
     """board.py window-report: remembers open usage windows and writes one scorecard per closed window."""
 
