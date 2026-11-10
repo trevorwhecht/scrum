@@ -8815,6 +8815,12 @@ class FableTest(unittest.TestCase):
         self.assertTrue(board.fable_ok(usage(five=(0, 3600), seven=(0, 86400)), USAGE_NOW))
         self.assertFalse(board.fable_ok(usage(five=(80, 3600), seven=(0, 86400)), USAGE_NOW))
 
+    def test_fable_state_missing_five_hour_reads_zero(self):
+        for seven, want in ((10, "ok"), (74.9, "ok"), (75, "warn"), (85, "paused"), (99, "paused")):
+            self.assertEqual(board.fable_state(usage(seven=(seven, 86400)), USAGE_NOW), want, seven)
+        self.assertTrue(board.fable_ok(usage(seven=(10, 86400)), USAGE_NOW))
+        self.assertEqual(board.fable_used(usage(seven=(10, 86400)), USAGE_NOW), {"5h": 0, "7d": 10})
+
     def test_fable_state_unknown_fails_safe(self):
         good = usage(five=(10, 3600), seven=(10, 86400))
         self.assertEqual(board.fable_state(good, USAGE_NOW), "ok")
@@ -8822,7 +8828,7 @@ class FableTest(unittest.TestCase):
                {**good, "written_at": None}, {**good, "written_at": "1000000"},
                {"rate_limits": good["rate_limits"]},
                usage(five=(10, 3600), seven=(10, 86400), written_at=USAGE_NOW - 301),
-               usage(five=(10, 3600)), usage(seven=(10, 86400)),
+               usage(five=(10, 3600)),
                {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"resets_at": USAGE_NOW + 60}}},
                {**good, "rate_limits": {**good["rate_limits"], "seven_day": {"used_percentage": 1}}},
                {**good, "rate_limits": {**good["rate_limits"], "five_hour": {"used_percentage": "10",
