@@ -5272,27 +5272,6 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"], [])
         self.assertEqual(self.get("/api/p/nope/digests")[0], 404)
 
-    def test_tick_spawns_when_usage_has_no_five_hour_window(self):
-        self.done(self.scrum, "reg job")
-        self.use(left=86400)
-        del self.usage["rate_limits"]["five_hour"]
-        self.serve.weekly_tick()
-        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001")
-
-    def test_tick_logs_one_line_when_skipping_in_window_for_fable(self):
-        self.done(self.scrum, "reg job")
-        self.use(seven=90)
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.serve.weekly_tick()
-        self.assertEqual(err.getvalue(), "watchdog: weekly digest: skipped, fable state is paused\n")
-        self.use(seven=90, left=5 * 86400)
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.serve.weekly_tick()
-        self.assertEqual(err.getvalue(), "")
-        self.spawn.assert_not_called()
-
     def weekly_digest(self, proposals, digest_id="001", jobs=()):
         d = self.serve.board.weekly_dir() / digest_id
         d.mkdir(parents=True, exist_ok=True)
@@ -9662,6 +9641,27 @@ class WeeklyTest(unittest.TestCase):
         self.use(seven=84)  # room frees up later in the same window: it still runs
         self.serve.weekly_tick()
         self.assertEqual(self.spawn.call_count, 1)
+
+    def test_tick_spawns_when_usage_has_no_five_hour_window(self):
+        self.done(self.scrum, "reg job")
+        self.use(left=86400)
+        del self.usage["rate_limits"]["five_hour"]
+        self.serve.weekly_tick()
+        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001")
+
+    def test_tick_logs_one_line_when_skipping_in_window_for_fable(self):
+        self.done(self.scrum, "reg job")
+        self.use(seven=90)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.serve.weekly_tick()
+        self.assertEqual(err.getvalue(), "watchdog: weekly digest: skipped, fable state is paused\n")
+        self.use(seven=90, left=5 * 86400)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.serve.weekly_tick()
+        self.assertEqual(err.getvalue(), "")
+        self.spawn.assert_not_called()
 
     def weekly_digest(self, proposals, digest_id="001"):
         d = self.weekly / digest_id
