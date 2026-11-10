@@ -2764,6 +2764,46 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(log.read_text() if log.exists() else "", before)  # no pick recorded
 
+    def log_for(self, job_id):
+        log = self.root / "questions.log"
+        return [d for d in map(json.loads, log.read_text().splitlines()) if d.get("job") == job_id] if log.exists() else []
+
+    def test_answer_passes_note(self):
+        job_id = self.asked('rework 77 "preset"')
+        picked = {"key": "a", "label": "Rework", "command": 'rework 77 "preset"'}
+        code, _, m = self.answer(job_id, {"key": "a", "note": "  keep the\nold name "}, picked)
+        self.assertEqual(code, 202)
+        m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a", note="keep the old name")
+        for blank in ("", "  \n "):
+            job_id = self.asked('rework 77 "preset"')
+            code, _, m = self.answer(job_id, {"key": "a", "note": blank}, picked)
+            self.assertEqual(code, 202)
+            m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
+        job_id = self.asked('rework 1 "preset"')  # real cmd_answer: the pick line holds the note; no second note line
+        with mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "a", "note": "use the helper"})[0], 202)
+        self.assertEqual([(d["pick"], d["note"]) for d in self.log_for(job_id) if "pick" in d], [("Option a", "use the helper")])
+        self.assertEqual([d for d in self.log_for(job_id) if d.get("kind") == "note"], [])
+
+    def test_rework_button_logs_note(self):
+        job_id = self.job("rework note", "stage=needs-human", "reason=blocked: x")
+        with mock.patch.object(self.serve, "spawn"):
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "  "})[0], 400)
+            self.assertEqual(self.log_for(job_id), [])
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/rework", {"feedback": "use the\n helper"})[0], 202)
+        notes = [{k: d[k] for k in ("project", "job", "kind", "action", "note")} for d in self.log_for(job_id)]
+        self.assertEqual(notes, [{"project": "repo", "job": job_id, "kind": "note", "action": "rework", "note": "use the helper"}])
+
+    def test_discuss_logs_note(self):
+        job_id = self.job("discuss note", "stage=needs-human", "reason=Hard stop: schema — x")
+        patch, _ = self.terminal()
+        with patch, mock.patch.object(self.serve.subprocess, "Popen"):
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {})[0], 200)
+            self.assertEqual(self.log_for(job_id), [])
+            self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": "why this table?"})[0], 200)
+        self.assertEqual([(d["kind"], d["action"], d["note"]) for d in self.log_for(job_id)],
+                         [("note", "discuss", "why this table?")])
+
     # --- pause / play ---
     def test_pause_endpoint_kills_fake_run_and_marks_paused(self):
         job_id = self.serve.board.cmd_new(self.root, "pause me")

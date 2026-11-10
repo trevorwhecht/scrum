@@ -1615,6 +1615,20 @@ class ContractTest(unittest.TestCase):
                        "3 or more different jobs or more than about 1 h in total", "no-change rounds"):
             self.assertIn(phrase, reader, phrase)
 
+    def test_digest_reads_trevor(self):
+        step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
+        self.assertIn("B digest-trevor <id>", step1)
+        self.assertLess(step1.index("B pipeline-fit"), step1.index("B digest-trevor <id>"))
+        self.assertIn("never stops the digest", step1[step1.index("B digest-trevor <id>"):])
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        for phrase in ("DIGEST_DIR/trevor.md", "    ## Trevor asked\n", "asked again after fix: yes|no", "`kind: note`"):
+            self.assertIn(phrase, reader, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        rule = digester[digester.index("**Trevor asked.**"):]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("## Trevor asked", "`fixed by: none`", "Trevor asked:", "lowest ids", "**Backlog fallback**"):
+            self.assertIn(phrase, rule, phrase)
+
     def test_digest_agents_contract(self):
         for name in ("scrum-digest-reader", "scrum-digester"):
             self.assertEqual(frontmatter(ROOT / "agents" / f"{name}.md").get("tools"), "Read, Grep, Glob, Write", name)

@@ -704,6 +704,29 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((after["stage"], after["question"], after["options"]),
                          ("needs-human", "Q?", before["options"]))
 
+    def test_answer_logs_note(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
+        board.cmd_answer(self.root, job_id, "a", note="  keep the\n old name ")
+        board.cmd_answer(self.root, job_id, "b", note=" \n ")
+        board.cmd_answer(self.root, job_id, "b")
+        picks = [l for l in self.log_lines() if "pick" in l]
+        self.assertEqual([(l["pick"], l.get("note")) for l in picks], [("A", "keep the old name"), ("B", None), ("B", None)])
+        self.assertEqual(set(picks[1]), {"date", "job", "pick"})
+
+    def test_log_note_skips_blank(self):
+        job_id = board.cmd_new(self.root, "x")
+        before = (self.root / "board.json").read_text()
+        for blank in (None, "", "  \n "):
+            board.log_note(self.root, job_id, "rework", blank)
+        self.assertEqual(self.log_lines(), [])
+        board.log_note(self.root, job_id, "discuss", "why\n  this table?")
+        [line] = self.log_lines()
+        self.assertEqual({k: v for k, v in line.items() if k != "date"},
+                         {"project": self.root.resolve().parent.name, "job": job_id, "kind": "note", "action": "discuss",
+                          "note": "why this table?"})
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
     def test_answer_refuses_wrong_stage_or_key(self):
         job_id = board.cmd_new(self.root, "x")
         with self.assertRaises(SystemExit):
@@ -7389,6 +7412,209 @@ class RunAllLilguyTest(unittest.TestCase):
                          ("done", "lilguy", "/tmp/wt-one", self.PR))
 
 
+JEV_STUB = """import json, sys
+lines = [l.rstrip("\\n") for l in sys.stdin]
+open(sys.argv[0] + ".log", "w").write(json.dumps({"argv": sys.argv[1:], "stdin": lines}))
+for l in lines:
+    print("0.9\\t" + l)
+"""
+
+
+class DigestTrevorTest(unittest.TestCase):
+    """board.py digest-trevor: digests/<NNN>/trevor.md from Trevor's chat, feature.md quotes, backlog tags and notes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name).resolve()
+        self.repo, self.root = base / "repo", base / "repo" / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        self.transcripts = base / "transcripts"
+        (self.transcripts / "proj").mkdir(parents=True)
+        self.jev = base / "jev-rank.py"
+        self.jev.write_text(JEV_STUB)
+        env = mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.transcripts), "SCRUM_JEV_RANK": str(self.jev)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.day = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=1)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def digest(self, name, jobs=(), error=False):
+        d = self.root / "digests" / name
+        d.mkdir(parents=True)
+        (d / "jobs.txt").write_text("".join(f"{j}\n" for j in jobs))
+        if error:
+            (d / "error.md").write_text("digest reader produced no notes\n")
+        return d
+
+    def run_trevor(self, name):
+        out = run_board("--dir", str(self.root), "digest-trevor", name)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout), (self.root / "digests" / name / "trevor.md").read_text()
+
+    def section(self, text, heading):
+        lines = text.splitlines()
+        start = lines.index(heading) + 1
+        end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")), len(lines))
+        return lines[start:end]
+
+    def user(self, text, cwd=None, at=None, **extra):
+        stamp = (at or self.day).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return {"type": "user", "cwd": str(cwd or self.repo), "timestamp": stamp, "message": {"role": "user", "content": text},
+                **extra}
+
+    def transcript(self, name, *entries):
+        (self.transcripts / "proj" / name).write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+    def test_sections_and_since(self):
+        first = self.digest("001")
+        self.digest("002", error=True)
+        self.digest("003")
+        got, text = self.run_trevor("003")
+        st = first.stat()
+        since = datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime), timezone.utc).isoformat(timespec="seconds")
+        self.assertEqual(got, {"id": "003", "chat": 0, "quotes": 0, "backlog": 0, "notes": 0})
+        self.assertEqual(text.splitlines(), ["# Trevor: digest 003", f"Since: {since}", "## Chat", "None", "## Feature quotes",
+                                             "None", "## Backlog", "None", "## Answer notes", "None"])
+        _, text = self.run_trevor("001")  # no earlier digest: 7 days back
+        at = datetime.fromisoformat(text.splitlines()[1].removeprefix("Since: "))
+        self.assertLess(abs(at - (datetime.now(timezone.utc) - timedelta(days=7))), timedelta(seconds=60))
+
+    def test_bad_digest_id(self):
+        self.digest("001")
+        for name in ("009", "1", "../x"):
+            with self.subTest(name), self.assertRaises(SystemExit) as cm:
+                board.cmd_digest_trevor(self.root, name)
+            self.assertEqual(str(cm.exception.code), f"no digest '{name}'")
+        out = run_board("--dir", str(self.root), "digest-trevor", "009")
+        self.assertEqual((out.returncode, out.stderr.strip()), (1, "no digest '009'"))
+
+    def test_chat_filters_and_jev(self):
+        self.digest("001")
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        self.transcript("a-inter.jsonl",
+                        self.user("Stop  asking me\nabout merges", entrypoint="cli"),
+                        {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok scrum"}]}},
+                        self.user([{"type": "tool_result", "content": "scrum output"}, {"type": "text", "text": "scrum x"}]),
+                        self.user("<system-reminder>scrum noise</system-reminder>Builder must run lint"),
+                        self.user("<system-reminder>only a reminder about scrum</system-reminder>"),
+                        self.user("<command-name>/clear</command-name> scrum"),
+                        self.user("<local-command-stdout>scrum</local-command-stdout>"),
+                        self.user("Caveat: The messages below were generated by the user running scrum"),
+                        self.user("old scrum complaint", at=self.day - timedelta(days=10)),
+                        self.user("meta scrum text", isMeta=True),
+                        self.user("This session is being continued (scrum)", isCompactSummary=True),
+                        self.user("worktree note", cwd=self.repo / ".claude" / "worktrees" / "w"))
+        self.transcript("b-other.jsonl",
+                        self.user([{"type": "text", "text": "Reviewer"}, {"type": "text", "text": "keeps flagging SCRUM caps"}],
+                                  cwd=elsewhere),
+                        self.user("fix my css", cwd=elsewhere))
+        self.transcript("c-sdk.jsonl", self.user("headless scrum prompt", entrypoint="sdk-cli"),
+                        self.user("later scrum prompt in sdk file"))
+        self.transcript("d-sibling.jsonl", self.user("sibling repo talk", cwd=Path(str(self.repo) + "-other")))
+        got, text = self.run_trevor("001")
+        sent = json.loads(Path(str(self.jev) + ".log").read_text())
+        want = ["Stop asking me about merges", "Builder must run lint", "worktree note", "Reviewer keeps flagging SCRUM caps"]
+        self.assertEqual(sent["stdin"], want)
+        self.assertEqual(sent["argv"], ["Trevor is correcting or complaining about how the dev pipeline behaved, or stating "
+                                        "a rule it should follow from now on", "--top", "60", "--min", "0.8"])
+        stamp = self.day.isoformat(timespec="seconds")
+        self.assertEqual(self.section(text, "## Chat"), [f'- {stamp} 0.9: "{t}"' for t in want])
+        self.assertEqual(got["chat"], 4)
+
+    def test_chat_caps(self):
+        self.digest("001")
+        self.transcript("a.jsonl", self.user("w" * 2000))
+        _, text = self.run_trevor("001")
+        self.assertEqual(json.loads(Path(str(self.jev) + ".log").read_text())["stdin"], ["w" * 1500])
+        self.assertEqual(self.section(text, "## Chat"), [f'- {self.day.isoformat(timespec="seconds")} 0.9: "{"w" * 400}"'])
+
+    def test_jev_failure_is_a_note(self):
+        self.digest("001", jobs=["001-a"])
+        (self.root / "jobs" / "001-a").mkdir()
+        (self.root / "jobs" / "001-a" / "feature.md").write_text("Trevor 2026-11-01: keep it short\n")
+        self.transcript("a.jsonl", self.user("scrum broke again"))
+        self.jev.write_text("import sys\nsys.exit('jev-rank: HTTP 500 boom')\n")
+        got, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Chat"), ["- Jev failed: exit 1: jev-rank: HTTP 500 boom"])
+        self.assertEqual(self.section(text, "## Feature quotes"), ["- 001-a: Trevor 2026-11-01: keep it short"])
+        self.assertEqual((got["chat"], got["quotes"]), (0, 1))
+        missing = Path(self.tmp.name) / "nope.py"
+        with mock.patch.dict(os.environ, {"SCRUM_JEV_RANK": str(missing)}):
+            _, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Chat"), [f"- Jev failed: no script at {missing}"])
+        with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("jev", 300)):
+            _, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Chat"), ["- Jev failed: timed out after 300 s"])
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(Path(self.tmp.name) / "gone")}):
+            got, text = self.run_trevor("001")
+        [line] = self.section(text, "## Chat")
+        self.assertTrue(line.startswith("- Transcripts failed: "), line)
+        self.assertEqual(self.section(text, "## Feature quotes"), ["- 001-a: Trevor 2026-11-01: keep it short"])
+
+    def test_feature_quotes(self):
+        self.digest("001", jobs=["001-a", "002-b", "../x"])
+        (self.root / "jobs" / "001-a").mkdir()
+        long = "Trevor 2026-11-02: " + "y" * 500
+        (self.root / "jobs" / "001-a" / "feature.md").write_text(
+            "# A\n  Trevor 2026-11-01: never cut my text  \nTrevor said something undated\n" + long + "\n")
+        got, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Feature quotes"),
+                         ["- 001-a: Trevor 2026-11-01: never cut my text", "- 001-a: " + long[:400]])
+        self.assertEqual(got["quotes"], 2)
+
+    def test_backlog_tags_since_last_digest(self):
+        today = datetime.now(timezone.utc).date().isoformat()
+        backlog = self.root / "backlog.md"
+        backlog.write_text(f"# Backlog\n- [ ] Fix merge noise (Trevor {today})\n- [ ] Old ask (Trevor 2020-01-01)\n"
+                           f"- [ ] Untagged item\n- [x] Nested (Trevor {today} (again))\nNot an item (Trevor {today})\n")
+        self.digest("001")
+        got, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Backlog"),
+                         [f"- [ ] Fix merge noise (Trevor {today})", f"- [x] Nested (Trevor {today} (again))"])
+        self.assertEqual(got["backlog"], 2)
+        self.assertEqual((self.root / "digests" / "001" / "trevor-backlog.txt").read_text(),
+                         f"(Trevor {today})\n(Trevor 2020-01-01)\n(Trevor {today} (again))\n")
+        backlog.write_text(backlog.read_text() + "- [ ] New ask (Trevor said so)\n")
+        self.digest("002")
+        got, text = self.run_trevor("002")
+        self.assertEqual(self.section(text, "## Backlog"), ["- [ ] New ask (Trevor said so)"])
+        backlog.unlink()
+        self.digest("003")
+        _, text = self.run_trevor("003")
+        self.assertEqual(self.section(text, "## Backlog"), ["None"])
+
+    def test_answer_notes(self):
+        self.digest("001")
+        old = (self.day - timedelta(days=10)).isoformat(timespec="seconds")
+        new = self.day.isoformat(timespec="seconds")
+        lines = [{"date": old, "job": "001-a", "pick": "Ship it", "note": "too old"},
+                 {"date": new, "job": "001-a", "pick": "Rework", "note": "use the helper"},
+                 {"date": new, "job": "002-b", "kind": "note", "action": "discuss", "note": "why this table?"},
+                 {"date": new, "job": "003-c", "pick": "Ship it"},
+                 {"date": new, "job": "004-d", "pick": "Ship it", "note": " "}]
+        (self.root / "questions.log").write_text("".join(json.dumps(l) + "\n" for l in lines) + "not json\n")
+        got, text = self.run_trevor("001")
+        self.assertEqual(self.section(text, "## Answer notes"),
+                         [f'- {new} 001-a Rework: "use the helper"', f'- {new} 002-b discuss: "why this table?"'])
+        self.assertEqual(got["notes"], 2)
+
+    def test_size_cap(self):
+        today = datetime.now(timezone.utc).date().isoformat()
+        items = [f"- [ ] Item {i} (Trevor {today} {'z' * 300})" for i in range(200)]
+        (self.root / "backlog.md").write_text("# Backlog\n" + "\n".join(items) + "\n")
+        self.digest("001")
+        got, text = self.run_trevor("001")
+        self.assertEqual(got["backlog"], 200)
+        self.assertLessEqual(len(text.encode()), 40000)
+        lines = text.splitlines()
+        self.assertEqual(lines[-1], "- truncated at 40000 bytes")
+        kept = lines[lines.index("## Backlog") + 1:-1]
+        self.assertGreater(len(kept), 100)
+        self.assertEqual(kept, items[:len(kept)])
+
+
 class PipelineFitTest(unittest.TestCase):
     """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
 
@@ -8134,6 +8360,7 @@ class WindowReportTest(unittest.TestCase):
             {"date": self.at(R - 20000), "job": "503-b", "kind": "ask", "options": ask, "reason": "q"},
             {"date": self.at(R - 17000), "job": "503-b", "kind": "stall", "reason": "s"},
             {"date": self.at(R - 600), "job": "504-c", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(R - 300), "job": "504-c", "kind": "note", "action": "discuss", "note": "why?"},  # still waits
             {"date": self.at(R - 500), "job": "505-d", "kind": "ask", "options": ask, "reason": "q"})
         c = self.card(R + 50)
         self.assertEqual(c["idle"], {"ready_idle_secs": 200, "needs_human_secs": 2600})

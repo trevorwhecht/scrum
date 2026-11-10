@@ -527,10 +527,11 @@ def answer_job(project, root, job, jobs, key, note=None):
     if not option_command(opt.get("command")):
         return 409, {"error": f"unknown option command: {opt.get('command')}"}
     job_id = job["id"]
+    typed = {"note": n} if (n := board.clean(note or "", board.ITEM_MAX)) else {}  # the pick line keeps what he typed
     if option_command(opt.get("command"))[0] == "resume" and (refusal := resume_refusal(project, root, job, manual=True)):
         if not refusal.startswith(board.MACHINE_WAIT) and not getattr(refusal, "blocker", None):
             return refused(root, job_id, refusal)
-        board.cmd_answer(root, job_id, key)
+        board.cmd_answer(root, job_id, key, **typed)
         with board.locked_board(root) as b:  # the machine guard or a sibling queues the pick like a Play; play_queue_tick starts it
             if (live := board.find(b, job_id))["stage"] == "needs-human":
                 live.setdefault("play_queued", board.now())
@@ -538,7 +539,7 @@ def answer_job(project, root, job, jobs, key, note=None):
         return 202, {"id": job_id, "action": "answer", "command": "resume", "queued": True, "message": PLAY_QUEUED}
     if option_command(opt.get("command"))[0] == "apply":  # writes the global file itself, then records the pick
         return weekly_apply(project, root, job_id, key)
-    picked = board.cmd_answer(root, job_id, key)
+    picked = board.cmd_answer(root, job_id, key, **typed)
     parsed = option_command(picked.get("command"))
     if not parsed:
         return 409, {"error": f"unknown option command: {picked.get('command')}"}
@@ -4614,6 +4615,7 @@ class Handler(BaseHTTPRequestHandler):
             started = approve_job(project, root, job_id, bool(body.get("migrated")))
         elif action == "discuss":  # interactive, in its own Terminal window; it records its tty, so it isn't in RUNS
             note = board.clean(body.get("feedback") or "", board.ITEM_MAX)
+            board.log_note(root, job_id, "discuss", note)  # blank logs nothing
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
             clicked = time.time()
@@ -4624,6 +4626,7 @@ class Handler(BaseHTTPRequestHandler):
                     DISCUSSES[f"{project}/{job_id}"] = clicked
             return code, {"id": job_id, **obj} if code == 200 else obj
         else:
+            board.log_note(root, job_id, "rework", body.get("feedback"))
             started = rework_job(project, root, job_id, body.get("feedback"))
         return 202, {"id": job_id, "action": action, **queued(started)}
 
