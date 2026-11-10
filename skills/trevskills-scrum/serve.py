@@ -935,8 +935,8 @@ def auto_resume(project, root, jobs):
                 busy = True
                 if not take_room():
                     continue
-                resume_job(project, root, job, jobs)
-                stall_mark(key, m)  # after the spawn: one that raised (CLI missing) spends no retry
+                if resume_job(project, root, job, jobs):  # a launch that raised (CLI missing) or was queued spends no retry
+                    stall_mark(key, m)
             continue
         busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
         stage = board.stall_stage(job)
@@ -1082,7 +1082,10 @@ def park_spent(root, job, stage, used):
     """A stalled (or limit-held) job whose automatic retries ran out: write jobs/<id>/stop.md (stage, retries used, last
     run log), then park it at needs-human under the board lock with a BUILDER_BLOCKED question (Try again / Remove this
     job), so Trevor sees it and board.resume_first stops holding the project. The live job is re-checked under the
-    lock: False when it is gone, paused, moved on or no longer stalled or held."""
+    lock: False when it is gone, paused, moved on, no longer stalled or held, or has a queued launch (play_queue_tick
+    starts it once there is room; parking would drop it)."""
+    if job.get("queued_launch"):  # re-checked under the lock below; this only spares a stop.md for nothing
+        return False
     jid = job["id"]
     d = Path(root) / "jobs" / jid
     d.mkdir(parents=True, exist_ok=True)
@@ -1096,7 +1099,7 @@ def park_spent(root, job, stage, used):
     try:
         with board.locked_board(root) as b:
             live = next((j for j in b["jobs"] if j["id"] == jid), None)
-            if not live or live.get("paused") or live.get("stage") != job["stage"] \
+            if not live or live.get("paused") or live.get("stage") != job["stage"] or live.get("queued_launch") \
                     or not (board.stalled(live) or live.get("limitResetAt")):
                 raise board._Gone
             board.park(root, live, question, parsed, "BUILDER_BLOCKED", why)
@@ -1161,8 +1164,8 @@ def respawn_exited(project, root):
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(project, root, job):
             continue  # left stalled for auto_resume; no sound, a stall is not a human stop
-        resume_job(project, root, job, jobs)
-        stall_mark(key, stage)  # this is the stage's one non-limit resume (after the spawn: one that raised spends none)
+        if resume_job(project, root, job, jobs):  # the stage's one non-limit resume; a raised or queued launch spends none
+            stall_mark(key, stage)
         with RUNS_LOCK:
             new = RUNS.get(key)
             if new is not None and new is not run:  # the entry resume_job's spawn just created
@@ -1199,9 +1202,8 @@ def respawn_orphans(project, root, p, kids, alive):
             if not flag_stalled(root, kid, ORPHANED):
                 continue
         ORPHAN_RESPAWN[key] = stage
-        spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
-        if action == "resume":
-            stall_mark(key, stage)  # this is the stage's one non-limit resume (after the spawn: one that raised spends none)
+        if spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}") and action == "resume":
+            stall_mark(key, stage)  # the stage's one non-limit resume; a raised or queued launch spends none
         spawned = True
     return spawned
 

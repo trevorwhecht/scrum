@@ -6685,6 +6685,27 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["chk"], "the next tick retries it")
         self.assertEqual(s.STALL_RESUMED, {"p/chk/check"})
 
+    def test_queued_launch_spends_no_retry_and_is_not_parked(self):
+        s = self.serve
+        self.jobs = [{"id": "bld", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+                      "updatedAt": "2026-01-01T00:00:00+00:00", "runlog": "runs/crash.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        def gated(project, root, job_id, action, prompt, flags=(), manual=False):  # serve.spawn's queue path
+            with s.board.locked_board(root) as b:
+                s.board.find(b, job_id)["queued_launch"] = {"action": action, "prompt": prompt, "stage": "build"}
+            return None
+        with mock.patch.object(s, "spawn", side_effect=gated), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None):
+            s.auto_resume("p", self.root, self.jobs)
+            self.assertEqual(s.STALL_RESUMED, set(), "a queued launch started nothing, so it spends no retry")
+            s.STALL_RESUMED.add("p/bld/build")  # even with the retry spent, a queued launch is never parked
+            self.jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+            s.auto_resume("p", self.root, self.jobs)
+        job = json.loads((self.root / "board.json").read_text())["jobs"][0]
+        self.assertEqual((job["stage"], job["stalled"]), ("build", True))
+        self.assertIn("queued_launch", job)
+        self.assertFalse((self.root / "jobs" / "bld" / "stop.md").exists())
+
     def test_resume_held_cap_parks_for_trevor(self):
         s, T = self.serve, 1_800_000_000
         self.jobs = [{"id": "held", "stage": "review", "reason": None, "limitResetAt": T,
