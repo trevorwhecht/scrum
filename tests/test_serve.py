@@ -624,12 +624,12 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(spawn.call_count, 1)
 
     def settle_board(self):
-        """Abort the paused or stalled jobs earlier tests left on this shared board: they would hold every new claim
-        (board.resume_first)."""
-        b = self.serve.board
+        """Abort the paused, stalled or live leaf jobs (a live stub session included) earlier tests left on this shared
+        board: cmd_ready counts them as outside holders, and one with no spec.md holds every new claim (job 751)."""
+        b, live = self.serve.board, self.serve.live_ids("repo")
         with b.locked_board(self.root) as board:
             for j in board["jobs"]:
-                if b.resume_first([j]):
+                if b.resume_first([j]) or b.stalled(j) or (not b.idle(j) or j["id"] in live) and not j.get("children"):
                     j.pop("paused", None)
                     j["stage"] = "aborted"
 
@@ -661,6 +661,7 @@ class ServeTest(unittest.TestCase):
     def test_setup_done_refuses_non_waiting_job(self):
         parent, c1, c2 = self.bigboy()
         plain = self.serve.board.cmd_new(self.root, "Plain job")
+        self.edit_job(plain, stage="done")  # job 751: a live spec-less job would hold c1's claim
         with mock.patch.object(self.serve, "spawn") as spawn:
             for job_id in (plain, parent, c2):  # not a child / the parent / a child with no setup pending
                 self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/setup-done", {})[0], 409, job_id)
@@ -2109,10 +2110,10 @@ class ServeTest(unittest.TestCase):
                 self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{parent}/resume", {"manual": True}),
                                  (202, {"id": parent, "action": "resume"}))
             self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
-            # job 466: Play is Trevor's click, so cool-down no longer holds its claim; the jobs this test resumed (their
-            # sessions are mocked, so they still read paused/stalled) hold it instead (board.resume_first)
+            # job 466: Play is Trevor's click, so cool-down no longer holds its claim; the paused sibling this test
+            # resumed (its session is mocked, so it still reads paused) holds the spec-less waiting kid (job 751)
             self.assertEqual(self.stage_of(wait)["stage"], "waiting")
-            self.assertRegex(self.stage_of(parent)["reason"], r"^waiting: \d+ paused jobs? needs? Play or Abort first$")
+            self.assertEqual(self.stage_of(parent)["reason"], f"waiting on you in: {kid}")
             asked = self.asked("resume 1")
             code, out, m = self.answer(asked, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
             self.assertEqual((code, out), (202, {"id": asked, "action": "answer", "command": "resume"}))
@@ -2902,6 +2903,7 @@ class ServeTest(unittest.TestCase):
 
     def test_start_ready_passes_manual(self):
         b = self.serve.board
+        self.settle_board()
         parent, kid = (b.cmd_new(self.root, t) for t in ("Manual parent", "Manual kid"))
         self.edit_job(parent, lane="runall", stage="running", children=[kid])
         for manual in (True, False):
@@ -2927,9 +2929,10 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(code, 202, out)
         self.assertNotIn("paused", self.stage_of(parent))
         self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(a, "resume", f"/trevskills-scrum resume {a}")])
-        # a's resume session has not written the board yet and r still reads paused: w is held for them
+        # a's resume session has not written the board yet and r still reads paused: spec-less w runs alone, so the
+        # paused siblings hold it (job 751)
         self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["reason"]),
-                         ("running", "waiting: 2 paused jobs need Play or Abort first"))
+                         ("running", f"waiting on you in: {a}, {r}"))
         self.assertEqual(self.stage_of(w)["stage"], "waiting")
         for k in (a, r):
             b.cmd_set(self.root, k, ["stage=done"], unpause=True)  # their sessions finish
@@ -7134,7 +7137,8 @@ class MainFfTickTest(unittest.TestCase):
 
 
 class ResumeFirstTest(unittest.TestCase):
-    """Paused jobs and resumable stalled jobs hold every new claim in their project (board.resume_first)."""
+    """board.resume_first counts paused and stalled jobs; since job 751 they hold a claim only by Likely-file overlap
+    (cmd_ready), like a live job in another tree."""
     PAUSED = "stalled in build: paused by Trevor. Fix: click Play."
 
     def setUp(self):
@@ -7170,30 +7174,80 @@ class ResumeFirstTest(unittest.TestCase):
     def job(self, root, job_id):
         return self.board.find(self.board.read_board(root), job_id)
 
-    def test_paused_job_blocks_claims_in_own_project_only(self):
-        a, par_a, kid_a = self.runall("a", [{"id": "9-pz", "stage": "build", "paused": True, "reason": self.PAUSED}])
-        b, par_b, kid_b = self.runall("b")
-        with mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.serve.start_ready("a", a, par_a)["ready"], [])
-            spawn.assert_not_called()
-            self.assertEqual(self.job(a, kid_a)["stage"], "waiting")
-            self.assertEqual((self.job(a, par_a)["stage"], self.job(a, par_a)["reason"]),
-                             ("running", "waiting: 1 paused job needs Play or Abort first"))
-            self.assertEqual(self.serve.start_ready("b", b, par_b)["ready"], [kid_b])
-            self.assertEqual([c.args[2] for c in spawn.call_args_list], [kid_b])
-        with self.board.locked_board(a) as board:
-            board["jobs"] = [j for j in board["jobs"] if j["id"] != "9-pz"]
-        self.assertEqual(self.board.cmd_ready(a, par_a)["ready"], [kid_a])
-        self.assertEqual((self.job(a, par_a)["stage"], self.job(a, par_a)["reason"]), ("running", None))
+    def tree(self, extra, kids, lane="runall"):
+        """A fresh board: a running parent 001-par over `kids` (id, stage, Likely files or None, extra fields) plus
+        `extra` jobs (same shape, no parent). Each job with files gets a spec.md naming them."""
+        root = self.base / "p" / "scrum"
+        shutil.rmtree(root, ignore_errors=True)
+        (root / "jobs").mkdir(parents=True)
+        jobs = [{"id": "001-par", "stage": "running", "lane": lane, "reason": None, "children": [k[0] for k in kids]}]
+        for spec, parent in [(k, "001-par") for k in kids] + [(j, None) for j in extra]:
+            job_id, stage, paths, more = spec
+            jobs.append({"id": job_id, "stage": stage, "parent": parent, "parallel": True, "reason": None, **more})
+            if paths is not None:
+                (root / "jobs" / job_id).mkdir()
+                (root / "jobs" / job_id / "spec.md").write_text(
+                    "# x\n## Likely files\n" + "".join(f"- `{p}`\n" for p in paths))
+        (root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j} for j in jobs]}))
+        return root
 
-    def test_paused_block_parent_reason_text(self):
-        a, par, kid = self.runall("a", [
-            {"id": "8-pz", "stage": "review", "paused": True, "reason": self.PAUSED},
-            {"id": "9-st", "stage": "needs-human", "reason": "stalled in build: no live session. Fix: click Resume."}])
-        self.assertEqual(self.board.cmd_ready(a, par)["ready"], [])
-        self.assertEqual((self.job(a, par)["stage"], self.job(a, par)["reason"]),
-                         ("running", "waiting: 2 paused jobs need Play or Abort first"))
-        self.assertEqual(self.job(a, kid)["stage"], "waiting")
+    def parent(self, root):
+        p = self.job(root, "001-par")
+        return p["stage"], p["reason"]
+
+    def stops(self, root):
+        log = root / "questions.log"
+        return log.read_text() if log.exists() else ""
+
+    def test_paused_sibling_holds_only_overlapping_claims(self):
+        paused = {"paused": True, "reason": self.PAUSED}
+        root = self.tree([], [("002-pz", "build", ["src/a.py"], paused), ("003-w", "waiting", ["src/b.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"], "disjoint files: claimed")
+        self.assertEqual(self.parent(root), ("running", None))
+        for files in (["src/a.py"], None):  # overlapping, or the paused sibling's files unknown
+            with self.subTest(files=files):
+                root = self.tree([], [("002-pz", "build", files, paused), ("003-w", "waiting", ["src/a.py"], {})])
+                self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
+                self.assertEqual(self.job(root, "003-w")["stage"], "waiting")
+                self.assertEqual(self.parent(root), ("running", "waiting on you in: 002-pz"))
+        stalled = {"stalled": True, "reason": "stalled: no live session. Fix: click Resume."}
+        root = self.tree([], [("002-st", "build", ["src/a.py"], stalled), ("003-w", "waiting", ["src/a.py"], {}),
+                              ("004-w", "waiting", ["src/c.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["004-w"], "a stalled sibling holds its files")
+        self.assertNotIn("Play or Abort first", (root / "board.json").read_text())
+
+    def test_outside_overlap_holds_only_overlapping_child(self):
+        bigboy = [("008-big", "running", None, {"lane": "bigboy", "children": ["009-bk", "010-st"]}),
+                  ("009-bk", "build", ["src/x.py"], {"parent": "008-big"}),
+                  ("010-st", "build", ["src/z/"], {"parent": "008-big", "stalled": True,
+                                                  "reason": "stalled: no live session. Fix: click Resume."})]
+        root = self.tree(bigboy, [("002-w", "waiting", ["src/x.py"], {})])
+        for _ in range(2):  # held again on the next call: same reason, never needs-human
+            self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
+            self.assertEqual(self.job(root, "002-w")["stage"], "waiting")
+            self.assertEqual(self.parent(root), ("running", "waiting: files overlap 009-bk"))
+        self.assertEqual(self.stops(root), "", "an overlap wait is not a machine stop")
+        with self.board.locked_board(root) as b:
+            self.board.find(b, "009-bk")["stage"] = "done"
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"])
+        self.assertEqual(self.parent(root), ("running", None))
+        root = self.tree(bigboy, [("002-w", "waiting", ["src/z/y.py"], {}), ("003-w", "waiting", ["src/q.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"], "the stalled 010-st holds only 002-w")
+        self.assertEqual(self.job(root, "002-w")["stage"], "waiting")
+        root = self.tree(bigboy, [("002-w", "waiting", ["src/x.py"], {}), ("003-w", "waiting", ["src/z/y.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
+        self.assertEqual(self.parent(root), ("running", "waiting: files overlap 009-bk, 010-st"))
+
+    def test_outside_holder_unknown_files_holds_all(self):
+        root = self.tree([("007-solo", "build", None, {})], [("002-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
+        self.assertEqual(self.parent(root), ("running", "waiting: files overlap 007-solo"))
+        root = self.tree([("007-solo", "build", ["src/b.py"], {"parallel": False})],
+                         [("002-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"], "parallel=no never blocks another tree")
+        root = self.tree([("007-solo", "needs-human", None, {"reason": "Pick a layout?"})],
+                         [("002-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"], "a needs-human job holds nothing")
 
 
 class CloudPollTest(unittest.TestCase):
@@ -8040,8 +8094,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 "queued play and auto-resume": [("010-q", "resume"), ("011-solo", "resume")],
                 "bigboy review": [("020-big", "resume")], "bigboy fix ticket": [], "bigboy next child": [],
                 "bigboy flagged sibling": [], "auto continue": []}
-        want_off = {"bigboy fix ticket": [("033-fix", "start")], "bigboy next child": [("042-wait", "start")],
-                    "bigboy flagged sibling": [("042-wait", "start")]}
+        run_all = ("run-all", "run-all")  # job 751: a live tree no longer holds auto continue
+        want_off = {"bigboy fix ticket": [("033-fix", "start"), run_all],
+                    "bigboy next child": [("042-wait", "start"), run_all],
+                    "bigboy flagged sibling": [("042-wait", "start"), run_all]}
         waiting = {"orphan": "003-wait", "runall claim": "003-wait", "bigboy fix ticket": "033-fix",
                    "bigboy next child": "042-wait", "bigboy flagged sibling": "042-wait"}
         (self.root / "project.md").write_text("# Project\n- Test: x\n- Auto continue: 1\n")
@@ -8151,9 +8207,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
         data["jobs"][1].update(paused=True, updatedAt=old, reason="stalled in build: paused by Trevor. Fix: click Play.")
         (self.root / "board.json").write_text(json.dumps(data))
         spawn, _, _ = self.tick()
-        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [], "the paused child holds its sibling's claim")
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [],
+                         "the paused child holds its spec-less sibling's claim (it runs alone)")
         self.assertEqual((self.job("001-par")["stage"], self.job("001-par")["reason"]),
-                         ("running", "waiting: 1 paused job needs Play or Abort first"))
+                         ("running", "waiting on you in: 002-kid"))
         self.assertEqual((self.job("002-kid")["stage"], self.job("002-kid")["paused"]), ("build", True))
 
     def test_skips_no_waiting_child(self):
@@ -8293,7 +8350,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
 
 class AutoContinueTest(unittest.TestCase):
     """`- Auto continue: <n>` in project.md: each tick the watchdog starts one headless run-all in every opted-in
-    project with no work in flight and a claimable backlog line, in rank (board.projects()) order; n orders nothing.
+    project whose run-all is not running and with a claimable backlog line, in rank (board.projects()) order, even
+    beside a live, paused or stalled tree (job 751); n orders nothing.
     Usage pace gates nothing; starts stop at the first failed machine_ok (RAM or disk)."""
 
     def setUp(self):
@@ -8346,10 +8404,11 @@ class AutoContinueTest(unittest.TestCase):
         self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", "aborted", "done"]))],
                          [c[:3] for c in self.started("a")])
 
-    def test_unfinished_bigboy_parent_still_busy(self):
+    def test_unfinished_bigboy_parent_no_longer_blocks(self):
         for st in ("build", "waiting"):
             with self.subTest(st=st):
-                self.assertEqual(self.tick_run_all(self.parent_jobs(["done", st])), [])
+                self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", st]))],
+                                 [c[:3] for c in self.started("a")], "a live tree no longer holds the run-all")
         self.assertEqual([c[:3] for c in self.tick_run_all(self.parent_jobs(["done", "needs-human"]))],
                          [c[:3] for c in self.started("a")], "parked on Trevor (the 054 shape): not busy")
 
@@ -8359,23 +8418,33 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", 1, jobs=jobs)
         return [c for c in self.tick() if c[2] == "run-all"]
 
-    def test_only_running_bigboy_parent_is_excluded(self):
-        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], lane="runall")), [])
-        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="review")), [])
-        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], stage="plan")), [])
+    def test_any_parent_shape_starts(self):
+        for kw in ({"lane": "runall"}, {"stage": "review"}, {"stage": "plan"}):
+            with self.subTest(**kw):
+                self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], **kw))), 1)
 
     def test_finished_bigboy_parent_edge_cases(self):
-        self.assertEqual(self.tick_run_all(self.parent_jobs([], children=[])), [])
-        self.assertEqual(self.tick_run_all(self.parent_jobs(["done"], children=None)), [])
+        self.assertEqual(len(self.tick_run_all(self.parent_jobs([], children=[]))), 1)
+        self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=None))), 1)
         self.assertEqual(len(self.tick_run_all(self.parent_jobs(["done"], children=["2-kid", "9-gone"]))), 1)
 
-    def test_auto_continue_skips_project_with_paused_job(self):
+    def test_auto_continue_starts_beside_stalled_bigboy(self):
+        """Job 751 (onewitharts s94d): a BigBoy with a stalled child and a building child no longer holds new work."""
+        jobs = self.parent_jobs(["build", "build"])
+        jobs[1].update(stalled=True, reason="stalled: no live session. Fix: click Resume.")
+        self.project("a", n=1, jobs=jobs)
+        (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
+        with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")), \
+                mock.patch.object(self.serve, "auto_resume", return_value=False):
+            self.assertEqual([c for c in self.tick() if c[2] == "run-all"], self.started("a"))
+
+    def test_auto_continue_starts_beside_paused_job(self):
         self.project("a", n=1, jobs=[{"id": "9-pz", "stage": "build", "paused": True,
                                       "reason": "stalled in build: paused by Trevor. Fix: click Play."}])
         self.project("b", n=2)
         (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
         with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")):
-            self.assertEqual(self.tick(), self.started("b"), "a holds its paused job; b still starts this tick")
+            self.assertEqual(self.tick(), self.started("a") + self.started("b"), "a paused job no longer holds a")
 
     def test_auto_continue_machine_guard(self):
         """Low RAM or disk: no run-all starts; the next tick with room starts it as before. A guard that fails partway
@@ -8444,7 +8513,7 @@ class AutoContinueTest(unittest.TestCase):
 
     def test_busy_project_does_not_block_others(self):
         self.project("a", n=1, jobs=[{"id": "001-x", "stage": "build"}]); self.project("b", n=5)
-        self.assertEqual(self.tick(), self.started("b"), "a busy: only a is skipped")
+        self.assertEqual(self.tick(), self.started("a") + self.started("b"), "a busy: a still starts")
         (self.projects["a"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
         self.assertEqual(self.tick(running=lambda p, j: (p, j) == ("a", "run-all")), self.started("b"),
                          "a's run-all running: only a is skipped")
@@ -8478,10 +8547,12 @@ class AutoContinueTest(unittest.TestCase):
                        {"id": "003-wait", "stage": "waiting", "parent": "001-par"}]
 
     def test_run_all_chains_beside_idle_start(self):
-        """A project whose run-all has a waiting child chains it; an idle lower-ranked project still starts."""
+        """A project whose run-all has a waiting child chains it and, its run-all session gone, starts a new run-all
+        for its open line (job 751); an idle lower-ranked project still starts."""
         self.project("a", n=1, jobs=self.WAITING_RUN_ALL)
         self.project("b", n=5)
         self.assertEqual([c[:4] for c in self.tick()], [("a", self.base / "a" / "scrum", "003-wait", "start"),
+                                                        ("a", self.base / "a" / "scrum", "run-all", "run-all"),
                                                         ("b", self.base / "b" / "scrum", "run-all", "run-all")])
 
     BLOCKED = {
@@ -8492,9 +8563,6 @@ class AutoContinueTest(unittest.TestCase):
         "parked-parent-only": {"backlog": "- [x] Claimed → 002-k\n",
                                "jobs": [{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                         {"id": "002-k", "stage": "needs-human", "parent": "001-p"}]},
-        "busy": {"jobs": [{"id": "001-x", "stage": "build"}]},
-        "paused": {"jobs": [{"id": "9-pz", "stage": "build", "paused": True,
-                             "reason": "stalled in build: paused by Trevor. Fix: click Play."}]},
         "not opted in": {"n": None},
     }
 
@@ -8583,15 +8651,15 @@ class AutoContinueTest(unittest.TestCase):
         self.tick(alive=lambda job: True)  # ps unreadable: always-True fn keeps parked .next
         self.assertTrue((wt("human") / ".next/cache").is_dir())
 
-    def test_no_start_in_flight(self):
+    def test_starts_beside_work_in_flight(self):
         self.project("a", n=1); self.project("b", n=2, jobs=[{"id": "001-x", "stage": "build"}])
-        self.assertEqual(self.tick(), self.started("a"), "b in flight: only b is skipped")
+        self.assertEqual(self.tick(), self.started("a") + self.started("b"), "b in flight still starts (job 751)")
         self.project("c", n=3, jobs=[{"id": "001-p", "stage": "running", "lane": "runall", "children": ["002-k"]},
                                      {"id": "002-k", "stage": "build", "paused": True, "parent": "001-p"}])
         del self.projects["b"], self.projects["a"]
         (self.base / "ps.txt").write_text("claude -p /trevskills-scrum start 9-x\n")  # a live session: no auto-play
         with mock.patch.dict(os.environ, SCRUM_PS=str(self.base / "ps.txt")):
-            self.assertEqual(self.tick(), [], "a running parent with only idle children is still in flight")
+            self.assertEqual(self.tick(), self.started("c"), "a running parent with a paused child holds nothing")
 
     def test_no_start_while_auto_run_all_running(self):
         self.project("a", n=1); self.project("b", n=2)
@@ -8783,7 +8851,13 @@ class ParkedParentTest(unittest.TestCase):
                 if case == "chain lock":
                     lock.parent.mkdir(parents=True, exist_ok=True); lock.write_text("holder")
                 self.write(kids)
-                self.assertEqual(self.tick(**kw), [], case)
+                if case == "no needs-human child":  # auto-play of the paused child takes the tick: no run-all
+                    self.assertEqual(self.tick(**kw), [], case)
+                    continue
+                # job 751: busy no longer holds auto continue, so read board_busy (idle_cleanup's input) directly
+                with mock.patch.object(self.serve, "auto_continue_tick") as act:
+                    self.tick(**kw)
+                self.assertEqual(act.call_args.args[0], {"p": True}, case)
                 lock.unlink(missing_ok=True)
 
     def test_new_shape_stalled_child_not_parked(self):

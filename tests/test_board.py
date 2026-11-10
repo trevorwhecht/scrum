@@ -873,6 +873,8 @@ class BoardTest(unittest.TestCase):
     def test_ready_child_waits_on_outside_job(self):
         parent, (c1, c2, c3) = self.three()
         out = self.outside(parent, c1)
+        self.spec(out, "src/outside.py")  # job 751: unknown files on either side would let out hold c2
+        self.spec(c2, "src/c2.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
         board.cmd_set(self.root, c2, ["stage=done"])
         board.cmd_set(self.root, c3, ["stage=done"])
@@ -933,6 +935,8 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c3])
         board.cmd_set(self.root, c1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        for c in (c2, c3):  # job 751: the first tree's live children would hold the next tree's claims
+            board.cmd_set(self.root, c, ["stage=done"])
         # A parallel=no child starts only when no sibling is in progress.
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no — touches everything"), self.ticket(3, deps="T1, T2", exposure="yes"))
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -969,6 +973,8 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("## Likely files", (self.root / "jobs" / c3 / "feature.md").read_text())
         self.assertIsNone(board.resume_blocker(self.root, c2, live={c1}))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        for c in (c1, c2):  # job 751: the first tree's live children would hold the next tree's claims
+            board.cmd_set(self.root, c, ["stage=done"])
         # A specced file under a waiting sibling's folder clashes with it (prefix-aware), in ready and resume_blocker.
         parent = plan()
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -990,6 +996,7 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1], unknown)
             board.cmd_set(self.root, c1, ["stage=done"])
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2], unknown)
+            board.cmd_set(self.root, c2, ["stage=done"])  # job 751: a live spec-less job holds every other tree
         # Reversed: the spec-less child is claimed first, and a disjoint sibling waits until it is done.
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -1250,6 +1257,7 @@ class BoardTest(unittest.TestCase):
         board.cmd_ready(self.root, parent)
         p = self.child(parent)
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+        board.cmd_set(self.root, c1, ["stage=done"])  # job 751: a live outside job would hold the run-all's claims
         rparent, (a, b) = self.runall(2)
         board.cmd_ready(self.root, rparent)
         board.cmd_set(self.root, rparent, ["stage=needs-human", "reason=run-all blocked: x. Fix: y"], internal=True)
@@ -1660,6 +1668,8 @@ class BoardTest(unittest.TestCase):
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"]), (kids, 7))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        for k in kids:  # job 751: the first run-all's live children would hold the next run-all's claims
+            board.cmd_set(self.root, k, ["stage=done"])
         # A spec-less Run-all child starts only alone.
         parent, (a, b) = self.runall(2)
         self.spec(b, "src/b.py")
