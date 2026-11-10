@@ -4093,6 +4093,26 @@ class BoardTest(unittest.TestCase):
             self.assertIsNone(board.stall_stage(job), job)
         self.assertIn("stalled: ", board.RESUMABLE)
 
+    def test_resume_first_skips_stalled_child_of_non_running_parent(self):
+        shapes = ({"stage": "build", "stalled": True, "reason": "stalled: no live session"},
+                  {"stage": "needs-human", "reason": "stalled in build: no live session"})
+        for shape in shapes:
+            for par in ({"stage": "running", "paused": True}, {"stage": "needs-human"}, {"stage": "done"}):
+                with self.subTest(shape=shape["stage"], parent=par):
+                    kid = {"id": "k", "parent": "p", **shape}
+                    # a paused parent counts itself (1), the stalled child adds nothing
+                    self.assertEqual(board.resume_first([{"id": "p", **par}, kid]), int(bool(par.get("paused"))))
+
+    def test_resume_first_still_counts_running_parent_child_and_standalone(self):
+        for shape in ({"stage": "build", "stalled": True, "reason": "stalled: no live session"},
+                      {"stage": "needs-human", "reason": "stalled in build: no live session"}):
+            par = {"id": "p", "stage": "running"}
+            self.assertEqual(board.resume_first([par, {"id": "k", "parent": "p", **shape}]), 1)
+            self.assertEqual(board.resume_first([{"id": "s", **shape}]), 1)
+            self.assertEqual(board.resume_first([{"id": "k", "parent": "gone", **shape}]), 1, "missing parent counts")
+        paused = {"id": "k", "parent": "p", "stage": "build", "paused": True}
+        self.assertEqual(board.resume_first([{"id": "p", "stage": "running", "paused": True}, paused]), 2, "both paused")
+
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # a build sibling would hold its slot
     def test_ready_treats_new_shape_stalled_child_as_idle(self):
         parent, (c1, c2, c3) = self.three()

@@ -6687,6 +6687,41 @@ class AutoResumeTest(unittest.TestCase):
         self.assertTrue(live()["reason"].startswith("auto-resume spent in build: "), live()["reason"])
         self.assertNotIn("limitResetAt", live())
 
+    def test_resume_held_queued_launch_spends_no_try(self):
+        s, T = self.serve, 1_800_000_000
+        self.jobs = [{"id": "held", "stage": "build", "reason": None, "limitResetAt": T, "updatedAt": "2026-01-01T00:00:00+00:00"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s.time, "time", return_value=T + 121), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "resume_job", return_value=None):
+            for _ in range(13):
+                self.assertIs(s.auto_resume("p", self.root, self.jobs), True)
+            self.assertNotIn("p/held", s.AUTO_RESUME, "a queued launch spends no try, so it is never parked as spent")
+            self.assertEqual(self.jobs[0]["stage"], "build")
+        with mock.patch.object(s.time, "time", return_value=T + 121), mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None), \
+                mock.patch.object(s, "resume_job", return_value="runs/held.log"):
+            s.auto_resume("p", self.root, self.jobs)
+        self.assertEqual(s.AUTO_RESUME["p/held"][0], 1)
+
+    def test_net_error_queued_launch_spends_no_try(self):
+        s, now = self.serve, 1_800_000_000
+        self.jobs = [{"id": "net", "stage": "build", "stalled": True, "reason": "stalled: no live session",
+                      "updatedAt": "2026-01-01T00:00:00+00:00", "runlog": "runs/crash.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        common = (mock.patch.object(s.time, "time", return_value=now), mock.patch.object(s, "running", return_value=False),
+                  mock.patch.object(s, "resume_refusal", return_value=None), mock.patch.object(s, "take_room", return_value=True),
+                  mock.patch.object(s, "limit_reset", return_value=(False, None, False)),
+                  mock.patch.object(s, "net_error", return_value=True))
+        with common[0], common[1], common[2], common[3], common[4], common[5], \
+                mock.patch.object(s, "resume_job", return_value=None):
+            for _ in range(13):
+                self.assertIs(s.auto_resume("p", self.root, self.jobs), True)
+            self.assertNotIn("p/net", s.AUTO_RESUME)
+        with common[0], common[1], common[2], common[3], common[4], common[5], \
+                mock.patch.object(s, "resume_job", return_value="runs/net.log"):
+            s.auto_resume("p", self.root, self.jobs)
+        self.assertEqual(s.AUTO_RESUME["p/net"], [1, now + s.NET_RETRY_EVERY])
+
     def test_failed_spawn_spends_no_stall_retry(self):
         s = self.serve
         self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": "stalled: no live session",
