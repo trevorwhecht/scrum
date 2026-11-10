@@ -901,6 +901,21 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((again["ready"], again["in_progress"]), ([], 2))
         self.assertEqual([self.child(c)["stage"] for c in (c1, c2, c3)], ["spec", "spec", "waiting"])
 
+    def test_ready_writes_claimed_at_once(self):
+        claimed = lambda c: self.root / "jobs" / c / "claimed-at.txt"
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        before = int(time.time())
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertTrue(before <= int(claimed(c1).read_text()) <= int(time.time()))
+        self.assertFalse(claimed(c2).exists())  # left waiting on c1
+        self.assertFalse(claimed(c3).exists())
+        claimed(c1).write_text("123")
+        board.cmd_ready(self.root, parent)  # a second call
+        board.cmd_set(self.root, c1, ["stage=waiting"])  # a re-claim
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertEqual(claimed(c1).read_text(), "123")
+
     def test_ready_skips_pending_setup(self):
         parent, (c1, c2, c3) = self.three(setup="Create the S3 bucket")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
@@ -3364,6 +3379,34 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(cell(), "-")  # empty file
         gates.write_text("ram_room\ncpu_load\n")
         self.assertEqual(cell(), "ram_room, cpu_load")
+
+    def test_timing_row_claim_clock(self):
+        t0 = 1_700_000_000
+        self.write("j/feature.md", "f\n")
+        self.write("j/spec.md", "s\n")
+        os.utime(self.root / "jobs/j/feature.md", (t0, t0))
+        os.utime(self.root / "jobs/j/spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        cells = lambda: board._timing_row(self.root, "j", {}, {})[0][2:4]
+        self.assertEqual(cells(), ["3h10m", "0m"])  # no claimed-at.txt: today's values
+        claimed = self.root / "jobs/j/claimed-at.txt"
+        claimed.write_text(f"{t0 + 3 * 3600}\n")
+        self.assertEqual(cells(), ["10m", "3h00m"])
+        self.write("j/round-1/head.txt", "h\n")  # a build start 5m after spec.md adds its own queue
+        (self.root / "runs").mkdir(exist_ok=True)
+        start = datetime.fromtimestamp(t0 + 3 * 3600 + 900, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{start}-start-j.log").write_text("")
+        self.assertEqual(cells(), ["10m", "3h05m"])
+
+    def test_timing_row_bad_claim_ignored(self):
+        t0 = 1_700_000_000
+        self.write("j/feature.md", "f\n")
+        self.write("j/spec.md", "s\n")
+        os.utime(self.root / "jobs/j/feature.md", (t0, t0))
+        os.utime(self.root / "jobs/j/spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        claimed = self.root / "jobs/j/claimed-at.txt"
+        for bad in ("", "soon", f"{t0 + 4 * 3600}", f"{t0 - 60}"):  # empty, non-numeric, after spec.md, before feature.md
+            claimed.write_text(bad)
+            self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["3h10m", "0m"], bad)
 
     def test_bad_window_thresholds(self):
         self.assertEqual((board.BAD_WASTED_PCT, board.BAD_FIRST_PASS, board.BAD_MIN_JOBS, board.EARLY_DIGEST_MIN),
