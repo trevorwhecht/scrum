@@ -76,6 +76,9 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
+  board.py process-health <NNN>    write and print digests/<NNN>/health.json {"digest","previous","metrics"}: 10 fixed
+                                   metrics for the listed jobs, each with the previous digest's value, its limit and a
+                                   flag ("worse", "over twice" or null) (Digest step 1)
   board.py window-report           remember each open usage window in windows/open.json; for each one that has closed,
                                    write windows/<window>-<resets_at>.json once (points, tokens, waste, lane fit, idle)
                                    and print the scorecards written as a JSON list
@@ -1456,6 +1459,133 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     globs = ui_globs(root)
     return {"digest": str(digest_id), "jobs": [_fit_job(root, job_id, jobs.get(job_id, {}), globs) for job_id in listed]}
+
+
+# --- process-health: 10 fixed metrics per digest, each compared with the previous digest's (Digest step 1). ---
+HEALTH_LIMITS = {"stops_per_job": 0.5, "resume_abort_stops": 0, "waiting_on_job_stops": 0, "unreadable_asks": 0,
+                 "cheaper_lane_jobs": 0, "test_waste_jobs": 0, "fable_misuse": 0, "unused_windows": 0,
+                 "overburned_windows": 0, "not_shipped": 0}
+HEALTH_UNUSED_PCT = 15  # a window left more than this % unused at reset
+HEALTH_EARLY_90_SECS = 3600  # a window that reached 90% more than this long before reset burned too early
+HEALTH_WAITING_RE = re.compile(r"(?i)blocked on sibling|waiting (?:on|for) (?:job |another job|\d{3})")
+HEALTH_UNREADABLE_RE = re.compile(r"[\w.-]*/[\w.-]+\.[A-Za-z]{1,5}\b|\brule \d+\b", re.I)
+HEALTH_STOP_KINDS = ("ask", "stall", "machine", "refused", "bigboy")
+HEALTH_TEST_ROLES = ("review-e2e", "review-ui", "review-ux")
+
+
+def _health_file(path, kind):
+    """path's JSON when it parses as `kind` (list or dict), else an empty one."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return kind()
+    return data if isinstance(data, kind) else kind()
+
+
+def _previous_health(root, digest_id):
+    """(name, metrics) of the highest-numbered earlier digest with a readable health.json and no error.md."""
+    digests = Path(root) / "digests"
+    for n in sorted((p.name for p in digests.iterdir() if DIGEST_RE.fullmatch(p.name) and p.name < digest_id),
+                    reverse=True):
+        if (digests / n / "error.md").exists():
+            continue
+        metrics = _health_file(digests / n / "health.json", dict).get("metrics")
+        if isinstance(metrics, dict):
+            return n, metrics
+    return None, {}
+
+
+def cmd_process_health(root, digest_id: str) -> dict:
+    """{"digest", "previous", "metrics"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
+    questions.log, each job's routing.log, fable.log and round reviews, the digest's pipeline-fit.json and windows.json,
+    and board.json; each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
+    broken input counts 0. Writes digests/<NNN>/health.json."""
+    root = Path(root)
+    d = root / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
+        raise SystemExit(f"no digest {digest_id!r}")
+    listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
+    claimed = set(listed)
+    board = {j["id"]: j for j in read_board(root)["jobs"] if isinstance(j, dict) and str(j.get("id")) in claimed}
+    hits = {name: [] for name in HEALTH_LIMITS}  # one entry per counted line, job or window
+    for q in _json_lines(root / "questions.log"):
+        job, kind = q.get("job"), q.get("kind")
+        if str(job) not in claimed or not (kind in HEALTH_STOP_KINDS or "question" in q and kind is None):
+            continue
+        hits["stops_per_job"].append(job)
+        if HEALTH_WAITING_RE.search(str(q.get("reason") or q.get("question") or "")):
+            hits["waiting_on_job_stops"].append(job)
+        if kind not in (None, "ask"):
+            continue
+        opts = q.get("options") if isinstance(q.get("options"), list) else []
+        if opts and all(isinstance(o, dict) and str(o.get("command") or "").startswith(("resume ", "abort "))
+                        for o in opts):
+            hits["resume_abort_stops"].append(job)
+        question = str(q.get("question") or "")
+        if len(question.split()) > 40 or HEALTH_UNREADABLE_RE.search(question):
+            hits["unreadable_asks"].append(job)
+    for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
+        if not isinstance(e, dict) or str(e.get("id")) not in claimed:
+            continue
+        added, files, lane = e.get("added"), e.get("files"), e.get("lane") or "standard"
+        if type(added) is int and type(files) is int and files <= LILGUY_MAX_FILES and (
+                lane in ("fast", "standard", "debug") and added <= LILGUY_MAX_LINES
+                or lane in ("standard", "debug") and added <= FAST_MAX_LINES):
+            hits["cheaper_lane_jobs"].append(e["id"])
+    globs, seconds = ui_globs(root), 0
+    for job_id in listed:
+        folder = root / "jobs" / job_id
+        routed = _json_lines(folder / "routing.log")
+        lane = board.get(job_id, {}).get("lane") or "standard"
+        reviewed = any(_real_review(p) for r in HEALTH_TEST_ROLES for p in folder.glob(f"round-*/{r}.md"))
+        try:
+            spec = (folder / "spec.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            spec = ""
+        no_ui = not globs or not any(glob_match(p, globs) for p in likely_files(spec))
+        if reviewed and (lane in ("lilguy", "fast") or no_ui):
+            hits["test_waste_jobs"].append(job_id)
+            seconds += sum(r["duration_s"] for r in routed if is_num(r.get("duration_s"))
+                           and any(t in str(r.get("role") or "") for t in HEALTH_TEST_ROLES))
+        simple = not job_complex(root, job_id)
+        for r in routed:
+            role = str(r.get("role") or "")
+            if "fable" in str(r.get("model") or "") and (simple or ("planner" not in role and "spec-writer" not in role)):
+                hits["fable_misuse"].append(job_id)
+        try:
+            fable = (folder / "fable.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            fable = []
+        hits["fable_misuse"] += [job_id for line in fable if simple and line.split("\t")[2:3] == ["fable"]]
+        job = board.get(job_id, {})
+        if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
+                                          or job.get("lane") not in ("lilguy", "runall", "bigboy") and not job.get("pr")):
+            hits["not_shipped"].append(job_id)
+    for card in _health_file(d / "windows.json", list):
+        b = card.get("budget") if isinstance(card, dict) else None
+        if not isinstance(b, dict):
+            continue
+        name, reset = f"{card.get('window')}-{card.get('resets_at')}", card.get("resets_at")
+        if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT:
+            hits["unused_windows"].append(name)
+        if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
+                or is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SECS):
+            hits["overburned_windows"].append(name)
+    prev_id, prev = _previous_health(root, str(digest_id))
+    metrics = {}
+    for name, limit in HEALTH_LIMITS.items():
+        value = (round(len(hits[name]) / len(listed), 2) if listed else None) if name == "stops_per_job" \
+            else len(hits[name])
+        old = prev.get(name, {}).get("value") if isinstance(prev.get(name), dict) else None
+        old = old if is_num(old) else None
+        flag = None
+        if value is not None and old is not None:
+            flag = "worse" if value > old else "over twice" if value > limit and old > limit else None
+        metrics[name] = {"value": value, "previous": old, "limit": limit, "jobs": sorted(set(hits[name])), "flag": flag}
+    metrics["test_waste_jobs"]["minutes"] = round(seconds / 60)
+    out = {"digest": str(digest_id), "previous": prev_id, "metrics": metrics}
+    _write_json(d / "health.json", out)
+    return out
 
 
 # --- pipeline health: digest-start raises one needs-human job per tool that failed in half its claimed jobs. ---
@@ -5187,6 +5317,7 @@ def main(argv=None):
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("pipeline-fit").add_argument("digest")
+    sub.add_parser("process-health").add_argument("digest")
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
     sub.add_parser("lilguy-fit").add_argument("id")
@@ -5318,6 +5449,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "pipeline-fit":
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
+    elif a.cmd == "process-health":
+        print(json.dumps(cmd_process_health(a.dir, a.digest)))
     elif a.cmd == "window-report":
         print(json.dumps(cmd_window_report(a.dir)))
     elif a.cmd == "move-ratio":
