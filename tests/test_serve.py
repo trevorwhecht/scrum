@@ -1253,9 +1253,15 @@ class ServeTest(unittest.TestCase):
         self.serve.board.backlog_op(self.root, "add", text=text)
         return len(self.serve.board.backlog_items(self.root)) - 1
 
+    def terminal(self, ok=True):
+        """Patches serve.run_terminal (it refuses to run under unittest); the returned mock receives each first argv."""
+        run = mock.Mock(return_value=None)
+        result = lambda tries: (200, {"message": tries[0][1]}) if ok else (500, {"error": "couldn't open the terminal"})
+        return mock.patch.object(self.serve, "run_terminal", side_effect=lambda tries: run(tries[0][0]) or result(tries)), run
+
     def askme_run(self, body, returncode=0):
-        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve, "spawn") as spawn:
-            run.return_value = mock.Mock(returncode=returncode, stdout="", stderr="Terminal said no\n" if returncode else "")
+        patch, run = self.terminal(not returncode)
+        with patch, mock.patch.object(self.serve, "spawn") as spawn:
             code, out = self.req("POST", "/api/p/repo/backlog/run", body)
         return code, out, run, spawn
 
@@ -1297,8 +1303,8 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])  # stays claimed for a manual start
 
     def run_all(self, headers=None, body=None):
-        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve, "spawn") as spawn:
-            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        patch, run = self.terminal()
+        with patch, mock.patch.object(self.serve, "spawn") as spawn:
             r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog/run-all", method="POST",
                                        data=json.dumps(body if body is not None else {}).encode(),
                                        headers={"Content-Type": "application/json", **(headers or {})})
@@ -1559,15 +1565,27 @@ class ServeTest(unittest.TestCase):
         job_id = self.asked("lilguy 77", "abort 77 --cascade")
         tries = []
         with mock.patch.object(self.serve, "run_terminal",
-                               side_effect=lambda t: tries.append(t) or (200, {"message": "Opened in a new Terminal window."})):
+                               side_effect=lambda t: tries.append(t) or (200, {"message": "Opened in a Terminal window."})):
             code, out, m = self.answer(job_id, {"key": "a"}, {"key": "a", "label": "Run it", "command": "lilguy 77"})
-        self.assertEqual((code, out), (200, {"message": "Opened in a new Terminal window."}))
+        self.assertEqual((code, out), (200, {"message": "Opened in a Terminal window."}))
         m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
-        self.assertEqual(tries, [[(["osascript", "-e", self.serve.NEW_WINDOW_SCRIPT, str(self.root.resolve().parent), "env",
+        script = str(Path(self.serve.__file__).with_name("job-window.applescript"))
+        self.assertEqual(tries, [[(["osascript", script, str(self.root.resolve().parent), job_id, "env",
                                     "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum lilguy {job_id}"],
-                                   "Opened in a new Terminal window.")]])
+                                   "Opened in a Terminal window.")]])
         for name in ("spawn", "stop", "abort", "resume"):
             m[name].assert_not_called()
+
+    def test_run_terminal_refuses_under_unittest(self):
+        with mock.patch.object(self.serve.subprocess, "run") as run, \
+                self.assertRaisesRegex(RuntimeError, "^run_terminal refused under unittest; mock it$"):
+            self.serve.run_terminal([(self.serve.osa_job_window(self.root, "749-x", "sleep", "30"), "ok")])
+        run.assert_not_called()
+
+    def test_job_window_script_reuses_titled_tab(self):
+        text = (Path(self.serve.__file__).with_name("job-window.applescript")).read_text()
+        for phrase in ("custom title", '"scrum " &', "busy", "do script cmd in", "&& exit"):
+            self.assertIn(phrase, text, phrase)
 
     def test_answer_lilguy_terminal_failure_keeps_question(self):
         job_id = self.asked("lilguy 77", "abort 77 --cascade")
@@ -1600,13 +1618,14 @@ class ServeTest(unittest.TestCase):
         job_id = self.batch_job()
         seen = []
 
-        def run(cmd, **kw):  # the window command: records whether terminal_opened was already claimed on the board
-            seen.append((cmd[-1], "terminal_opened" in self.stage_of(job_id)))
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        with mock.patch.object(self.serve.subprocess, "run", side_effect=run) as sub:
+        def run(tries):  # the window command: records whether terminal_opened was already claimed on the board
+            seen.append((tries[0][0][-1], "terminal_opened" in self.stage_of(job_id)))
+            return 200, {"message": "Opened"}
+        with mock.patch.object(self.serve, "run_terminal", side_effect=run) as rt:
             self.batch_tick(job_id)
             self.assertEqual(seen, [(f"/trevskills-scrum lilguy {job_id}", True)])
-            self.assertEqual(sub.call_args.args[0][:2], ["osascript", "-e"])
+            self.assertEqual(rt.call_args.args[0][0][0][:2],
+                             ["osascript", str(Path(self.serve.__file__).with_name("job-window.applescript"))])
             self.assertTrue(self.stage_of(job_id).get("terminal_opened"))
             self.batch_tick(job_id)
         self.assertEqual(len(seen), 1, "a second tick opens no second window")
@@ -3115,8 +3134,8 @@ class ServeTest(unittest.TestCase):
 
     def test_discuss_opens_interactive_claude_with_note_as_argv(self):
         job_id = self.job("discuss me")
-        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen") as popen:
-            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        patch, run = self.terminal()
+        with patch, mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {})[0], 409)  # not needs-human
             self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
             code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": "it's'; rm -rf ~"})
@@ -3134,8 +3153,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(len(note), 1500)
         job_id = self.job("discuss long")
         self.serve.board.cmd_set(self.root, job_id, ["stage=needs-human", "reason=Hard stop: schema — x"], internal=True)
-        with mock.patch.object(self.serve.subprocess, "run") as run, mock.patch.object(self.serve.subprocess, "Popen"):
-            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        patch, run = self.terminal()
+        with patch, mock.patch.object(self.serve.subprocess, "Popen"):
             code, out = self.req("POST", f"/api/p/repo/jobs/{job_id}/discuss", {"feedback": note})
         self.assertEqual(code, 200, out)
         self.assertEqual(run.call_args.args[0][-1], f'/trevskills-scrum discuss {job_id} "{note}"')

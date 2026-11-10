@@ -1304,7 +1304,8 @@ class ContractTest(unittest.TestCase):
                        "Claude Code refuses those edits in a session that runs on its own", "dependents' `depends_on`"):
             self.assertIn(phrase, step3, phrase)
         self.assertLess(step3.index("B claude-paths $ID"), step3.index("B set $ID lane=<fast|standard|debug|bigboy>"))
-        self.assertEqual(step3.count("tell application \"Terminal\""), 1)
+        self.assertEqual(step3.count("job-window.applescript"), 1)
+        self.assertNotIn("tell application \"Terminal\"", step3)
         self.assertIn("on `created` true (a new batch", step3)
         self.assertIn("on `created` false no session opens", step3)
         self.assertIn("lilguy <id>'", step3)
