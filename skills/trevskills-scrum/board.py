@@ -2710,9 +2710,16 @@ OVERLAP_WAIT = MACHINE_WAIT + "files overlap "  # its waiting children share Lik
 
 def resume_first(jobs: list[dict]) -> int:
     """How many jobs on this board Trevor paused (not done or aborted), plus the unpaused stalled ones, either shape
-    (not lilguy-in-checkout). Since job 751 they no longer hold new claims (cmd_ready checks their Likely files)."""
+    (not lilguy-in-checkout). A stalled child whose parent is on the board but paused or not running is skipped:
+    auto_resume leaves it alone. Since job 751 they no longer hold new claims (cmd_ready checks their Likely files)."""
+    by_id = {j.get("id"): j for j in jobs}
+
+    def parent_idle(j):
+        p = by_id.get(j.get("parent")) if j.get("parent") else None
+        return bool(p) and (bool(p.get("paused")) or p.get("stage") != "running")
+
     return sum(bool(j.get("paused")) and j.get("stage") not in ("done", "aborted")
-               or stalled(j) and not lilguy_in_checkout(j) for j in jobs)
+               or stalled(j) and not lilguy_in_checkout(j) and not parent_idle(j) for j in jobs)
 
 
 def usage_path():

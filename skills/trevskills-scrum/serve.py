@@ -921,9 +921,8 @@ def auto_resume(project, root, jobs):
             if net_error(root, job):
                 if resume_refusal(project, root, job) is None:
                     busy = True
-                    if take_room():
+                    if take_room() and resume_job(project, root, job, jobs):  # a queued launch spends no try
                         AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
-                        resume_job(project, root, job, jobs)
                 continue
             m = board.stall_stage(job)
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
@@ -1010,8 +1009,8 @@ def resume_held(project, root, job, jobs, now):
         return False
     if resume_refusal(project, root, job) or not take_room():
         return True  # a sibling or the tick's budget holds its slot: no try spent
-    AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
-    resume_job(project, root, job, jobs)
+    if resume_job(project, root, job, jobs):  # a queued launch spends no try
+        AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
     return True
 
 
