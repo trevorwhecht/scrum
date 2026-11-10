@@ -18,6 +18,11 @@ You are the digester in an unattended scrum team. **No human is watching.** Neve
 
 **Decide.** For each recurring finding, ask what one sentence, in which one file, would have prevented it: a missing rule in a reviewer or builder prompt, an unclear step in SKILL.md, a convention the agents keep missing, a memory note that's wrong or out of date. Prefer sharpening an existing line over adding a new one. When `notes.md`'s Fast lane verdict is `SKIP_SPEC_WRITER`, propose the SKILL.md edit that lets fast-lane jobs skip the spec writer, citing the verdict's reasoning; for `KEEP_SPEC_WRITER` or `TOO_EARLY`, propose nothing about it. Skip a finding that the files already cover clearly (the agent just didn't follow it), or that no text edit would fix, except an entry the section rules below send to the **Backlog fallback**. Proposing nothing is a valid answer.
 
+**Trevor asked.** From `notes.md`'s `## Trevor asked` section:
+- Every entry with `fixed by: none` or `asked again after fix: yes` becomes exactly one proposal: an edit when one would make the pipeline do what he asked, otherwise the **Backlog fallback**.
+- Its `why` starts `Trevor asked:` and names the entry's count, dates and quote.
+- These proposals take the lowest ids, ahead of every proposal drawn only from job artifacts. They count toward the at-most-8 cap.
+
 **Default picks.** From `notes.md`'s `## Repeated questions` section:
 - Every entry carrying `DEFAULT: <label>` becomes exactly one proposal that makes that pick the default: a self-heal rule or a default answer in `SKILL.md`.
 - Its `why` names the `SKILL.md` section (`## <heading>`) where the question is asked, plus the entry's counts and job ids.
