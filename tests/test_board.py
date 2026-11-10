@@ -3301,6 +3301,70 @@ class BoardTest(unittest.TestCase):
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
 
+    def pulse_digest(self, lines, since=None, error_since=None):
+        """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
+        jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. Returns (pulse.md, stderr)."""
+        self.done_jobs(1)
+        for name, at, err in (("001", since, False), ("002", error_since, True)):
+            if at is not None:
+                self.marker(name, "0\n", error=err)
+                os.utime(self.root / "digests" / name / "jobs.txt", (at, at))
+        reg = Path(self.tmp.name) / "reg"
+        reg.mkdir()
+        if lines is not None:
+            (reg / "pulse.log").write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json")}):
+            out = run_board("--dir", str(self.root), "digest-start")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        d = json.loads(out.stdout)["id"]
+        return (self.root / "digests" / d / "pulse.md").read_text(), out.stderr
+
+    def test_digest_start_writes_pulse(self):
+        s = 1_700_000_000
+
+        def line(t, sessions, cooldown, cpu, app, lib):
+            keys = ("claimable", "waiting", "busy", "top")
+            return {"t": t, "sessions": sessions, "cooldown": cooldown, "cpu_load": cpu, "focus": "app",
+                    "projects": {"app": dict(zip(keys, app)), "lib": dict(zip(keys, lib))}}
+        text, _ = self.pulse_digest([
+            line(s - 60, 9, False, 900, (1, 0, False, 1), (0, 0, True, 1)),  # before the last digest: not counted
+            line(s, 0, False, 100, (1, 0, False, 10), (0, 0, True, 3)),  # idle, non-focus
+            line(s + 60, 0, False, 100, (0, 1, False, 10), (0, 0, False, 3)),  # idle (waiting work)
+            line(s + 120, 3, True, 600, (1, 0, False, 12), (0, 0, True, 3)),  # app +2 in cool down at 600%, non-focus
+            "junk", {"t": "x", "sessions": 0},
+            line(s + 180, 0, False, 550, (1, 0, False, 12), (0, 0, False, 4)),  # idle, lib +1 at 550%
+            line(s + 240, 0, True, 100, (1, 0, False, 12), (0, 0, False, 5)),  # cool down: not idle; lib +1 in cool down
+        ], since=s)
+        self.assertEqual(text, "# Pulse: digest 002\n\n"
+                               "Window: 2023-11-14T22:13+00:00 to 2023-11-14T22:17+00:00 · ticks: 5\n"
+                               "Idle with claimable work: 3 min (longest stretch 2 min)\n"
+                               "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
+                               "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
+                               "Claims during cool down: 3 — app 12, lib 5\n"
+                               "Claims while CPU load over 500%: 3\n"
+                               "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
+
+    def test_pulse_missing_log(self):
+        empty = "# Pulse: digest 001\n\nNo pulse lines since the last digest.\n"
+        self.assertEqual(self.pulse_digest(None)[0], empty)
+        self.tearDown(); self.setUp()
+        self.assertEqual(self.pulse_digest(["junk", {"t": None}, {"t": 5, "sessions": 0}], since=10)[0],
+                         empty.replace("001", "002"))
+        self.tearDown(); self.setUp()
+        with mock.patch.object(board, "write_pulse", side_effect=OSError("disk full")):
+            self.done_jobs(1)
+            out = run_board("--dir", str(self.root), "digest-start")
+        self.assertEqual(json.loads(out.stdout), {"id": "001", "jobs": [board.read_board(self.root)["jobs"][0]["id"]],
+                                                  "windows": []})
+        self.assertIn("digest-start: pulse: disk full\n", out.stderr)
+
+    def test_pulse_skips_errored_digest_since(self):
+        text, _ = self.pulse_digest([{"t": 1_000_500, "sessions": 2}, {"t": 2_000_500, "sessions": 1}],
+                                    since=1_000_000, error_since=2_000_000)
+        self.assertIn("# Pulse: digest 003\n", text)
+        self.assertIn(" · ticks: 2\n", text)
+        self.assertIn("Peak sessions: 2 at 1970-01-12T13:55+00:00\n", text)
+
     def test_timing_build_start_from_run_log(self):
         t0 = 1_700_000_000
         self.assertIsNone(board._build_start(self.root, "j"))

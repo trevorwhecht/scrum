@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # pulse.log, weekly/ never in the real home
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # watchdog_tick never runs top or writes the real CPU log
