@@ -52,8 +52,11 @@ class StallSpentReproTest(unittest.TestCase):
         spawned = self.tick() + self.tick()
         job = json.loads((self.root / "board.json").read_text())["jobs"][0]
         self.assertEqual(job["stage"], "needs-human", "spent retries must park the job for Trevor, not wait silently")
-        self.assertEqual(sorted(o["command"] for o in job.get("options") or []), ["abort 911-x", "resume 911-x"])
-        self.assertIn("runs/20261110-183838-resume-911-x.log", job["reason"], "the question names the last run log")
+        self.assertEqual(sorted(o["command"].split()[0] for o in job.get("options") or []), ["abort", "resume"])
+        self.assertFalse(self.board.stalled(job), "a parked job is a question for Trevor, no longer a stall")
+        self.assertEqual(self.board.resume_first([job]), 0)
+        stop = (self.root / "jobs" / "911-x" / "stop.md").read_text()  # lanes/stops.md: logs go in stop.md
+        self.assertIn("20261110-183838-resume-911-x.log", stop, "stop.md names the last run log")
         self.assertNotIn("911-x", spawned, "no third auto-resume")
         self.assertIn("run-all", spawned, "with the stall handed to Trevor, auto continue claims new work")
 
