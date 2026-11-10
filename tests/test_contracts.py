@@ -1615,6 +1615,23 @@ class ContractTest(unittest.TestCase):
                        "3 or more different jobs or more than about 1 h in total", "no-change rounds"):
             self.assertIn(phrase, reader, phrase)
 
+    def test_digest_reader_reads_pulse(self):
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        for phrase in ("`DIGEST_DIR/pulse.md`", "For `## Pulse`, use `DIGEST_DIR/pulse.md`", "says `No pulse lines`",
+                       "claims while CPU load over 500%"):
+            self.assertIn(phrase, reader, phrase)
+        template = reader[reader.index("    ## Time sinks\n"):]
+        self.assertIn("    ## Pulse\n    Idle with claimable work:", template)
+        rule = reader[reader.index("For `## Pulse`"):]
+        rule = rule[:rule.index("\n")]
+        self.assertIn("exempt from the 2 or more different jobs rule", rule)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        pulse = digester[digester.index("**Pulse.**"):digester.index("**Backlog fallback.**")]
+        self.assertLess(digester.index("**Time sinks.**"), digester.index("**Pulse.**"))
+        for phrase in ("must-propose", "exactly one proposal whose `why` starts `Pulse:`", "30 min", "**Backlog fallback**",
+                       "at-most-8 cap", "like **Usage windows**"):
+            self.assertIn(phrase, pulse, phrase)
+
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
         self.assertIn("B digest-trevor <id>", step1)

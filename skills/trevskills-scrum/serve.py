@@ -1354,9 +1354,14 @@ def set_colour(root: Path, value) -> tuple[int, dict]:
     return 200, {"colour": colour}
 
 
+def claimable_count(root: Path) -> int:
+    """Backlog lines `next` could claim: open, no Human setup, no open prerequisite."""
+    return sum(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
+
+
 def claimable(root: Path) -> bool:
-    """A backlog line `next` could claim: open, no Human setup, no open prerequisite."""
-    return any(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
+    """A backlog line `next` could claim (claimable_count)."""
+    return claimable_count(root) > 0
 
 
 def parked_tree(project, root, job, by_id, alive) -> bool:
@@ -1772,6 +1777,7 @@ def watchdog_tick():
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
+    6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
     Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
     global RESUME_ROOM, E2E_RESUMED
     try:
@@ -1866,6 +1872,10 @@ def watchdog_tick():
         weekly_tick()
     except (Exception, SystemExit) as e:
         print(f"watchdog: weekly digest: {e}", file=sys.stderr, flush=True)
+    try:
+        pulse_tick(busy)
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: pulse: {e}", file=sys.stderr, flush=True)
     cooldown_chime()
 
 
@@ -1904,6 +1914,46 @@ def weekly_tick():
         return
     if (out := board.cmd_weekly_start(resets, now))["id"]:
         spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
+
+
+def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
+    """Append one JSON line to board.pulse_path(): sessions, CPU load, free RAM, swap, cool-down, 5h/7d usage, the focus
+    project (rank 0) and per project its claimable backlog lines, parked waiting jobs, busy (watchdog_tick's) and top
+    job number. A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
+    older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace) to the
+    last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
+    now = time.time() if now is None else now
+    names, usage, projects = board.projects(), claude_usage(now), {}
+    for project, repo in names.items():
+        root = repo / "scrum"
+        try:
+            jobs = board.read_board(root)["jobs"]
+            projects[project] = {
+                "claimable": claimable_count(root), "waiting": sum(map(board.parked_waiting, jobs)),
+                "busy": bool(busy.get(project)),
+                "top": max((int(m.group(1)) for j in jobs if (m := re.match(r"(\d+)-", str(j.get("id"))))), default=None)}
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: pulse: {project}: {e}", file=sys.stderr, flush=True)
+    line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),
+            "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
+            "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects}
+    path = board.pulse_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            first = json.loads(f.readline() or "{}")
+    except OSError:
+        first = {}  # no file yet: nothing to rotate
+    except ValueError:
+        first = {"t": None}  # a malformed first line never ages out by itself: rotate it away
+    if first and not (isinstance(first, dict) and board.is_num(first.get("t"))
+                      and first["t"] >= now - board.PULSE_KEEP_SECS - 86400):
+        keep = [l for l in board._json_lines(path) if board.is_num(l.get("t")) and l["t"] >= now - board.PULSE_KEEP_SECS]
+        tmp = path.with_name("pulse.log.tmp")
+        tmp.write_text("".join(json.dumps(l) + "\n" for l in keep))
+        os.replace(tmp, path)
+    with open(path, "a") as f:
+        f.write(json.dumps(line) + "\n")
 
 
 COOLDOWN_CHIMED = False  # ponytail: in memory, so a serve.py restart during an idle cool-down may chime once more

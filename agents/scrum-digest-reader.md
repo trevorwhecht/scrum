@@ -24,6 +24,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `DIGEST_DIR/windows.json`, read once per digest: `board.py digest-start` wrote it. A JSON list of usage-window scorecards, one per closed window, with `window`, `resets_at`, `headline`, `points_done`, `wasted_pct`, `lane_fit.over_routed_pct`, `cache_hit_rate`, `first_pass_rate`, `escapes` and `budget` (`used_pct`, `hit_90_at`, `left_at_reset_pct`, `cap_idle_secs`).
 - `DIGEST_DIR/health.json`, read once per digest: `board.py process-health` wrote it. `metrics` maps each of 10 fixed metric names to `value`, `previous`, `limit`, `jobs` (job ids, or window names for the window metrics) and `flag` (`worse`, `over twice` or null); `test_waste_jobs` also has `minutes`.
 - `DIGEST_DIR/timing.md`, read once per digest: `board.py digest-start` wrote it. One table row per claimed job (`Job`, `Wall`, `Spec`, `Queue`, `Queue gate` (the launch gates that queued it: `ram_room`, `cpu_load`, or `-`), `Rounds`, `Round times`, `No-change rounds`, `E2E lock waits`, `Stalls`), a `## Totals` line, and `## Waiting on the E2E queue`: jobs on any registered board stalled on the E2E lock right now, with how long.
+- `DIGEST_DIR/pulse.md`, read once per digest: `board.py digest-start` wrote it from the serve.py watchdog's one-line-a-minute pulse log since the last digest: idle minutes with claimable work, peak sessions, peak CPU load, claims during cool down, claims while CPU load over 500%, and non-focus minutes. It says `No pulse lines` when the log had none.
 - `DIGEST_DIR/trevor.md`, read once per digest: `board.py digest-trevor` wrote it. Trevor's own words since the last digest: `## Chat` (his chat messages Jev picked as pipeline complaints or rules, `- <date> <score>: "<text>"`), `## Feature quotes`, `## Backlog` (new `(Trevor …)` items) and `## Answer notes`.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
 
@@ -71,6 +72,8 @@ In `questions.log`, count only lines dated within 7 days of its newest `date` (a
     - <count> × <theme> — dates: <date>, ... — "<short quote>" — fixed by: <job id or none> — asked again after fix: yes|no
     ## Process health
     - <metric>: <value> (previous <previous>, limit <limit>) — jobs: <ids> — <flag>
+    ## Pulse
+    Idle with claimable work: <m> min (longest <m> min) · peak sessions: <n> · peak CPU load: <pct>% · claims during cool down: <n> (<projects and job numbers>) · claims while CPU load over 500%: <n> · non-focus: <m> min (focus: <name>)
 
 Sort each list by count, highest first. For the Fast lane verdict: `TOO_EARLY` only while the board holds fewer than 5 fast-lane jobs in total (count `"lane": "fast"` entries in `JOBS_DIR/../board.json`, every digest included, not just this one); `SKIP_SPEC_WRITER` only when the fast specs were mostly near-verbatim copies of feature.md and no CHANGES round or promotion traces back to something a spec would have caught; otherwise `KEEP_SPEC_WRITER`. `<count>` is the number of distinct jobs. Write `None` under a heading that has no entry.
 
@@ -122,6 +125,8 @@ For `## Time sinks`, use `DIGEST_DIR/timing.md`. Group the time lost by cause: E
 
 For `## Trevor asked`, use `DIGEST_DIR/trevor.md`. Group its entries (every section) by the process change Trevor asks for; `<count>` is the number of entries in the theme. `fixed by:` is a `done` job in `JOBS_DIR/../board.json` whose title or `feature.md` matches the theme, else `none`. `asked again after fix: yes` when an entry is dated after that job's `updatedAt`. Sort by count, highest first. This section is exempt from the 2 or more different jobs rule. Write `None` when trevor.md is missing or empty.
 For `## Process health`, use `DIGEST_DIR/health.json`: one line per metric, in file order. A null value, previous or flag is written `-`, except that a null flag is left off with its ` — `. For `test_waste_jobs`, add ` · <minutes> min` after the value. Write `None` under the section when the file is missing or not valid JSON. This section is exempt from the 2 or more different jobs rule.
+
+For `## Pulse`, use `DIGEST_DIR/pulse.md`: copy its figures into the template line as written, never recomputed or rounded. Write `None` under the section when the file is missing or says `No pulse lines`. This section is exempt from the 2 or more different jobs rule.
 
 Keep the file under 150 lines.
 

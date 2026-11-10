@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
+DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home
+os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
@@ -75,7 +77,7 @@ class ServeTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
-        os.environ.pop("SCRUM_REGISTRY", None)
+        os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
         os.environ.pop("SCRUM_ROUTE", None)
         cls.tmp.cleanup()
 
@@ -10211,6 +10213,108 @@ class E2eFullTest(unittest.TestCase):
         rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
         self.assertEqual((rec["result"], rec["lastGreen"]), ("pass", self.git("rev-parse", "HEAD")))
         self.assertIsNone(self.serve.E2E_FULL["running"])
+
+
+class PulseTest(unittest.TestCase):
+    """Job 755: each watchdog tick appends one pulse.log line; rotation keeps PULSE_KEEP_SECS. No real ps, top,
+    memory_pressure or sysctl: SCRUM_PS and the SCRUM_* readings are fakes."""
+    NOW = 1_700_000_000
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.base = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        for name, jobs, backlog in (
+                ("app", [{"id": "006-dep", "stage": "running"}, {"id": "007-wait", "stage": "waiting", "depends_on": ["006-dep"]},
+                         {"id": "012-done", "stage": "done"}],
+                 "# Backlog\n- [ ] A\n- [ ] B\n- [x] C\n- [ ] D {setup: key}\n"),
+                ("lib", [], "# Backlog\n")):
+            (self.base / name / "scrum").mkdir(parents=True)
+            (self.base / name / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+            (self.base / name / "scrum" / "backlog.md").write_text(backlog)
+        (self.base / "ps.txt").write_text("   00:10 claude -p /trevskills-scrum start 1-a\n   01:10 claude -p /trevskills-scrum start 2-b\n")
+        (self.base / "cooldown").write_text("")
+        (self.base / "projects.json").write_text(json.dumps([str(self.base / "app"), str(self.base / "lib")]))
+        self.log = self.base / "pulse.log"
+        usage = {"rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": self.NOW + 3600},
+                                 "seven_day": {"used_percentage": 60, "resets_at": self.NOW + 86400}}, "written_at": self.NOW}
+        for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PS=str(self.base / "ps.txt"),
+                                  SCRUM_FREE_RAM="42", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="250",
+                                  SCRUM_COOLDOWN=str(self.base / "cooldown")),
+                  mock.patch.object(serve.board, "read_usage", lambda: usage)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def lines(self):
+        return [json.loads(l) for l in self.log.read_text().splitlines()]
+
+    def test_tick_appends_one_line(self):
+        s = self.serve
+        self.assertEqual(s.board.pulse_path(), self.log)
+        s.pulse_tick({"app": True}, now=self.NOW)
+        self.assertEqual(self.lines(), [{
+            "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 42.0, "swap": 3.0, "cooldown": True,
+            "u5h": 30, "u7d": 60, "focus": "app",
+            "projects": {"app": {"claimable": 2, "waiting": 1, "busy": True, "top": 12},
+                         "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None}}}])
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
+                mock.patch.object(s.board, "free_ram_pct", return_value=None), \
+                mock.patch.object(s.board, "swap_used_pct", return_value=None), \
+                mock.patch.object(s.board, "cpu_load_pct", return_value=None), \
+                mock.patch.object(s.board, "read_usage", return_value=None):
+            s.pulse_tick({}, now=self.NOW + 60)
+        second = self.lines()[1]
+        self.assertEqual([second[k] for k in ("t", "cpu_load", "free_ram", "swap", "u5h", "u7d")],
+                         [1_700_000_060, None, None, None, None, None])
+        self.assertFalse(second["projects"]["app"]["busy"], "a project missing from busy is not busy")
+        self.log.unlink()  # the fixed NOW lines are years old: the real-clock tick below would rotate them away
+        with mock.patch.object(s, "auto_continue_tick"), mock.patch.object(s, "window_tick"), \
+                mock.patch.object(s, "weekly_tick"), mock.patch.object(s, "wake_waiting"), \
+                mock.patch.object(s, "e2e_full_tick"), mock.patch.object(s, "idle_cleanup"), \
+                mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "auto_resume", return_value=False), \
+                mock.patch.object(s, "cloud_tick"), mock.patch.object(s, "prune_worktrees"), \
+                mock.patch.object(s, "actions_alert"), mock.patch.object(s.board, "record_cpu_sample"), \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            s.watchdog_tick()
+        (line,) = self.lines()  # one watchdog tick, one line
+        self.assertEqual(sorted(line["projects"]), ["app", "lib"])
+
+    def test_failure_does_not_break_tick(self):
+        s = self.serve
+        with mock.patch.object(s.board, "pulse_path", return_value=self.base / "missing" / "\0bad"), \
+                mock.patch.object(s.board, "projects", return_value={}), \
+                mock.patch.object(s, "window_tick"), mock.patch.object(s, "idle_cleanup"), \
+                mock.patch.object(s, "auto_continue_tick"), mock.patch.object(s.board, "record_cpu_sample"), \
+                mock.patch.object(s, "weekly_tick") as weekly, mock.patch.object(s, "cooldown_chime") as chime, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.watchdog_tick()
+        self.assertIn("watchdog: pulse: ", err.getvalue())
+        weekly.assert_called_once()
+        chime.assert_called_once()
+
+    def test_bad_project_skipped(self):
+        (self.base / "lib" / "scrum" / "board.json").write_text("{not json")
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            self.serve.pulse_tick({}, now=self.NOW)
+        (line,) = self.lines()
+        self.assertEqual(list(line["projects"]), ["app"])
+        self.assertEqual(line["projects"]["app"]["top"], 12)
+
+    def test_rotation_keeps_14_days(self):
+        s, keep = self.serve, 14 * 86400
+        self.assertEqual(s.board.PULSE_KEEP_SECS, keep)
+        fresh = [{"t": self.NOW - keep - 86400 + 5, "n": 1}, {"t": self.NOW - 100, "n": 2}]
+        self.log.write_text("".join(json.dumps(l) + "\n" for l in fresh))
+        s.pulse_tick({}, now=self.NOW)
+        self.assertEqual([l.get("n") for l in self.lines()], [1, 2, None], "first line not stale: append only")
+        self.log.write_text(json.dumps({"t": self.NOW - keep - 86400 - 1, "n": 1}) + "\n" + "junk\n"
+                            + json.dumps({"t": self.NOW - keep - 1, "n": 2}) + "\n" + json.dumps({"t": "x", "n": 3}) + "\n"
+                            + json.dumps({"t": self.NOW - keep, "n": 4}) + "\n" + json.dumps({"t": self.NOW - 60, "n": 5}) + "\n")
+        s.pulse_tick({}, now=self.NOW)
+        self.assertEqual([(l["t"], l.get("n")) for l in self.lines()],
+                         [(1_700_000_000 - 1_209_600, 4), (1_699_999_940, 5), (1_700_000_000, None)])
+        self.assertFalse((self.base / "pulse.log.tmp").exists())
 
 
 if __name__ == "__main__":

@@ -1259,6 +1259,10 @@ def cmd_digest_start(root):
         write_history(root, out["id"])
     except (SystemExit, OSError) as e:
         print(f"digest-start: history: {e}", file=sys.stderr)
+    try:
+        write_pulse(root, digest_id)
+    except (SystemExit, OSError, ValueError, TypeError) as e:
+        print(f"digest-start: pulse: {e}", file=sys.stderr)
     return out
 
 
@@ -1313,6 +1317,82 @@ WEEKLY_LATE_SECS = 172800  # serve.py weekly_tick runs the cross-project Fable d
 def weekly_dir():
     """The cross-project weekly digests, beside projects.json (SCRUM_REGISTRY moves both)."""
     return registry_path().parent / "weekly"
+
+
+PULSE_KEEP_SECS = 14 * 86400  # serve.py pulse_tick keeps this much of pulse.log
+
+
+def pulse_path():
+    """The serve.py watchdog's pulse log (one JSON line a tick), beside projects.json (SCRUM_REGISTRY moves both)."""
+    return registry_path().parent / "pulse.log"
+
+
+def _pulse_since(root, digest_id):
+    """The jobs.txt mtime of the newest digest before digest_id with no error.md, or None (every pulse line counts)."""
+    d = Path(root) / "digests"
+    for p in sorted((x for x in d.iterdir() if DIGEST_RE.fullmatch(x.name) and x.name < digest_id), reverse=True):
+        try:
+            if not (p / "error.md").exists():
+                return (p / "jobs.txt").stat().st_mtime
+        except OSError:
+            pass
+    return None
+
+
+def write_pulse(root, digest_id):
+    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since), one line = one minute. Idle with
+    claimable work (no session, no cool-down, some project with claimable or waiting work), peaks, claims (a rise in a
+    project's top job number) during cool-down or at CPU load over 500%, and minutes the focus project had claimable
+    work while another project was busy."""
+    since = _pulse_since(root, digest_id)
+    lines = [l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)]
+    out = [f"# Pulse: digest {digest_id}", ""]
+    if not lines:
+        out.append("No pulse lines since the last digest.")
+    else:
+        iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="minutes")
+        projs = lambda l: {k: v for k, v in (l.get("projects") if isinstance(l.get("projects"), dict) else {}).items()
+                           if isinstance(v, dict)}
+        pos = lambda v: is_num(v) and v > 0
+        idle = streak = longest = nonfocus = 0
+        for l in lines:
+            ps = projs(l)
+            if l.get("sessions") == 0 and not l.get("cooldown") and any(
+                    pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values()):
+                idle, streak = idle + 1, streak + 1
+                longest = max(longest, streak)
+            else:
+                streak = 0
+            f = l.get("focus") if isinstance(l.get("focus"), str) else None
+            if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
+                nonfocus += 1
+        cool, hot, claimed = 0, 0, {}
+        for a, b in zip(lines, lines[1:]):
+            pa, pb = projs(a), projs(b)
+            for name, p in pb.items():
+                was, top = pa.get(name, {}).get("top"), p.get("top")
+                if not (is_num(was) and is_num(top) and top > was):
+                    continue
+                if b.get("cooldown") is True:
+                    cool += top - was
+                    claimed.setdefault(name, []).append(str(top))
+                if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
+                    hot += top - was
+
+        def peak(key):
+            nums = [l for l in lines if is_num(l.get(key))]
+            return max(nums, key=lambda l: l[key]) if nums else None
+        s, c = peak("sessions"), peak("cpu_load")
+        focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
+        out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
+                f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
+                f"Peak CPU load: {c['cpu_load']:.0f}% at {iso(c['t'])}" if c else "Peak CPU load: unknown",
+                f"Claims during cool down: {cool}"
+                + (" — " + ", ".join(f"{n} {' '.join(v)}" for n, v in claimed.items()) if claimed else ""),
+                f"Claims while CPU load over 500%: {hot}",
+                f"Non-focus work while focus had claimable work: {nonfocus} min (focus: {focus})"]
+    (Path(root) / "digests" / digest_id / "pulse.md").write_text("\n".join(out) + "\n")
 
 
 def weekly_ran(resets_at):
