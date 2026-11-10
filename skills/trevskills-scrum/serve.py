@@ -561,7 +561,7 @@ def answer_job(project, root, job, jobs, key, note=None):
 
 
 AUTO_RESUME = {}  # "project/job id" -> [tries, next try time]; a usage-limit outage kills every session, this brings them back
-AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) stays on the board for Trevor
+AUTO_RESUME_EVERY, AUTO_RESUME_MAX = 30 * 60, 12  # ponytail: a job still stalled after 12 tries (~6 h) is parked for Trevor (park_spent)
 SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a hold on a bare clock time is capped here
 STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's non-limit resumes per stage (STALL_RESUMES)
 BUILD_CHECK_STOP = "Build check could not"  # a needs-human stop the scrum answers with its resume option once
@@ -887,6 +887,7 @@ def auto_resume(project, root, jobs):
         key = f"{project}/{job['id']}"
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
+            park_spent(root, job, board.stall_stage(job), AUTO_RESUME_MAX)
             continue
         if str(job.get("reason") or "").startswith(board.STALL + board.COOLDOWN_PARK):  # waits out cool down, no try spent
             if not board.cooling_down() and resume_refusal(project, root, job) is None and take_room():
@@ -928,13 +929,14 @@ def auto_resume(project, root, jobs):
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             run_child = parent and parent.get("stage") == "running" and not parent.get("paused") \
                 and parent.get("lane") in ("runall", "bigboy")
-            if m and (run_child or not job.get("parent")) \
-                    and not stall_spent(key, m) and resume_refusal(project, root, job) is None:
+            if m and (run_child or not job.get("parent")) and stall_spent(key, m):
+                park_spent(root, job, m, STALL_RESUMES.get(m, 1))  # never retried again, so never left holding resume_first
+            elif m and (run_child or not job.get("parent")) and resume_refusal(project, root, job) is None:
                 busy = True
                 if not take_room():
                     continue
-                stall_mark(key, m)  # a Run-all/BigBoy child or a standalone job gets one non-limit retry per stage
-                resume_job(project, root, job, jobs)
+                if resume_job(project, root, job, jobs):  # a launch that raised (CLI missing) or was queued spends no retry
+                    stall_mark(key, m)
             continue
         busy = True  # a limit-stalled job in its window: resumed now, or waiting for its reset or a slot
         stage = board.stall_stage(job)
@@ -995,7 +997,7 @@ def main_ff_tick(project, repo, root, jobs) -> bool:
 
 def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
-    tries it is left stalled in its stage, silently, and auto_resume skips it at the cap. True when it resumed the job
+    tries it is parked for Trevor (park_spent). True when it resumed the job
     or still waits for the reset or a slot."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
@@ -1004,7 +1006,7 @@ def resume_held(project, root, job, jobs, now):
     if now < job["limitResetAt"] + 120:
         return True
     if tries >= AUTO_RESUME_MAX:
-        flag_stalled(root, job, f"usage limit hit after {AUTO_RESUME_MAX} auto-resumes")
+        park_spent(root, job, job["stage"], AUTO_RESUME_MAX)
         return False
     if resume_refusal(project, root, job) or not take_room():
         return True  # a sibling or the tick's budget holds its slot: no try spent
@@ -1073,6 +1075,40 @@ def flag_stalled(root, job, msg):
     return True
 
 
+SPENT = "auto-resume spent in "  # the needs-human question of a stall whose automatic retries ran out
+
+
+def park_spent(root, job, stage, used):
+    """A stalled (or limit-held) job whose automatic retries ran out: write jobs/<id>/stop.md (stage, retries used, last
+    run log), then park it at needs-human under the board lock with a BUILDER_BLOCKED question (Try again / Remove this
+    job), so Trevor sees it and board.resume_first stops holding the project. The live job is re-checked under the
+    lock: False when it is gone, paused, moved on, no longer stalled or held, or has a queued launch (play_queue_tick
+    starts it once there is room; parking would drop it)."""
+    if job.get("queued_launch"):  # re-checked under the lock below; this only spares a stop.md for nothing
+        return False
+    jid = job["id"]
+    d = Path(root) / "jobs" / jid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "stop.md").write_text(f"# Auto-resume spent\n\n- Stage: {stage}\n- Automatic retries used: {used}\n"
+                               f"- Last run log: {job.get('runlog') or 'none'}\n- Last reason: {job.get('reason') or ''}\n")
+    question = (f"{SPENT}{stage}: this job stopped in {stage} and its automatic retries ran out ({used} of {used} used). "
+                "The last session's log is in the stop.md tab of this job.")
+    parsed = [{"key": "a", "label": "Try again", "command": f"resume {jid}"},
+              {"key": "b", "label": "Remove this job", "command": f"abort {jid} --cascade"}]
+    why = {"key": "a", "why": "Try again starts a fresh session in the same stage; remove the job if the log shows it cannot finish."}
+    try:
+        with board.locked_board(root) as b:
+            live = next((j for j in b["jobs"] if j["id"] == jid), None)
+            if not live or live.get("paused") or live.get("stage") != job["stage"] or live.get("queued_launch") \
+                    or not (board.stalled(live) or live.get("limitResetAt")):
+                raise board._Gone
+            board.park(root, live, question, parsed, "BUILDER_BLOCKED", why)
+    except board._Gone:
+        return False
+    board.play(board.sound("needs-human"))
+    return True
+
+
 def hold_limited(root, job, reset, stage=None, fixed=False):
     """Under the board lock, keep a usage-limit-killed job in its stage (or move it back to `stage`) with
     limitResetAt = reset (epoch seconds), at most now + SESSION_WINDOW unless the reset is fixed (an epoch or a date);
@@ -1128,8 +1164,8 @@ def respawn_exited(project, root):
         flagged.append(job["id"])
         if run.get("respawn") or resume_refusal(project, root, job):
             continue  # left stalled for auto_resume; no sound, a stall is not a human stop
-        stall_mark(key, stage)  # this is the stage's one non-limit resume; auto_resume skips it
-        resume_job(project, root, job, jobs)
+        if resume_job(project, root, job, jobs):  # the stage's one non-limit resume; a raised or queued launch spends none
+            stall_mark(key, stage)
         with RUNS_LOCK:
             new = RUNS.get(key)
             if new is not None and new is not run:  # the entry resume_job's spawn just created
@@ -1165,9 +1201,9 @@ def respawn_orphans(project, root, p, kids, alive):
         if action == "resume":  # `resume` only accepts a stalled job
             if not flag_stalled(root, kid, ORPHANED):
                 continue
-            stall_mark(key, stage)  # this is the stage's one non-limit resume; auto_resume skips it
         ORPHAN_RESPAWN[key] = stage
-        spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}")
+        if spawn(project, root, kid["id"], action, f"/trevskills-scrum {action} {kid['id']}") and action == "resume":
+            stall_mark(key, stage)  # the stage's one non-limit resume; a raised or queued launch spends none
         spawned = True
     return spawned
 

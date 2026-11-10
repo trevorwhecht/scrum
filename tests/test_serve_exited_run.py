@@ -72,9 +72,10 @@ class ExitedRunTest(unittest.TestCase):
             serve.RUNS[key]["proc"].poll.return_value = 0
             serve.watchdog_tick()
             self.assertEqual(len(calls()), 1, "the auto-respawn happens only once")
-        self.assertEqual((self.job(job_id)["stage"], self.job(job_id)["stalled"]), ("build", True))
-        self.assertEqual(self.job(job_id)["reason"], "stalled: session exited while the job was still in build.")
-        self.assertNotIn(mock.call(board.sound("needs-human")), play.call_args_list, "a stall plays no sound")
+        job = self.job(job_id)
+        self.assertEqual(job["stage"], "needs-human", "its one respawn is spent: parked for Trevor, not left stalled")
+        self.assertTrue(job["reason"].startswith("auto-resume spent in build: "), job["reason"])
+        self.assertEqual(play.call_args_list.count(mock.call(board.sound("needs-human"))), 1, "the park is one stop for Trevor")
 
 
     def held_after_exit(self, line, now):

@@ -3757,6 +3757,8 @@ def park(root, job, question, parsed, title, recommend=None):
         job.pop("outcome", None)  # a new blocker: the last run's outcome no longer applies
     job.update(stage="needs-human", reason=question, question=question, options=parsed, stopTitle=title,
                updatedAt=now())
+    job.pop("stalled", None)  # a question, not a stall: a later `set --unpause stage=` must not bring the flag back
+    job.pop("limitResetAt", None)
     entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job["id"],
              "question": question, "options": parsed, "reason": question, "stopTitle": title,
              "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
@@ -5486,11 +5488,15 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
     argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
-    with open(log, "w") as fh:
-        proc = subprocess.Popen(argv, cwd=root.parent,
-                                stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
-                                         CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    try:
+        with open(log, "w") as fh:
+            proc = subprocess.Popen(argv, cwd=root.parent,
+                                    stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                    env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+                                             CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+    except OSError:  # never started (e.g. the claude CLI missing mid-update): no empty log that reads like a dead session
+        log.unlink(missing_ok=True)
+        raise
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
         cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
     except SystemExit:
