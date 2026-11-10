@@ -500,8 +500,9 @@ def check_points(points):
 
 
 def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None, top=False,
-               by=None, critical=False):
+               by=None, critical=False, unless_open=None):
     """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
+    add with unless_open writes nothing and returns None when an open item's text contains it.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker.
     add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins).
     add's by ("t", "back" or None = agent; top implies "t") and critical set the priority through source_priority."""
@@ -510,6 +511,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
         if op == "add":
             if not clean(text or ""):
                 raise SystemExit("backlog item text is empty")
+            if unless_open and any(unless_open in i["text"] for i in items if not i["done"]):
+                return None
             if points is not KEEP:
                 check_points(points)
             check_priority(priority)
@@ -964,10 +967,11 @@ def migrate_backlog_sources():
     return done
 
 
-def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, critical=False):
+def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, critical=False, unless_open=None):
     """Append each non-empty item, each with the Human setup checklist `setup` ("step; step") when given; returns the
     texts as stored. An empty checklist adds nothing. top puts each item first with {p:5}; by and critical set the
-    source and priority (see backlog_op)."""
+    source and priority (see backlog_op). unless_open skips an item while an open item's text contains it (checked
+    under the add's lock); skipped items are left out of the result."""
     check_source(by, priority, top, critical)
     if setup is not None:
         setup_steps(setup)
@@ -975,8 +979,9 @@ def cmd_backlog_add(root, items, setup=None, priority=None, top=False, by=None, 
     added = []
     for item in items:
         if clean(item):
-            backlog_op(root, "add", text=item, setup=setup, priority=priority, top=top, by=by, critical=critical)
-            added.append(clean(item, ITEM_MAX))
+            if backlog_op(root, "add", text=item, setup=setup, priority=priority, top=top, by=by, critical=critical,
+                          unless_open=unless_open) is not None:
+                added.append(clean(item, ITEM_MAX))
     return added
 
 

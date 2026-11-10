@@ -1,4 +1,4 @@
-import contextlib, errno, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
+import contextlib, errno, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest, urllib.parse, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
@@ -10336,6 +10336,190 @@ class PulseTest(unittest.TestCase):
         self.assertEqual([(l["t"], l.get("n")) for l in self.lines()],
                          [(1_700_000_000 - 1_209_600, 4), (1_699_999_940, 5), (1_700_000_000, None)])
         self.assertFalse((self.base / "pulse.log.tmp").exists())
+
+
+class ProdErrorsTest(unittest.TestCase):
+    """Job 769: prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day."""
+
+    NOW = 1762740000.0  # 2025-11-10T02:00:00Z
+    ARGV = ["vercel", "logs", "--environment", "production", "--level", "error", "--since", "24h", "--json", "--limit",
+            "1000", "--non-interactive"]
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.root = self.repo / "scrum"
+        self.root.mkdir()
+        (self.root / "project.md").write_text("# Project\n- Stack: x\n- Prod errors: Yes\n")
+        (self.repo / ".vercel").mkdir()
+        (self.repo / ".vercel" / "project.json").write_text('{"projectId": "prj_x"}')
+
+    @staticmethod
+    def row(path, message, ts, dep="dpl_1"):
+        return {"timestamp": ts, "deploymentId": dep, "level": "error", "message": message, "requestPath": path}
+
+    def sweep(self, rows=(), code=0, now=None, machine=None, raw=None):
+        """prod_errors_tick with vercel logs answering rows (JSON Lines) and machine_ok answering machine; returns the
+        subprocess.run mock."""
+        out = raw if raw is not None else "".join(json.dumps(r) + "\n" for r in rows)
+        with mock.patch.object(self.serve.subprocess, "run",
+                               return_value=subprocess.CompletedProcess(self.ARGV, code, out, "auth failed")) as run, \
+                mock.patch.object(self.serve.board, "machine_ok", return_value=machine), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.serve.prod_errors_tick("owa", self.repo, self.root, self.NOW if now is None else now)
+        self.err = err.getvalue()
+        return run
+
+    def state(self):
+        return json.loads((self.root / "prod-errors.json").read_text())
+
+    def backlog(self):
+        return [i for i in self.serve.board.read_backlog(self.root)[1]]
+
+    def test_runs_only_when_opted_in_linked_due_and_machine_ok(self):
+        run = self.sweep([self.row("/a", "Error: x", 1762736400000)])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], self.ARGV)
+        self.assertEqual(run.call_args.kwargs["cwd"], self.repo)
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["timeout"], 120)
+        self.assertEqual(self.state()["lastSweep"], self.NOW)
+        self.assertEqual(len(self.backlog()), 1)
+        blocked = {
+            "not due": lambda: None,
+            "machine": lambda: None,
+            "error retry": lambda: (self.root / "prod-errors.json").write_text(
+                json.dumps({"lastSweep": None, "errorAt": self.NOW + 86399 - 3599, "seen": {}})),
+            "opted out": lambda: (self.root / "project.md").write_text("# Project\n- Prod errors: no\n"),
+            "no line": lambda: (self.root / "project.md").write_text("# Project\n- E2E: none\n"),
+            "unlinked": lambda: (self.repo / ".vercel" / "project.json").unlink(),
+        }
+        for name, setup in blocked.items():
+            with self.subTest(name):
+                if name == "machine":
+                    (self.root / "prod-errors.json").unlink()
+                setup()
+                before = sorted(p.name for p in self.root.iterdir())
+                files = {p: p.read_bytes() for p in self.root.iterdir()}
+                run = self.sweep([self.row("/b", "Error: y", 1762736400000)], now=self.NOW + 86399,
+                                 machine="free RAM low" if name == "machine" else None)
+                run.assert_not_called()
+                self.assertEqual(sorted(p.name for p in self.root.iterdir()), before)
+                self.assertEqual({p: p.read_bytes() for p in self.root.iterdir()}, files)
+        (self.root / "project.md").write_text("- Prod errors: yes\n")
+        (self.repo / ".vercel" / "project.json").write_text("{}")
+        (self.root / "prod-errors.json").write_text(json.dumps({"lastSweep": self.NOW - 86400, "errorAt": self.NOW - 3600,
+                                                                "seen": {}}))
+        self.sweep([], now=self.NOW).assert_called_once()
+
+    def test_signature_strips_ids_and_numbers(self):
+        sig = self.serve.prod_error_signature
+        a = sig({"requestPath": "/api/orders/123?x=1", "message": "\n  Error: upstream   503\n    at l (x.js:1:2)"})
+        b = sig({"requestPath": "/api/orders/456", "message": "Error: upstream 502"})
+        self.assertEqual(a, b)
+        self.assertEqual(a, (hashlib.sha1(b"/api/orders/:id\nError: upstream N").hexdigest()[:10], "/api/orders/:id",
+                             "Error: upstream N"))
+        u = sig({"requestPath": "/api/u/0b1f8a2e-4c3d-4e5f-9a8b-7c6d5e4f3a2b/files/cl9x8y7z6w5v4u3t2s1r0q9p8",
+                 "message": "Order 3f2a9c8b77 for 0b1f8a2e-4c3d-4e5f-9a8b-7c6d5e4f3a2b failed"})
+        self.assertEqual(u[1:], ("/api/u/:id/files/:id", "Order <id> for <id> failed"))
+        self.assertEqual(sig({"requestPath": "/api/clothingBlanks/ssActivewear", "message": "e"})[1],
+                         "/api/clothingBlanks/ssActivewear")
+        self.assertEqual(sig({"message": "boom"})[1], "(no route)")
+        self.assertEqual(sig({"requestPath": "", "message": "boom"})[1], "(no route)")
+        self.assertEqual(len(sig({"requestPath": "/x", "message": "y" * 300})[2]), 200)
+        self.assertNotEqual(sig({"requestPath": "/api/a", "message": "boom"})[0],
+                            sig({"requestPath": "/api/b", "message": "boom"})[0])
+
+    def test_dedupes_on_open_item_and_readds_after_close(self):
+        sig = hashlib.sha1(b"/api/orders/:id\nError: upstream N").hexdigest()[:10]
+        rows = [self.row("/api/orders/1", "Error: upstream 503", 1762732800000, "dpl_old"),
+                self.row("/api/orders/2", "Error: upstream 502", 1762736400000, "dpl_new")]
+        self.sweep(rows)
+        want = (f"Prod error on /api/orders/:id: Error: upstream N — 2x in 24 h, first seen 2025-11-10T00:00:00Z, "
+                f"last seen 2025-11-10T01:00:00Z, deployment dpl_new (sig {sig})")
+        self.assertEqual([(i["text"], i["done"]) for i in self.backlog()], [(want, False)])
+        self.assertEqual(self.state()["seen"][sig], {"route": "/api/orders/:id", "message": "Error: upstream N",
+                                                     "first": 1762732800.0, "last": 1762736400.0})
+        day = self.NOW + 86400
+        self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762822800000)], now=day)  # 2025-11-11T01:00Z
+        self.assertEqual(len(self.backlog()), 1, "an open item for the sig adds nothing")
+        self.assertEqual(self.state()["seen"][sig]["last"], 1762822800.0)
+        self.assertEqual(self.state()["seen"][sig]["first"], 1762732800.0)
+        text = (self.root / "backlog.md").read_text()
+        (self.root / "backlog.md").write_text(text.replace("- [ ] Prod", "- [x] Prod"))
+        self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762909200000, "dpl_3")], now=day + 86400)
+        items = self.backlog()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[1]["text"], f"Prod error on /api/orders/:id: Error: upstream N — 1x in 24 h, first seen "
+                                           f"2025-11-10T00:00:00Z, last seen 2025-11-12T01:00:00Z, deployment dpl_3 (sig {sig})")
+        self.assertFalse(items[1]["done"])
+        (self.root / "backlog.md").write_text("# Backlog\n")
+        self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762995600000)], now=day + 2 * 86400)
+        self.assertEqual(len(self.backlog()), 1, "a deleted item is added again")
+
+    def test_caps_five_items_plus_one_summary(self):
+        rows = [self.row(f"/r{chr(97 + n)}", "Error: boom", 1762736400000) for n in range(8) for _ in range(n + 1)]
+        self.sweep(rows)
+        texts = [i["text"] for i in self.backlog()]
+        self.assertEqual([t.split(":")[0] for t in texts[:5]], [f"Prod error on /r{c}" for c in "hgfed"])
+        self.assertEqual(texts[5], "Prod error sweep: 3 more new production error signatures in the last 24 h were not "
+                                   "backlogged (cap 5 a day); see scrum/prod-errors.json")
+        self.assertEqual(len(texts), 6)
+        self.assertEqual(len(self.state()["seen"]), 8)
+        self.sweep(rows, now=self.NOW + 86400)
+        texts = [i["text"] for i in self.backlog()]
+        self.assertEqual([t.split(":")[0] for t in texts[6:]], [f"Prod error on /r{c}" for c in "cba"],
+                         "signatures over yesterday's cap are added the next day")
+        self.assertEqual(len(texts), 9, "no second summary while one is open")
+
+    def test_fetch_failure_records_error_and_adds_nothing(self):
+        (self.root / "prod-errors.json").write_text(json.dumps({"lastSweep": self.NOW - 90000, "errorAt": None,
+                                                                "seen": {}}))
+        self.sweep([self.row("/a", "Error: x", 1762736400000)], code=1)
+        self.assertEqual(self.state(), {"lastSweep": self.NOW - 90000, "errorAt": self.NOW, "seen": {}})
+        self.assertEqual(self.backlog(), [])
+        self.assertEqual(self.err, "watchdog: owa: prod errors: vercel logs exited 1: auth failed\n")
+        for exc in (subprocess.TimeoutExpired(self.ARGV, 120), FileNotFoundError("vercel")):
+            with self.subTest(type(exc).__name__), mock.patch.object(self.serve.subprocess, "run", side_effect=exc), \
+                    mock.patch("sys.stderr", new=io.StringIO()) as err:
+                (self.root / "prod-errors.json").unlink()
+                self.serve.prod_errors_tick("owa", self.repo, self.root, self.NOW)
+                self.assertEqual(self.state()["errorAt"], self.NOW)
+                self.assertNotIn("lastSweep", self.state())
+                self.assertEqual(err.getvalue().count("\n"), 1)
+                self.assertTrue(err.getvalue().startswith("watchdog: owa: prod errors: "))
+        self.assertEqual(self.backlog(), [])
+        self.assertFalse((self.root / "prod-errors.json.tmp").exists())
+
+    def test_empty_and_malformed_inputs(self):
+        (self.root / "prod-errors.json").write_text("{not json")
+        self.sweep(raw="")
+        self.assertEqual(self.state(), {"lastSweep": self.NOW, "errorAt": None, "seen": {}})
+        (self.root / "prod-errors.json").write_text('["a list"]')
+        self.sweep(raw='not json\n[1, 2]\n"s"\n' + json.dumps(self.row("/a", "Error: x", 1762736400000)) + "\n")
+        self.assertEqual(list(self.state()["seen"].values()), [{"route": "/a", "message": "Error: x",
+                                                                "first": 1762736400.0, "last": 1762736400.0}])
+        self.assertEqual(len(self.backlog()), 1)
+
+    def test_watchdog_survives_tick_exception(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        with mock.patch.object(self.serve.board, "projects", return_value={"p1": self.repo, "p2": self.repo}), \
+                mock.patch.object(self.serve, "spawn"), mock.patch.object(self.serve, "e2e_full_tick"), \
+                mock.patch.object(self.serve.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}), \
+                mock.patch.object(self.serve, "prod_errors_tick", side_effect=RuntimeError("boom")) as tick, \
+                mock.patch.object(self.serve, "actions_alert", return_value=None) as gh, \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.serve.ACTIONS_ALERT.clear()
+            self.serve.watchdog_tick()
+            self.serve.ACTIONS_ALERT.clear()
+        self.assertEqual([c.args[0] for c in tick.call_args_list], ["p1", "p2"])
+        self.assertEqual(tick.call_args.args[1:], (self.repo, self.root))
+        self.assertEqual(gh.call_count, 1, "actions_alert still runs (cached per repo, both projects share one)")
+        self.assertEqual(err.getvalue().count("watchdog: p1: prod errors: boom"), 1)
+        self.assertEqual(err.getvalue().count("watchdog: p2: prod errors: boom"), 1)
+        self.assertIn("prod_errors_tick", self.serve.watchdog_tick.__doc__)
 
 
 if __name__ == "__main__":

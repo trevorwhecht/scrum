@@ -1474,6 +1474,112 @@ def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
     return removed
 
 
+PROD_ERRORS_EVERY = 86400  # seconds between one project's successful prod error sweeps (watchdog only)
+PROD_ERRORS_RETRY = 3600  # seconds before a failed vercel logs fetch is tried again
+PROD_ERRORS_CAP = 5  # signature items one sweep adds to one project's backlog; the excess gets one summary line
+PROD_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+PROD_ID_SEGMENT_RE = re.compile(r"\d+|[0-9a-f]{8,}|(?=[a-z0-9]*\d)[a-z0-9]{8,}", re.I)  # digits, hex, cuid-like
+
+
+def prod_errors_enabled(root) -> bool:
+    """True when root/project.md has a `- Prod errors: yes` line (any case)."""
+    m = re.search(r"^\s*-\s*Prod errors:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
+        if (root / "project.md").is_file() else None
+    return bool(m) and m[1].strip().lower() == "yes"
+
+
+def prod_error_signature(row: dict) -> tuple[str, str, str]:
+    """(sig, route, message) for one vercel logs row: ids and numbers stripped so repeats of one error share a sig."""
+    path = str(row.get("requestPath") or "").split("?", 1)[0]
+    route = "/".join(":id" if PROD_UUID_RE.fullmatch(s) or PROD_ID_SEGMENT_RE.fullmatch(s) else s
+                     for s in path.split("/")) if path else "(no route)"
+    first = next((ln for ln in str(row.get("message") or "").splitlines() if ln.strip()), "")
+    message = re.sub(r"\d+", "N", re.sub(r"[0-9a-f]{8,}", "<id>", PROD_UUID_RE.sub("<id>", first), flags=re.I))
+    message = re.sub(r"\s+", " ", message).strip()[:200]
+    return hashlib.sha1(f"{route}\n{message}".encode()).hexdigest()[:10], route, message
+
+
+def prod_errors_fetch(repo, project) -> list[dict] | None:
+    """The last 24 h of production error rows from `vercel logs` in repo (non-object lines skipped); None after one
+    `watchdog: <project>: prod errors: <reason>` stderr line when the CLI fails, times out or is missing."""
+    try:
+        r = subprocess.run(["vercel", "logs", "--environment", "production", "--level", "error", "--since", "24h",
+                            "--json", "--limit", "1000", "--non-interactive"], cwd=repo, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=120)
+        reason = f"vercel logs exited {r.returncode}: {(r.stderr or '').strip()[-300:]}" if r.returncode else None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        reason = str(e)
+    if reason:
+        print(f"watchdog: {project}: prod errors: {reason}", file=sys.stderr, flush=True)
+        return None
+    rows = []
+    for line in r.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def prod_errors_tick(project, repo, root, now=None) -> None:
+    """Once a day per project with `- Prod errors: yes` and a linked repo/.vercel/project.json, while board.machine_ok
+    allows: fetch production errors (prod_errors_fetch), record each signature in root/prod-errors.json and add one
+    backlog line per signature with no open item, at most PROD_ERRORS_CAP (highest count first) plus one summary line
+    for the rest. A failed fetch sets only errorAt and is retried after PROD_ERRORS_RETRY."""
+    now = time.time() if now is None else now
+    if not prod_errors_enabled(root) or not (Path(repo) / ".vercel" / "project.json").is_file():
+        return
+    try:
+        state = json.loads((root / "prod-errors.json").read_text())
+        state = state if isinstance(state, dict) and isinstance(state.get("seen"), dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    if now - (num(state.get("lastSweep")) or 0) < PROD_ERRORS_EVERY or now - (num(state.get("errorAt")) or 0) < PROD_ERRORS_RETRY:
+        return
+    if board.machine_ok(root) is not None:
+        return
+    rows = prod_errors_fetch(repo, project)
+    if rows is None:
+        state["errorAt"] = now
+    else:
+        state.update(lastSweep=now, errorAt=None)
+    seen, groups = state.setdefault("seen", {}), {}
+    for row in rows or []:
+        sig, route, message = prod_error_signature(row)
+        ts = row["timestamp"] / 1000 if num(row.get("timestamp")) is not None else now
+        g = groups.setdefault(sig, {"route": route, "message": message, "count": 0, "first": ts, "last": ts,
+                                    "deployment": row.get("deploymentId")})
+        g["count"] += 1
+        g["first"] = min(g["first"], ts)
+        if ts >= g["last"]:
+            g["last"], g["deployment"] = ts, row.get("deploymentId")
+    for sig, g in groups.items():
+        prev = seen.get(sig) if isinstance(seen.get(sig), dict) else {}
+        g["first"] = min(g["first"], num(prev.get("first")) or g["first"])
+        seen[sig] = {"route": g["route"], "message": g["message"], "first": g["first"],
+                     "last": max(g["last"], num(prev.get("last")) or 0)}
+    tmp = root / "prod-errors.json.tmp"  # written before the backlog, so a backlog failure never re-fetches each tick
+    tmp.write_text(json.dumps(state, indent=1) + "\n")
+    os.replace(tmp, root / "prod-errors.json")
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    added = over = 0
+    open_text = [i["text"] for i in board.read_backlog(root)[1] if not i["done"]]
+    for sig, g in sorted(groups.items(), key=lambda kv: (-kv[1]["count"], -kv[1]["last"], kv[0])):
+        if added >= PROD_ERRORS_CAP:
+            over += not any(f"(sig {sig})" in t for t in open_text)
+            continue
+        text = (f"Prod error on {g['route']}: {g['message']} — {g['count']}x in 24 h, first seen {iso(g['first'])}, "
+                f"last seen {iso(g['last'])}, deployment {g['deployment']} (sig {sig})")
+        added += bool(board.cmd_backlog_add(root, [text], unless_open=f"(sig {sig})"))
+    if over:
+        board.cmd_backlog_add(root, [f"Prod error sweep: {over} more new production error signatures in the last 24 h "
+                                     f"were not backlogged (cap {PROD_ERRORS_CAP} a day); see scrum/prod-errors.json"],
+                              unless_open="Prod error sweep:")
+
+
 ACTIONS_ALERT_EVERY = 600  # seconds between one repo's actions_alert gh checks (run by the watchdog only)
 ACTIONS_ALERT: dict[str, tuple[float, str | None]] = {}  # str(repo) -> (checked at, alert or None)
 
@@ -1774,6 +1880,7 @@ def watchdog_tick():
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
        tick, and actions_alert refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
+       Before it, prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day.
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
@@ -1850,6 +1957,10 @@ def watchdog_tick():
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
             prune_worktrees(repo, jobs, project, alive)
+            try:  # its own guard: a vercel failure must not skip actions_alert or the next project
+                prod_errors_tick(project, repo, root)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: prod errors: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a gh failure must not skip the next project
                 hit = ACTIONS_ALERT.get(str(repo))
                 if not hit or time.time() - hit[0] >= ACTIONS_ALERT_EVERY:

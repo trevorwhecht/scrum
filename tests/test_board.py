@@ -9378,3 +9378,24 @@ class CooldownParkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BacklogUnlessOpenTest(unittest.TestCase):
+    """Job 769: cmd_backlog_add's unless_open skips an item while an open item holds that text, checked under the lock."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def test_skips_when_open_item_matches_and_adds_when_done(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Prod error on /a: boom (sig abc1234567)\n")
+        self.assertEqual(board.cmd_backlog_add(self.root, ["Prod error on /a: boom again (sig abc1234567)"],
+                                               unless_open="(sig abc1234567)"), [])
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Prod error on /a: boom (sig abc1234567)\n")
+        self.assertEqual(board.cmd_backlog_add(self.root, ["other (sig fff0000000)"], unless_open="(sig fff0000000)"),
+                         ["other (sig fff0000000)"])
+        (self.root / "backlog.md").write_text("# Backlog\n- [x] Prod error on /a: boom (sig abc1234567)\n")
+        self.assertEqual(board.cmd_backlog_add(self.root, ["Prod error on /a: back (sig abc1234567)"],
+                                               unless_open="(sig abc1234567)"), ["Prod error on /a: back (sig abc1234567)"])
+        self.assertIn("- [ ] Prod error on /a: back (sig abc1234567)", (self.root / "backlog.md").read_text())
+        self.assertEqual(board.cmd_backlog_add(self.root, ["plain"]), ["plain"], "no unless_open adds as before")
