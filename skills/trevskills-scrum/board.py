@@ -2705,12 +2705,13 @@ RUNALL_BLOCKED = "run-all blocked"
 CHAIN_LOCKED = "bigboy chain lock held by"  # SKILL.md Chaining step 5; re-evaluated like a blocked parent
 WAITING_ON = "waiting on you in: "  # a running parent whose children wait on Trevor (needs-human or Setup done)
 MACHINE_WAIT = "waiting: "  # a running parent whose next claim waits on free RAM or disk (machine_ok) or usage
+OVERLAP_WAIT = MACHINE_WAIT + "files overlap "  # its waiting children share Likely files with another tree's live job
 
 
 def resume_first(jobs: list[dict]) -> int:
-    """How many jobs on this board must be played, resumed or aborted before any new claim in its project: the ones
-    Trevor paused (not done or aborted), plus the unpaused stalled ones, either shape (not lilguy-in-checkout). A
-    stalled child whose parent is on the board but paused or not running is skipped: auto_resume leaves it alone."""
+    """How many jobs on this board Trevor paused (not done or aborted), plus the unpaused stalled ones, either shape
+    (not lilguy-in-checkout). A stalled child whose parent is on the board but paused or not running is skipped:
+    auto_resume leaves it alone. Since job 751 they no longer hold new claims (cmd_ready checks their Likely files)."""
     by_id = {j.get("id"): j for j in jobs}
 
     def parent_idle(j):
@@ -3491,7 +3492,10 @@ def note_queue_gate(root, job_id, gate):
 
 def cmd_ready(root, parent_id, live=(), manual=False):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
-    `live` ids count as in progress whatever their stage (see resume_blocker). Cool-down holds every claim (Run-all and
+    `live` ids count as in progress whatever their stage (see resume_blocker). Paused and stalled siblings keep their
+    overlap slot, and every live, paused or stalled leaf job of another tree is an outside holder: a child clashes with
+    one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no.
+    Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
     BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
     all_merged, so its final review runs."""
     jobs_dir = Path(root) / "jobs"
@@ -3514,8 +3518,6 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         go = not held and (parent["stage"] == "running" or legacy)
         # checked once: a machine-wide state, so it gates the whole call
         machine = go and machine_ok(root, manual=manual, claim=True)
-        # paused or stalled work goes before new claims; a job with a live session is already being resumed
-        first = resume_first([j for j in board["jobs"] if j["id"] not in live]) if go and not machine else 0
         cap = None  # the usage ladder's slots left this call; None = no taper
         if go and not machine:
             n_live = live_sessions()
@@ -3532,6 +3534,13 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         slots = [k for k in busy if k not in limited] if cap is not None and allow < len(limited) else list(busy)
         by_id = {j["id"]: j for j in board["jobs"]}
         slots = [k for k in slots if not parked_bigboy(k, by_id, live, root)]  # a parked BigBoy child runs no session
+        parked = lambda j: (j.get("paused") or stalled(j)) and j["stage"] not in ("done", "aborted")
+        slots += [k for k in kids if k not in busy and parked(k)]  # a paused or stalled sibling resumes on its files
+        outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
+                   and j["id"] != parent["id"] and not j.get("children")
+                   and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live or parked(j))]
+        files.update({j["id"]: child_files(jobs_dir, j["id"]) for j in outside})
+        overlap = []  # outside holder ids that alone hold a waiting child
         room = ram_room() if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)
@@ -3547,14 +3556,14 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
                 continue
             hit = slot_conflict(k, slots, files)
-            if hit:
+            out_hit = None if hit else slot_conflict(dict(k, parallel=True), outside, files)
+            if out_hit:
+                overlap += out_hit[1]
+            if hit or out_hit:
+                hit = hit or out_hit
                 for g in ["runs_alone"] if hit[0] == "this job runs alone" else [f"overlap:{i}" for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
-            if first:  # a claim is due, but held like a machine wait (never needs-human) until those are dealt with
-                machine = f"{first} paused job needs Play or Abort first" if first == 1 \
-                    else f"{first} paused jobs need Play or Abort first"
-                break
             k.update(stage="spec", updatedAt=now())
             try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)
                 with (jobs_dir / k["id"] / "claimed-at.txt").open("x", encoding="utf-8") as f:
@@ -3582,6 +3591,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
             aborted = [k["id"] for k in kids if k["stage"] == "aborted"]
             if waits:  # every action is on a child, so the parent keeps running and names them
                 new = "running", WAITING_ON + ", ".join(waits)
+            elif overlap:  # another tree's job holds the files; sweep_parents' start_ready retries each tick
+                new = "running", OVERLAP_WAIT + ", ".join(dict.fromkeys(overlap))
             elif any(stalled(k) for k in kids):  # a child stalled in its own stage is auto-resumed; keep running
                 new = "running", None
             elif not runall and aborted and stuck_on(kids, set(aborted)):  # Resume skips the dependents
@@ -3592,7 +3603,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                 new = "needs-human", f"{BLOCKED}: {', '.join(left)}. Fix: check each listed child's Depends on, " \
                     "then click Run now on a waiting child."
         if new != (parent["stage"], parent.get("reason")):
-            if (new[1] or "").startswith(MACHINE_WAIT) and not reason.startswith(MACHINE_WAIT):  # once per hold
+            if (new[1] or "").startswith(MACHINE_WAIT) and not (new[1].startswith(OVERLAP_WAIT)
+                                                                or reason.startswith(MACHINE_WAIT)):  # once per hold
                 log_stop(root, parent["id"], "machine", new[1])
             elif (new[1] or "").startswith(BLOCKED):
                 log_stop(root, parent["id"], "bigboy", new[1])

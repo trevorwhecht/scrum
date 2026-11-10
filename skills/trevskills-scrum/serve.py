@@ -1396,21 +1396,16 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
 
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
-    Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no work in
-    flight, no paused or resumable stalled job (board.resume_first), no auto-started run-all still running and a
-    claimable backlog line, in rank order: board.projects() order, which the dashboard's Rank dialog sets. board.machine_ok
+    Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no
+    auto-started run-all still running and a claimable backlog line, in rank order: board.projects() order, which the
+    dashboard's Rank dialog sets. A live, paused or stalled tree never holds it (job 751): cmd_ready keeps the new
+    children off their Likely files. board.machine_ok
     (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
         root = repo / "scrum"
-        if auto_continue(root) is None or busy.get(project, True):
-            continue
-        try:
-            jobs = json.loads((root / "board.json").read_text())["jobs"]
-        except (OSError, ValueError, KeyError, TypeError):
-            jobs = []  # an unreadable board holds nothing
-        if board.resume_first(jobs):  # paused or stalled work goes first; other projects still get a run-all
+        if auto_continue(root) is None or project not in busy:
             continue
         try:
             if not running(project, "run-all") and claimable(root):
