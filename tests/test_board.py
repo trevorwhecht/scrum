@@ -3050,6 +3050,26 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.digested_ids(self.root), {a, b})
         self.assertTrue((d / "jobs.txt").exists())  # the failed digest stays as it was
 
+    def test_digest_start_writes_history(self):
+        other = Path(self.tmp.name) / "other"
+        (other / "scrum" / "digests" / "007").mkdir(parents=True)
+        (other / "scrum" / "digests" / "007" / "proposals.json").write_text(json.dumps(
+            {"proposals": [{"id": "p1", "kind": "backlog", "status": "queued", "why": "cant resume yet stop"}]}))
+        (other / "scrum" / "backlog.md").write_text("- [x] [2] old thing <!-- retired 2020-01-01: x -->\n- [x] [2] shipped thing\n")
+        reg = Path(self.tmp.name) / "reg.json"
+        reg.write_text(json.dumps([str(other)]))
+        old = self.root / "digests" / "001"
+        old.mkdir(parents=True)
+        (old / "proposals.json").write_text(json.dumps({"proposals": [{"id": "p2", "target": "/x.md", "why": "w"}]}))
+        self.done_jobs(1)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg)}):
+            self.assertEqual(self.cli("digest-start")["id"], "002")
+        text = (self.root / "digests" / "002" / "history.md").read_text()
+        self.assertIn("other 007 p1 [queued]", text)
+        self.assertIn("001 p2 [pending] /x.md: w", text)
+        self.assertIn("other: [2] shipped thing", text)
+        self.assertNotIn("old thing", text)
+
     def test_digest_start_claims_jobs_once(self):
         self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertFalse((self.root / "digests").exists())

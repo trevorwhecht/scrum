@@ -1249,7 +1249,48 @@ def cmd_digest_start(root):
         write_timing(root, digest_id, jobs)
     except (SystemExit, OSError) as e:
         print(f"digest-start: timing: {e}", file=sys.stderr)
+    try:
+        write_history(root, out["id"])
+    except (SystemExit, OSError) as e:
+        print(f"digest-start: history: {e}", file=sys.stderr)
     return out
+
+
+HISTORY_DIGESTS, HISTORY_DAYS = 5, 14  # write_history: how many earlier digests and how many days of closed backlog items
+
+
+def write_history(root, digest_id):
+    """digests/<NNN>/history.md: the proposals of the last HISTORY_DIGESTS earlier digests across every registered project
+    (newest first, with status), and the backlog items closed or retired in the last HISTORY_DAYS days, so the digester
+    does not re-propose them. Backlog lines carry no close date except `retired YYYY-MM-DD`, so undated [x] lines are the last 20."""
+    me = Path(root).resolve().parent
+    repos = [me] + [p for p in projects().values() if p.resolve() != me]
+    found = []
+    for repo in repos:
+        for f in (repo / "scrum" / "digests").glob("*/proposals.json"):
+            if not (repo == me and f.parent.name == digest_id):
+                try:
+                    found.append((f.stat().st_mtime, repo.name, f.parent.name, json.loads(f.read_text())["proposals"]))
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+    out = ["# History", "", "## Earlier proposals"]
+    for _, name, did, props in sorted(found, reverse=True)[:HISTORY_DIGESTS]:
+        for p in props if isinstance(props, list) else []:
+            if isinstance(p, dict):
+                out.append(f"- {name} {did} {p.get('id')} [{p.get('status', 'pending')}] {p.get('target') or p.get('kind')}: "
+                           f"{str(p.get('why'))[:160]}")
+    out += ["", "## Backlog closed"]
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    closed = []
+    for repo in repos:
+        try:
+            lines = [l for l in (repo / "scrum" / "backlog.md").read_text().splitlines() if l.startswith("- [x]")]
+        except OSError:
+            continue
+        dated = [(m.group(1), l) for l in lines if (m := re.search(r"retired (\d{4}-\d\d-\d\d)", l))]
+        closed += [f"- {repo.name}: {l[6:160]}" for d, l in dated if d >= cutoff]
+        closed += [f"- {repo.name}: {l[6:160]}" for l in lines[-20:] if not re.search(r"retired \d{4}", l)]
+    (Path(root) / "digests" / digest_id / "history.md").write_text("\n".join(out + closed) + "\n")
 
 
 def claim_folder(parent):
