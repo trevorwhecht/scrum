@@ -1640,6 +1640,9 @@ class ContractTest(unittest.TestCase):
         template = reader[reader.index("    ## Pipeline fit"):]
         self.assertIn("    ## Usage windows\n", template)
         self.assertIn("over-routed <over_routed_pct>%", reader)
+        self.assertIn("DIGEST_DIR/health.json", reader)
+        self.assertIn("    ## Process health\n", reader)
+        self.assertLess(reader.index("    ## Time sinks"), reader.index("    ## Process health\n"))
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()
         for phrase in ("notes.md", "proposals.json", "agents/*.md", "SKILL.md", "Conventions to read",
                        "~/.claude/projects/*/memory/", '"proposals"', "at most 8", "old == new", "exactly once",
@@ -1666,8 +1669,13 @@ class ContractTest(unittest.TestCase):
             self.assertNotIn(phrase, digester, phrase)
         self.assertIn("**Backlog fallback**", digester[digester.index("**Decide.**"):digester.index("**Default picks.**")])
         weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
-        for phrase in ("**Time sinks**", "**Backlog fallback**", "Never a memory file, a new skill or a backlog proposal."):
+        for phrase in ("**Time sinks**", "**Backlog fallback**", "Never a memory file, a new skill or a backlog proposal.",
+                       "**Process health**"):
             self.assertIn(phrase, weekly, phrase)
+        health = digester[digester.index("**Process health.**"):]
+        health = health[:health.index("\n\n")]
+        for phrase in ("Process health:", "open `- [ ]` item"):
+            self.assertIn(phrase, health, phrase)
 
     def test_skill_digest_flow(self):
         text = skill_text()
@@ -1680,6 +1688,8 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, digest, phrase)
         for phrase in ("## Stops", "15 lines", "`stall`", "`machine`", "`refused`", "`backlog`"):
             self.assertIn(phrase, digest[:digest.index("\n1. ")], phrase)
+        step1 = digest[digest.index("\n1. "):digest.index("\n2. ")]
+        self.assertLess(step1.index("B pipeline-fit"), step1.index("B process-health"))
         step4 = digest[digest.index("\n4. "):]
         for phrase in ('"skipped"', "<pid> → <target>: <why>", "queued: <reason>", "skipped: <reason>",
                        "committed and pushed to origin"):
