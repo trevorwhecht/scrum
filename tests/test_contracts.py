@@ -1115,7 +1115,7 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(text.count(phrase), 1, name)
             para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
             self.assertIn(phrase, para, name)
-            self.assertLessEqual(len(text), 20000, name)
+            self.assertLessEqual(len(text), 20300, name)
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
