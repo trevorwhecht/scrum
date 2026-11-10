@@ -76,6 +76,9 @@
   board.py digest-trim <NNN>       cut that digest's done job folders to feature.md, spec.md, decision.md
   board.py pipeline-fit <NNN>      print {"digest","jobs"}: each listed job's lane, agents, diff size, verdicts, fix rounds
                                    and whether a cheaper lane would have done (read-only; Digest step 1)
+  board.py digest-trevor <NNN>     write digests/<NNN>/trevor.md (Trevor's Jev-ranked chat messages, feature.md quotes,
+                                   new (Trevor …) backlog tags, answer notes since the last digest), print
+                                   {"id","chat","quotes","backlog","notes"}; a failed source is a one-line note
   board.py process-health <NNN>    write and print digests/<NNN>/health.json {"digest","previous","metrics"}: 10 fixed
                                    metrics for the listed jobs, each with the previous digest's value, its limit and a
                                    flag ("worse", "over twice" or null) (Digest step 1)
@@ -1253,10 +1256,51 @@ def cmd_digest_start(root):
     except (SystemExit, OSError) as e:
         print(f"digest-start: timing: {e}", file=sys.stderr)
     try:
+        write_history(root, out["id"])
+    except (SystemExit, OSError) as e:
+        print(f"digest-start: history: {e}", file=sys.stderr)
+    try:
         write_pulse(root, digest_id)
     except (SystemExit, OSError, ValueError, TypeError) as e:
         print(f"digest-start: pulse: {e}", file=sys.stderr)
     return out
+
+
+HISTORY_DIGESTS, HISTORY_DAYS = 5, 14  # write_history: how many earlier digests and how many days of closed backlog items
+
+
+def write_history(root, digest_id):
+    """digests/<NNN>/history.md: the proposals of the last HISTORY_DIGESTS earlier digests across every registered project
+    (newest first, with status), and the backlog items closed or retired in the last HISTORY_DAYS days, so the digester
+    does not re-propose them. Backlog lines carry no close date except `retired YYYY-MM-DD`, so undated [x] lines are the last 20."""
+    me = Path(root).resolve().parent
+    repos = [me] + [p for p in projects().values() if p.resolve() != me]
+    found = []
+    for repo in repos:
+        for f in (repo / "scrum" / "digests").glob("*/proposals.json"):
+            if not (repo == me and f.parent.name == digest_id):
+                try:
+                    found.append((f.stat().st_mtime, repo.name, f.parent.name, json.loads(f.read_text())["proposals"]))
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+    out = ["# History", "", "## Earlier proposals"]
+    for _, name, did, props in sorted(found, reverse=True)[:HISTORY_DIGESTS]:
+        for p in props if isinstance(props, list) else []:
+            if isinstance(p, dict):
+                out.append(f"- {name} {did} {p.get('id')} [{p.get('status', 'pending')}] {p.get('target') or p.get('kind')}: "
+                           f"{str(p.get('why'))[:160]}")
+    out += ["", "## Backlog closed"]
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    closed = []
+    for repo in repos:
+        try:
+            lines = [l for l in (repo / "scrum" / "backlog.md").read_text().splitlines() if l.startswith("- [x]")]
+        except OSError:
+            continue
+        dated = [(m.group(1), l) for l in lines if (m := re.search(r"retired (\d{4}-\d\d-\d\d)", l))]
+        closed += [f"- {repo.name}: {l[6:160]}" for d, l in dated if d >= cutoff]
+        closed += [f"- {repo.name}: {l[6:160]}" for l in lines[-20:] if not re.search(r"retired \d{4}", l)]
+    (Path(root) / "digests" / digest_id / "history.md").write_text("\n".join(out + closed) + "\n")
 
 
 def claim_folder(parent):
@@ -1498,6 +1542,210 @@ def cmd_pipeline_fit(root, digest_id: str) -> dict:
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     globs = ui_globs(root)
     return {"digest": str(digest_id), "jobs": [_fit_job(root, job_id, jobs.get(job_id, {}), globs) for job_id in listed]}
+
+
+# --- digest-trevor: Trevor's own words (chat, feature.md quotes, backlog tags, answer notes) for the digest reader ---
+TREVOR_MAX_BYTES = 40000
+TREVOR_JEV_QUESTION = ("Trevor is correcting or complaining about how the dev pipeline behaved, or stating a rule it "
+                       "should follow from now on")
+TREVOR_CHAT_MAX = 1500  # per message sent to Jev; jev-rank.py's own MAX_CHARS
+TREVOR_QUOTE_MAX = 400
+TREVOR_SKIP_PREFIXES = ("<command-", "<local-command", "Caveat:")
+
+
+def jev_rank_path() -> Path:
+    return Path(os.environ.get("SCRUM_JEV_RANK") or Path.home() / ".claude" / "scripts" / "jev-rank.py")
+
+
+def _iso(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def _trevor_previous(root, digest_id):
+    """The highest-numbered digest folder below digest_id with no error.md, or None."""
+    d = Path(root) / "digests"
+    below = [p for p in d.iterdir() if DIGEST_RE.fullmatch(p.name) and int(p.name) < int(digest_id) and p.is_dir()
+             and not (p / "error.md").exists()]
+    return max(below, key=lambda p: int(p.name), default=None)
+
+
+def _trevor_text(content):
+    """A user entry's typed text, or None when it carries a tool_result or no text."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        return None
+    return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str))
+
+
+def _trevor_messages(root, since):
+    """[(date, one-line text)] Trevor typed in interactive sessions since `since` (epoch), about this repo or scrum."""
+    repo = Path(root).resolve().parent
+    out = []
+    for proj in sorted(transcripts_dir().iterdir()):  # OSError here (no transcripts dir) fails the whole section
+        for f in sorted(proj.glob("*.jsonl")) if proj.is_dir() else []:
+            try:
+                if f.stat().st_mtime < since:
+                    continue
+            except OSError:
+                continue
+            first = True
+            for d in _json_lines(f):
+                if d.get("type") != "user":
+                    continue
+                if first and d.get("entrypoint") == "sdk-cli":
+                    break  # a headless scrum session, not Trevor
+                first = False
+                at = _epoch(d.get("timestamp"))
+                msg = d.get("message")
+                text = _trevor_text(msg.get("content")) if isinstance(msg, dict) else None
+                if d.get("isMeta") or d.get("isCompactSummary") or at is None or at < since or text is None:
+                    continue
+                text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.S).strip()
+                if not text or text.startswith(TREVOR_SKIP_PREFIXES):
+                    continue
+                cwd = d.get("cwd")
+                here = isinstance(cwd, str) and Path(cwd).resolve().is_relative_to(repo)
+                if here or "scrum" in text.lower():
+                    out.append((_iso(at), re.sub(r"\s+", " ", text)[:TREVOR_CHAT_MAX]))
+    return out
+
+
+def _trevor_chat(root, since):
+    """The ## Chat lines: Jev's pick of Trevor's messages, or one failure line."""
+    try:
+        msgs = _trevor_messages(root, since)
+    except OSError as e:
+        return [f"- Transcripts failed: {e}"]
+    if not msgs:
+        return []
+    dates = {}
+    for at, text in msgs:
+        dates.setdefault(text, at)
+    script = jev_rank_path()
+    if not script.is_file():
+        return [f"- Jev failed: no script at {script}"]
+    try:
+        r = subprocess.run([sys.executable, str(script), TREVOR_JEV_QUESTION, "--top", "60", "--min", "0.8"],
+                           input="".join(f"{t}\n" for t in dates), capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return ["- Jev failed: timed out after 300 s"]
+    except OSError as e:
+        return [f"- Jev failed: {e}"]
+    if r.returncode:
+        tail = (r.stderr.strip().splitlines() or [""])[-1]
+        return [f"- Jev failed: exit {r.returncode}" + (f": {tail[:300]}" if tail else "")]
+    out = []
+    for line in r.stdout.splitlines():
+        score, sep, text = line.partition("\t")
+        if sep and text.strip():
+            out.append(f'- {dates.get(text, "?")} {score}: "{text[:TREVOR_QUOTE_MAX]}"')
+    return out
+
+
+def _trevor_tags(line):
+    """Each `(Trevor …)` in line, from `(Trevor` to its matching `)`."""
+    tags, i = [], line.find("(Trevor")
+    while i >= 0:
+        depth = 0
+        for j in range(i, len(line)):
+            depth += {"(": 1, ")": -1}.get(line[j], 0)
+            if depth == 0:
+                tags.append(line[i:j + 1])
+                break
+        else:
+            break  # unclosed: no tag
+        i = line.find("(Trevor", j + 1)
+    return tags
+
+
+def _trevor_backlog(root, d, prev, since):
+    """The ## Backlog lines: backlog lines with a Trevor tag new since the previous digest. Writes trevor-backlog.txt."""
+    path = Path(root) / "backlog.md"
+    if not path.is_file():
+        return []
+    lines = [l.strip() for l in path.read_text(encoding="utf-8", errors="replace").splitlines() if l.startswith("- [")]
+    seen_file = prev / "trevor-backlog.txt" if prev else None
+    seen = set(seen_file.read_text().splitlines()) if seen_file and seen_file.is_file() else None
+    day = datetime.fromtimestamp(since, timezone.utc).date().isoformat()
+    out, every = [], []
+    for line in lines:
+        tags = _trevor_tags(line)
+        every += tags
+        if seen is not None:
+            new = any(t not in seen for t in tags)
+        else:
+            new = any((m := re.match(r"\(Trevor (\d{4}-\d{2}-\d{2})", t)) and m.group(1) >= day for t in tags)
+        if new:
+            out.append(f"- {line[2:]}")
+    (d / "trevor-backlog.txt").write_text("".join(f"{t}\n" for t in dict.fromkeys(every)))
+    return out
+
+
+def _trevor_quotes(root, d):
+    """The ## Feature quotes lines: each `Trevor YYYY-MM-DD` line of every digested job's feature.md."""
+    out, jobs_txt = [], d / "jobs.txt"
+    for job_id in (l.strip() for l in jobs_txt.read_text().splitlines()) if jobs_txt.is_file() else []:
+        feature = Path(root) / "jobs" / job_id / "feature.md"
+        if ID_RE.match(job_id) and feature.is_file():
+            out += [f"- {job_id}: {l.strip()[:TREVOR_QUOTE_MAX]}"
+                    for l in feature.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if re.search(r"Trevor \d{4}-\d{2}-\d{2}", l)]
+    return out
+
+
+def _trevor_notes(root, since):
+    """The ## Answer notes lines: questions.log lines since `since` that carry a typed note."""
+    out = []
+    for q in _json_lines(Path(root) / "questions.log"):
+        at, note = _epoch(q.get("date")), q.get("note")
+        if at is not None and at >= since and isinstance(note, str) and note.strip():
+            out.append(f'- {q["date"]} {q.get("job")} {q.get("pick") or q.get("action")}: "{note}"')
+    return out
+
+
+def cmd_digest_trevor(root, digest_id) -> dict:
+    """Write digests/<NNN>/trevor.md: Trevor's typed chat messages (Jev-ranked), feature.md quotes, new backlog tags and
+    answer notes since the previous live digest (else 7 days). A failing source is a one-line note; never raises then."""
+    d = Path(root) / "digests" / str(digest_id)
+    if not DIGEST_RE.fullmatch(str(digest_id)) or not d.is_dir():
+        raise SystemExit(f"no digest {digest_id!r}")
+    prev = _trevor_previous(root, digest_id)
+    if prev:
+        st = prev.stat()
+        since = getattr(st, "st_birthtime", st.st_mtime)
+    else:
+        since = time.time() - 7 * 86400
+    sections, counts = {}, {}
+    for key, heading, read in (("chat", "## Chat", lambda: _trevor_chat(root, since)),
+                               ("quotes", "## Feature quotes", lambda: _trevor_quotes(root, d)),
+                               ("backlog", "## Backlog", lambda: _trevor_backlog(root, d, prev, since)),
+                               ("notes", "## Answer notes", lambda: _trevor_notes(root, since))):
+        try:
+            items = read()
+        except (OSError, ValueError) as e:  # one broken source never costs the digest the others
+            items = [f"- {heading[3:]} failed: {e}"]
+        failed = len(items) == 1 and items[0].startswith(("- Jev failed:", "- Transcripts failed:",
+                                                          f"- {heading[3:]} failed:"))
+        sections[heading], counts[key] = items or ["None"], 0 if failed else len(items)
+    body = [f"# Trevor: digest {digest_id}", f"Since: {_iso(since)}"]
+    for heading, items in sections.items():
+        body += [heading, *items]
+    text = "".join(f"{l}\n" for l in body)
+    if len(text.encode()) > TREVOR_MAX_BYTES:
+        marker = f"- truncated at {TREVOR_MAX_BYTES} bytes\n"
+        kept, size = [], len(marker.encode())
+        for l in body:
+            if size + len(l.encode()) + 1 > TREVOR_MAX_BYTES:
+                break
+            kept.append(l)
+            size += len(l.encode()) + 1
+        text = "".join(f"{l}\n" for l in kept) + marker
+    (d / "trevor.md").write_text(text)
+    return {"id": str(digest_id), **counts}
 
 
 # --- process-health: 10 fixed metrics per digest, each compared with the previous digest's (Digest step 1). ---
@@ -1942,13 +2190,14 @@ def _scorecard(root, e, t, board, questions):
         if named:
             escapes += 1
             escaped.update(named)
-    # needs-human time: each ask line's span until the job's next questions.log line, clipped to the window
+    # needs-human time: each ask line's span until the job's next questions.log line, clipped to the window; a Discuss
+    # note leaves the job waiting, so it ends no span
     needs_human = 0
     for n, q in enumerate(questions):
         if "options" not in q or q["_ts"] is None:
             continue
-        nxt = next((x["_ts"] for x in questions[n + 1:] if x.get("job") == q.get("job") and x["_ts"] is not None),
-                   None)
+        nxt = next((x["_ts"] for x in questions[n + 1:] if x.get("job") == q.get("job") and x["_ts"] is not None
+                    and not (x.get("kind") == "note" and x.get("action") == "discuss")), None)
         if nxt is None:
             if jobs.get(q.get("job"), {}).get("stage") != "needs-human":
                 continue
@@ -4168,8 +4417,9 @@ def cmd_unblock_log(root, job_id):
     return {"verdict": verdict, "blocker": blocker, "kind": kind, "n": n}
 
 
-def cmd_answer(root, job_id, key):
-    """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names."""
+def cmd_answer(root, job_id, key, note=None):
+    """Log Trevor's pick on the job's open question and return that option; the stage is left to the command it names.
+    A non-blank note he typed with the pick goes on the same line."""
     with locked_board(root) as board:
         job = find(board, check_id(job_id))
         if job["stage"] != "needs-human" or not job.get("options"):
@@ -4177,8 +4427,22 @@ def cmd_answer(root, job_id, key):
         option = next((o for o in job["options"] if o["key"] == key), None)
         if option is None:
             raise SystemExit(f"no option {key!r}; the question offers {', '.join(o['key'] for o in job['options'])}")
-        questions_log(root, {"date": now(), "job": job_id, "pick": option["label"]})
+        entry = {"date": now(), "job": job_id, "pick": option["label"]}
+        if note := clean(note or "", ITEM_MAX):
+            entry["note"] = note
+        questions_log(root, entry)
     return option
+
+
+def log_note(root, job_id, action, text):
+    """Append Trevor's typed rework or discuss text to questions.log as a `kind: note` line; blank text logs nothing.
+    Takes the board's flock only, like serve.py `refused`: board.json is left as it was."""
+    if not (note := clean(text or "", ITEM_MAX)):
+        return
+    with open(Path(root) / ".board.lock", "w") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id, "kind": "note",
+                             "action": action, "note": note})
 
 
 def cmd_sync(root, job_id):
@@ -5356,6 +5620,7 @@ def main(argv=None):
     sub.add_parser("digest-start")
     sub.add_parser("digest-trim").add_argument("digest")
     sub.add_parser("pipeline-fit").add_argument("digest")
+    sub.add_parser("digest-trevor").add_argument("digest")
     sub.add_parser("process-health").add_argument("digest")
     sub.add_parser("window-report")
     sub.add_parser("move-ratio").add_argument("id")
@@ -5488,6 +5753,8 @@ def main(argv=None):
         print(json.dumps(cmd_digest_trim(a.dir, a.digest)))
     elif a.cmd == "pipeline-fit":
         print(json.dumps(cmd_pipeline_fit(a.dir, a.digest)))
+    elif a.cmd == "digest-trevor":
+        print(json.dumps(cmd_digest_trevor(a.dir, a.digest)))
     elif a.cmd == "process-health":
         print(json.dumps(cmd_process_health(a.dir, a.digest)))
     elif a.cmd == "window-report":
