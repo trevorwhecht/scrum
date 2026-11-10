@@ -1903,7 +1903,10 @@ def weekly_tick():
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
     week = limits.get("seven_day") if isinstance(limits, dict) else None
     resets = week.get("resets_at") if isinstance(week, dict) else None
-    if not board.is_num(resets) or not now < resets <= now + board.WEEKLY_LATE_SECS or not board.fable_ok(usage, now):
+    if not board.is_num(resets) or not now < resets <= now + board.WEEKLY_LATE_SECS:
+        return
+    if not board.fable_ok(usage, now):
+        print(f"watchdog: weekly digest: skipped, fable state is {board.fable_state(usage, now)}", file=sys.stderr, flush=True)
         return
     if board.weekly_ran(resets):
         return

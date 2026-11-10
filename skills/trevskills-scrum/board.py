@@ -3368,10 +3368,14 @@ def usage_allowance(usage, now, live):
 
 
 def fable_used(usage, now):
-    """{"5h": %, "7d": %} for the Fable guard: a window whose reset is at or before now reads 0, an unreadable one None."""
+    """{"5h": %, "7d": %} for the Fable guard: a window whose reset is at or before now reads 0, an unreadable one None; an absent five_hour key
+    reads 0 (no 5h window is active), an absent seven_day stays None."""
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
     out = {}
     for key, label in WINDOWS:
+        if key == "five_hour" and isinstance(limits, dict) and key not in limits:
+            out[label] = 0
+            continue
         w = limits.get(key) if isinstance(limits, dict) else None
         ok = isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at"))
         out[label] = None if not ok else 0 if w["resets_at"] <= now else w["used_percentage"]
