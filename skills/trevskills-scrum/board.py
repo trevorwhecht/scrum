@@ -1526,7 +1526,7 @@ def _waited(prev, end, starts, mtimes):
 def _timing_row(root, job_id, job, stalls, waits=()):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
-    mtime (else spec.md's), done is the board updatedAt; each round's time runs from the previous round's last file
+    mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
     (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs)."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
@@ -1552,6 +1552,12 @@ def _timing_row(root, job_id, job, stalls, waits=()):
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
     waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
     spec = spec_at - created if spec_at and created else None
+    try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
+        claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        claim = None
+    if claim and spec_at and created and created <= claim <= spec_at:
+        spec, queue = spec_at - claim, queue + claim - created
     try:  # serve.py note_queue_gate: the launch gates that queued it
         gates = ", ".join((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()) or "-"
     except OSError:
@@ -3543,6 +3549,11 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                     else f"{first} paused jobs need Play or Abort first"
                 break
             k.update(stage="spec", updatedAt=now())
+            try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)
+                with (jobs_dir / k["id"] / "claimed-at.txt").open("x", encoding="utf-8") as f:
+                    f.write(f"{int(time.time())}\n")
+            except OSError:
+                pass
             busy.append(k)
             slots.append(k)
             ready.append(k["id"])
