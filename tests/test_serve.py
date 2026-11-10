@@ -6664,11 +6664,28 @@ class AutoResumeTest(unittest.TestCase):
         hold()
         s.AUTO_RESUME["p/held"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(at(T + 121), [], "capped")
-        self.assertEqual((live()["stage"], live()["stalled"], live()["reason"]),
-                         ("build", True, "stalled: usage limit hit after 12 auto-resumes"))
+        self.assertEqual((live()["stage"], live()["stopTitle"]), ("needs-human", "BUILDER_BLOCKED"))
+        self.assertTrue(live()["reason"].startswith("auto-resume spent in build: "), live()["reason"])
         self.assertNotIn("limitResetAt", live())
 
-    def test_resume_held_cap_stalls_in_stage_silently(self):
+    def test_failed_spawn_spends_no_stall_retry(self):
+        s = self.serve
+        self.jobs = [{"id": "chk", "stage": "check", "stalled": True, "reason": "stalled: no live session",
+                      "updatedAt": "2026-01-01T00:00:00+00:00", "runlog": "runs/crash.log"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": self.jobs}))
+        with mock.patch.object(s, "resume_job", side_effect=FileNotFoundError("/opt/homebrew/bin/claude")), \
+                mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None):
+            with self.assertRaises(FileNotFoundError):
+                s.auto_resume("p", self.root, self.jobs)
+        self.assertEqual(s.STALL_RESUMED, set(), "a spawn that never started keeps its retry")
+        with mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "resume_refusal", return_value=None):
+            s.auto_resume("p", self.root, self.jobs)
+        self.assertEqual([c.args[2]["id"] for c in resume.call_args_list], ["chk"], "the next tick retries it")
+        self.assertEqual(s.STALL_RESUMED, {"p/chk/check"})
+
+    def test_resume_held_cap_parks_for_trevor(self):
         s, T = self.serve, 1_800_000_000
         self.jobs = [{"id": "held", "stage": "review", "reason": None, "limitResetAt": T,
                       "updatedAt": "2026-01-01T00:00:00+00:00", "runlog": "runs/held.log"}]
@@ -6678,14 +6695,19 @@ class AutoResumeTest(unittest.TestCase):
         with mock.patch.object(s.time, "time", return_value=T + 121), mock.patch.object(s.board, "play") as play:
             self.assertEqual(self.sweep(), [])
             [live] = json.loads((self.root / "board.json").read_text())["jobs"]
-            self.assertEqual((live["stage"], live["stalled"], live["reason"]),
-                             ("review", True, "stalled: usage limit hit after 12 auto-resumes"))
+            self.assertEqual((live["stage"], live["reason"]), ("needs-human", "auto-resume spent in review: this job stopped in "
+                             "review and its automatic retries ran out (12 of 12 used). The last session's log is in the "
+                             "stop.md tab of this job."))
+            self.assertEqual([o["command"] for o in live["options"]], ["resume held", "abort held --cascade"])
             self.assertNotIn("limitResetAt", live)
-            self.jobs = [live]  # the next tick reads the stalled job: its tries are at the cap, so nothing spawns
+            self.assertNotIn("stalled", live)
+            self.assertIn("runs/held.log", (self.root / "jobs" / "held" / "stop.md").read_text())
+            self.assertEqual(s.board.resume_first([live]), 0, "a parked job no longer holds new claims")
+            self.jobs = [live]  # the next tick reads the parked question: nothing spawns
             with mock.patch.object(s, "spawn") as spawn:
                 self.assertEqual(self.sweep(), [])
             spawn.assert_not_called()
-        play.assert_not_called()
+        play.assert_called_once()  # a stop for Trevor sounds once
         self.assertEqual(s.AUTO_RESUME["p/held"][0], s.AUTO_RESUME_MAX)
 
     def test_auto_resume_skips_paused_job(self):
@@ -7409,6 +7431,7 @@ class ExitedRunSweepTest(unittest.TestCase):
         self.repo = Path(tempfile.mkdtemp()); self.root = self.repo / "scrum"
         (self.root / "jobs").mkdir(parents=True)
         self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("p/")])
+        serve.STALL_RESUMED.clear(); self.addCleanup(serve.STALL_RESUMED.clear)  # another test's spent "p/kid/build" parks kid
 
     def write(self, jobs):
         for j in jobs:
@@ -7502,6 +7525,17 @@ class ExitedRunSweepTest(unittest.TestCase):
         self.assertEqual(self.job("kid")["reason"], self.STALLED)
         self.assertEqual(self.job("sib")["stage"], "build")
 
+
+    def test_respawn_exited_failed_spawn_spends_no_retry(self):
+        self.write([{"id": "x", "stage": "build"}])
+        self.run_entry("x")
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.serve, "resume_refusal", return_value=None), \
+                mock.patch.object(self.serve, "resume_job", side_effect=FileNotFoundError("claude")):
+            with self.assertRaises(FileNotFoundError):
+                self.serve.respawn_exited("p", self.root)
+        self.assertEqual(self.serve.STALL_RESUMED, set())
+        self.assertTrue(self.job("x")["stalled"], "left stalled, so auto_resume retries it")
 
     def test_respawn_exited_leaves_paused_job(self):
         (self.root / "runs").mkdir()
@@ -8561,10 +8595,13 @@ class AutoContinueTest(unittest.TestCase):
         self.serve.AUTO_RESUME["a/001-x"] = [1, time.time() + 600]  # tried once, next try in 10 min
         self.assertEqual(self.tick(), [], "between tries: no run-all beside it")
 
-    def test_exhausted_or_non_limit_stall_stays_idle(self):
-        self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
+    def test_exhausted_stall_parks_and_non_limit_stall_resumes(self):
+        root = self.limit_stalled("rate_limit: rejected (five_hour) resets_at=1700000000")
         self.serve.AUTO_RESUME["a/001-x"] = [self.serve.AUTO_RESUME_MAX, 0.0]
-        self.assertEqual(self.tick(), [], "tries used up: left for Trevor, and it holds new claims in its project")
+        self.assertEqual([c[2] for c in self.tick()], ["run-all"], "tries used up: parked for Trevor, so new claims start")
+        job = json.loads((root / "board.json").read_text())["jobs"][0]
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertTrue(job["reason"].startswith("auto-resume spent in plan: "), job["reason"])
         self.limit_stalled("Traceback: something else broke")
         self.assertEqual([c[2:4] for c in self.tick()], [("001-x", "resume")],
                          "no limit line: resumed once as a standalone stall, and no run-all starts beside it")

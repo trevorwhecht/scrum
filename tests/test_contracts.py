@@ -1218,7 +1218,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("leaving each stuck job in its stage with board `stalled` true and reason `stalled: ...` "
                       "(never `needs-human`)", nxt)
         self.assertIn("or have board `stalled` true in its stage", resume)
-        self.assertIn("**`stalled`** (board `stalled` true, or a legacy `stalled in <stage>` reason): ", resume)
+        self.assertIn("**`stalled`** (board `stalled` true, a legacy `stalled in <stage>` reason, or an `auto-resume spent in <stage>:` question): ", resume)
         self.assertIn("run `B set --unpause <id> stage=<the job's stage> reason=`", resume)
         self.assertIn("A stalled job is not a stop: it keeps its stage with board `stalled` true and serve.py resumes it.",
                       self.section(text, "**Every stop is a closed question.**", "\n\n"))
@@ -1235,7 +1235,8 @@ class ContractTest(unittest.TestCase):
         self.assertLess(text.index("The session running this skill **is the orchestrator**"), text.index(para),
                         "the rule follows the opening paragraph")
         self.assertLess(text.index(para), text.index("This skill is a sanctioned exception"))
-        for phrase in ("claude -p", "ScheduleWakeup", "never ends its turn", "SendMessage reply"):
+        for phrase in ("claude -p", "ScheduleWakeup", "never ends its turn", "SendMessage reply",
+                       "an offer to continue", "until the job merges or `B ask` stops it"):
             self.assertIn(phrase, para, phrase)
         resuming = self.section(text, "## Resuming the builder", "## Digest")
         self.assertIn("headless", resuming)
@@ -2842,7 +2843,7 @@ class ContractTest(unittest.TestCase):
     def test_resume_reentry_per_reason(self):
         text = self.rules()
         resume = next(l for l in text.splitlines() if l.startswith("- **`/trevskills-scrum resume <id>`**"))
-        for prefix in ("**`stalled`** (board `stalled` true, or a legacy `stalled in <stage>` reason)", "`bigboy off track`", "`bigboy review: main not updated`",
+        for prefix in ("**`stalled`** (board `stalled` true, a legacy `stalled in <stage>` reason, or an `auto-resume spent in <stage>:` question)", "`bigboy off track`", "`bigboy review: main not updated`",
                        "`bigboy blocked`", "`Base branch `"):
             self.assertIn(prefix, resume, prefix)
         for phrase in ("BigBoy lane** step 5 sub-steps 2-3", "merge-base --is-ancestor HEAD origin/$DEFAULT",
@@ -2862,6 +2863,10 @@ class ContractTest(unittest.TestCase):
         for phrase in ("**Answered question** (any other reason)", "must be in the job's board `options` (else **refuse**)",
                        "find the step whose `B ask` wrote the question"):
             self.assertIn(phrase, resume, phrase)
+        every = "Whatever the branch, the job then runs to the end as a `start` session would"
+        self.assertEqual(resume.count("runs to the end as a `start` session would"), 1, "one copy, covering every branch")
+        self.assertLess(resume.index("Then re-enter by reason."), resume.index(every))
+        self.assertLess(resume.index(every), resume.index("**`stalled`** ("))
         step6 = next(l for l in text.splitlines() if l.startswith("6. **After a child stops.**"))
         self.assertIn("If `all_merged` is true, go to step 7; when P's `lane` is `runall`, run `B set $P stage=done reason=` "
                       "instead. Otherwise **start** each id in `ready`", step6)

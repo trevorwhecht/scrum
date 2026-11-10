@@ -297,6 +297,17 @@ class BoardTest(unittest.TestCase):
                          ("needs-human", "Ship it?", "Ship it?", want))
         self.assertRegex(job["updatedAt"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
 
+    def test_ask_ends_a_stall(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=check"])
+        with board.locked_board(self.root) as b:
+            board.find(b, job_id).update(stalled=True, limitResetAt=1_800_000_000)
+        board.cmd_ask(self.root, job_id, "Go on?", [f"Try again=resume {job_id}", f"Drop=abort {job_id}"], title="BUILDER_BLOCKED")
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "needs-human")
+        self.assertNotIn("stalled", job, "a question is not a stall")
+        self.assertNotIn("limitResetAt", job)
+
     def test_ask_cli_three_options(self):
         job_id = board.cmd_new(self.root, "x")
         buf = io.StringIO()
@@ -4603,6 +4614,12 @@ print("stub err", file=sys.stderr)
         stamp = re.match(r"^runs/(\d{8}-\d{6})-", line["log"]).group(1)
         got = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
         self.assertTrue(before <= got <= after, (before, got, after))
+
+    def test_spawn_that_never_started_leaves_no_log(self):
+        with mock.patch.object(board, "CLAUDE", str(Path(self.tmp.name) / "missing-claude")):
+            with self.assertRaises(FileNotFoundError):
+                board.spawn(self.root, "123-some-job", "resume", "/p", model="sonnet")
+        self.assertEqual(list((self.root / "runs").iterdir()), [], "no 0-byte log that reads like a dead session")
 
     def test_spawn_argv_log_and_env(self):
         out = self.cli("123-some-job", "start")
