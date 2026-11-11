@@ -11,11 +11,15 @@ class TerminalOpensInBackground(unittest.TestCase):
     def test_no_focus_steal(self):
         serve = (SKILL / "serve.py").read_text()
         new_window = re.search(r'NEW_WINDOW_SCRIPT = """(.*?)"""', serve, re.S).group(1)
-        for name, text in (("job-window.applescript", (SKILL / "job-window.applescript").read_text()),
-                           ("NEW_WINDOW_SCRIPT", new_window)):
+        script = (SKILL / "job-window.applescript").read_text()
+        # raise-only code: the raiseWin handler and the doRaise-gated activate
+        keep = re.sub(r"(?s)on raiseWin\(w\).*?end raiseWin", "", script)
+        keep = keep.replace("if doRaise then activate", "")
+        for name, text in (("job-window.applescript", keep), ("NEW_WINDOW_SCRIPT", new_window)):
             self.assertNotRegex(text, r"(?m)^\s*activate\b", name)
             self.assertNotIn("set index of", text, name)
-
+        self.assertIn("my raiseWin", script)
+        self.assertEqual(script.count("my raiseWin"), script.count("if doRaise then my raiseWin"))
 
 if __name__ == "__main__":
     unittest.main()
