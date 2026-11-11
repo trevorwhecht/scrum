@@ -34,7 +34,7 @@ hooks:
 
 The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. It never writes code (except in the **Lilguy lane**), and it never reads diffs or reviews beyond their first lines. Agents get their context from files, never from this conversation.
 
-**Headless sessions block.** In a `claude -p` session (a dashboard or nohup run), ending the turn exits the process and kills everything it spawned: background agents, pending SendMessage replies, ScheduleWakeup/cron/loop timers. So the orchestrator never ends its turn while an agent or subprocess it spawned is still running; it waits for every one to return or exit, a "background" spawn included. It never relies on a later notification, a SendMessage reply or a `ScheduleWakeup`/cron/loop timer to continue, because those die with the process. It also never ends its turn with a question or an offer to continue ("say continue", an Optional Follow-up): it goes on stage by stage until the job merges or `B ask` stops it.
+**Headless sessions block.** In a `claude -p` session (a dashboard or nohup run), ending the turn exits the process and kills everything it spawned: background agents, pending SendMessage replies, ScheduleWakeup/cron/loop timers. So the orchestrator never ends its turn while an agent or subprocess it spawned is still running; it waits for every one to return or exit. It never relies on a later notification, SendMessage reply or timer to continue: those die with the process. It also never ends its turn with a question or an offer to continue ("say continue", an Optional Follow-up): it goes on stage by stage until the job merges or `B ask` stops it.
 
 This skill is a sanctioned exception to the global git rules: it may push its own `scrum/*` branch, `gh pr create`, and `gh pr merge --squash` that PR once checks pass. Nothing else:
 - never `git reset`, `git rebase`, or `--force`, and never `git merge` except the conflict step in **Merge**, the pre-build sync in **New job**, the first-Check sync in **Check gate** and the retry sync in **approve**
@@ -56,7 +56,7 @@ REPO="$(git rev-parse --show-toplevel)"; F="$REPO/scrum"
 B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; }
 ```
 
-Shell variables and functions don't survive between Bash calls, so re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call.
+Shell variables and functions don't survive between Bash calls: re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call.
 
 **Agent-written text in a shell command** (a reason, title, verify string or prompt): never put it inside double quotes or backticks. Strip single quotes from it and wrap it in single quotes, or write it to a file and pass the file.
 
@@ -148,6 +148,8 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/review.md` when this section r
 ## Migrate (Merge's schema guard)
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section runs.
+
+When **Prod check** fails on the deploy wait or the smoke check and no `## Prod runs` bullet ran, it waits 2 minutes and reruns once from its top (the default answer, Try again); only a second failure runs its `B ask`.
 
 ## Merge (APPROVE, or /trevskills-scrum approve)
 
