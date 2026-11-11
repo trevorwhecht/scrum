@@ -13,6 +13,7 @@ never leave it dirty, and land changes with `/trevskills-commitpush` or the pipe
 - `skills/trevskills-scrum/board.py` conventions: errors are `raise SystemExit("<message>")`; every board write is a
   tmp file + `os.replace` under the board lock; `SCRUM_*` env vars (`SCRUM_CODEX_SESSIONS`,
   `SCRUM_REGISTRY`, ...) override paths and URLs so tests stay hermetic.
+- A test module that reaches `serve.spawn`, a launch gate or auto-resume pins `SCRUM_PS=os.devnull`, `SCRUM_FREE_RAM`, `SCRUM_SWAP_PCT` and `SCRUM_CPU_LOAD_PCT` (as `tests/test_serve.py` does at import) and mocks `serve.run_terminal`, which raises under unittest.
 - SKILL.md: locate sections by heading (`grep -n '^## ' skills/trevskills-scrum/SKILL.md`), never by line number.
   Headings: Setup, Commands, New job, Run all, Fast lane, Debug lane, BigBoy lane, Roadmap lane, Lilguy lane,
   Cloud lane, Check gate, Review (WAIT FOR ALL), Approve, Migrate, Merge, Routing, Resuming the builder, Digest, Final report.
