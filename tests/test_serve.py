@@ -1388,6 +1388,24 @@ class ServeTest(unittest.TestCase):
             self.assertEqual((err.code, json.loads(err.read())), (400, {"error": "backlog item 0 has no Human setup"}))
         self.assertEqual(path.read_text(), "# Backlog\n- [ ] Plain\n- [ ] Send SMS\n")
 
+    def test_backlog_priority_op(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [ ] Plain {#aaaa}\n- [ ] Raise me {#bbbb} {p:2}\n")
+        code, items = self.req("POST", "/api/p/repo/backlog", {"op": "priority", "id": "bbbb", "priority": 4})
+        self.assertEqual(code, 200)
+        self.assertEqual([(i["text"], i["priority"]) for i in items], [("Plain", None), ("Raise me", 4)])
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Plain {#aaaa}\n- [ ] Raise me {#bbbb} {p:4}\n")
+        for body in ({"op": "priority", "id": "zzzz", "priority": 4}, {"op": "setup-done", "index": 0}):
+            r = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/p/repo/backlog", method="POST",
+                                       data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            with self.subTest(body=body), self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(r)
+            with e.exception as err:
+                self.assertEqual(err.code, 400)
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Plain {#aaaa}\n- [ ] Raise me {#bbbb} {p:4}\n")
+
     def test_backlog_add_cli_triggers_estimate(self):
         scrum = Path(self.tmp.name) / "cli-repo" / "scrum"
         scrum.mkdir(parents=True)

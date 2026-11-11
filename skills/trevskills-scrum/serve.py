@@ -4760,6 +4760,8 @@ class Handler(BaseHTTPRequestHandler):
                     threading.Thread(target=estimate, args=(root, new["text"]), daemon=True).start()
                 return 200, items
             kwargs = {"index": body.get("index")}
+            if op == "priority":  # by {#id}, so a list that changed since the client read it cannot hit the wrong item
+                kwargs = {"id": body.get("id"), "priority": body.get("priority")}
             if op == "edit":
                 kwargs.update(text=body.get("text"), **({"points": body["points"]} if "points" in body else {}))
             if op == "move":
