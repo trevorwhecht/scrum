@@ -5960,6 +5960,20 @@ class DigestTest(unittest.TestCase):
         self.assert_landed(2)
         self.assertEqual(len(self.jobs()), 1)
 
+    def test_retry_tick_push_failure_opens_one_job(self):
+        """A retry whose push fails opens one board job and DIGEST question, then stops retrying that proposal."""
+        self.held_dirty()
+        self.serve.digest_auto(self.scrum, "001")
+        (self.reg / "notes.txt").unlink()
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'origin says no' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual(len(self.jobs()), 1)
+        [p] = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual((p["status"], p["reason"]), ("queued", "push failed: remote: origin says no"))
+
     def test_retry_tick_applies_hold_from_another_root(self):
         """A digest in another project's scrum/ holding an edit to reg is retried against reg, not the tick's own repo."""
         self.held_dirty()

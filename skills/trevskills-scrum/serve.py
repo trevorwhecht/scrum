@@ -4385,8 +4385,8 @@ def digest_auto(root, digest_id):
 def digest_retry_tick(project, repo, root):
     """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes` in root/digests, once their target repo's
     checkout is clean (the target may be another registered repo than `repo`). A
-    landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item. Any other
-    refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
+    landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item; a board job,
+    commit or push failure keeps its new reason so it is not retried. Any other refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
     held = {}  # (digest id, target repo) -> props: a digest in this root may target another registered repo
     for d in sorted((root / "digests").glob("*")) if (root / "digests").is_dir() else []:
         if not board.DIGEST_RE.fullmatch(d.name):
@@ -4401,7 +4401,7 @@ def digest_retry_tick(project, repo, root):
     for (digest_id, target_repo), props in held.items():
         if ready.setdefault(target_repo, digest_apply_ready(target_repo)):
             continue
-        _, not_applied, _ = digest_apply(root, digest_id, props, from_status="queued")
+        _, not_applied, job_id = digest_apply(root, digest_id, props, from_status="queued")
         by_id = {p["id"]: p for p in props}
         updates = {}
         for q in not_applied:
@@ -4410,6 +4410,8 @@ def digest_retry_tick(project, repo, root):
             elif q["reason"].startswith("contract tests failed"):
                 digest_queue_repo_edit(digest_id, by_id[q["id"]], reason=q["reason"])
                 updates[q["id"]] = ("queued", q["reason"])
+            elif job_id or q["reason"].startswith(("commit failed", "push failed", "board job failed")):
+                updates[q["id"]] = ("queued", q["reason"])  # its DIGEST question is the one place to act: no new job per tick
         if updates:
             with DIGEST_LOCK:
                 digest_set_statuses(root, digest_id, updates, from_status="queued")
