@@ -34,6 +34,7 @@ Find each name with `grep -n '<name>'`; never trust a line number. Every serve.p
   - then fast-forwards the main checkout after the Merge guard (on `<branch>`, no tracked changes); when that fails the edits stay applied and the job is done with `merged, not live: <why>`;
   - always removes the temporary worktree.
 - In `digest_auto`, an `old text found N times` result is `skipped`; any other unapplied repo edit becomes a backlog item via `digest_queue_repo_edit` (`queued`).
+- A dirty-checkout refusal (uncommitted changes) leaves the proposal queued with that reason and no backlog item; watchdog_tick's digest_retry_tick re-runs digest_apply (from_status="queued") once digest_apply_ready is clean. A contract-test failure first tries the same edit on the one tests/*.py file holding the old text; if that passes both land in one commit, else it is queued with the failing test name.
 - Backlog items carry a pre-written spec from `digest_item_spec`; `queue_digest_item` writes the spec before the backlog line.
 - `digest_skill_check` re-checks a queued skill before its backlog job creates the file.
 
