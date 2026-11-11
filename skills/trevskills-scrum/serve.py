@@ -4184,6 +4184,9 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
             if not digest_contract_ok(wt):
                 holders = []
                 for tf in sorted((wt_real / "tests").glob("*.py")):
+                    tf = tf.resolve()  # same symlink guard as target
+                    if wt_real not in tf.parents:
+                        continue
                     try:
                         if tf.read_bytes().decode().count(p["old"]) == 1:
                             holders.append((tf, tf.read_bytes()))
@@ -4380,23 +4383,24 @@ def digest_auto(root, digest_id):
 
 
 def digest_retry_tick(project, repo, root):
-    """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes`, once the checkout is clean. A
+    """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes` in root/digests, once their target repo's
+    checkout is clean (the target may be another registered repo than `repo`). A
     landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item. Any other
     refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
-    held = {}
+    held = {}  # (digest id, target repo) -> props: a digest in this root may target another registered repo
     for d in sorted((root / "digests").glob("*")) if (root / "digests").is_dir() else []:
         if not board.DIGEST_RE.fullmatch(d.name):
             continue
         with DIGEST_LOCK:
             raw = read_proposals(d / "proposals.json")[1]
-        props = [v for x in raw if (v := valid_proposal(x)) and v["status"] == "queued" and v.get("reason") == "uncommitted changes"
-                 and v["kind"] not in ("backlog", "skill") and not digest_denied(v["target"])
-                 and (r := repo_of(v["target"])) and os.path.realpath(r[0]) == os.path.realpath(repo)]
-        if props:
-            held[d.name] = props
-    if not held or digest_apply_ready(repo):
-        return
-    for digest_id, props in held.items():
+        for v in raw:
+            if ((v := valid_proposal(v)) and v["status"] == "queued" and v.get("reason") == "uncommitted changes"
+                    and v["kind"] not in ("backlog", "skill") and not digest_denied(v["target"]) and (r := repo_of(v["target"]))):
+                held.setdefault((d.name, Path(os.path.realpath(r[0]))), []).append(v)
+    ready = {}
+    for (digest_id, target_repo), props in held.items():
+        if ready.setdefault(target_repo, digest_apply_ready(target_repo)):
+            continue
         _, not_applied, _ = digest_apply(root, digest_id, props, from_status="queued")
         by_id = {p["id"]: p for p in props}
         updates = {}

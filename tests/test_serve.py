@@ -5916,6 +5916,22 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
                          ["Apply digest 001 p1 to agents/scrum-x.md (contract tests failed: test_pin): Seen in 001-a and 002-b (p1)."])
 
+    def test_contract_hold_never_writes_through_test_symlink(self):
+        """A tests/*.py tracked as a symlink to a file outside the worktree is never read or written by the wording swap."""
+        self.git_repo()
+        self.contract_tests(fail_on=(1,))  # the edit alone fails; a swap would then pass
+        outside = Path(self.tmp.name) / "outside.py"
+        outside.write_text("assert 'old line'\n")
+        (self.reg / "tests" / "test_link.py").symlink_to(outside)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "link")
+        self.git("push", "-q")
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["queued"][0]["reason"], "contract tests failed")
+        self.assertEqual(outside.read_text(), "assert 'old line'\n")
+        self.assert_landed(2)
+
     def held_dirty(self):
         self.git_repo()
         runs = self.contract_tests()
@@ -5943,6 +5959,21 @@ class DigestTest(unittest.TestCase):
         self.serve.digest_retry_tick("reg", self.reg, self.scrum)
         self.assert_landed(2)
         self.assertEqual(len(self.jobs()), 1)
+
+    def test_retry_tick_applies_hold_from_another_root(self):
+        """A digest in another project's scrum/ holding an edit to reg is retried against reg, not the tick's own repo."""
+        self.held_dirty()
+        (self.reg / "notes.txt").unlink()
+        other = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other, True)
+        d = other / "scrum" / "digests" / "001"
+        d.mkdir(parents=True)
+        held = self.prop("p1", self.reg / "agents" / "scrum-x.md", status="queued", reason="uncommitted changes")
+        (d / "proposals.json").write_text(json.dumps({"proposals": [held]}))
+        self.serve.digest_retry_tick("other", other, other / "scrum")
+        self.assertEqual([p["status"] for p in json.loads((d / "proposals.json").read_text())["proposals"]], ["applied"])
+        self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
+        self.assert_landed(2)
 
     def test_retry_tick_skips_dirty_and_changed(self):
         self.held_dirty()
