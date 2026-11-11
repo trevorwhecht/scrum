@@ -47,6 +47,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 **Look for:**
 - every acceptance criterion actually implemented and actually verified; run the tests yourself if in doubt. When a criterion's verify step is a browser walkthrough or other running-app step (including `rendered by reviewers`) and build.md marks it `NOT RUN` without the exact start command and its quoted error (or the "no `Test sign-in:` account can reach the page" reason), or marks it `rendered by reviewers`, write a `[blocking]` finding at confidence >= 80 (`VERDICT: CHANGES`) only when the round has no rendering reviewer; never note it as "unverified" and pass. The round has a rendering reviewer only when PROJECT has a `UI globs` line and at least one file in `git -C WORKTREE diff --name-only BASE...HEAD` matches it (the same files that make `review-plan` spawn ui and ux, and the fast lane spawn its one UI reviewer); then write nothing for a `rendered by reviewers` line, and for a `NOT RUN` line a non-blocking note naming the UI/UX reviewers as the check instead
 - bugs and missing edge cases
+- a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
 - logic duplicated where something existing could be reused
 - unrequested abstractions and over-engineering
 - the repo's conventions: file naming, file size, the Result pattern if used, the TODO format
