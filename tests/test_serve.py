@@ -5864,7 +5864,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(out, {"applied": [{"id": "p1", "target": str(x), "why": "Seen in 001-a and 002-b (p1)."}], "skipped": [],
                                "job": job["id"], "queued": [{"id": "p2", "target": str(y), "why": "Seen in 001-a and 002-b (p2).",
                                                              "reason": "contract tests failed"}]})
-        self.assert_worktree_runs(runs(), 2)
+        self.assert_worktree_runs(runs(), 3)  # the third names the failing test
         self.assertEqual((x.read_text(), y.read_text()), ("keep A\nnew line\nkeep B\n", "keep A\nold line\nkeep B\n"))
         self.assertEqual((job["lane"], job["stage"]), ("lilguy", "done"))
         self.assert_landed(2)
@@ -5876,6 +5876,150 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(self.get("/api/p/reg/digests")[1]["digests"][0]["proposals"][1]["reason"], "contract tests failed")
         self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
                          ["Apply digest 001 p2 to agents/scrum-y.md: Seen in 001-a and 002-b (p2)."])
+
+    def pin_tests(self, tests_text):
+        """A contract-test command that fails (printing a FAIL: line) while agents/scrum-x.md has the new line and
+        tests/test_contracts.py still has the old one."""
+        code = ("import pathlib, sys; a = pathlib.Path('agents/scrum-x.md').read_text(); t = pathlib.Path('tests/test_contracts.py').read_text(); "
+                "bad = 'new line' in a and 'old line' in t; bad and print('FAIL: test_pin (tests.test_contracts.T.test_pin)', file=sys.stderr); sys.exit(bad)")
+        patch = mock.patch.object(self.serve, "DIGEST_CONTRACT_TESTS", [sys.executable, "-c", code])
+        patch.start()
+        self.addCleanup(patch.stop)
+        (self.reg / "tests" / "test_contracts.py").write_text(tests_text)
+        self.git("commit", "-q", "-am", "pin")
+        self.git("push", "-q")
+
+    def test_contract_hold_updates_test_wording(self):
+        self.git_repo()
+        self.pin_tests("assert 'old line'\n")
+        x = self.reg / "agents" / "scrum-x.md"
+        self.digest([self.prop("p1", x)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([a["id"] for a in out["applied"]], ["p1"])
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md", "tests/test_contracts.py"])
+        self.assertEqual((self.reg / "tests" / "test_contracts.py").read_text(), "assert 'new line'\n")
+        self.assert_landed(3)
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+
+    def test_contract_hold_queues_naming_test(self):
+        self.git_repo()
+        self.pin_tests("assert 'old line'\nassert 'old line'\n")  # twice: no single file swap
+        x = self.reg / "agents" / "scrum-x.md"
+        self.digest([self.prop("p1", x)])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["queued"][0]["reason"], "contract tests failed: test_pin")
+        self.assertEqual(self.statuses(), ["queued"])
+        self.assertEqual((x.read_text(), (self.reg / "tests" / "test_contracts.py").read_text()),
+                         ("keep A\nold line\nkeep B\n", "assert 'old line'\nassert 'old line'\n"))
+        self.assert_landed(2)
+        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)],
+                         ["Apply digest 001 p1 to agents/scrum-x.md (contract tests failed: test_pin): Seen in 001-a and 002-b (p1)."])
+
+    def test_contract_hold_never_writes_through_test_symlink(self):
+        """A tests/*.py tracked as a symlink to a file outside the worktree is never read or written by the wording swap."""
+        self.git_repo()
+        self.contract_tests(fail_on=(1,))  # the edit alone fails; a swap would then pass
+        outside = Path(self.tmp.name) / "outside.py"
+        outside.write_text("assert 'old line'\n")
+        (self.reg / "tests" / "test_link.py").symlink_to(outside)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "link")
+        self.git("push", "-q")
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["queued"][0]["reason"], "contract tests failed")
+        self.assertEqual(outside.read_text(), "assert 'old line'\n")
+        self.assert_landed(2)
+
+    def held_dirty(self):
+        self.git_repo()
+        runs = self.contract_tests()
+        self.repo_file("notes.txt", "stray\n")
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        return runs
+
+    def test_dirty_hold_queues_without_backlog(self):
+        self.held_dirty()
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(out["queued"][0]["reason"], "uncommitted changes")
+        self.assertEqual(self.statuses(), ["queued"])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertFalse((self.scrum / "backlog-specs").exists() and any((self.scrum / "backlog-specs").iterdir()))
+
+    def test_retry_tick_applies_hold_once_clean(self):
+        self.held_dirty()
+        self.serve.digest_auto(self.scrum, "001")
+        (self.reg / "notes.txt").unlink()
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assert_landed(2)
+        self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
+        self.assertEqual(self.git("show", "--name-only", "--format=", "origin/main").split(), ["agents/scrum-x.md"])
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assert_landed(2)
+        self.assertEqual(len(self.jobs()), 1)
+
+    def test_retry_tick_push_failure_opens_one_job(self):
+        """A retry whose push fails opens one board job and DIGEST question, then stops retrying that proposal."""
+        self.held_dirty()
+        self.serve.digest_auto(self.scrum, "001")
+        (self.reg / "notes.txt").unlink()
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'origin says no' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual(len(self.jobs()), 1)
+        [p] = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual((p["status"], p["reason"]), ("queued", "push failed: remote: origin says no"))
+
+    def test_retry_tick_applies_hold_from_another_root(self):
+        """A digest in another project's scrum/ holding an edit to reg is retried against reg, not the tick's own repo."""
+        self.held_dirty()
+        (self.reg / "notes.txt").unlink()
+        other = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other, True)
+        d = other / "scrum" / "digests" / "001"
+        d.mkdir(parents=True)
+        held = self.prop("p1", self.reg / "agents" / "scrum-x.md", status="queued", reason="uncommitted changes")
+        (d / "proposals.json").write_text(json.dumps({"proposals": [held]}))
+        self.serve.digest_retry_tick("other", other, other / "scrum")
+        self.assertEqual([p["status"] for p in json.loads((d / "proposals.json").read_text())["proposals"]], ["applied"])
+        self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
+        self.assert_landed(2)
+
+    def test_retry_tick_skips_dirty_and_changed(self):
+        self.held_dirty()
+        self.serve.digest_auto(self.scrum, "001")
+        self.serve.digest_retry_tick("reg", self.reg, self.scrum)  # still dirty
+        self.assertEqual((self.statuses(), self.jobs(), self.head_count()), (["queued"], [], 1))
+        (self.reg / "notes.txt").unlink()
+        path = self.scrum / "digests" / "001" / "proposals.json"
+        real = self.serve.digest_apply
+
+        def apply_then_revert(*a, **k):  # the status changes between the read and the write
+            data = json.loads(path.read_text())
+            data["proposals"][0]["status"] = "reverted"
+            path.write_text(json.dumps(data))
+            return real(*a, **k)
+
+        with mock.patch.object(self.serve, "digest_apply", side_effect=apply_then_revert):
+            self.serve.digest_retry_tick("reg", self.reg, self.scrum)
+        self.assertEqual(self.statuses(), ["reverted"])
+
+    def test_retry_tick_failure_is_guarded(self):
+        err = io.StringIO()
+        with mock.patch.object(self.serve, "digest_retry_tick", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.serve.board, "projects", return_value={"reg": self.reg}), \
+                mock.patch.object(self.serve.board, "record_cpu_sample"), mock.patch.object(self.serve.board, "ram_room", return_value=0), \
+                mock.patch.object(self.serve.board, "cmd_watchdog", return_value=[]), mock.patch.object(self.serve, "cloud_tick"), \
+                mock.patch.object(self.serve, "prune_worktrees"), mock.patch.object(self.serve, "actions_alert", return_value=None), \
+                mock.patch.object(self.serve, "sweep_parents"), contextlib.redirect_stderr(err):
+            (self.scrum).mkdir(exist_ok=True)
+            (self.scrum / "board.json").write_text('{"jobs": []}')
+            self.serve.watchdog_tick()
+        self.assertIn("watchdog: reg: digest retry: boom", err.getvalue())
 
     def test_digest_auto_queues_when_checkout_unsafe(self):
         agent = self.reg / "agents" / "scrum-x.md"
@@ -5905,7 +6049,7 @@ class DigestTest(unittest.TestCase):
                 if setup:
                     self.assertEqual(self.head_count(), heads)
         self.assertEqual(runs(), [])
-        self.assertEqual(len(self.board.backlog_items(self.scrum)), 4)
+        self.assertEqual(len(self.board.backlog_items(self.scrum)), 3)  # the dirty hold writes none
 
     def test_digest_auto_queues_when_commit_fails(self):
         self.git_repo(files=("agents/scrum-x.md", "agents/scrum-y.md"))

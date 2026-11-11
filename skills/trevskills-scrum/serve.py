@@ -1962,6 +1962,10 @@ def watchdog_tick():
                 prod_errors_tick(project, repo, root)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: prod errors: {e}", file=sys.stderr, flush=True)
+            try:  # its own guard: a digest retry failure must not skip actions_alert or the next project
+                digest_retry_tick(project, repo, root)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: digest retry: {e}", file=sys.stderr, flush=True)
             try:  # its own guard: a gh failure must not skip the next project
                 hit = ACTIONS_ALERT.get(str(repo))
                 if not hit or time.time() - hit[0] >= ACTIONS_ALERT_EVERY:
@@ -4009,11 +4013,13 @@ def digest_queue_skill(root: Path, digest_id: str, prop: dict, edits: Sequence[d
     return None
 
 
-def digest_queue_repo_edit(digest_id: str, prop: dict, where: tuple[Path, str] | None = None) -> None:
+def digest_queue_repo_edit(digest_id: str, prop: dict, where: tuple[Path, str] | None = None, reason: str | None = None) -> None:
     """Queue an edit to a registered repo's file as a backlog item in that repo's scrum/, with its pre-written spec.
-    where: its (repo, rel) as resolved before digest_apply, whose fast-forward may have re-pointed the target."""
+    where: its (repo, rel) as resolved before digest_apply, whose fast-forward may have re-pointed the target.
+    reason: a `contract tests failed: <test>` hold, whose test name goes in the item text."""
     repo, rel = where or repo_of(prop["target"])
-    queue_digest_item(repo / "scrum", f"Apply digest {digest_id} {prop['id']} to {rel}: {prop['why']}",
+    named = f" ({reason})" if reason and reason.startswith("contract tests failed: ") else ""
+    queue_digest_item(repo / "scrum", f"Apply digest {digest_id} {prop['id']} to {rel}{named}: {prop['why']}",
                       digest_item_spec(digest_id, prop, rel, repo=repo))
 
 
@@ -4110,21 +4116,33 @@ def digest_contract_ok(repo):
         return False
 
 
-def digest_mark_applied(root, digest_id, pids):
-    """Set these still-pending proposals to applied; once nothing is pending the digest is trimmed."""
+def digest_failing_test(repo):
+    """The first test name on a FAIL:/ERROR: line of a contract-test run in repo, or None."""
+    try:
+        r = subprocess.run(DIGEST_CONTRACT_TESTS, cwd=repo, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"^(?:FAIL|ERROR): (\S+)", r.stderr + "\n" + r.stdout, re.M)
+    return m.group(1) if m else None
+
+
+def digest_mark_applied(root, digest_id, pids, from_status="pending"):
+    """Set these still-from_status proposals to applied; once nothing is pending the digest is trimmed."""
     with DIGEST_LOCK:
-        digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids})
+        digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids}, from_status=from_status)
 
 
 def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
-                 mark_applied: bool = True) -> tuple[list[dict], list[dict], str | None]:
+                 mark_applied: bool = True, from_status: str = "pending") -> tuple[list[dict], list[dict], str | None]:
     """Apply one repo's edit proposals in a temporary detached worktree at origin/<branch>, running the contract tests
     there after each, commit the ones that passed under one lilguy board job in that repo's scrum/, push that commit to
     origin/<branch> and fast-forward the main checkout, which is never written to directly. Refuses (queues everything)
     when the fetch fails or local <branch> is ahead of origin. Returns (applied, to queue, job id): each to-queue entry
     carries the reason it wasn't applied, and nothing of it is landed. A blocked fast-forward after the push still counts
     as applied, with the job done as `merged, not live: <why>`. title (the job and commit subject) and feature
-    (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone."""
+    (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone; from_status is the status
+    the applied proposals are flipped from. When the contract tests fail after an edit, the same old to new swap is tried
+    in the one tests/*.py file holding the old text once, and lands in the same commit if the tests then pass."""
     repo = repo_of(props[0]["target"])[0]
     entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
     first = lambda r: next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
@@ -4162,21 +4180,46 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
             except OSError as e:
                 queued.append(entry(p, f"write failed: {e}"))
                 continue
+            extra = None
             if not digest_contract_ok(wt):
-                target.write_bytes(orig)  # restored, so the proposals after it are tested without it
-                queued.append(entry(p, "contract tests failed"))
-                continue
+                holders = []
+                for tf in sorted((wt_real / "tests").glob("*.py")):
+                    tf = tf.resolve()  # same symlink guard as target
+                    if wt_real not in tf.parents:
+                        continue
+                    try:
+                        if tf.read_bytes().decode().count(p["old"]) == 1:
+                            holders.append((tf, tf.read_bytes()))
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                if len(holders) == 1:
+                    tf, tf_orig = holders[0]
+                    try:
+                        tf.write_bytes(tf_orig.decode().replace(p["old"], p["new"], 1).encode())
+                    except OSError:
+                        pass
+                    else:
+                        extra = tf
+                if extra is None or not digest_contract_ok(wt):
+                    if extra is not None:
+                        extra.write_bytes(holders[0][1])
+                    name = digest_failing_test(wt)  # the edit alone is still written: names the test it breaks
+                    target.write_bytes(orig)  # restored, so the proposals after it are tested without it
+                    queued.append(entry(p, f"contract tests failed: {name}" if name else "contract tests failed"))
+                    continue
             done.append((p, rel))
+            if extra is not None:
+                done.append((p, str(extra.relative_to(wt_real))))
         order = {p["id"]: i for i, p in enumerate(props)}
         if not done:
             return [], queued, None
         scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel in done))
-        pids = ", ".join(p["id"] for p, _ in done)
+        pids = ", ".join(dict.fromkeys(p["id"] for p, _ in done))
         lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel in done)
         title = title or f"Apply digest {digest_id} {pids}"
         feature = feature if feature is not None else f"Apply digest {digest_id} proposals:\n\n{lines}"
         # every write is in wt, so removing it (finally) is the undo
-        undo = lambda why: ([], sorted(queued + [entry(p, why) for p, _ in done], key=lambda q: order[q["id"]]))
+        undo = lambda why: ([], sorted(queued + [entry(p, why) for p in {p["id"]: p for p, _ in done}.values()], key=lambda q: order[q["id"]]))
         try:
             job_id = board.cmd_new(scrum, title)
             (scrum / "jobs" / job_id / "feature.md").write_text(feature)
@@ -4203,9 +4246,9 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
         elif git_run(repo, "merge", "-q", "--ff-only", f"origin/{branch}").returncode:
             not_live = "fast-forward failed"
         if mark_applied:
-            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done})
+            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done}, from_status)
         board.cmd_set(scrum, job_id, ["stage=done"] + ([f"reason=merged, not live: {not_live}"] if not_live else []))
-        return [entry(p) for p, _ in done], queued, job_id
+        return [entry(p) for p in {p["id"]: p for p, _ in done}.values()], queued, job_id
     finally:
         git_run(repo, "worktree", "remove", "--force", wt)
         shutil.rmtree(wt, ignore_errors=True)
@@ -4331,11 +4374,47 @@ def digest_auto(root, digest_id):
             if q["reason"].startswith("old text found"):
                 skip(by_id[q["id"]], q["reason"])
             else:
-                digest_queue_repo_edit(digest_id, by_id[q["id"]], where[q["id"]])
+                if q["reason"] != "uncommitted changes":  # held without a backlog item: digest_retry_tick re-applies it
+                    digest_queue_repo_edit(digest_id, by_id[q["id"]], where[q["id"]], q["reason"])
                 queue(by_id[q["id"]], q["reason"])
     with DIGEST_LOCK:
         digest_set_statuses(root, digest_id, updates)
     return out
+
+
+def digest_retry_tick(project, repo, root):
+    """Re-run digest_apply for repo edit proposals held as queued `uncommitted changes` in root/digests, once their target repo's
+    checkout is clean (the target may be another registered repo than `repo`). A
+    landed one becomes applied; stale old text is skipped; a contract-test failure becomes a backlog item; a board job,
+    commit or push failure keeps its new reason so it is not retried. Any other refusal leaves it queued for the next tick. Status writes are under DIGEST_LOCK with from_status="queued"."""
+    held = {}  # (digest id, target repo) -> props: a digest in this root may target another registered repo
+    for d in sorted((root / "digests").glob("*")) if (root / "digests").is_dir() else []:
+        if not board.DIGEST_RE.fullmatch(d.name):
+            continue
+        with DIGEST_LOCK:
+            raw = read_proposals(d / "proposals.json")[1]
+        for v in raw:
+            if ((v := valid_proposal(v)) and v["status"] == "queued" and v.get("reason") == "uncommitted changes"
+                    and v["kind"] not in ("backlog", "skill") and not digest_denied(v["target"]) and (r := repo_of(v["target"]))):
+                held.setdefault((d.name, Path(os.path.realpath(r[0]))), []).append(v)
+    ready = {}
+    for (digest_id, target_repo), props in held.items():
+        if ready.setdefault(target_repo, digest_apply_ready(target_repo)):
+            continue
+        _, not_applied, job_id = digest_apply(root, digest_id, props, from_status="queued")
+        by_id = {p["id"]: p for p in props}
+        updates = {}
+        for q in not_applied:
+            if q["reason"].startswith("old text found"):
+                updates[q["id"]] = ("skipped", q["reason"])
+            elif q["reason"].startswith("contract tests failed"):
+                digest_queue_repo_edit(digest_id, by_id[q["id"]], reason=q["reason"])
+                updates[q["id"]] = ("queued", q["reason"])
+            elif job_id or q["reason"].startswith(("commit failed", "push failed", "board job failed")):
+                updates[q["id"]] = ("queued", q["reason"])  # its DIGEST question is the one place to act: no new job per tick
+        if updates:
+            with DIGEST_LOCK:
+                digest_set_statuses(root, digest_id, updates, from_status="queued")
 
 
 def weekly_set_status(path: Path, pid: str, status: str, reason: str, from_status: str = "pending") -> None:
