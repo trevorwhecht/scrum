@@ -3774,7 +3774,8 @@ def cooling_down():
 
 
 def swap_grew(swap):
-    """True when swap rose more than 1 point of RAM above the lowest reading of the last SWAP_GROWTH_SECS. Records swap
+    """True when swap is more than 1 point of RAM above the oldest reading of the last SWAP_GROWTH_SECS (net growth: a
+    fall then a rebound is not growth). Records swap
     in SCRUM_SWAP_LOG (default: system temp dir), pruned to that window; a missing or corrupt file means no growth."""
     log = os.environ.get("SCRUM_SWAP_LOG") or os.path.join(tempfile.gettempdir(), "scrum-swap-log.json")
     now = time.time()
@@ -3782,13 +3783,18 @@ def swap_grew(swap):
         keep = [[t, v] for t, v in json.loads(Path(log).read_text()) if now - t < SWAP_GROWTH_SECS]
     except (OSError, ValueError, TypeError):
         keep = []
-    grew = bool(keep) and swap - min(v for _, v in keep) > 1
+    grew = bool(keep) and swap - keep[0][1] > 1
     try:
         with open(log, "w") as fh:
             json.dump(keep + [[now, swap]], fh)
     except OSError:
         pass
     return grew
+
+
+def swap_pressing(ram, swap, limit):
+    """True when swap is past `limit` and either free RAM is under SWAP_FREE_RAM_PCT or swap grew over the window."""
+    return swap is not None and swap > limit and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap))
 
 
 def machine_ok(path, manual=False, claim=False):
@@ -3803,7 +3809,7 @@ def machine_ok(path, manual=False, claim=False):
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
     swap = swap_used_pct()
-    if swap is not None and swap > MAX_SWAP_PCT and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap)):
+    if swap_pressing(ram, swap, MAX_SWAP_PCT):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
@@ -3824,12 +3830,12 @@ def ram_room(floor=1):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
     for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
-    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping.
+    bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS."""
     ram = free_ram_pct()
     swap = swap_used_pct()
-    if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
+    if ram is None or swap_pressing(ram, swap, MAX_SWAP_PCT / 2):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
     young = sum(a < SESSION_RAMP_SECS for a in ages)
