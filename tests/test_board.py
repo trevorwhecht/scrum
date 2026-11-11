@@ -3459,6 +3459,16 @@ class BoardTest(unittest.TestCase):
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
 
+    def test_pulse_null_top_baseline(self):
+        s = 1_700_000_000
+        pr = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top}
+        text, _ = self.pulse_digest([
+            {"t": s, "sessions": 1, "cooldown": False, "cpu_load": 100, "focus": "app", "projects": {"app": pr(None)}},
+            {"t": s + 60, "sessions": 1, "cooldown": True, "cpu_load": 600, "focus": "app",
+             "projects": {"app": pr(2), "new": pr(5)}}])  # "new" absent from the earlier line: no claim
+        self.assertIn("Claims during cool down: 2 — app 2\n", text)
+        self.assertIn("Claims while CPU load over 500%: 2\n", text)
+
     def test_pulse_missing_log(self):
         empty = "# Pulse: digest 001\n\nNo pulse lines since the last digest.\n"
         self.assertEqual(self.pulse_digest(None)[0], empty)

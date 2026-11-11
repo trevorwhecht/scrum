@@ -2047,8 +2047,10 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
         root = repo / "scrum"
         try:
             jobs = board.read_board(root)["jobs"]
+            done = {j.get("id") for j in jobs if j.get("stage") == "done"}
             projects[project] = {
-                "claimable": claimable_count(root), "waiting": sum(map(board.parked_waiting, jobs)),
+                "claimable": claimable_count(root),
+                "waiting": sum(board.parked_waiting(j) and all(d in done for d in j["depends_on"]) for j in jobs),
                 "busy": bool(busy.get(project)),
                 "top": max((int(m.group(1)) for j in jobs if (m := re.match(r"(\d+)-", str(j.get("id"))))), default=None)}
         except (Exception, SystemExit) as e:

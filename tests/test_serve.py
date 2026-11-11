@@ -10466,7 +10466,7 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(self.lines(), [{
             "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 42.0, "swap": 3.0, "cooldown": True,
             "u5h": 30, "u7d": 60, "focus": "app",
-            "projects": {"app": {"claimable": 2, "waiting": 1, "busy": True, "top": 12},
+            "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12},
                          "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None}}}])
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
@@ -10489,6 +10489,18 @@ class PulseTest(unittest.TestCase):
             s.watchdog_tick()
         (line,) = self.lines()  # one watchdog tick, one line
         self.assertEqual(sorted(line["projects"]), ["app", "lib"])
+
+    def test_waiting_counts_only_unblocked(self):
+        def waiting(jobs):
+            (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+            self.log.unlink(missing_ok=True)
+            self.serve.pulse_tick({}, now=self.NOW)
+            return self.lines()[0]["projects"]["app"]["waiting"]
+        w = {"id": "007-wait", "stage": "waiting", "depends_on": ["006-dep"]}
+        self.assertEqual(waiting([{"id": "006-dep", "stage": "running"}, w]), 0)
+        self.assertEqual(waiting([{"id": "006-dep", "stage": "done"}, w]), 1)
+        self.assertEqual(waiting([{"id": "006-dep", "stage": "aborted"}, w]), 0)
+        self.assertEqual(waiting([w]), 0)
 
     def test_failure_does_not_break_tick(self):
         s = self.serve

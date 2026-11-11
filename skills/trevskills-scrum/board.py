@@ -1396,6 +1396,8 @@ def write_pulse(root, digest_id):
             pa, pb = projs(a), projs(b)
             for name, p in pb.items():
                 was, top = pa.get(name, {}).get("top"), p.get("top")
+                if name in pa and was is None:
+                    was = 0  # no jobs yet: the first job is a claim
                 if not (is_num(was) and is_num(top) and top > was):
                     continue
                 if b.get("cooldown") is True:
