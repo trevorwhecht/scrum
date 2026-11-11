@@ -57,6 +57,10 @@
                                    (depends_on, transitively; Run-all ones requeued), prints {"aborted": [ids]}
   board.py artifacts <id>          print jobs/<id>/... paths safe to push (regular, under 1 MB, UTF-8, no secret); name the
                                    rest in jobs/<id>/skipped-secrets.txt (Cloud lane's scrum-artifacts/<id> branch)
+  board.py db-up --env <file>      read DATABASE_URL from the env file; when its local host:port refuses, start the local
+                                   database (brew postgres* service, else docker compose up -d) and re-probe every 5 s for
+                                   up to 120 s; print {"up","started"} (exit 1 when still down), or {"up": null,"skipped"}
+                                   for a missing file or URL or a non-local host (Check gate step 2)
   board.py cooldown-park <id>      while cooling down, stall a round-0 spec/build job at this checkpoint (serve.py resumes
                                    it after cool down); print {"parked": bool}
   board.py dev-clear <id>          stop every server listening from inside the job's .claude/worktrees/ worktree (TERM,
@@ -154,11 +158,12 @@
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
-import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, string, subprocess, sys, tempfile, time
+import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, socket, string, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REVIEWERS = ("security", "ux", "ui", "code")
 FABLE_MODEL = "claude-fable-5-1"  # fable-ok: the planner and standard spec-writers of complex jobs, in the ok band only
@@ -3774,7 +3779,8 @@ def cooling_down():
 
 
 def swap_grew(swap):
-    """True when swap rose more than 1 point of RAM above the lowest reading of the last SWAP_GROWTH_SECS. Records swap
+    """True when swap is more than 1 point of RAM above the oldest reading of the last SWAP_GROWTH_SECS (net growth: a
+    fall then a rebound is not growth). Records swap
     in SCRUM_SWAP_LOG (default: system temp dir), pruned to that window; a missing or corrupt file means no growth."""
     log = os.environ.get("SCRUM_SWAP_LOG") or os.path.join(tempfile.gettempdir(), "scrum-swap-log.json")
     now = time.time()
@@ -3782,13 +3788,18 @@ def swap_grew(swap):
         keep = [[t, v] for t, v in json.loads(Path(log).read_text()) if now - t < SWAP_GROWTH_SECS]
     except (OSError, ValueError, TypeError):
         keep = []
-    grew = bool(keep) and swap - min(v for _, v in keep) > 1
+    grew = bool(keep) and swap - keep[0][1] > 1
     try:
         with open(log, "w") as fh:
             json.dump(keep + [[now, swap]], fh)
     except OSError:
         pass
     return grew
+
+
+def swap_pressing(ram, swap, limit):
+    """True when swap is past `limit` and either free RAM is under SWAP_FREE_RAM_PCT or swap grew over the window."""
+    return swap is not None and swap > limit and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap))
 
 
 def machine_ok(path, manual=False, claim=False):
@@ -3803,7 +3814,7 @@ def machine_ok(path, manual=False, claim=False):
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
     swap = swap_used_pct()
-    if swap is not None and swap > MAX_SWAP_PCT and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap)):
+    if swap_pressing(ram, swap, MAX_SWAP_PCT):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
     disk = free_disk_gb(path)
     if disk is not None and disk < MIN_FREE_DISK_GB:
@@ -3824,12 +3835,12 @@ def ram_room(floor=1):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
     for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
-    bursts blind, and so does swap already past MAX_SWAP_PCT / 2: free RAM % reads healthy while the kernel is swapping.
+    bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS."""
     ram = free_ram_pct()
     swap = swap_used_pct()
-    if ram is None or (swap is not None and swap > MAX_SWAP_PCT / 2):
+    if ram is None or swap_pressing(ram, swap, MAX_SWAP_PCT / 2):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
     young = sum(a < SESSION_RAMP_SECS for a in ages)
@@ -5507,6 +5518,89 @@ def listeners() -> list[tuple[int, int, str]]:
     return [(p, port, cwds[p]) for p, port in ports if p in cwds]
 
 
+LOCAL_DB_HOSTS = ("localhost", "127.0.0.1", "::1")
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+
+
+def port_open(host: str, port: int) -> bool:
+    """True when a TCP connect to host:port succeeds within 2 s."""
+    try:
+        socket.create_connection((host, port), timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def start_local_db(cwd=None, sleep=time.sleep) -> str | None:
+    """Start the local database: `brew services start` the first postgres* service `brew services list` names, else
+    `docker compose up -d` when cwd (default the current folder) holds a compose file, after waiting up to 120 s for
+    Docker (`open -a Docker`, then `docker info` every 5 s). Returns None when the start command succeeded, else the
+    reason; never raises."""
+    def run(*argv):
+        return subprocess.run(list(argv), capture_output=True, text=True, timeout=120)
+    try:
+        listed = run("brew", "services", "list").stdout.splitlines()[1:]
+        name = next((ln.split()[0] for ln in listed if ln.split() and ln.split()[0].startswith("postgres")), None)
+    except (OSError, subprocess.SubprocessError):
+        name = None
+    try:
+        if name:
+            r = run("brew", "services", "start", name)
+            return None if r.returncode == 0 else f"brew services start {name} exited {r.returncode}: {r.stderr.strip()}"
+        if not any((Path(cwd or ".") / f).exists() for f in COMPOSE_FILES):
+            return "no postgres brew service and no compose file"
+        if run("docker", "info").returncode != 0:
+            run("open", "-a", "Docker")
+            for _ in range(24):
+                sleep(5)
+                if run("docker", "info").returncode == 0:
+                    break
+            else:
+                return "Docker did not start within 120 s"
+        r = subprocess.run(["docker", "compose", "up", "-d"], capture_output=True, text=True, timeout=300, cwd=cwd)
+        return None if r.returncode == 0 else f"docker compose up -d exited {r.returncode}: {r.stderr.strip()}"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"database start failed: {e}"
+
+
+def db_up(env_file, wait=120, start=None, probe=None, sleep=None) -> dict:
+    """The Check gate's database probe. Reads DATABASE_URL (quotes stripped) from env_file and TCP-probes its host:port
+    (5432 when the URL has none). Open: {"up": true, "started": false}. Refused on a LOCAL_DB_HOSTS host: call start
+    (default start_local_db) once, re-probe every 5 s for up to wait seconds, and return {"up", "started": true}, plus
+    "error" when the start failed. A missing file, a missing or unparsable URL, or a non-local host returns
+    {"up": null, "skipped": reason} and starts nothing."""
+    probe, sleep = probe or port_open, sleep or time.sleep
+    try:
+        text = Path(env_file).read_text()
+    except (OSError, UnicodeDecodeError):
+        return {"up": None, "skipped": f"no readable env file {env_file}"}
+    m = re.search(r"^\s*(?:export\s+)?DATABASE_URL\s*=\s*(.*)$", text, re.M)
+    if not m:
+        return {"up": None, "skipped": "no DATABASE_URL"}
+    try:
+        u = urlsplit(m.group(1).strip().strip("\"'"))
+        host, port = u.hostname, u.port or 5432
+    except ValueError:
+        host = None
+    if not host:
+        return {"up": None, "skipped": "DATABASE_URL has no parsable host:port"}
+    if host not in LOCAL_DB_HOSTS:
+        return {"up": None, "skipped": f"{host} is not a local host"}
+    if probe(host, port):
+        return {"up": True, "started": False}
+    try:
+        error = (start or start_local_db)()
+    except Exception as e:  # a starter failure is reported, never raised
+        error = f"database start failed: {e}"
+    up = False
+    for _ in range(max(1, int(wait // 5))):
+        sleep(5)
+        if probe(host, port):
+            up = True
+            break
+    return {"up": up, "started": True, **({"error": error} if error and not up else {})}
+
+
 def stop_worktree_servers(repo: Path, wt: str | None, listening=None, wait: float = 0.0) -> list[int]:
     """SIGTERM every listener whose cwd is the job worktree wt or under it; returns the pids signalled, in order.
     wt must sit strictly inside <repo>/.claude/worktrees/ and exist, else nothing is read or signalled (a main-checkout
@@ -5624,6 +5718,7 @@ def main(argv=None):
     ab.add_argument("--reason")
     sub.add_parser("artifacts").add_argument("id")
     sub.add_parser("dev-clear").add_argument("id")
+    sub.add_parser("db-up").add_argument("--env", required=True)
     sub.add_parser("cooldown-park").add_argument("id")
     sub.add_parser("digest-due")
     sub.add_parser("digest-start")
@@ -5709,6 +5804,10 @@ def main(argv=None):
             line = ""
         print(line)
         return 0
+    if a.cmd == "db-up":
+        out = db_up(a.env)
+        print(json.dumps(out))
+        return 1 if out["up"] is False else 0
     require_scrum_dir(a.dir)
     if a.cmd == "new":
         print(cmd_new(a.dir, a.title, a.id))

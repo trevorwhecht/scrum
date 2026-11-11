@@ -684,6 +684,12 @@ class ContractTest(unittest.TestCase):
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("head.txt", "B review-plan $ID", "--incremental", "SINCE=", "Re-review:", "REWORK", "Conflicts"):
             self.assertIn(phrase, review, phrase)
+        self.assertNotIn("the Merge **Conflicts** step, or in a resumed", review)
+        self.assertIn("a round started through the Merge **Conflicts** step may pass it", review)
+        self.assertIn("falls back to a full review when the merge's changed files", review)
+        merge_text = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        self.assertNotIn("fresh check and full review round", merge_text)
+        self.assertIn("a review round (incremental when Review step 2 allows it, otherwise full)", merge_text)
         self.assertIn("Carried forward from round", BOARD_PY.read_text())  # review-plan writes it
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertIn("Carried forward", line)
@@ -1017,7 +1023,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26325, "newjob.md")  # +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26720, "newjob.md")  # +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2006,6 +2012,17 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`npx eslint --cache <changed .js/.jsx/.ts/.tsx/.mjs/.cjs files>`", step2)
         self.assertIn("`eslint.config.*` or `.eslintrc*`", step2)
         self.assertIn("`Lint: skipped, no lintable file in diff`", step2)
+
+    def test_check_gate_runs_db_up(self):
+        check = self.lane("newjob").split("## Check gate")[1]
+        step2 = check[check.index("2. **Runtime files**"):check.index("\n3. ")]
+        db = step2.index('board.py" db-up --env "$WT/.env"')
+        self.assertLess(step2.index("open -a Docker"), db)
+        self.assertLess(db, step2.index("then run each of Test / Typecheck / Lint / Build"))
+        self.assertIn("`.env.local` when `$WT/.env` is missing", step2)
+        self.assertIn("only `{\"up\": false}` stops", step2)
+        self.assertIn("Build check could not run: local database down", step2)
+        self.assertIn("board.py db-up --env <file>", (SKILL_DIR / "board.py").read_text())
 
     def test_check_gate_syncs_main_on_round_one(self):
         check = self.lane("newjob").split("## Check gate")[1]

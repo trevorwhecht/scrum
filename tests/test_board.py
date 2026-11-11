@@ -2094,6 +2094,10 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), msg)
         with self.swap_log([(700, 50.0)]), self.machine("71", "1000"), env:
             self.assertIsNone(board.machine_ok(self.tmp.name), "old sample")
+        with self.swap_log([(500, 60.0), (400, 50.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "fell then rebounded: net down, not growth")
+        with self.swap_log([(500, 50.0), (400, 40.0)]), self.machine("71", "1000"), env:
+            self.assertEqual(board.machine_ok(self.tmp.name), msg, "net up over the window")
         with self.swap_log([(120, 56.0)]), self.machine("71", "1000"), env:
             self.assertIsNone(board.machine_ok(self.tmp.name), "under 1 point of growth")
         with self.swap_log([(120, 60.0)]), self.machine("71", "1000"), env:
@@ -2121,8 +2125,12 @@ class BoardTest(unittest.TestCase):
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ram_room_is_one_while_swap_fills(self):
-        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
-            self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2: one claim per call")
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2, RAM low: one claim per call")
+        with self.swap_log([(120, 10.0)]), self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 1, "swap growing: one claim per call")
+        with self.swap_log([(120, 20.0)]), self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 9, "stale swap, healthy RAM: normal math")
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10"):
             self.assertEqual(board.ram_room(), 9)
 
@@ -2142,7 +2150,7 @@ class BoardTest(unittest.TestCase):
         with self.machine("66", "1000"), self.sessions(14):
             self.assertEqual(board.ram_room(floor=0), 0, "at the ceiling")
         ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n")
-        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
             with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
                 self.assertEqual(board.ram_room(floor=0), 0, "swapping: none while a session is young")
                 self.assertEqual(board.ram_room(), 1)
@@ -9399,3 +9407,123 @@ class BacklogUnlessOpenTest(unittest.TestCase):
                                                unless_open="(sig abc1234567)"), ["Prod error on /a: back (sig abc1234567)"])
         self.assertIn("- [ ] Prod error on /a: back (sig abc1234567)", (self.root / "backlog.md").read_text())
         self.assertEqual(board.cmd_backlog_add(self.root, ["plain"]), ["plain"], "no unless_open adds as before")
+
+
+class TestDbUp(unittest.TestCase):
+    """board.db_up: the Check gate's local-database probe and start (job 761)."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.socks = []
+        self.addCleanup(lambda: [s.close() for s in self.socks])
+
+    def env(self, url_line):
+        path = self.dir / ".env"
+        path.write_text(f"OTHER=1\n{url_line}\n")
+        return path
+
+    def free_port(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def listen(self, port):
+        import socket
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen()
+        self.socks.append(s)
+
+    def test_open_port_does_not_start(self):
+        port = self.free_port()
+        self.listen(port)
+        start = mock.Mock()
+        out = board.db_up(self.env(f'DATABASE_URL="postgresql://u:p@127.0.0.1:{port}/db?schema=public"'), start=start)
+        self.assertEqual(out, {"up": True, "started": False})
+        start.assert_not_called()
+
+    def test_refused_port_starts_then_succeeds(self):
+        port = self.free_port()
+        calls, sleeps = [], []
+        out = board.db_up(self.env(f"DATABASE_URL='postgresql://u@localhost:{port}/db'"), wait=120,
+                          start=lambda: calls.append(1) or self.listen(port), sleep=sleeps.append)
+        self.assertEqual(out, {"up": True, "started": True})
+        self.assertEqual(calls, [1])
+        self.assertEqual(sleeps, [5])
+
+    def test_never_opens_returns_down(self):
+        sleeps, calls = [], []
+        out = board.db_up(self.env("DATABASE_URL=postgresql://u@127.0.0.1:5999/db"), wait=12,
+                          start=lambda: calls.append(1), probe=lambda host, port: False, sleep=sleeps.append)
+        self.assertEqual(out, {"up": False, "started": True})
+        self.assertEqual(calls, [1])
+        self.assertEqual(sleeps, [5, 5])
+        port = self.free_port()
+        env = self.env(f"DATABASE_URL=postgresql://u@127.0.0.1:{port}/db")
+        with mock.patch.object(board, "start_local_db", return_value=None) as start, \
+                mock.patch.object(board.time, "sleep"):
+            r = run_board("db-up", "--env", str(env))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(json.loads(r.stdout), {"up": False, "started": True})
+        start.assert_called_once_with()
+
+    def test_skips_remote_and_missing_url(self):
+        start = mock.Mock()
+        never = lambda host, port: self.fail("probed a skipped database")  # noqa: E731
+        cases = {
+            "remote": self.env("DATABASE_URL=postgresql://u@db.example.com:5432/db"),
+            "missing file": self.dir / "nope.env",
+            "no url": self.env("DIRECT_URL=postgresql://u@localhost/db"),
+            "bad port": self.env("DATABASE_URL=postgresql://u@localhost:notaport/db"),
+        }
+        for name, env in cases.items():
+            out = board.db_up(env, start=start, probe=never)
+            self.assertIsNone(out["up"], name)
+            self.assertTrue(out["skipped"], name)
+            self.assertEqual(set(out), {"up", "skipped"}, name)
+        start.assert_not_called()
+        r = run_board("db-up", "--env", str(self.env("DATABASE_URL=postgresql://u@db.example.com/db")))
+        self.assertEqual(r.returncode, 0)
+        self.assertIsNone(json.loads(r.stdout)["up"])
+
+    def test_default_starter_failure_is_reported(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["brew", "services", "list"]:
+                return subprocess.CompletedProcess(argv, 0, "Name Status User File\npostgresql@16 none\n", "")
+            return subprocess.CompletedProcess(argv, 1, "", "boom")
+        with mock.patch.object(board.subprocess, "run", side_effect=fake_run) as run:
+            out = board.db_up(self.env("DATABASE_URL=postgresql://u@localhost/db"), wait=5,
+                              probe=lambda host, port: False, sleep=lambda s: None)
+        self.assertEqual(out["up"], False)
+        self.assertEqual(out["started"], True)
+        self.assertIn("brew services start postgresql@16", out["error"])
+        self.assertEqual(run.call_args_list[1].args[0], ["brew", "services", "start", "postgresql@16"])
+        # no brew and no compose file: reported, never raised
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.object(board.subprocess, "run", side_effect=FileNotFoundError("brew")):
+            out = board.db_up(self.env("DATABASE_URL=postgresql://u@localhost/db"), wait=5,
+                              probe=lambda host, port: False, sleep=lambda s: None)
+        self.assertEqual((out["up"], out["started"]), (False, True))
+        self.assertIn("no compose file", out["error"])
+
+    def test_compose_starter_waits_for_docker(self):
+        (self.dir / "docker-compose.yml").write_text("services: {}\n")
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(argv)
+            if argv[:3] == ["brew", "services", "list"]:
+                return subprocess.CompletedProcess(argv, 0, "Name Status\nredis none\n", "")
+            ok = argv != ["docker", "info"] or seen.count(["docker", "info"]) > 1
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, "", "")
+        with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(board.start_local_db(cwd=self.dir, sleep=lambda s: None))
+        self.assertEqual(seen[1:], [["docker", "info"], ["open", "-a", "Docker"], ["docker", "info"],
+                                    ["docker", "compose", "up", "-d"]])
