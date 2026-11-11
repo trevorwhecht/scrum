@@ -1023,7 +1023,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26325, "newjob.md")  # +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26720, "newjob.md")  # +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -2012,6 +2012,17 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`npx eslint --cache <changed .js/.jsx/.ts/.tsx/.mjs/.cjs files>`", step2)
         self.assertIn("`eslint.config.*` or `.eslintrc*`", step2)
         self.assertIn("`Lint: skipped, no lintable file in diff`", step2)
+
+    def test_check_gate_runs_db_up(self):
+        check = self.lane("newjob").split("## Check gate")[1]
+        step2 = check[check.index("2. **Runtime files**"):check.index("\n3. ")]
+        db = step2.index('board.py" db-up --env "$WT/.env"')
+        self.assertLess(step2.index("open -a Docker"), db)
+        self.assertLess(db, step2.index("then run each of Test / Typecheck / Lint / Build"))
+        self.assertIn("`.env.local` when `$WT/.env` is missing", step2)
+        self.assertIn("only `{\"up\": false}` stops", step2)
+        self.assertIn("Build check could not run: local database down", step2)
+        self.assertIn("board.py db-up --env <file>", (SKILL_DIR / "board.py").read_text())
 
     def test_check_gate_syncs_main_on_round_one(self):
         check = self.lane("newjob").split("## Check gate")[1]
