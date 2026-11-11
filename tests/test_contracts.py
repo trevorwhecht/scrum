@@ -684,6 +684,12 @@ class ContractTest(unittest.TestCase):
         review = self.section(text, "## Review (WAIT FOR ALL)", "## Approve")
         for phrase in ("head.txt", "B review-plan $ID", "--incremental", "SINCE=", "Re-review:", "REWORK", "Conflicts"):
             self.assertIn(phrase, review, phrase)
+        self.assertNotIn("the Merge **Conflicts** step, or in a resumed", review)
+        self.assertIn("a round started through the Merge **Conflicts** step may pass it", review)
+        self.assertIn("falls back to a full review when the merge's changed files", review)
+        merge_text = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        self.assertNotIn("fresh check and full review round", merge_text)
+        self.assertIn("a review round (incremental when Review step 2 allows it, otherwise full)", merge_text)
         self.assertIn("Carried forward from round", BOARD_PY.read_text())  # review-plan writes it
         line = next(l for l in text.splitlines() if "never edits code or review files" in l)
         self.assertIn("Carried forward", line)
