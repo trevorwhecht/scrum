@@ -2631,6 +2631,29 @@ class ServeTest(unittest.TestCase):
         self.edit_job(first, stage="done")
         self.assertNotIn("waitingOn", self.board_jobs()[second])
 
+    def test_board_json_waiting_on_overlap_hold(self):
+        # Job 764: cmd_ready's overlap_hold becomes the waiting card's "Waiting on" line.
+        b = self.serve.board
+        held, sib, gone, dep = (b.cmd_new(self.root, t) for t in ("Held kid", "Busy sibling", "Gone sibling", "Dep one"))
+        self.addCleanup(lambda: [self.edit_job(i, stage="aborted") for i in (held, sib, dep)])  # no later tick may claim them
+        self.edit_job(sib, stage="build")
+        self.edit_job(gone, stage="done")
+        self.edit_job(dep, stage="build")
+        self.edit_job(held, stage="waiting", overlap_hold={"ids": [gone, sib], "text": f"sibling {gone} shares a/SKILL.md; "
+                                                                                    f"sibling {sib} shares b/SKILL.md"})
+        self.assertEqual(self.board_jobs()[held]["waitingOn"],
+                         {"ids": [sib], "why": "shares SKILL.md", "titles": ["Busy sibling"]})
+        self.edit_job(held, overlap_hold={"ids": [sib], "text": "this job runs alone"})
+        self.assertEqual(self.board_jobs()[held]["waitingOn"],
+                         {"ids": [sib], "why": "runs alone", "titles": ["Busy sibling"]})
+        self.edit_job(held, depends_on=[dep])  # an unmet depends_on wins
+        self.assertEqual(self.board_jobs()[held]["waitingOn"],
+                         {"ids": [dep], "why": "not merged yet", "titles": ["Dep one"]})
+        self.edit_job(held, depends_on=[], overlap_hold={"ids": [gone], "text": f"sibling {gone} shares a/SKILL.md"})
+        self.assertNotIn("waitingOn", self.board_jobs()[held])  # every holder finished
+        self.edit_job(held, stage="build", overlap_hold={"ids": [sib], "text": "this job runs alone"})
+        self.assertNotIn("waitingOn", self.board_jobs()[held])  # not waiting
+
     def test_board_with_activity_fable_badge(self):
         b = self.serve.board
         big, plain, pts = (b.cmd_new(self.root, t) for t in ("Fable bigboy", "Fable plain", "Fable points"))

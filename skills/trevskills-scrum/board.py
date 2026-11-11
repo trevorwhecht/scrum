@@ -3991,7 +3991,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no.
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
     BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
-    all_merged, so its final review runs."""
+    all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text} (the card's
+    "Waiting on" line); a claim or a depends_on wait drops it."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -4046,6 +4047,7 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                 continue
             undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if undone:
+                k.pop("overlap_hold", None)
                 for dep in undone:
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
                 continue
@@ -4055,10 +4057,12 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                 overlap += out_hit[1]
             if hit or out_hit:
                 hit = hit or out_hit
+                k["overlap_hold"] = {"ids": list(hit[1]), "text": hit[0]}  # serve.py's waitingOn for the card
                 for g in ["runs_alone"] if hit[0] == "this job runs alone" else [f"overlap:{i}" for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
             k.update(stage="spec", updatedAt=now())
+            k.pop("overlap_hold", None)
             try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)
                 with (jobs_dir / k["id"] / "claimed-at.txt").open("x", encoding="utf-8") as f:
                     f.write(f"{int(time.time())}\n")

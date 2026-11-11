@@ -1023,6 +1023,31 @@ class BoardTest(unittest.TestCase):
         board.cmd_ready(self.root, parent)
         self.assertEqual(gates(d2), ["runs_alone"])
 
+    def test_ready_records_overlap_hold(self):
+        # Job 764: the card shows why a waiting child is held; a claim or a dep wait drops a stale hold.
+        parent, (c1, c2, c3) = self.three()
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/a.py")
+        with board.locked_board(self.root) as b:
+            next(j for j in b["jobs"] if j["id"] == c3)["overlap_hold"] = {"ids": ["999-old"], "text": "stale"}
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        board.cmd_set(self.root, c1, ["stage=build"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+        self.assertNotIn("overlap_hold", self.child(c1))
+        self.assertNotIn("overlap_hold", self.child(c3))  # held on depends_on: the stale hold is dropped
+        board.cmd_set(self.root, c1, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        self.assertEqual(self.child(c2)["stage"], "spec")
+        self.assertNotIn("overlap_hold", self.child(c2))
+        board.cmd_set(self.root, c2, ["stage=done"])
+        # A child with no spec and no plan paths runs alone.
+        parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(d1, "src/x.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
+        self.assertEqual(self.child(d2)["overlap_hold"], {"ids": [d1], "text": "this job runs alone"})
+
     def test_ready_waiting_children_use_plan_paths(self):
         # Job 673: a waiting child has no spec.md; its plan's Parallel: paths stand in as its Likely files.
         plan = lambda: self.plan(self.ticket(1, parallel="yes — touches only `src/app/(pages)/`"),

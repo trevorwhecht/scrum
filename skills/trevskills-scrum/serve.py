@@ -3212,7 +3212,8 @@ def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
     Resume POST's gate) also gets `resumeRefusal` (what a click would be refused with, or null) and `waitingOn`; so does a
-    waiting job with a dependency not yet done or aborted ("not merged yet"). A job not done or aborted whose
+    waiting job with a dependency not yet done or aborted ("not merged yet"), else one cmd_ready held on an overlap
+    (its `overlap_hold`, live holders only). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
     `nextRetryAt` (epoch seconds, or None). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
@@ -3242,6 +3243,10 @@ def board_with_activity(root, project):
         if job.get("stage") == "waiting" and (deps := [d for d in job.get("depends_on") or []
                                                        if stage.get(d) not in ("done", "aborted")]):
             job["waitingOn"] = {"ids": deps, "why": "not merged yet"}  # parked by board.py wait-on, or a sibling's wait
+        hold = job.get("overlap_hold") or {}
+        if job.get("stage") == "waiting" and not job.get("waitingOn") and (
+                ids := [i for i in hold.get("ids") or [] if stage.get(i) not in ("done", "aborted")]):
+            job["waitingOn"] = waiting_on(board.Blocker(hold.get("text") or "", ids))  # cmd_ready held it on an overlap
         if job.get("stage") == "check" and job.get("worktree") and build_lock_waiting(job["worktree"]):
             job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
