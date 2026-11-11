@@ -516,10 +516,11 @@ def refused(root, job_id, refusal):
     return 409, {"error": refusal}
 
 
-def answer_job(project, root, job, jobs, key, note=None):
+def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
     """Trevor picked option `key` of a needs-human job's closed question. Every check runs before board.cmd_answer
     records the pick; the command it returns runs through the same helpers as the matching button, on this job.
-    A non-blank note replaces a rework option's preset text; other options ignore it."""
+    A non-blank note replaces a rework option's preset text; other options ignore it.
+    raise_window: Trevor's own click brings the job's Terminal tab to the front; watchdog opens stay in the background."""
     opts = job.get("options") if job else None
     opt = next((o for o in opts or [] if isinstance(o, dict) and isinstance(key, str) and o.get("key") == key), None)
     if not job or job["stage"] != "needs-human" or running(project, job["id"]) or not opt:
@@ -546,7 +547,7 @@ def answer_job(project, root, job, jobs, key, note=None):
     verb, arg = parsed
     if verb == "lilguy":  # Trevor approves each .claude/ edit in the window; a failed launch leaves the question open
         return run_terminal([(osa_job_window(root.parent, job_id, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
-                                             f"/trevskills-scrum lilguy {job_id}"), "Opened in a Terminal window.")])
+                                             f"/trevskills-scrum lilguy {job_id}", raise_window=raise_window), "Opened in a Terminal window.")])
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
     if verb == "approve":
@@ -3274,9 +3275,9 @@ def osa_new_window(cwd, *words):
 JOB_WINDOW = Path(__file__).with_name("job-window.applescript")
 
 
-def osa_job_window(cwd, job_id, *words):
-    """Find the Terminal tab titled `scrum <job_id>` (never focused), or run the words in it or a new window (job-window.applescript)."""
-    return ["osascript", str(JOB_WINDOW), str(cwd), job_id, *words]
+def osa_job_window(cwd, job_id, *words, raise_window=False):
+    """Find the Terminal tab titled `scrum <job_id>` (raised and activated only when raise_window), or run the words in it or a new window (job-window.applescript)."""
+    return ["osascript", str(JOB_WINDOW), str(cwd), job_id, "raise" if raise_window else "keep", *words]
 
 
 def run_terminal(tries):
@@ -4738,7 +4739,7 @@ class Handler(BaseHTTPRequestHandler):
         jobs = json.loads((root / "board.json").read_text())["jobs"] if (root / "board.json").exists() else []
         job = next((j for j in jobs if j["id"] == job_id), None)
         if action == "answer":
-            return answer_job(project, root, job, jobs, body.get("key"), body.get("note"))
+            return answer_job(project, root, job, jobs, body.get("key"), body.get("note"), raise_window=True)
         if action == "resume":  # a paused job (Play), one stopped for a reason whose card offers Resume (RESUMABLE), or a queued one (Start now)
             if not job or running(project, job_id) or not resumable(job) and not limit_held(job) and not job.get("play_queued"):
                 return 409, {"error": "job isn't stalled, or is already running"}

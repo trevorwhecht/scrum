@@ -1573,11 +1573,15 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, out), (200, {"message": "Opened in a Terminal window."}))
         m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
         script = str(Path(self.serve.__file__).with_name("job-window.applescript"))
-        self.assertEqual(tries, [[(["osascript", script, str(self.root.resolve().parent), job_id, "env",
+        self.assertEqual(tries, [[(["osascript", script, str(self.root.resolve().parent), job_id, "raise", "env",
                                     "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum lilguy {job_id}"],
                                    "Opened in a Terminal window.")]])
         for name in ("spawn", "stop", "abort", "resume"):
             m[name].assert_not_called()
+
+    def test_osa_job_window_keeps_background_unless_raised(self):
+        self.assertEqual(self.serve.osa_job_window("/d", "7", "x")[3:5], ["7", "keep"])  # watchdog open
+        self.assertEqual(self.serve.osa_job_window("/d", "7", "x", raise_window=True)[3:5], ["7", "raise"])  # Trevor's click
 
     def test_run_terminal_refuses_under_unittest(self):
         with mock.patch.object(self.serve.subprocess, "run") as run, \
