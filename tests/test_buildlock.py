@@ -266,6 +266,35 @@ class BuildLockTest(unittest.TestCase):
         holder.kill()
         self.assertEqual(waiter.wait(timeout=10), 0)
 
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_prune_dead_waiters(self):
+        bl = load()
+        wd = bl.waiting_dir(self.lock)
+        wd.mkdir(parents=True)
+        dead, live, odd = wd / str(self.dead_pid()), wd / str(os.getpid()), wd / "notapid"
+        for m in (dead, live, odd):
+            m.write_text("x\n0")
+        bl.prune_dead_waiters(self.lock)
+        self.assertFalse(dead.exists())
+        self.assertTrue(live.exists())
+        self.assertTrue(odd.exists())
+        bl.prune_dead_waiters(self.dir / "missing.lock")  # no dir: no raise
+
+    def test_waiter_prunes_dead_marker(self):
+        self.hold()
+        wd = self.lock.with_name(self.lock.name + ".waiting")
+        wd.mkdir(parents=True, exist_ok=True)
+        dead = wd / str(self.dead_pid())
+        dead.write_text("x\n0")
+        r = self.run_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="1")
+        self.assertEqual(r.returncode, 124)
+        self.assertFalse(dead.exists())
+        self.assertEqual(list(wd.iterdir()), [])
+
     def test_no_marker_when_lock_free(self):
         self.assertEqual(self.run_wrap(sys.executable, "-c", "pass").returncode, 0)
         self.assertEqual(list(self.marker_dir().glob("*")) if self.marker_dir().exists() else [], [])

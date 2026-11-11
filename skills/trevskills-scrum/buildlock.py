@@ -56,6 +56,21 @@ def waiting_dir(lock: Path) -> Path:
     return lock.with_name(lock.name + ".waiting")
 
 
+def prune_dead_waiters(lock: Path) -> None:
+    """Unlink every waiting marker whose pid is dead (a SIGKILLed waiter never ran its `finally`). Never raises."""
+    try:
+        markers = list(waiting_dir(lock).iterdir())
+    except OSError:
+        return
+    for m in markers:
+        try:
+            os.kill(int(m.name), 0)
+        except ProcessLookupError:
+            m.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass  # alive but not ours, a non-pid name, or an unlink failure: leave it
+
+
 def timeout_s() -> float:
     try:
         value = float(os.environ.get("SCRUM_BUILD_LOCK_TIMEOUT", ""))
@@ -145,6 +160,7 @@ def main(argv: list[str]) -> int:
         except (Exception, SystemExit):
             rank = 0  # the rank only orders cool-down waiters; never fail the build over it
         try:
+            prune_dead_waiters(path)
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(f"{os.getcwd()}\n{rank}")
         except OSError:
