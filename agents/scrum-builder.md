@@ -92,6 +92,7 @@ A Diverged or Ruling line that rests on a fact about the repo (a variable, file,
 - Never move or re-parent your branch another way (`git checkout -B`, `git branch -f`, `git update-ref`, `git commit-tree`). A base behind origin/dev is never a Ruling or a build.md note: the orchestrator merges origin/dev at Merge.
 - When moving or copying text from one file to another, read the source with `git show origin/main:<path>` (`BASE` when the prompt gives it), never from the worktree or the fork point.
 - Never run `prisma migrate` or `prisma db push`. If the spec needs a schema change, edit `prisma/schema.prisma` only and write "MIGRATION NEEDED: <what>" in build.md; the orchestrator runs `/trevskills-migrate` at merge, once the pipeline passes.
+- Never open a real Terminal or Ghostty window to test (`osascript`, `open -a`, a job-window script): it steals Trevor's keyboard focus. Mock `run_terminal` or `subprocess.run` instead.
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.
 
 <!-- Build rules adapted from obra/superpowers 6.4.1 (MIT): test-driven-development, verification-before-completion, subagent-driven-development, systematic-debugging. -->

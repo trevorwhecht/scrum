@@ -3257,7 +3257,6 @@ NEW_WINDOW_SCRIPT = """on run argv
   end repeat
   tell application "Terminal"
     do script cmd
-    activate
   end tell
 end run"""  # argv: a directory, then the command's words; each is shell-quoted, so nothing in them runs as shell
 
@@ -3276,7 +3275,7 @@ JOB_WINDOW = Path(__file__).with_name("job-window.applescript")
 
 
 def osa_job_window(cwd, job_id, *words):
-    """Focus the Terminal tab titled `scrum <job_id>`, or run the words in it or a new window (job-window.applescript)."""
+    """Find the Terminal tab titled `scrum <job_id>` (never focused), or run the words in it or a new window (job-window.applescript)."""
     return ["osascript", str(JOB_WINDOW), str(cwd), job_id, *words]
 
 
