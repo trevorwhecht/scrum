@@ -2094,6 +2094,10 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), msg)
         with self.swap_log([(700, 50.0)]), self.machine("71", "1000"), env:
             self.assertIsNone(board.machine_ok(self.tmp.name), "old sample")
+        with self.swap_log([(500, 60.0), (400, 50.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "fell then rebounded: net down, not growth")
+        with self.swap_log([(500, 50.0), (400, 40.0)]), self.machine("71", "1000"), env:
+            self.assertEqual(board.machine_ok(self.tmp.name), msg, "net up over the window")
         with self.swap_log([(120, 56.0)]), self.machine("71", "1000"), env:
             self.assertIsNone(board.machine_ok(self.tmp.name), "under 1 point of growth")
         with self.swap_log([(120, 60.0)]), self.machine("71", "1000"), env:
@@ -2121,8 +2125,12 @@ class BoardTest(unittest.TestCase):
 
     @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
     def test_ram_room_is_one_while_swap_fills(self):
-        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
-            self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2: one claim per call")
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 1, "swap past MAX_SWAP_PCT/2, RAM low: one claim per call")
+        with self.swap_log([(120, 10.0)]), self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 1, "swap growing: one claim per call")
+        with self.swap_log([(120, 20.0)]), self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+            self.assertEqual(board.ram_room(), 9, "stale swap, healthy RAM: normal math")
         with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="10"):
             self.assertEqual(board.ram_room(), 9)
 
@@ -2142,7 +2150,7 @@ class BoardTest(unittest.TestCase):
         with self.machine("66", "1000"), self.sessions(14):
             self.assertEqual(board.ram_room(floor=0), 0, "at the ceiling")
         ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n")
-        with self.machine("66", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15"):
             with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
                 self.assertEqual(board.ram_room(floor=0), 0, "swapping: none while a session is young")
                 self.assertEqual(board.ram_room(), 1)
