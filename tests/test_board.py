@@ -68,6 +68,45 @@ class BoardTest(unittest.TestCase):
         p.write_text(text, encoding="utf-8")
         return p
 
+    # --- backlog priority op (job 763) ---
+    def backlog(self, text):
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text(text)
+
+    def test_priority_op_raises(self):
+        self.backlog("# Backlog\n\n- [ ] [3] Alpha {#aaaa} {p:2} {by:t} <!-- why -->\n- [ ] Beta {#bbbb}\nnote line\n")
+        items = board.backlog_op(self.root, "priority", id="aaaa", priority=4)
+        self.assertEqual((self.root / "backlog.md").read_text(),
+                         "# Backlog\n\n- [ ] [3] Alpha {#aaaa} {p:4} {by:t} <!-- why -->\n- [ ] Beta {#bbbb}\nnote line\n")
+        self.assertEqual([(i["id"], i["priority"]) for i in items], [("aaaa", 4), ("bbbb", None)])
+
+    def test_priority_op_never_lowers(self):
+        start = "# Backlog\n- [ ] Alpha {#aaaa} {p:4}\n- [ ] Beta {#bbbb}\n"
+        self.backlog(start)
+        for item_id, n in (("aaaa", 4), ("aaaa", 1), ("bbbb", 2), ("bbbb", 1)):
+            items = board.backlog_op(self.root, "priority", id=item_id, priority=n)
+            self.assertEqual((self.root / "backlog.md").read_text(), start)
+            self.assertEqual([(i["id"], i["priority"]) for i in items], [("aaaa", 4), ("bbbb", None)])
+        board.backlog_op(self.root, "priority", id="bbbb", priority=3)
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Alpha {#aaaa} {p:4}\n- [ ] Beta {#bbbb} {p:3}\n")
+
+    def test_priority_op_rejects(self):
+        start = "# Backlog\n- [x] Done {#dddd} → 001-done\n- [ ] Open {#oooo}\n- [ ] Old line\n"
+        self.backlog(start)
+        for item_id, n in (("zzzz", 4), ("dddd", 4), (None, 4), ("oooo", True), ("oooo", 0), ("oooo", 6),
+                           ("oooo", None), ("oooo", "4"), ("oooo", 4.0)):
+            with self.subTest(id=item_id, priority=n), self.assertRaises(SystemExit):
+                board.backlog_op(self.root, "priority", id=item_id, priority=n)
+            self.assertEqual((self.root / "backlog.md").read_text(), start)
+
+    def test_priority_op_finds_by_id_after_reorder(self):
+        self.backlog("# Backlog\n- [ ] Alpha {#aaaa}\n- [ ] Beta {#bbbb}\n")
+        board.backlog_op(self.root, "priority", id="bbbb", priority=3)
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Beta {#bbbb} {p:3}\n- [ ] Alpha {#aaaa}\n")
+        items = board.backlog_op(self.root, "priority", id="aaaa", priority=5)
+        self.assertEqual((self.root / "backlog.md").read_text(), "# Backlog\n- [ ] Beta {#bbbb} {p:3}\n- [ ] Alpha {#aaaa} {p:5}\n")
+        self.assertEqual([(i["id"], i["priority"]) for i in items], [("bbbb", 3), ("aaaa", 5)])
+
     # --- new ---
     def test_new_creates_job_folder_and_entry(self):
         job_id = board.cmd_new(self.root, "Add Rate Limiting!")

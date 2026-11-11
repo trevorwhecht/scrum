@@ -505,12 +505,14 @@ def check_points(points):
 
 
 def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None, to=None, priority=None, top=False,
-               by=None, critical=False, unless_open=None):
-    """add / edit / delete / move / setup-done one backlog item under the board lock. Returns the new item list.
+               by=None, critical=False, unless_open=None, id=None):
+    """add / edit / delete / move / setup-done / priority one backlog item under the board lock. Returns the new item list.
     add with unless_open writes nothing and returns None when an open item's text contains it.
     add's setup ("step; step") parks the new item behind a Human setup checklist; setup-done removes that marker.
     add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins).
-    add's by ("t", "back" or None = agent; top implies "t") and critical set the priority through source_priority."""
+    add's by ("t", "back" or None = agent; top implies "t") and critical set the priority through source_priority.
+    priority finds the open item by its {#id} on the freshly read file and only raises: it writes {p:priority} when that is
+    above the current priority (unmarked counts as 2.5, as priority_key does), else changes nothing."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -566,6 +568,19 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             line = lines[item["line"]]
             m = ITEM_RE.match(line)  # cut just the marker, so the rest of the line stays byte for byte
             lines[item["line"]] = line[:m.start(7) - len(" {setup: ")] + line[m.end(7) + 1:]
+        elif op == "priority":
+            if priority is None:
+                raise SystemExit("priority must be 1-5")
+            check_priority(priority)
+            item = next((i for i in items if isinstance(id, str) and i["id"] == id and not i["done"]), None)
+            if item is None:
+                raise SystemExit(f"no open backlog item with id {id!r}")
+            if -priority >= priority_key(item):
+                return backlog_items(root)
+            line = lines[item["line"]]
+            m = ITEM_RE.match(line)  # splice just the marker, so the rest of the line stays byte for byte
+            start, end = m.span(5) if m.group(5) else (m.end(4) + 1, m.end(4) + 1)  # after the "}" of {#id}
+            lines[item["line"]] = line[:start] + (str(priority) if m.group(5) else f" {{p:{priority}}}") + line[end:]
         else:
             raise SystemExit(f"unknown backlog op {op!r}")
         write_backlog(root, lines)
