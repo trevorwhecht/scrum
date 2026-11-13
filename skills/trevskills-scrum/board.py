@@ -6100,7 +6100,8 @@ def prod_bullet(bullet: str):
 
 def prod_records(path: Path):
     """[(script, args, passed)] for each `- run: <bullet> exit <code>` record in prod.md; a record passes when its
-    code is 0 and no output line (up to the next `- run:` line or `## ` heading) has the word error."""
+    code is 0 and no output line (up to the next `- run:` line or `## ` heading) has the word error, or the record holds
+    Merge's `    error found in output (Jev: handled): ` marker and no plain `    error found in output: ` marker."""
     try:
         lines = path.read_text().splitlines()
     except (OSError, UnicodeDecodeError):  # no prod.md: no records
@@ -6114,13 +6115,15 @@ def prod_records(path: Path):
             except SystemExit:
                 cur = None
                 continue
-            cur = [script, args, m[2] == "0"]
+            cur = [script, args, m[2] == "0", False, False, False]  # + error word, handled marker, plain marker
             out.append(cur)
         elif line.startswith("## "):
             cur = None
-        elif cur is not None and re.search(r"(?i)\berror\b", line):
-            cur[2] = False
-    return out
+        elif cur is not None:
+            cur[3] |= bool(re.search(r"(?i)\berror\b", line))
+            cur[4] |= line.startswith("    error found in output (Jev: handled): ")
+            cur[5] |= line.startswith("    error found in output: ")
+    return [(s, a, ok and (not err or (handled and not plain))) for s, a, ok, err, handled, plain in out]
 
 
 def cmd_prod_ok(root: Path, job_id: str, bullet: str) -> str:

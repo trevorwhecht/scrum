@@ -9092,6 +9092,34 @@ class ProdOkTest(unittest.TestCase):
                    "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n")
         self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
 
+    def test_jev_handled_record_passes(self):
+        imessage = "iMessage skipped: Contacts read failed: execution error: ... Application isn't running"
+        cloudinary = "error: { message: 'Request Timeout', http_code: 499 }"
+        self.write(f"- run: npm run backfill:x exit 0\n    {imessage}\n    Dry run: 0 files\n"
+                   f"    error found in output (Jev: handled): {imessage}\n",
+                   f"- run: npm run backfill:x -- --apply exit 0\n    {cloudinary}\n    mirrored 1,074 photos\n"
+                   f"    error found in output (Jev: handled): {cloudinary}\n")
+        self.assertEqual(self.ok("npm run backfill:x:prod"), "ok")
+
+    def test_plain_error_marker_still_fails(self):
+        dry = "- run: npm run backfill:x exit 0\n    Error: boom\n    error found in output (Jev: handled): Error: boom\n"
+        apply = "- run: npm run backfill:x -- --apply exit 0\n    Error: boom\n    error found in output: Error: boom\n"
+        self.write(dry, apply)
+        self.assertIn("no passing dev run of 'npm run backfill:x -- --apply' in prod.md",
+                      self.refused("npm run backfill:x:prod"))
+        self.write(dry.replace(" (Jev: handled)", ""), apply.replace("output: ", "output (Jev: handled): "))
+        self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
+        self.write("- run: npm run backfill:x exit 0\n    Error: boom\n", apply.replace("output: ", "output (Jev: handled): "))
+        self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
+        self.write("- run: npm run backfill:x exit 0\n    Error: boom\n    error found in output (Jev: handled): Error: boom\n"
+                   "    error found in output: Error: boom\n", apply.replace("output: ", "output (Jev: handled): "))
+        self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
+
+    def test_handled_marker_with_nonzero_exit_fails(self):
+        self.write("- run: npm run backfill:x exit 1\n    Error: boom\n    error found in output (Jev: handled): Error: boom\n",
+                   "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n")
+        self.assertIn("no passing dev run of 'npm run backfill:x' in prod.md", self.refused("npm run backfill:x:prod"))
+
     def test_prod_needs_dev_dry_and_apply(self):
         dry = "- run: npm run backfill:x exit 0\n    would update 3 rows\n"
         apply = "- run: npm run backfill:x -- --apply exit 0\n    updated 3 rows\n"

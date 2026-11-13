@@ -16,6 +16,8 @@ UI_Q = "This diff needs a UI review"
 APPROVER_Q = "This diff changes payment, pricing, billing, authentication, session, role or permission logic"
 DUPE_Q = "Item {i} is the same task as the query"
 CRITICAL_Q = "This ticket reports data loss, wrong money or pricing, broken production, or a security hole"
+PROD_ERROR_Q = ("Does this output show the run failed, crashed, or lost or corrupted data, rather than a problem the script "
+                "reported and worked around (skipped, kept, retried)?")
 BACKLOG = ("# Backlog\n\n- [ ] [3] Add dark mode {#ab12} → 012-dark <!-- big -->\n- [x] Done thing\n"
            "- [ ] Fix login bug\n")
 
@@ -106,9 +108,9 @@ class JevGateTest(unittest.TestCase):
         (self.root / "backlog.md").write_text(BACKLOG)
         bad = {"model": {"q": {"score": 7}}, "spec-model": {"q": {"score": 7}}, "dupe": {"q0": {"noul": "high"}, "q1": {"noul": 0.1}},
                "approver": {"q": {"noul": "high"}}, "reviewer-security": {"q": {"noul": 1.5}},
-               "reviewer-ui": {"q": {"noul": "high"}}}
+               "reviewer-ui": {"q": {"noul": "high"}}, "prod-error": {"q": {"noul": "high"}}}
         fallback = {"model": "opus", "spec-model": "opus", "dupe": "add", "approver": "opus", "reviewer-security": "skip",
-                    "reviewer-ui": "skip"}
+                    "reviewer-ui": "skip", "prod-error": "real"}
         for step, want in fallback.items():
             kinds = {"nokey": (None, "JevError"), "timeout": (TimeoutError("timed out"), "TimeoutError"),
                      "other": (RuntimeError("boom"), "RuntimeError"),
@@ -323,6 +325,7 @@ class JevGateTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("rank", err.split("<")[1])
         self.assertIn("critical", err.split("<")[1].split(">")[0].split("|"))
+        self.assertIn("prod-error", err.split("<")[1].split(">")[0].split("|"))
 
     # --- critical ---
     def test_critical_step(self):
@@ -343,6 +346,34 @@ class JevGateTest(unittest.TestCase):
             with self.subTest(ask=ask):
                 out, f = self.gate("critical", "Critical: prod is down", ask)
                 self.assertEqual((out, f[2], f[4]), ("normal", CRITICAL_Q, "normal"))
+
+    # --- prod-error ---
+    def test_prod_error_step(self):
+        for v, want in ((0.3, "real"), (0.29, "handled")):
+            with self.subTest(v=v):
+                self.sent.clear()
+                out, f = self.gate("prod-error", "Error: boom\nrow 1\n", noul_ask(v))
+                self.assertEqual((out, f[1], f[2], f[4]), (want, "prod-error", PROD_ERROR_Q, want))
+                self.assertEqual(len(self.sent), 1)
+                self.assertEqual(self.sent[0][0], "Error: boom\nrow 1")
+
+    def test_prod_error_empty_stdin_no_call(self):
+        for stdin in ("", " \n\t"):
+            with self.subTest(stdin=stdin):
+                out, f = self.gate("prod-error", stdin)  # ask=None: a Jev call fails the test
+                self.assertEqual((out, f[1], f[2], f[4]), ("real", "prod-error", "-", "real"))
+
+    def test_prod_error_reported_outputs_handled(self):
+        imessage = "iMessage skipped: Contacts read failed: execution error: ... Application isn't running"
+        cloudinary = "error: { message: 'Request Timeout', http_code: 499 }"
+        for line, tail in ((imessage, "Sent 3 emails\nDry run: 0 files would change\n"),
+                           (cloudinary, "Mirrored 1,074 photos to Cloudinary\nDone.\n")):
+            with self.subTest(line=line):
+                self.sent.clear()
+                out, f = self.gate("prod-error", f"{line}\n{tail}", noul_ask(0.0))
+                self.assertEqual((out, f[4]), ("handled", "handled"))
+                self.assertEqual(len(self.sent), 1)
+                self.assertIn(line, self.sent[0][0])
 
 if __name__ == "__main__":
     unittest.main()
