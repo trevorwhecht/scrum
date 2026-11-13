@@ -7175,6 +7175,38 @@ class AutoResumeTest(unittest.TestCase):
                 dict(held, id="w", account="main", stage="waiting")]
         self.assertEqual(self.held_sweep(jobs), [])
 
+    def test_limit_held_early_failover_drops_limit_reset_at(self):
+        self.two_accounts()
+        reset = int(time.time()) + 3600
+        self.serve.board.note_limit("main", reset)
+        job = {"id": "124-h", "stage": "build", "limitResetAt": reset, "account": "main", "runlog": "runs/h.log"}
+        self.assertEqual(self.held_sweep([job]), [("124-h", str(self.owa))])
+        self.assertNotIn("limitResetAt", json.loads((self.root / "board.json").read_text())["jobs"][0])
+
+    def test_limit_re_ignores_prose_and_reads_the_cli_line_before_a_hook_line(self):
+        log, job = self.root / "runs" / "prose.log", {"runlog": "runs/prose.log"}
+        log.write_text("**Action Needed** held by a usage limit until Sat, so I did not resume it; rate limits apply\n")
+        self.assertEqual(self.serve.limit_reset(self.root, job), (False, None, False))
+        log.write_text("You've hit your weekly limit \u00b7 resets Nov 14 at 5pm\nSessionEnd hook failed\n")
+        self.assertTrue(self.serve.limit_reset(self.root, job)[0])
+
+    def test_prose_exit_on_main_marks_no_owa_marker(self):
+        s = self.serve
+        self.two_accounts()
+        (self.root / "runs" / "p.log").write_text("job is held by a usage limit; rate limits reset later\n")
+        job = {"id": "9-p", "stage": "build", "account": "main", "runlog": "runs/p.log"}
+        self.assertEqual(s.limit_reset(self.root, job)[0], False)
+        self.assertFalse((self.owa / "limit_until").exists())
+
+    def test_terminal_env_adds_config_dir_only_for_a_non_first_account(self):
+        s = self.serve
+        self.two_accounts()
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1"))  # main free
+        s.board.note_limit("main", int(time.time()) + 3600)
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1", f"CLAUDE_CONFIG_DIR={self.owa}"))
+        s.board.note_limit("owa", int(time.time()) + 3600)
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1"))  # no account
+
     def test_hold_limited_caps_a_clock_time_reset_at_5h(self):
         s, now = self.serve, 1_800_000_000
         self.jobs = [{"id": "c", "stage": "build"}, {"id": "f", "stage": "build"}]

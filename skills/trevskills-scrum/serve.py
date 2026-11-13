@@ -580,11 +580,22 @@ def stall_spent(key, stage):
     return sum(f"{key}/{stage}{n}" in STALL_RESUMED for n in ("", "#2")) >= STALL_RESUMES.get(stage, 1)
 def stall_mark(key, stage):
     STALL_RESUMED.add(f"{key}/{stage}" if f"{key}/{stage}" not in STALL_RESUMED else f"{key}/{stage}#2")
-LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
+# Only the CLI's own limit lines, at a line start: a session's closing prose ("held by a usage limit") must not read as a limit exit.
+LIMIT_RE = re.compile(r"^\s*(?:You've )?hit your (?:\w+ )?limit|^\s*Claude AI usage limit reached|usage_limit_reached|^\s*rate_limit: rejected",
+                      re.I | re.M)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
 NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
 RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
+
+
+def terminal_env():
+    """The `env` words for a Terminal launch: notifier off, plus CLAUDE_CONFIG_DIR when board.pick_account names a
+    non-first account (picked once per launch, as board.spawn does)."""
+    name = board.pick_account(time.time())[0]
+    acc = next((a for a in board.accounts() if a.name == name), None)
+    first = board.accounts()[0]
+    return ("env", "CLAUDE_NOTIFIER_DISABLE=1") + ((f"CLAUDE_CONFIG_DIR={acc.dir}",) if acc and acc != first else ())
 
 
 def run_log_tail(root, job):
@@ -1021,6 +1032,11 @@ def resume_held(project, root, job, jobs, now):
         return False
     if resume_refusal(project, root, job) or not take_room():
         return True  # a sibling or the tick's budget holds its slot: no try spent
+    if now < job["limitResetAt"] + 120:  # failing over early: the resumed session must not see a future hold and decline
+        with board.locked_board(root) as b:
+            for j in b["jobs"]:
+                if j["id"] == job["id"]:
+                    j.pop("limitResetAt", None)
     if resume_job(project, root, job, jobs):  # a queued launch spends no try
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
     return True
@@ -4809,7 +4825,7 @@ class Handler(BaseHTTPRequestHandler):
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
-                code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
+                code, obj = run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE,
                                                           f"/trevskills-scrum start {out['id']} askme {askme}"),
                                            "Askme opened in a new Terminal window.")])
                 return code, {"id": out["id"], **obj} if code == 200 else obj
@@ -4820,7 +4836,7 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "backlog is empty"}
             # ponytail: Terminal.app only, like discuss and askme. With askme the session asks for every child before any starts.
             cmd = "/trevskills-scrum run-all" + (f" askme {askme}" if askme else "")
-            return run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, cmd),
+            return run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE, cmd),
                                   "Run all opened in a new Terminal window.")])
         if rest == "/digest":
             return digest_now(project, root)
@@ -4896,7 +4912,7 @@ class Handler(BaseHTTPRequestHandler):
             prompt = f"/trevskills-scrum discuss {job_id}" + (f" {json.dumps(note)}" if note else "")
             # ponytail: Terminal.app only; add iTerm/Ghostty if a discuss ever needs to open there
             clicked = time.time()
-            code, obj = run_terminal([(osa_new_window(root.parent, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE, prompt),
+            code, obj = run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE, prompt),
                                        "Discussion opened in a new Terminal window.")])
             if code == 200:
                 with RUNS_LOCK:

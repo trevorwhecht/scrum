@@ -384,6 +384,35 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.pick_account(NOW)[0], "owa")
 
 
+class LimitBoundsTest(AccountEnv):
+    def test_note_limit_bounds_reset_to_8_days(self):
+        now = 1_800_000_000
+        with mock.patch.object(board.time, "time", return_value=now):
+            board.note_limit("owa", now + 8 * 86400 + 1)
+            self.assertFalse((self.owa / "limit_until").exists())
+            board.note_limit("owa", now + 8 * 86400 - 1)
+            self.assertEqual((self.owa / "limit_until").read_text().strip(), str(now + 8 * 86400 - 1))
+
+    def test_pick_account_switches_back_to_main(self):
+        self.assertEqual(board.pick_account(NOW)[0], "main")  # both free
+        board.note_limit("main", NOW + 60)
+        with mock.patch.object(board.time, "time", return_value=NOW):
+            board.note_limit("main", NOW + 60)
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.assertEqual(board.pick_account(NOW + 61)[0], "main")
+
+    def test_unittest_refuses_real_account_dirs(self):
+        home = Path(self.tmp.name) / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude-owa").mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("SCRUM_ACCOUNTS", "SCRUM_USAGE")}
+        with mock.patch.dict(os.environ, {**env, "HOME": str(home)}, clear=True):
+            board.note_limit("main", time.time() + 60)
+            board.note_limit("owa", time.time() + 60)
+            self.assertIsNone(board.limited_until("owa", 0))
+        self.assertEqual([p.name for p in home.rglob("limit_until")], [])
+
+
 class LimitMarkerTest(AccountEnv):
     def test_limit_marker(self):
         self.assertEqual(board.limit_path("owa"), self.owa / "limit_until")
