@@ -39,13 +39,23 @@ if [ -e "$jev_rank" ] && [ ! -L "$jev_rank" ]; then
 else
   link "$here/skills/trevskills-scrum/jev-rank.py" "$jev_rank"
 fi
-# Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set, and its
+# The git-guard hook is a Go binary (job 812). No go, or a failed build: say so and carry on; the hook's `|| true`
+# makes a missing binary a silent pass.
+if command -v go >/dev/null 2>&1; then
+  (cd "$here/skills/trevskills-scrum/gitguard" && go build -o "$here/skills/trevskills-scrum/gitguard/gitguard") \
+    || echo "warning: go build failed; git-guard binary not built" >&2
+else
+  echo "go not found; git-guard binary not built (install Go and re-run ./install.sh)"
+fi
+# Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set, and the
 # git-guard PreToolUse hook (refuses a chat's git commit on main in a scrum repo), only when no git-guard hook exists.
+# An old `board.py git-guard` hook entry is rewritten in place to the Go binary.
 python3 - "$dest" <<'PY'
 import json, os, shlex, sys
 dest = sys.argv[1]
 path = os.path.join(dest, "settings.json")
 board = "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/board.py")
+guard = shlex.quote(f"{dest}/skills/trevskills-scrum/gitguard/gitguard") + " || true"
 try:
     with open(path) as f:
         settings = json.load(f)
@@ -66,9 +76,16 @@ if settings is not None:
     pre = hooks.setdefault("PreToolUse", []) if isinstance(hooks, dict) else None
     if not isinstance(pre, list):
         print(f"warning: {path} hooks.PreToolUse is not a list; git-guard hook not set, add it by hand", file=sys.stderr)
-    elif "git-guard" not in json.dumps(pre):
-        pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": f"{board} git-guard", "timeout": 5}]})
-        changed.append("git-guard PreToolUse hook")
+    else:
+        for entry in pre:
+            for hook in (entry.get("hooks") if isinstance(entry, dict) else None) or []:
+                cmd = hook.get("command") if isinstance(hook, dict) else None
+                if isinstance(cmd, str) and "board.py" in cmd and "git-guard" in cmd:
+                    hook["command"] = guard
+                    changed.append("Go git-guard hook (was board.py git-guard)")
+        if "git-guard" not in json.dumps(pre) and "gitguard" not in json.dumps(pre):
+            pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": guard, "timeout": 5}]})
+            changed.append("git-guard PreToolUse hook")
 if changed:
     with open(path + ".tmp", "w") as f:
         json.dump(settings, f, indent=2)
