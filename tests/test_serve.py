@@ -3425,8 +3425,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(len(argvs), 3)
         for argv in argvs:
             self.assertEqual(argv[:2], ["osascript", "-e"])
-            self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE])
-            self.assertEqual(len(argv), 8)
+            self.assertEqual(argv[4:9], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE])
+            self.assertEqual(len(argv), 10)
 
     def activity_of(self, job_id):
         code, data = self.req("GET", "/p/repo/board.json")
