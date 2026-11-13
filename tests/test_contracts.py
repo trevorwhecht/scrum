@@ -416,7 +416,9 @@ class ContractTest(unittest.TestCase):
                        "https://", "whether or not a Deploy URL is set", "nothing pending",
                        "prod dry run still reports pending work", "prod run changes the schema", "db:push",
                        "migrate", "prisma migrate", "prisma db push",
-                       "B prod-ok $ID", "prod run refused", "not just those 20 lines, for the whole word `error` (case-insensitive,", "error found in output: <first matching line", "output has an error line", "- run: <bullet> exit <code>"):
+                       "B prod-ok $ID", "prod run refused", "not just those 20 lines, for the whole word `error` (case-insensitive,", "error found in output: <first matching line", "output has an error line", "- run: <bullet> exit <code>",
+                       "jev-gate.py prod-error $F/jobs/$ID", "error found in output (Jev: handled): <first matching line",
+                       "without asking Jev"):
             self.assertIn(phrase, step, phrase)
         self.assertNotIn("Without a Deploy URL, the check is the last", step)
         self.assertLess(text.index("**Restart.**"), text.index("**Prod check**"))

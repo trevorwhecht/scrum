@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Jev decision for the pipeline. Never fails the caller: any error prints the step's fallback.
 
-usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical)
+usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical prod-error)
 stdout is one line, the decision. Every run appends to <job-dir>/jev.log:
 timestamp, step, question, raw answer, decision, elapsed seconds (tab-separated).
 """
@@ -25,6 +25,8 @@ STEPS = {
     "rank": ("How important is this ticket to the project", None, "none"),  # prints p<1-5> <kind>
     "critical": ("This ticket reports data loss, wrong money or pricing, broken production, or a security hole", 0.7,
                  "normal"),  # prints critical or normal
+    "prod-error": ("Does this output show the run failed, crashed, or lost or corrupted data, rather than a problem the "
+                   "script reported and worked around (skipped, kept, retried)?", 0.3, "real"),  # prints real or handled
 }
 LEVELS = ["trivial edit", "small contained change", "multi-file change with new logic", "cross-cutting or risky change"]
 IMPORTANCE = ["Trivial (cosmetic or pedantic, nobody would notice if never done)",
@@ -98,6 +100,12 @@ def decide(step, job, asked):
         return rank_ticket(stdin, job.parent.parent, asked)
     if step == "critical":
         return critical_ticket(stdin, asked)
+    if step == "prod-error":
+        if not stdin:
+            return "-", "-", "real"
+        asked.append(q)
+        v, raw = jev.noul(stdin, q)
+        return q, raw, "real" if v >= cut else "handled"
     if step == "promote":
         return "-", stdin or "-", "opus"
     if step == "dupe":
