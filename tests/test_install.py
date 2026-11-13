@@ -158,7 +158,7 @@ class InstallTest(unittest.TestCase):
             want = {"type": "command", "command": f"python3 {home}/skills/trevskills-scrum/board.py statusline",
                     "refreshInterval": 60}
             guard = {"matcher": "Bash", "hooks": [{"type": "command", "timeout": 5,
-                                                   "command": f"python3 {home}/skills/trevskills-scrum/board.py git-guard"}]}
+                                                   "command": f"{home}/skills/trevskills-scrum/gitguard/gitguard || true"}]}
             # no settings.json: created holding only statusLine and the git-guard hook; a second run changes nothing
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
@@ -195,10 +195,54 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(list(got), ["model", "statusLine", "hooks", "z"])
             self.assertEqual(list(got["hooks"]), ["Stop", "PreToolUse"])
             self.assertEqual(got["hooks"]["Stop"], [{"x": 1}])
-            board = f"{t}/my home/.claude/skills/trevskills-scrum/board.py"
+            binary = f"{t}/my home/.claude/skills/trevskills-scrum/gitguard/gitguard"
             self.assertEqual(got["hooks"]["PreToolUse"], [inline, {"matcher": "Bash", "hooks": [
-                {"type": "command", "command": "python3 '" + board + "' git-guard", "timeout": 5}]}])
-            self.assertEqual(shlex.split(got["hooks"]["PreToolUse"][1]["hooks"][0]["command"]), ["python3", board, "git-guard"])
+                {"type": "command", "command": "'" + binary + "' || true", "timeout": 5}]}])
+            self.assertEqual(shlex.split(got["hooks"]["PreToolUse"][1]["hooks"][0]["command"]), [binary, "||", "true"])
+
+    def test_install_migrates_python_git_guard_hook(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "my home" / ".claude"
+            home.mkdir(parents=True)
+            settings = home / "settings.json"
+            old = {"type": "command", "command": f"python3 '{home}/skills/trevskills-scrum/board.py' git-guard", "timeout": 5}
+            mine = {"matcher": "Bash", "hooks": [{"type": "command", "command": "my git-guard"}]}
+            settings.write_text(json.dumps({"z": 1, "statusLine": {"command": "mine"}, "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [old]}, mine]}}))
+            want = {"z": 1, "statusLine": {"command": "mine"}, "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "timeout": 5,
+                                               "command": f"'{home}/skills/trevskills-scrum/gitguard/gitguard' || true"}]},
+                mine]}}
+            texts = []
+            for _ in range(2):
+                result = self.run_install(home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                got = json.loads(settings.read_text())
+                self.assertEqual(got, want)
+                self.assertEqual(list(got), ["z", "statusLine", "hooks"])
+                self.assertEqual(list(got["hooks"]["PreToolUse"][0]["hooks"][0]), ["type", "command", "timeout"])
+                texts.append(settings.read_text())
+            self.assertEqual(texts[0], texts[1])
+
+    def test_install_without_go_keeps_hook_harmless(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "home"
+            home.mkdir()
+            bin_dir = Path(t) / "bin"  # every tool install.sh runs, and no go
+            bin_dir.mkdir()
+            for tool in ("bash", "git", "python3", "ln", "mkdir", "dirname", "basename"):
+                (bin_dir / tool).symlink_to(shutil.which(tool))
+            result = subprocess.run(["bash", str(ROOT / "install.sh")], capture_output=True, text=True,
+                                    env={**os.environ, "PATH": str(bin_dir), "CLAUDE_HOME": str(home),
+                                         "CODEX_HOME": str(home / "codex")})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            notices = [l for l in (result.stdout + result.stderr).splitlines() if "go" in l.split() and "not built" in l]
+            self.assertEqual(len(notices), 1, result.stdout + result.stderr)
+            command = json.loads((home / "settings.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            missing = command.replace(str(home), str(Path(t) / "nowhere"))  # the binary may exist from another run
+            for cmd in (command, missing):
+                run = subprocess.run(["sh", "-c", cmd], input="{}", capture_output=True, text=True)
+                self.assertEqual((run.returncode, run.stdout), (0, ""), cmd)
 
     def test_install_quotes_status_line_path_with_spaces(self):
         with tempfile.TemporaryDirectory() as t:
