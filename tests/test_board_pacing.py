@@ -121,6 +121,26 @@ class StatuslineTest(unittest.TestCase):
         self.assertEqual(self.merge(lo, hi)["rate_limits"], hi)
         self.assertEqual(self.merge(hi, lo)["rate_limits"], hi)
 
+    def test_statusline_writes_the_config_dir_usage_file(self):
+        """An OWA session (CLAUDE_CONFIG_DIR set, no SCRUM_USAGE) writes its own usage.json, never main's."""
+        owa, main = Path(self.tmp.name) / "owa", Path(self.tmp.name) / "main"
+        owa.mkdir()
+        main.mkdir()
+        accounts = json.dumps([["main", str(main), None], ["owa", str(owa), [80, 90]]])
+        env = {k: v for k, v in os.environ.items() if k != "SCRUM_USAGE"}
+        with mock.patch.dict(os.environ, {**env, "CLAUDE_CONFIG_DIR": str(owa), "SCRUM_ACCOUNTS": accounts}, clear=True):
+            board.cmd_statusline(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 33, "resets_at": 9}}}))
+        self.assertEqual(json.loads((owa / "usage.json").read_text())["rate_limits"]["five_hour"]["used_percentage"], 33)
+        self.assertFalse((main / "usage.json").exists())
+
+    def test_scrum_usage_wins_over_config_dir(self):
+        owa = Path(self.tmp.name) / "owa"
+        owa.mkdir()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(owa)}):
+            board.cmd_statusline(json.dumps({"rate_limits": {"five_hour": {"used_percentage": 44, "resets_at": 9}}}))
+        self.assertEqual(json.loads(self.path.read_text())["rate_limits"]["five_hour"]["used_percentage"], 44)
+        self.assertFalse((owa / "usage.json").exists())
+
     def test_statusline_merge_bad_or_missing_old_file(self):
         new = {"five_hour": {"used_percentage": 5, "resets_at": 1}}
         for old in (None, "not json", "[1]", '{"rate_limits": 3}'):
@@ -235,6 +255,33 @@ class ReadyPacingTest(unittest.TestCase):
     def test_ready_held_kids_yield_still_respects_zero_cap(self):
         self.assertFalse(self.claimed("AC", 99))  # allowance 0: nothing is claimed
 
+    def two_accounts(self, main_pct, owa_pct):
+        """SCRUM_ACCOUNTS main (SCRUM_USAGE) + owa, each with a fresh five_hour reading at that used %."""
+        owa = Path(self.tmp.name) / "owa"
+        owa.mkdir(exist_ok=True)
+        now = int(time.time())
+        self.usage.write_text(json.dumps(usage(five=(main_pct, 9000), written_at=now)))
+        (owa / "usage.json").write_text(json.dumps(usage(five=(owa_pct, 9000), written_at=now)))
+        env = mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps([["main", "/unused", None], ["owa", str(owa), [80, 90]]]))
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_ready_claims_when_only_main_is_full(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.two_accounts(99, 10)
+        parent, kids = self.runall(1)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], kids)
+
+    def test_ready_holds_when_every_account_is_full(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.two_accounts(99, 85)
+        parent, kids = self.runall(1)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        job = self.jobs()[parent]
+        self.assertEqual(job["stage"], "running")
+        self.assertTrue(job["reason"].startswith("waiting: no account has room: main usage 5h 99% used"), job["reason"])
+        self.assertIn("; owa reserve 5h 85% used", job["reason"])
+
     def test_ready_only_held_kids_left_keeps_parent_running(self):
         parent, b = self.held_board("AC", 96)  # allowance 1 < 2 held, and no waiting sibling to claim
         path = self.root / "board.json"
@@ -244,6 +291,162 @@ class ReadyPacingTest(unittest.TestCase):
         out = board.cmd_ready(self.root, parent)
         self.assertEqual((out["ready"], out["in_progress"]), ([], 2))
         self.assertEqual(self.jobs()[parent]["stage"], "running")
+
+class AccountEnv(unittest.TestCase):
+    """A main and an owa config dir under a temp folder, listed through SCRUM_ACCOUNTS; SCRUM_USAGE unset."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.main, self.owa = base / "main", base / "owa"
+        self.main.mkdir()
+        self.owa.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("SCRUM_USAGE", "CLAUDE_CONFIG_DIR")}
+        env["SCRUM_ACCOUNTS"] = json.dumps([["main", str(self.main), None], ["owa", str(self.owa), [80, 90]]])
+        patch = mock.patch.dict(os.environ, env, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def write(self, folder, five=None, seven=None, written_at=NOW):
+        (folder / "usage.json").write_text(json.dumps(usage(five, seven, written_at)))
+
+
+class AccountsTest(AccountEnv):
+    def test_accounts_order_env_override_and_missing_dir(self):
+        self.assertEqual(board.ACCOUNTS, (("main", "~/.claude", None), ("owa", "~/.claude-owa", (80, 90))))
+        self.assertEqual(board.accounts(), [("main", self.main, None), ("owa", self.owa, (80, 90))])
+        self.assertEqual(board.accounts()[1].reserve, (80, 90))
+        gone = Path(self.tmp.name) / "gone"
+        with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps([["main", str(gone), None], ["owa", str(gone), None]])):
+            self.assertEqual(board.accounts(), [("main", gone, None)])  # the first stays, a later missing dir drops
+        del os.environ["SCRUM_ACCOUNTS"]
+        home = Path(self.tmp.name)
+        (home / ".claude-owa").mkdir()
+        with mock.patch.dict(os.environ, HOME=str(home)):
+            self.assertEqual(board.accounts(), [("main", home / ".claude", None), ("owa", home / ".claude-owa", (80, 90))])
+            with mock.patch.dict(os.environ, SCRUM_USAGE="/x/usage.json"):
+                self.assertEqual(board.accounts(), [("main", home / ".claude", None)])
+
+    def test_usage_path_per_account(self):
+        self.assertEqual(board.usage_path(), self.main / "usage.json")
+        self.assertEqual(board.usage_path("owa"), self.owa / "usage.json")
+        with mock.patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(self.owa)):
+            self.assertEqual(board.usage_path(), self.owa / "usage.json")
+            self.assertEqual(board.usage_path("main"), self.main / "usage.json")
+        with mock.patch.dict(os.environ, SCRUM_USAGE="/x/u.json"):
+            self.assertEqual(board.usage_path(), Path("/x/u.json"))
+            self.assertEqual(board.usage_path("main"), Path("/x/u.json"))
+            self.assertEqual(board.usage_path("owa"), self.owa / "usage.json")
+        self.write(self.owa, five=(12, 9000))
+        self.assertEqual(board.read_usage("owa")["rate_limits"]["five_hour"]["used_percentage"], 12)
+        self.assertIsNone(board.read_usage("main"))
+
+
+class PickAccountTest(AccountEnv):
+    FULL = (99, 9000)  # 1 % left, resetting in 2.5 h: usage_allowance 0
+
+    def test_main_full_gives_owa(self):
+        self.write(self.main, five=self.FULL)
+        self.assertEqual(board.pick_account(NOW), ("owa", None))
+
+    def test_owa_at_reserve_with_main_full_gives_none(self):
+        self.write(self.main, five=self.FULL)
+        for five, seven in (((80, 9000), (10, 90000)), ((10, 9000), (90, 90000))):
+            self.write(self.owa, five=five, seven=seven, written_at=NOW - 3600)  # stale: the reserve still counts
+            name, allow = board.pick_account(NOW)
+            self.assertEqual((name, allow), (None, 0), (five, seven))
+            self.assertTrue(allow.reason.startswith("no account has room: main usage 5h 99% used"), allow.reason)
+            self.assertIn("owa reserve", allow.reason)
+
+    def test_owa_below_reserve_with_main_full_gives_owa(self):
+        self.write(self.main, five=self.FULL)
+        self.write(self.owa, five=(79, 9000), seven=(89, 90000))
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+
+    def test_both_free_gives_main(self):
+        self.write(self.main, five=(10, 9000))
+        self.write(self.owa, five=(10, 9000))
+        self.assertEqual(board.pick_account(NOW)[0], "main")
+
+    def test_prefer_owa_with_both_free_gives_owa(self):
+        self.assertEqual(board.pick_account(NOW, prefer="owa")[0], "owa")
+
+    def test_prefer_owa_with_owa_full_gives_main(self):
+        self.write(self.owa, five=self.FULL)
+        self.assertEqual(board.pick_account(NOW, prefer="owa")[0], "main")
+
+    def test_limit_marker_and_reset_window(self):
+        board.note_limit("main", NOW + 60)
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.assertEqual(board.pick_account(NOW + 61)[0], "main")
+        self.write(self.owa, five=(95, -10))  # the reserve window already reset: no hold
+        board.note_limit("main", NOW + 60)
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+
+
+class LimitMarkerTest(AccountEnv):
+    def test_limit_marker(self):
+        self.assertEqual(board.limit_path("owa"), self.owa / "limit_until")
+        self.assertIsNone(board.limited_until("owa", NOW))  # missing
+        with mock.patch.object(board.os, "replace", wraps=os.replace) as rep:
+            board.note_limit("owa", NOW + 100)
+        self.assertEqual(Path(rep.call_args[0][1]), self.owa / "limit_until")
+        self.assertEqual(board.limited_until("owa", NOW), NOW + 100)
+        self.assertIsNone(board.limited_until("owa", NOW + 100))  # past
+        self.assertIsNone(board.limited_until("main", NOW))  # per account
+        (self.owa / "limit_until").write_text("soon")
+        self.assertIsNone(board.limited_until("owa", NOW))  # malformed
+        self.assertEqual(sorted(p.name for p in self.owa.iterdir()), ["limit_until"])  # no temp left behind
+
+
+class SpawnAccountTest(AccountEnv):
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        self.job = board.cmd_new(self.root, "x")
+
+    def spawn(self, job_id=None, environ=None):
+        with mock.patch.object(board.subprocess, "Popen") as popen, mock.patch.dict(os.environ, environ or {}):
+            board.spawn(self.root, job_id or self.job, "resume")
+        return popen.call_args.kwargs["env"]
+
+    def account(self):
+        return json.loads((self.root / "board.json").read_text())["jobs"][0].get("account")
+
+    def test_spawn_sets_config_dir_and_records_account(self):
+        self.write(self.main, five=(99, 9000), written_at=int(time.time()))
+        env = self.spawn()
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.owa))
+        self.assertEqual(self.account(), "owa")
+        self.assertIn("runlog", json.loads((self.root / "board.json").read_text())["jobs"][0])
+        env = self.spawn("run-all")  # not on the board: still starts
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.owa))
+
+    def test_main_spawn_drops_inherited_config_dir(self):
+        env = self.spawn(environ={"CLAUDE_CONFIG_DIR": str(self.owa)})
+        self.assertIsNone(env.get("CLAUDE_CONFIG_DIR"))  # never assertNotIn: it would print the whole env
+        self.assertEqual(self.account(), "main")
+
+    def test_resume_keeps_recorded_account_while_it_has_room(self):
+        board.cmd_set(self.root, self.job, ["account=owa"])
+        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
+        self.assertEqual(self.account(), "owa")
+
+    def test_spawn_falls_back_when_every_account_is_full(self):
+        later = int(time.time()) + 3600
+        board.note_limit("main", later)
+        board.note_limit("owa", later)
+        self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))  # no recorded account: the first
+        self.assertEqual(self.account(), "main")
+        board.cmd_set(self.root, self.job, ["account=owa"])
+        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))  # the recorded one
+        self.assertEqual(self.account(), "owa")
+
+    def test_account_field_shape(self):
+        with self.assertRaises(SystemExit):
+            board.cmd_set(self.root, self.job, ["account=OWA main"])
+
 
 if __name__ == "__main__":
     unittest.main()
