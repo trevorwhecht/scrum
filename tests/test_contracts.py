@@ -3471,6 +3471,13 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never load above 8"):
             self.assertIn(phrase, stops, phrase)
 
+    def test_builder_keeps_new_ui_on_screen_at_390(self):
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        self.assertEqual(builder.count("UB-15"), 1)
+        line = next(l for l in builder.splitlines() if "UB-15" in l)
+        for phrase in ("off-screen", "390 px", "sideways scroll", "headless render of the touched component"):
+            self.assertIn(phrase, line, phrase)
+
     def test_builder_runs_focused_tests_only(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         self.assertNotIn("Run the full suite once", builder)
