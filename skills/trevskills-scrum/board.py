@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
-  board.py new "<title>" [--id ID] create jobs/<id>/ and a board entry, print the id (--id keeps a given id)
+  board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand)
   board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
@@ -354,8 +354,12 @@ def short_title(text, n=60) -> str:
     return (cut or head) + "…"
 
 
-def add_job(root, board, title, job_id=None):
-    """Caller must hold the board lock. job_id keeps an id given elsewhere (a cloud job keeps its local board's id)."""
+STARTED_BY = ("serve", "runall", "wake", "hand")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand)
+
+
+def add_job(root, board, title, job_id=None, started_by="hand"):
+    """Caller must hold the board lock. job_id keeps an id given elsewhere (a cloud job keeps its local board's id).
+    started_by (STARTED_BY) records who started the job."""
     jobs_dir = Path(root) / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     names = [p.name for p in jobs_dir.iterdir()] + [j.get("id", "") for j in board["jobs"]]
@@ -369,16 +373,17 @@ def add_job(root, board, title, job_id=None):
         "id": job_id, "title": title, "branch": f"scrum/{job_id}", "stage": "spec", "round": 0, "limit": 2,
         "reviews": {r: "pending" for r in REVIEWERS}, "rounds": [], "files": [],
         "pr": None, "reason": None, "worktree": None, "builder": None, "base": None, "updatedAt": now(),
+        "started_by": started_by,
     })
     return job_id
 
 
-def cmd_new(root, title, job_id=None, unique=False):
+def cmd_new(root, title, job_id=None, unique=False, started_by="hand"):
     """unique: return None, adding nothing, while a job with this exact title is neither done nor aborted."""
     with locked_board(root) as board:
         if unique and any(j["title"] == title and j["stage"] not in ("done", "aborted") for j in board["jobs"]):
             return None
-        return add_job(root, board, title, job_id)
+        return add_job(root, board, title, job_id, started_by)
 
 
 # --- backlog.md: "- [ ] [5] Text {#k3f9} {p:4} {needs #a1b2} {setup: step; step} {by:t} → 003-id <!-- why -->"; points, the id,
@@ -697,7 +702,7 @@ def cmd_next(root, index=None):
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
-        job_id = add_job(root, board, short_title(item["text"]))
+        job_id = add_job(root, board, short_title(item["text"]), started_by="runall" if index is None else "hand")
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
@@ -733,7 +738,7 @@ def cmd_cloud_claim(root, n) -> dict:
             files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
             if not files or files & taken:
                 continue
-            job_id = add_job(root, board, short_title(item["text"]))
+            job_id = add_job(root, board, short_title(item["text"]), started_by="serve")
             board["jobs"][-1]["cloudClaim"] = True  # keeps its files reserved until the dispatcher moves it to stage cloud
             take_spec(root, item["text"], job_id)
             claim_item(lines, item, job_id)
@@ -1367,11 +1372,25 @@ def _pulse_since(root, digest_id):
     return None
 
 
+def _hand_started(cache, name, n):
+    """True when project `name`'s board job numbered n has started_by "hand". A project not in projects(), an
+    unreadable board or a missing job is not hand, so write_pulse still counts its claim. cache: {name: board jobs}."""
+    if name not in cache:
+        try:
+            cache[name] = read_board(projects()[name] / "scrum")["jobs"]
+        except (KeyError, OSError, ValueError, SystemExit):
+            cache[name] = []
+    return any(j.get("started_by") == "hand" for j in cache[name]
+               if (m := re.match(r"(\d+)-", str(j.get("id")))) and int(m.group(1)) == n)
+
+
 def write_pulse(root, digest_id):
     """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since), one line = one minute. Idle with
-    claimable work (no session, no cool-down, some project with claimable or waiting work), peaks, claims (a rise in a
-    project's top job number) during cool-down or at CPU load over 500%, and minutes the focus project had claimable
-    work while another project was busy."""
+    claimable work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line
+    without it is off) or waiting work), idle held (no session, some claimable or waiting work, not idle: Auto continue
+    off or cool-down), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
+    jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
+    while another project was busy."""
     since = _pulse_since(root, digest_id)
     lines = [l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)]
     out = [f"# Pulse: digest {digest_id}", ""]
@@ -1382,19 +1401,20 @@ def write_pulse(root, digest_id):
         projs = lambda l: {k: v for k, v in (l.get("projects") if isinstance(l.get("projects"), dict) else {}).items()
                            if isinstance(v, dict)}
         pos = lambda v: is_num(v) and v > 0
-        idle = streak = longest = nonfocus = 0
+        idle = held = streak = longest = nonfocus = 0
         for l in lines:
             ps = projs(l)
             if l.get("sessions") == 0 and not l.get("cooldown") and any(
-                    pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values()):
+                    (pos(p.get("claimable")) and p.get("auto") is True) or pos(p.get("waiting")) for p in ps.values()):
                 idle, streak = idle + 1, streak + 1
                 longest = max(longest, streak)
             else:
                 streak = 0
+                held += l.get("sessions") == 0 and any(pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values())
             f = l.get("focus") if isinstance(l.get("focus"), str) else None
             if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
                 nonfocus += 1
-        cool, hot, claimed = 0, 0, {}
+        cool, hot, claimed, boards = 0, 0, {}, {}
         for a, b in zip(lines, lines[1:]):
             pa, pb = projs(a), projs(b)
             for name, p in pb.items():
@@ -1404,8 +1424,10 @@ def write_pulse(root, digest_id):
                 if not (is_num(was) and is_num(top) and top > was):
                     continue
                 if b.get("cooldown") is True:
-                    cool += top - was
-                    claimed.setdefault(name, []).append(str(top))
+                    for n in range(int(was) + 1, int(top) + 1):
+                        if not _hand_started(boards, name, n):
+                            cool += 1
+                            claimed.setdefault(name, []).append(str(n))
                 if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
                     hot += top - was
 
@@ -1416,6 +1438,7 @@ def write_pulse(root, digest_id):
         focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
         out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
                 f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                f"Idle held by Auto continue off or cool down: {held} min",
                 f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
                 f"Peak CPU load: {c['cpu_load']:.0f}% at {iso(c['t'])}" if c else "Peak CPU load: unknown",
                 f"Claims during cool down: {cool}"
@@ -3673,8 +3696,8 @@ def parse_plan(text):
 
 def add_child(root, board, parent, t, depends_on, goal, plain=False):
     """Create one waiting child job for ticket t and write its feature.md (just t's text when plain).
-    Caller holds the board lock."""
-    job_id = add_job(root, board, short_title(t["title"]))
+    Caller holds the board lock. It copies the parent's started_by (runall when the parent has none)."""
+    job_id = add_job(root, board, short_title(t["title"]), started_by=parent.get("started_by") or "runall")
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
     feature = t["text"] + "\n" if plain else \
@@ -3741,7 +3764,7 @@ def cmd_runall_start(root):
         todo = sorted((i for i in items if not i["done"] and i["index"] not in held), key=priority_key)
         if not todo:
             return {"id": None, "children": []}
-        parent_id = add_job(root, board, "Run all")
+        parent_id = add_job(root, board, "Run all", started_by="runall")
         parent = board["jobs"][-1]
         kids, by_id = [], {}
         for item in todo:
@@ -4541,6 +4564,7 @@ def wake_waiting(root, room=None, hold=None) -> dict:
                 else:
                     j.update(stage="spec", reason=None, updatedAt=now())
                     ready.append(j["id"])
+                j["started_by"] = "wake"  # serve.py's cool-down refusal lets a woken start through
     for job_id, (dep, wake) in lost.items():
         try:  # one refused ask (the job was aborted meanwhile) must not hide the claimed ready jobs from the caller
             if wake:
@@ -5755,6 +5779,7 @@ def main(argv=None):
     n = sub.add_parser("new")
     n.add_argument("title")
     n.add_argument("--id")
+    n.add_argument("--by", choices=STARTED_BY, default="hand")
     s = sub.add_parser("set")
     s.add_argument("--unpause", action="store_true")
     s.add_argument("id")
@@ -5898,7 +5923,7 @@ def main(argv=None):
         return 1 if out["up"] is False else 0
     require_scrum_dir(a.dir)
     if a.cmd == "new":
-        print(cmd_new(a.dir, a.title, a.id))
+        print(cmd_new(a.dir, a.title, a.id, started_by=a.by))
     elif a.cmd == "set":
         cmd_set(a.dir, a.id, a.pairs, unpause=a.unpause)
     elif a.cmd == "sync":
