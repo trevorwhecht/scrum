@@ -3431,12 +3431,16 @@ def usage_allowance(usage, now, live):
 
 def limit_path(account):
     """The account's usage-limit marker: an epoch beside its usage.json."""
+    if "unittest" in sys.modules and not (os.environ.get("SCRUM_ACCOUNTS") or os.environ.get("SCRUM_USAGE")):
+        raise SystemExit("limit markers refused under unittest without SCRUM_ACCOUNTS or SCRUM_USAGE")
     return usage_path(account).with_name("limit_until")
 
 
 def note_limit(account, reset):
     """Mark the account limited until `reset` (epoch seconds), tmp file + os.replace. No folder to write in (tests'
     SCRUM_USAGE=/dev/null/...) skips it; a failed write is logged to stderr and skipped: the marker only saves retries."""
+    if reset > time.time() + 8 * 86400:  # a reset that far out is a misread, not a limit
+        return
     try:
         path = limit_path(account)
         if not path.parent.is_dir():
