@@ -1278,7 +1278,7 @@ class ServeTest(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum start {job_id} askme 3"])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE, f"/trevskills-scrum start {job_id} askme 3"])
         spawn.assert_not_called()
         self.assertTrue(self.serve.board.backlog_items(self.root)[i]["done"])
 
@@ -1327,7 +1327,7 @@ class ServeTest(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, "/trevskills-scrum run-all"])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE, "/trevskills-scrum run-all"])
         self.assertEqual((self.root / "backlog.md").read_text(), before)  # claims nothing; the session does
         code, _, run = self.run_all({"Origin": "https://evil.example"})
         self.assertEqual(code, 403)
@@ -1338,7 +1338,7 @@ class ServeTest(unittest.TestCase):
         code, out, run = self.run_all(body={"askme": 3})
         self.assertEqual((code, out), (200, {"message": "Run all opened in a new Terminal window."}))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, "/trevskills-scrum run-all askme 3"])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE, "/trevskills-scrum run-all askme 3"])
         for off in ({}, {"askme": None}):
             code, out, run = self.run_all(body=off)
             self.assertEqual(code, 200, off)
@@ -1592,7 +1592,7 @@ class ServeTest(unittest.TestCase):
         m["answer"].assert_called_once_with(self.root.resolve(), job_id, "a")
         script = str(Path(self.serve.__file__).with_name("job-window.applescript"))
         self.assertEqual(tries, [[(["osascript", script, str(self.root.resolve().parent), job_id, "raise", "env",
-                                    "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f"/trevskills-scrum lilguy {job_id}"],
+                                    "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE, f"/trevskills-scrum lilguy {job_id}"],
                                    "Opened in a Terminal window.")]])
         for name in ("spawn", "stop", "abort", "resume"):
             m[name].assert_not_called()
@@ -3234,7 +3234,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(argv[:2], ["osascript", "-e"])
         self.assertIn("quoted form of", argv[2])
         self.assertEqual(os.path.realpath(argv[3]), os.path.realpath(self.root.parent))
-        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
+        self.assertEqual(argv[4:], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE, f'/trevskills-scrum discuss {job_id} "it\'s\'; rm -rf ~"'])
         popen.assert_not_called()
         self.assertFalse(self.serve.running("repo", job_id))
 
@@ -3425,8 +3425,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(len(argvs), 3)
         for argv in argvs:
             self.assertEqual(argv[:2], ["osascript", "-e"])
-            self.assertEqual(argv[4:7], ["env", "CLAUDE_NOTIFIER_DISABLE=1", self.serve.CLAUDE])
-            self.assertEqual(len(argv), 8)
+            self.assertEqual(argv[4:9], ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE])
+            self.assertEqual(len(argv), 10)
 
     def activity_of(self, job_id):
         code, data = self.req("GET", "/p/repo/board.json")
@@ -7215,11 +7215,11 @@ class AutoResumeTest(unittest.TestCase):
     def test_terminal_env_adds_config_dir_only_for_a_non_first_account(self):
         s = self.serve
         self.two_accounts()
-        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1"))  # main free
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM="))  # main free
         s.board.note_limit("main", int(time.time()) + 3600)
-        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1", f"CLAUDE_CONFIG_DIR={self.owa}"))
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", f"CLAUDE_CONFIG_DIR={self.owa}"))
         s.board.note_limit("owa", int(time.time()) + 3600)
-        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1"))  # no account
+        self.assertEqual(s.terminal_env(), ("env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM="))  # no account
 
     def test_hold_limited_caps_a_clock_time_reset_at_5h(self):
         s, now = self.serve, 1_800_000_000
