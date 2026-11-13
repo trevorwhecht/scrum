@@ -3416,6 +3416,60 @@ class BoardTest(unittest.TestCase):
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
 
+    def escape_digest(self, jobs, commits=()):
+        """digest-start over a board of `jobs` (dicts, stage done unless set) with a git repo at root.parent holding
+        `commits` ((files dict, message), in order). Returns (escapes.md text or None, result, stderr)."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"stage": "done", **j} for j in jobs]}))
+        repo = Path(self.tmp.name)
+        if commits:
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        for files, message in commits:
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_text(text)
+                subprocess.run(["git", "-C", str(repo), "add", rel], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                            "-m", message], check=True)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(repo / "none.json")}), redirect_stderr(err):
+            out = board.cmd_digest_start(self.root)
+        path = self.root / "digests" / str(out["id"]) / "escapes.md"
+        return (path.read_text() if path.exists() else None), out, err.getvalue()
+
+    def test_digest_start_writes_escapes(self):
+        text, out, _ = self.escape_digest(
+            [{"id": "100-origin", "rounds": [{"check": "FAIL"}, {"check": "PASS", "code": "PASS", "ui": "PASS", "ux": "CHANGES"}]},
+             {"id": "200-bug", "lane": "debug"}],
+            [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+             ({"app.py": "a\nB\nc\n", "tests/test_app.py": "x\n"}, "Fix b\n\nJob files: scrum/jobs/200-bug/")])
+        self.assertEqual(out["jobs"], ["100-origin", "200-bug"])
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code, ui\n")
+
+    def test_digest_start_escapes_unknown_origin(self):
+        text, _, _ = self.escape_digest(
+            [{"id": "100-origin"}, {"id": "300-nocommit", "lane": "debug"}, {"id": "400-tests", "lane": "debug"},
+             {"id": "500-fast", "lane": "fast"}],
+            [({"app.py": "a\n"}, "Add app\n\nscrum/jobs/100-origin/"),
+             ({"tests/test_x.py": "x\n"}, "Fix\n\nscrum/jobs/400-tests/")])
+        self.assertEqual(text, "- 300-nocommit ← origin unknown: no merge commit\n"
+                               "- 400-tests ← origin unknown: only test files changed\n")
+        text, out, _ = self.escape_digest([{"id": "600-fast", "lane": "fast"}])
+        self.assertEqual((out["id"], text), ("002", "No bug jobs\n"))
+
+    def test_digest_start_escapes_no_scrum_job_in_blame(self):
+        text, _, _ = self.escape_digest(
+            [{"id": "200-bug", "lane": "debug"}],
+            [({"app.py": "a\nb\n"}, "Old commit with no job line"),
+             ({"app.py": "a\nb\nc\n"}, "Fix\n\nscrum/jobs/200-bug/")])
+        self.assertEqual(text, "- 200-bug ← origin unknown: no scrum job in blame\n")
+
+    def test_digest_start_escapes_without_git(self):
+        text, out, err = self.escape_digest([{"id": "200-bug", "lane": "debug"}])
+        self.assertEqual((out["id"], out["jobs"]), ("001", ["200-bug"]))
+        self.assertIn("digest-start: escapes: ", err)
+        self.assertIsNone(text)
+
     def pulse_digest(self, lines, since=None, error_since=None, boards=None):
         """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
         jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. `boards` ({project: jobs}) writes
