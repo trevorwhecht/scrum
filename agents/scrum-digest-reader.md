@@ -13,7 +13,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 **Read**, for every job id in `DIGEST_DIR/jobs.txt` (one per line), inside `JOBS_DIR/<id>/`:
 - `decision.md` (its `## Rulings` and `## Follow-ups` matter most)
 - every `round-*/review-*.md` and every `round-*/check.md`
-- `rework.md`, `promoted.md` and `assessment.md`, when present
+- `build.md`, `rework.md`, `promoted.md` and `assessment.md`, when present
 - `jev.log`, when present (one tab-separated line per Jev decision: `timestamp`, `step`, `question`, `raw`, `decision`, `elapsed`)
 - `routing.log`, when present (one JSON object per line: `ts`, `role`, `runner`, `model`, `duration_s`, `outcome`)
 - `JOBS_DIR/../routing.log`, the scrum-level log, read once per digest when present (not per job): the digest reader itself logs there, in the same line format as a job's `routing.log`. When it is missing, skip it; that is never an error.
