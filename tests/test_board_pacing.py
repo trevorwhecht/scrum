@@ -384,6 +384,20 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.pick_account(NOW)[0], "owa")
 
 
+class FallbackAccountTest(AccountEnv):
+    def test_all_limited_takes_the_soonest_reset(self):
+        board.note_limit("main", NOW + 100000)
+        board.note_limit("owa", NOW + 1800)
+        self.assertEqual(board.fallback_account(NOW, "main"), "owa")
+
+    def test_recorded_kept_when_tied_or_not_limited(self):
+        self.assertEqual(board.fallback_account(NOW, "main"), "main")  # no marker: counts as now
+        board.note_limit("main", NOW + 600)
+        board.note_limit("owa", NOW + 600)
+        self.assertEqual(board.fallback_account(NOW, "main"), "main")
+        self.assertEqual(board.fallback_account(NOW, "owa"), "owa")
+
+
 class LimitMarkerTest(AccountEnv):
     def test_limit_marker(self):
         self.assertEqual(board.limit_path("owa"), self.owa / "limit_until")

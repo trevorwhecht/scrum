@@ -3493,6 +3493,15 @@ def pick_account(now, live=0, prefer=None):
     return None, Allowance(0, "no account has room: " + "; ".join(why))
 
 
+def fallback_account(now, recorded):
+    """Account for a spawn when none has room: the one whose limit marker ends soonest (no marker counts as now), the
+    recorded one winning ties or when it is not limited; the first account when `recorded` is unlisted."""
+    accs = accounts()
+    names = [a.name for a in accs]
+    first = recorded if recorded in names else names[0]
+    return min([first] + [n for n in names if n != first], key=lambda n: limited_until(n, now) or now)
+
+
 def fable_used(usage, now):
     """{"5h": %, "7d": %} for the Fable guard: a window whose reset is at or before now reads 0, an unreadable one None; an absent five_hour key
     reads 0 (no 5h window is active), an absent seven_day stays None."""
@@ -6213,8 +6222,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
           model: str | None = None, account: str | None = None) -> tuple[subprocess.Popen, str]:
     """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
     start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
-    `account` None: pick_account, preferring the job's recorded account; with none free, the recorded account, else the
-    first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
+    `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
+    (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. Returns (proc, log path relative to root)."""
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
@@ -6231,7 +6240,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
             recorded = find(read_board(root), job_id).get("account")
         except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
             recorded = None
-        account = pick_account(time.time(), prefer=recorded)[0] or recorded
+        account = pick_account(time.time(), prefer=recorded)[0] or fallback_account(time.time(), recorded)
     acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
     env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise
