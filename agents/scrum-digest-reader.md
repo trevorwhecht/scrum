@@ -25,6 +25,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `DIGEST_DIR/health.json`, read once per digest: `board.py process-health` wrote it. `metrics` maps each of 10 fixed metric names to `value`, `previous`, `limit`, `jobs` (job ids, or window names for the window metrics) and `flag` (`worse`, `over twice` or null); `test_waste_jobs` also has `minutes`.
 - `DIGEST_DIR/timing.md`, read once per digest: `board.py digest-start` wrote it. One table row per claimed job (`Job`, `Wall`, `Spec`, `Queue`, `Queue gate` (the launch gates that queued it: `ram_room`, `cpu_load`, or `-`), `Rounds`, `Round times`, `No-change rounds`, `E2E lock waits`, `Stalls`), a `## Totals` line, and `## Waiting on the E2E queue`: jobs on any registered board stalled on the E2E lock right now, with how long.
 - `DIGEST_DIR/pulse.md`, read once per digest: `board.py digest-start` wrote it from the serve.py watchdog's one-line-a-minute pulse log since the last digest: idle minutes with claimable work, peak sessions, peak CPU load, claims during cool down, claims while CPU load over 500%, and non-focus minutes. It says `No pulse lines` when the log had none.
+- `DIGEST_DIR/escapes.md`, read once per digest: `board.py digest-start` wrote it. One line per debug job in this digest: `- <bug id> ← <origin id> · <n> lines in <files> · passed by: <reviewers>`, the earlier job whose lines its fix changed (by git blame) and the reviewers that passed it, or `- <bug id> ← origin unknown: <why>`. It says `No bug jobs` when no claimed job is a debug job.
 - `DIGEST_DIR/trevor.md`, read once per digest: `board.py digest-trevor` wrote it. Trevor's own words since the last digest: `## Chat` (his chat messages Jev picked as pipeline complaints or rules, `- <date> <score>: "<text>"`), `## Feature quotes`, `## Backlog` (new `(Trevor …)` items) and `## Answer notes`.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
 
@@ -74,6 +75,8 @@ In `questions.log`, count only lines dated within 7 days of its newest `date` (a
     - <metric>: <value> (previous <previous>, limit <limit>) — jobs: <ids> — <flag>
     ## Pulse
     Idle with claimable work: <m> min (longest <m> min) · peak sessions: <n> · peak CPU load: <pct>% · claims during cool down: <n> (<projects and job numbers>) · claims while CPU load over 500%: <n> · non-focus: <m> min (focus: <name>)
+    ## Escapes
+    - <bug job> ← <origin job> · missed by: <reviewers> · what: <one line from the bug job's feature.md>
 
 Sort each list by count, highest first. For the Fast lane verdict: `TOO_EARLY` only while the board holds fewer than 5 fast-lane jobs in total (count `"lane": "fast"` entries in `JOBS_DIR/../board.json`, every digest included, not just this one); `SKIP_SPEC_WRITER` only when the fast specs were mostly near-verbatim copies of feature.md and no CHANGES round or promotion traces back to something a spec would have caught; otherwise `KEEP_SPEC_WRITER`. `<count>` is the number of distinct jobs. Write `None` under a heading that has no entry.
 
@@ -127,6 +130,12 @@ For `## Trevor asked`, use `DIGEST_DIR/trevor.md`. Group its entries (every sect
 For `## Process health`, use `DIGEST_DIR/health.json`: one line per metric, in file order. A null value, previous or flag is written `-`, except that a null flag is left off with its ` — `. For `test_waste_jobs`, add ` · <minutes> min` after the value. Write `None` under the section when the file is missing or not valid JSON. This section is exempt from the 2 or more different jobs rule.
 
 For `## Pulse`, use `DIGEST_DIR/pulse.md`: copy its figures into the template line as written, never recomputed or rounded. Write `None` under the section when the file is missing or says `No pulse lines`. This section is exempt from the 2 or more different jobs rule.
+
+For `## Escapes`, use `DIGEST_DIR/escapes.md`:
+- Copy each origin line, with `passed by` written as `missed by`, and add `what:` from the bug job's `feature.md`.
+- Skip `origin unknown` lines.
+- Write `None` when the file is missing or says `No bug jobs`.
+- This section is exempt from the 2 or more different jobs rule.
 
 Keep the file under 150 lines.
 

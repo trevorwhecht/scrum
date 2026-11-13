@@ -73,6 +73,7 @@
   board.py digest-start            claim them all as digests/<NNN>/jobs.txt (+ questions.lines), and every windows/
                                    scorecard no live digest lists as windows.txt + windows.json, plus timing.md (per-job wall
                                    time, rounds, no-change rounds, E2E lock waits; jobs waiting on the E2E queue),
+                                   and escapes.md (each debug job's origin job by git blame, with its PASS reviewers),
                                    print {"id","jobs","windows"}
                                    (id null = nothing new; starts with no jobs when the questions trigger fired); then a
                                    pipeline health check parks one "Pipeline health: <tool>" job at needs-human per tool
@@ -1289,6 +1290,10 @@ def cmd_digest_start(root):
     except (SystemExit, OSError) as e:
         print(f"digest-start: timing: {e}", file=sys.stderr)
     try:
+        write_escapes(root, digest_id, jobs)
+    except (SystemExit, OSError, ValueError, subprocess.TimeoutExpired) as e:
+        print(f"digest-start: escapes: {e}", file=sys.stderr)
+    try:
         write_history(root, out["id"])
     except (SystemExit, OSError) as e:
         print(f"digest-start: history: {e}", file=sys.stderr)
@@ -2114,6 +2119,61 @@ def write_timing(root, digest_id, jobs):
                 waiting.append(f"- {scrum.parent.name}/{j['id']}: {_mins(t - at)}")
     lines += waiting or ["None"]
     (Path(root) / "digests" / digest_id / "timing.md").write_text("\n".join(lines) + "\n")
+
+
+# --- escapes: digest-start writes digests/<NNN>/escapes.md, each debug job traced by git blame to its origin job ---
+ESCAPE_SKIP_RE = re.compile(r"(^|/)(__tests__|e2e|tests?)/|(^|/)test_[^/]*\.py$|\.(test|spec)\.[cm]?[jt]sx?$")
+ESCAPE_JOB_RE = re.compile(r"scrum/jobs/([^/\s]+)/")
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ", re.M)
+BLAME_SHA_RE = re.compile(r"^([0-9a-f]{40,64}) \d+ \d+", re.M)
+
+
+def _escape_lines(repo, bug, board):
+    """The escapes.md lines for debug job `bug`: its newest HEAD commit naming scrum/jobs/<bug>/, each non-test file's
+    -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes."""
+    shas = _git(repo, "log", "HEAD", "-F", f"--grep=scrum/jobs/{bug}/", "--format=%H").decode().split()
+    if not shas:
+        return [f"- {bug} ← origin unknown: no merge commit"]
+    sha = shas[0]
+    changed = _git(repo, "show", "--format=", "--name-only", "--no-renames", sha).decode().splitlines()
+    if not [f for f in changed if f and not ESCAPE_SKIP_RE.search(f)]:
+        return [f"- {bug} ← origin unknown: only test files changed"]
+    # an added file has no lines in <sha>^ to blame
+    old = _git(repo, "show", "--format=", "--name-only", "--no-renames", "--diff-filter=a", sha).decode().splitlines()
+    origins, bodies = {}, {}
+    for f in (f for f in old if f and not ESCAPE_SKIP_RE.search(f)):
+        diff = _git(repo, "show", "--format=", "--unified=0", "--no-renames", sha, "--", f).decode(errors="replace")
+        ranges = []
+        for a, b in HUNK_RE.findall(diff):
+            a, b = int(a), 1 if b == "" else int(b)
+            ranges += ["-L", f"{a},{a + b - 1}" if b else f"{max(a, 1)},{max(a, 1)}"]
+        if not ranges:
+            continue
+        blame = _git(repo, "blame", "--porcelain", *ranges, f"{sha}^", "--", f).decode(errors="replace")
+        for c in BLAME_SHA_RE.findall(blame):
+            if c not in bodies:
+                body = _git(repo, "show", "-s", "--format=%B", c).decode(errors="replace")
+                bodies[c] = next((j for j in ESCAPE_JOB_RE.findall(body) if j != bug and j in board), None)
+            if bodies[c]:
+                files = origins.setdefault(bodies[c], {})
+                files[f] = files.get(f, 0) + 1
+    if not origins:
+        return [f"- {bug} ← origin unknown: no scrum job in blame"]
+    out = []
+    for origin, files in origins.items():
+        rounds = board[origin].get("rounds") or [{}]
+        passed = sorted(k for k, v in rounds[-1].items() if v == "PASS" and k != "check") or ["none"]
+        out.append(f"- {bug} ← {origin} · {sum(files.values())} lines in {', '.join(files)} · passed by: {', '.join(passed)}")
+    return out
+
+
+def write_escapes(root, digest_id, jobs):
+    """digests/<NNN>/escapes.md: for every claimed `"lane": "debug"` job, the origin jobs whose lines its fix changed
+    (_escape_lines, git in the repo that holds root), or `No bug jobs`."""
+    board = {j["id"]: j for j in read_board(root)["jobs"]}
+    repo = Path(root).resolve().parent
+    lines = [l for j in jobs if board.get(j, {}).get("lane") == "debug" for l in _escape_lines(repo, j, board)]
+    (Path(root) / "digests" / digest_id / "escapes.md").write_text("\n".join(lines or ["No bug jobs"]) + "\n")
 
 
 # --- window-report: remembers each open usage window in windows/open.json (merge_limits drops closed ones) and, once

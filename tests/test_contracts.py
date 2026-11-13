@@ -1647,6 +1647,30 @@ class ContractTest(unittest.TestCase):
                        "at-most-8 cap", "like **Usage windows**"):
             self.assertIn(phrase, pulse, phrase)
 
+    def test_digest_escapes_contract(self):
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        self.assertIn("`DIGEST_DIR/escapes.md`, read once per digest: `board.py digest-start` wrote it", read)
+        self.assertLess(reader.index("    ## Pulse\n"), reader.index("    ## Escapes\n"))
+        self.assertIn("    ## Escapes\n    - <bug job> ← <origin job> · missed by: <reviewers> · what: <one line from the bug "
+                      "job's feature.md>\n\n", reader)
+        rule = reader[reader.index("For `## Escapes`, use `DIGEST_DIR/escapes.md`"):]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("with `passed by` written as `missed by`", "Skip `origin unknown` lines",
+                       "Write `None` when the file is missing or says `No bug jobs`",
+                       "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, rule, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        self.assertLess(digester.index("**Pulse.**"), digester.index("**Escapes.**"))
+        self.assertLess(digester.index("**Escapes.**"), digester.index("**Backlog fallback.**"))
+        escapes = digester[digester.index("**Escapes.**"):digester.index("**Backlog fallback.**")]
+        for phrase in ("`missed by` on 2 or more lines with different origin jobs", "exactly one kind `edit` proposal",
+                       "`agents/scrum-review-<reviewer>.md`", "starts `Escapes:`", "the bug jobs and the origin jobs",
+                       "**Backlog fallback** instead", "fewer than 2 escapes", "at-most-8 cap"):
+            self.assertIn(phrase, escapes, phrase)
+        weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
+        self.assertIn("**Pulse**, **Escapes**, **Backlog fallback**", weekly)
+
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
         self.assertIn("B digest-trevor <id>", step1)
