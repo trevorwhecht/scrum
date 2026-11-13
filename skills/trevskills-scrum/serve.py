@@ -559,7 +559,7 @@ def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
         return 409, {"error": f"unknown option command: {picked.get('command')}"}
     verb, arg = parsed
     if verb == "lilguy":  # Trevor approves each .claude/ edit in the window; a failed launch leaves the question open
-        return run_terminal([(osa_job_window(root.parent, job_id, "env", "CLAUDE_NOTIFIER_DISABLE=1", CLAUDE,
+        return run_terminal([(osa_job_window(root.parent, job_id, "env", "CLAUDE_NOTIFIER_DISABLE=1", *TERMINAL_COLOR_ENV, CLAUDE,
                                              f"/trevskills-scrum lilguy {job_id}", raise_window=raise_window), "Opened in a Terminal window.")])
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
@@ -596,13 +596,17 @@ RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?
 RESET_EPOCH_RE = re.compile(r"resets?_?at[=:\s]+(\d{10})")
 
 
+# Terminal.app has no truecolor: Claude Code's theme paints every word as a grey box, so ask for 256-colour output.
+TERMINAL_COLOR_ENV = ("FORCE_COLOR=2", "COLORTERM=")
+
+
 def terminal_env():
     """The `env` words for a Terminal launch: notifier off, plus CLAUDE_CONFIG_DIR when board.pick_account names a
     non-first account (picked once per launch, as board.spawn does)."""
     name = board.pick_account(time.time())[0]
     acc = next((a for a in board.accounts() if a.name == name), None)
     first = board.accounts()[0]
-    return ("env", "CLAUDE_NOTIFIER_DISABLE=1") + ((f"CLAUDE_CONFIG_DIR={acc.dir}",) if acc and acc != first else ())
+    return ("env", "CLAUDE_NOTIFIER_DISABLE=1", *TERMINAL_COLOR_ENV) + ((f"CLAUDE_CONFIG_DIR={acc.dir}",) if acc and acc != first else ())
 
 
 def run_log_tail(root, job):
