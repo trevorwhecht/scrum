@@ -153,13 +153,14 @@
   board.py prod-ok <id> '<bullet>'  gate one decision.md `## Prod runs` bullet: print dev or ok, else exit non-zero
                                    (schema/deploy/fixture scripts always; a :prod run without a passing dev dry run
                                    and apply recorded in jobs/<id>/prod.md)
-  board.py statusline              Claude Code status line: save stdin's rate_limits to ~/.claude/usage.json, print "5h N% · 7d N%"
+  board.py statusline              Claude Code status line: save stdin's rate_limits to <CLAUDE_CONFIG_DIR or ~/.claude>/usage.json, print "5h N% · 7d N%"
 
 Verdicts are never typed in by hand: sync derives them from the first line of each file, so the board can't drift
 from the files. --dir points at the project's scrum/ folder (default ./scrum).
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, re, secrets, shlex, shutil, signal, socket, string, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
+from collections import namedtuple
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -174,12 +175,13 @@ FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
           "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud", "outcome")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome", "account")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
+          "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 # Every needs-human stop's fixed title (lanes/stops.md): key -> one-line meaning. The dashboard shows the key with
@@ -3208,13 +3210,46 @@ def resume_first(jobs: list[dict]) -> int:
                or stalled(j) and not lilguy_in_checkout(j) and not parent_idle(j) for j in jobs)
 
 
-def usage_path():
-    return Path(os.environ.get("SCRUM_USAGE") or Path.home() / ".claude" / "usage.json")
+# The Claude accounts automated sessions may run on, in order: (name, config dir, reserve) where reserve is
+# (5h used %, 7d used %) at which the account is kept for Trevor, or None. SCRUM_ACCOUNTS (JSON) replaces it.
+ACCOUNTS = (("main", "~/.claude", None), ("owa", "~/.claude-owa", (80, 90)))
+Account = namedtuple("Account", "name dir reserve")
+ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
 
-def read_usage():
+def accounts():
+    """ACCOUNTS (or SCRUM_ACCOUNTS) as Account tuples with dir expanded, in order. SCRUM_USAGE set without
+    SCRUM_ACCOUNTS means the first account only (tests stay hermetic); an account after the first whose dir is
+    missing is left out."""
+    raw = os.environ.get("SCRUM_ACCOUNTS")
     try:
-        u = json.loads(usage_path().read_text())
+        rows = json.loads(raw) if raw else ACCOUNTS[:1] if os.environ.get("SCRUM_USAGE") else ACCOUNTS
+        out = [Account(str(n), Path(os.path.expanduser(d)), tuple(r) if r else None) for n, d, r in rows]
+    except (ValueError, TypeError):
+        raise SystemExit(f"bad SCRUM_ACCOUNTS {raw!r}; must be a JSON list of [name, dir, reserve]")
+    if not out or not all(ACCOUNT_RE.fullmatch(a.name) for a in out):
+        raise SystemExit(f"bad accounts {[a.name for a in out]}; names must match {ACCOUNT_RE.pattern}")
+    return out[:1] + [a for a in out[1:] if a.dir.is_dir()]
+
+
+def usage_path(account=None):
+    """The usage.json the status line writes. No account: SCRUM_USAGE, else <CLAUDE_CONFIG_DIR or the first
+    account's dir>/usage.json (this session's own account). A named account: SCRUM_USAGE for the first one when
+    set, else <its dir>/usage.json. An unknown name raises SystemExit."""
+    env, accs = os.environ.get("SCRUM_USAGE"), accounts()
+    if account is None:
+        return Path(env or Path(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or accs[0].dir)) / "usage.json")
+    if env and account == accs[0].name:
+        return Path(env)
+    acc = next((a for a in accs if a.name == account), None)
+    if acc is None:
+        raise SystemExit(f"unknown account {account!r}")
+    return acc.dir / "usage.json"
+
+
+def read_usage(account=None):
+    try:
+        u = json.loads(usage_path(account).read_text())
     except (OSError, ValueError):
         return None
     return u if isinstance(u, dict) else None
@@ -3392,6 +3427,70 @@ def usage_allowance(usage, now, live):
     count = live if isinstance(live, int) else len(live)
     return Allowance(n, f"usage {label} {round(used)}% used, resets {datetime.fromtimestamp(resets):%H:%M} "
                         f"(allowance {n}, {count} live)")
+
+
+def limit_path(account):
+    """The account's usage-limit marker: an epoch beside its usage.json."""
+    return usage_path(account).with_name("limit_until")
+
+
+def note_limit(account, reset):
+    """Mark the account limited until `reset` (epoch seconds), tmp file + os.replace. No folder to write in (tests'
+    SCRUM_USAGE=/dev/null/...) skips it; a failed write is logged to stderr and skipped: the marker only saves retries."""
+    try:
+        path = limit_path(account)
+        if not path.parent.is_dir():
+            return
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(f"{int(reset)}\n")
+        os.replace(tmp, path)
+    except (OSError, SystemExit) as e:
+        print(f"note_limit {account}: {e}", file=sys.stderr)
+
+
+def limited_until(account, now):
+    """The account's limit_until epoch while it is after `now`, else None (missing, malformed or past)."""
+    try:
+        at = int(limit_path(account).read_text().strip())
+    except (OSError, ValueError, SystemExit):
+        return None
+    return at if at > now else None
+
+
+def reserve_hit(acc, usage, now):
+    """Why the account's reserve keeps it for Trevor, or None: a window with resets_at > now whose used % is at or
+    above its reserve value. written_at is ignored (used % only grows inside one window)."""
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    if not acc.reserve or not isinstance(limits, dict):
+        return None
+    for (key, label), cap in zip(WINDOWS, acc.reserve):
+        w = limits.get(key)
+        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
+                and w["resets_at"] > now and w["used_percentage"] >= cap:
+            return f"reserve {label} {round(w['used_percentage'])}% used (keeps {cap}%)"
+    return None
+
+
+def pick_account(now, live=0, prefer=None):
+    """(name, allowance) of the first account with room, `prefer` first when listed, else (None, Allowance(0,
+    reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above 0, and no
+    reserve window reached (reserve_hit)."""
+    accs = accounts()
+    why = []
+    for acc in sorted(accs, key=lambda a: a.name != prefer):
+        if until := limited_until(acc.name, now):
+            why.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
+            continue
+        usage = read_usage(acc.name)
+        allow = usage_allowance(usage, now, live)
+        if allow is not None and allow <= 0:
+            why.append(f"{acc.name} {allow.reason}")
+            continue
+        if held := reserve_hit(acc, usage, now):
+            why.append(f"{acc.name} {held}")
+            continue
+        return acc.name, allow
+    return None, Allowance(0, "no account has room: " + "; ".join(why))
 
 
 def fable_used(usage, now):
@@ -4018,7 +4117,7 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         cap = None  # the usage ladder's slots left this call; None = no taper
         if go and not machine:
             n_live = live_sessions()
-            allow = usage_allowance(read_usage(), time.time(), n_live)
+            allow = pick_account(time.time(), n_live)[1]
             if allow is not None:
                 cap = max(0, allow - n_live)
                 if not cap:  # no slot under the budget: held like a machine wait, never needs-human
@@ -6111,9 +6210,12 @@ def orchestrator_model(root: Path, job_id: str | None = None) -> str | None:
 
 
 def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags=("--permission-mode", "acceptEdits"),
-          model: str | None = None) -> tuple[subprocess.Popen, str]:
-    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog.
-    start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given. Returns (proc, log path relative to root)."""
+          model: str | None = None, account: str | None = None) -> tuple[subprocess.Popen, str]:
+    """Start `claude -p <prompt> <flags>` in the repo, detached, logging to scrum/runs/, and set the job's runlog and account.
+    start/resume get `--model <Orchestrator model>` (or `<Big ticket model>`, see orchestrator_model) unless `model` is given.
+    `account` None: pick_account, preferring the job's recorded account; with none free, the recorded account, else the
+    first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
+    CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. Returns (proc, log path relative to root)."""
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
     if not SPAWN_ACTION_RE.fullmatch(action):
@@ -6123,6 +6225,19 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     if model is None and action in ("start", "resume"):
         model = orchestrator_model(root, job_id)
     prompt = prompt if prompt is not None else f"/trevskills-scrum {action} {job_id}"
+    accs = accounts()
+    if account is None:
+        try:
+            recorded = find(read_board(root), job_id).get("account")
+        except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
+            recorded = None
+        account = pick_account(time.time(), prefer=recorded)[0] or recorded
+    acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
+    env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
+               CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if acc != accs[0]:
+        env["CLAUDE_CONFIG_DIR"] = str(acc.dir)
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
@@ -6131,13 +6246,12 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
         with open(log, "w") as fh:
             proc = subprocess.Popen(argv, cwd=root.parent,
                                     stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                    env=dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
-                                             CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0"))  # -p kills background agents 10 min after the last turn otherwise
+                                    env=env)
     except OSError:  # never started (e.g. the claude CLI missing mid-update): no empty log that reads like a dead session
         log.unlink(missing_ok=True)
         raise
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
-        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome="], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}"], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
     except SystemExit:
         pass
     return proc, f"runs/{log.name}"

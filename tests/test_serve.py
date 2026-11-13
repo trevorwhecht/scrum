@@ -829,7 +829,7 @@ class ServeTest(unittest.TestCase):
         ps = Path(self.tmp.name) / f"ps-{self._testMethodName}.txt"
         ps.write_text("".join(f"{l}\n" for l in lines))
 
-        def fake_spawn(root, job_id, action, prompt=None, flags=()):
+        def fake_spawn(root, job_id, action, prompt=None, flags=(), account=None):
             with ps.open("a") as f:
                 f.write(f"   00:00 claude -p /trevskills-scrum {action} {job_id}\n")
             proc = mock.Mock()
@@ -1754,7 +1754,7 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         job = self.serve.board.find(self.serve.board.read_board(root), parent)
         self.assertEqual(job["stage"], "running")
-        self.assertTrue(job["reason"].startswith("waiting: usage "), job["reason"])
+        self.assertTrue(job["reason"].startswith("waiting: no account has room: main usage "), job["reason"])
 
     @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_ignores_pace_and_session_count(self):
@@ -5348,6 +5348,40 @@ class DigestTest(unittest.TestCase):
         self.assertNotIn("weekly", self.get("/api/p/reg/digests?brief=1")[1])
         self.assertEqual(len(self.get("/api/p/reg/digests")[1]["weekly"]), 1)
 
+    def test_window_tick_fails_over_then_holds_a_limit_killed_digest(self):
+        s, base = self.serve, Path(self.tmp.name)
+        main, owa = base / "main", base / "owa"
+        main.mkdir()
+        owa.mkdir()
+        due = {"due": True, "undigested": 3, "questionsGrowth": 0, "reason": "bad window five_hour-1.json"}
+        logs = iter(range(3))
+
+        def fake_board_spawn(root, job_id, action, prompt=None, flags=(), model=None, account=None):
+            log = f"runs/d{next(logs)}.log"
+            (root / "runs").mkdir(exist_ok=True)
+            (root / log).write_text("You've hit your weekly limit\n")  # no reset named: marked for AUTO_RESUME_EVERY
+            proc = mock.Mock()
+            proc.poll.return_value = 1
+            return proc, log
+
+        accounts = json.dumps([["main", str(main), None], ["owa", str(owa), [80, 90]]])
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(main / "usage.json"), SCRUM_ACCOUNTS=accounts), \
+                mock.patch.object(self.board, "cmd_window_report", return_value=[]), \
+                mock.patch.object(self.board, "cmd_digest_due", return_value=due), \
+                mock.patch.object(self.board, "spawn", side_effect=fake_board_spawn) as bspawn, \
+                mock.patch.object(s, "spawn", wraps=s.spawn) as spawn:
+            calls = []
+            for _ in range(3):
+                s.window_tick()
+                calls.append(spawn.call_count)
+            now = time.time()
+            for name in ("main", "owa"):
+                until = self.board.limited_until(name, now)
+                self.assertTrue(until and now < until <= now + s.AUTO_RESUME_EVERY + 1, (name, until))
+        self.assertEqual(calls, [1, 2, 2])
+        self.assertEqual([c.kwargs["account"] for c in bspawn.call_args_list], ["main", "owa"])
+        self.assertEqual(s.RUNS["reg/digest"]["account"], "owa")
+
     def test_digest_now_spawns_and_refuses_when_empty_or_running(self):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
@@ -7083,6 +7117,63 @@ class AutoResumeTest(unittest.TestCase):
         log.write_text("You've hit your limit · resets 2am (America/Los_Angeles)")
         os.utime(log, (day.replace(hour=0, minute=22).timestamp(),) * 2)
         self.assertEqual(self.serve.limit_reset(self.root, job), (True, day.replace(hour=2, minute=0).timestamp(), False))
+
+    def two_accounts(self):
+        """main (its usage.json via SCRUM_USAGE) and owa config dirs under the temp root, listed by SCRUM_ACCOUNTS."""
+        self.main, self.owa = self.root / "main", self.root / "owa"
+        self.main.mkdir()
+        self.owa.mkdir()
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.main / "usage.json"), SCRUM_ACCOUNTS=json.dumps(
+            [["main", str(self.main), None], ["owa", str(self.owa), [80, 90]]]))
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_hold_limited_marks_the_jobs_account_limited(self):
+        s, reset = self.serve, int(time.time()) + 7200
+        self.two_accounts()
+        jobs = [{"id": "a", "stage": "build", "account": "owa"}, {"id": "b", "stage": "build"},
+                {"id": "c", "stage": "build", "paused": True, "account": "owa"}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertFalse(s.hold_limited(self.root, jobs[2], reset, fixed=True))
+        self.assertFalse(s.hold_limited(self.root, dict(jobs[0], stage="check"), reset, fixed=True))  # moved on
+        self.assertFalse((self.owa / "limit_until").exists())  # a paused or moved-on job writes no marker
+        self.assertTrue(s.hold_limited(self.root, jobs[0], reset, fixed=True))
+        self.assertEqual((s.board.limited_until("owa", time.time()), s.board.limited_until("main", time.time())),
+                         (reset, None))
+        self.assertTrue(s.hold_limited(self.root, jobs[1], reset + 5, fixed=True))  # no account: the first
+        self.assertEqual(s.board.limited_until("main", time.time()), reset + 5)
+
+    def held_sweep(self, jobs):
+        """auto_resume over `jobs` written to board.json, with board.spawn's Popen mocked: [(id, env)] it started."""
+        s = self.serve
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.addCleanup(lambda: [s.RUNS.pop(f"p/{j['id']}", None) for j in jobs])
+        with mock.patch.object(s.board.subprocess, "Popen") as popen, mock.patch.object(s, "running", return_value=False):
+            s.auto_resume("p", self.root, jobs)
+        return [(c.args[0][2].split()[-1], c.kwargs["env"].get("CLAUDE_CONFIG_DIR")) for c in popen.call_args_list]
+
+    def test_limit_held_job_resumes_on_the_other_account_before_the_reset(self):
+        self.two_accounts()
+        reset = int(time.time()) + 3600
+        self.serve.board.note_limit("main", reset)
+        job = {"id": "123-h", "stage": "build", "limitResetAt": reset, "account": "main", "runlog": "runs/h.log"}
+        self.assertEqual(self.held_sweep([job]), [("123-h", str(self.owa))])
+        live = json.loads((self.root / "board.json").read_text())["jobs"][0]
+        self.assertEqual(live["account"], "owa")
+        self.assertEqual(self.serve.AUTO_RESUME["p/123-h"][0], 1)  # the same try budget
+
+    def test_limit_held_job_waits_when_every_account_is_limited(self):
+        self.two_accounts()
+        reset = int(time.time()) + 3600
+        self.serve.board.note_limit("main", reset)
+        self.serve.board.note_limit("owa", reset)
+        held = {"stage": "build", "limitResetAt": reset}
+        jobs = [dict(held, id="h", account="main"), dict(held, id="n")]  # n: no account means main
+        self.assertEqual(self.held_sweep(jobs), [])
+        (self.owa / "limit_until").unlink()  # owa free again: only a job that ran on owa waits on its own account
+        jobs = [dict(held, id="o", account="owa"), dict(held, id="p", account="main", paused=True),
+                dict(held, id="w", account="main", stage="waiting")]
+        self.assertEqual(self.held_sweep(jobs), [])
 
     def test_hold_limited_caps_a_clock_time_reset_at_5h(self):
         s, now = self.serve, 1_800_000_000

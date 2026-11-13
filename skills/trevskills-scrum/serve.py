@@ -209,7 +209,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
     RAM) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
     None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
-    play_queued) writes ram_hold, the reading, and logs it to stderr the first time."""
+    play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
+    digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account)."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -249,10 +250,16 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 live.pop("ram_hold", None)
         if proc is None:
             return None
-    else:
-        proc, log = board.spawn(root, job_id, action, prompt, flags)
+    account = None  # a board job's account is picked and recorded by board.spawn
+    if not on_board:
+        try:
+            board.find(board.read_board(root), job_id)
+        except (SystemExit, OSError):
+            account = board.pick_account(time.time())[0]
+        proc, log = board.spawn(root, job_id, action, prompt, flags, account=account)
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
+                                       "account": account,
                                        **({"reason": reason} if action in ("approve", "rework", "resume") else {})}
     return log
 
@@ -280,14 +287,14 @@ def start_ready(project, root, parent_id, manual=False):
 
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
-    `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance. A full machine leaves
+    `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance (board.pick_account). A full machine leaves
     them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True). A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True):
         return
     room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
     live = board.live_sessions()
-    allow = board.usage_allowance(board.read_usage(), time.time(), live)
+    allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
     out = board.wake_waiting(root, room, hold=lambda j: j.get("wake") and board.resume_blocker(
@@ -998,14 +1005,17 @@ def main_ff_tick(project, repo, root, jobs) -> bool:
 
 def resume_held(project, root, job, jobs, now):
     """auto_resume for a limit-held job: wait for reset + 120 s and a free slot, then resume it in its stage; at AUTO_RESUME_MAX
-    tries it is parked for Trevor (park_spent). True when it resumed the job
+    tries it is parked for Trevor (park_spent). Before the reset it resumes at once when board.pick_account offers an
+    account other than the one the job ran on (board.spawn records the new one). True when it resumed the job
     or still waits for the reset or a slot."""
     key = f"{project}/{job['id']}"
     tries = AUTO_RESUME.get(key, [0, 0.0])[0]
     if running(project, job["id"]):
         return False
     if now < job["limitResetAt"] + 120:
-        return True
+        other = board.pick_account(now, prefer=job.get("account"))[0]
+        if other in (None, job.get("account") or board.accounts()[0].name):
+            return True
     if tries >= AUTO_RESUME_MAX:
         park_spent(root, job, job["stage"], AUTO_RESUME_MAX)
         return False
@@ -1113,7 +1123,8 @@ def park_spent(root, job, stage, used):
 def hold_limited(root, job, reset, stage=None, fixed=False):
     """Under the board lock, keep a usage-limit-killed job in its stage (or move it back to `stage`) with
     limitResetAt = reset (epoch seconds), at most now + SESSION_WINDOW unless the reset is fixed (an epoch or a date);
-    auto_resume restarts it after the reset. False when the job is gone or its stage moved on meanwhile."""
+    auto_resume restarts it after the reset. The job's account (none: the first) gets a board.note_limit marker with
+    the same reset. False when the job is gone or its stage moved on meanwhile."""
     if not fixed:
         reset = min(reset, int(time.time()) + SESSION_WINDOW)
     try:
@@ -1125,6 +1136,7 @@ def hold_limited(root, job, reset, stage=None, fixed=False):
                 raise board._Gone
             live.update(limitResetAt=reset, updatedAt=board.now(), stage=stage or live["stage"])
             live.pop("stalled", None)  # a new-shape stall is now a limit hold in the same stage
+            board.note_limit(live.get("account") or board.accounts()[0].name, reset)
     except board._Gone:
         return False
     return True
@@ -1407,7 +1419,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     auto-started run-all still running and a claimable backlog line, in rank order: board.projects() order, which the
     dashboard's Rank dialog sets. A live, paused or stalled tree never holds it (job 751): cmd_ready keeps the new
     children off their Likely files. board.machine_ok
-    (cool-down, RAM, disk, the session ceiling; claim=True) and board.usage_allowance are checked before each start; the first failure stops
+    (cool-down, RAM, disk, the session ceiling; claim=True) and board.pick_account's allowance are checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
@@ -1422,7 +1434,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                 if refused:  # no room on this machine; retry next tick
                     return
                 live = board.live_sessions()
-                allow = board.usage_allowance(board.read_usage(), time.time(), live)
+                allow = board.pick_account(time.time(), live)[1]
                 if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
                     return
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
@@ -1999,12 +2011,25 @@ def window_tick():
     """board.cmd_window_report for every project, each in its own guard. Every tick, whether or not a scorecard was
     written, when digest-due's reason is a bad window, start the digest through digest_now (DIGEST_LOCK; no spawn
     while one runs), so a busy or failed start is retried next tick. Cool-down skips it: the scorecard is still
-    written, the skipped digest waits for cool-down to end (the dashboard Digest button is not held)."""
+    written, the skipped digest waits for cool-down to end (the dashboard Digest button is not held). A digest run
+    that exited on a usage limit marks its account limited (board.note_limit, once per run), and no digest starts
+    while board.pick_account finds no account with room, so the next one fails over to another account."""
     for project, repo in board.projects().items():
         try:
             root = repo / "scrum"
             board.cmd_window_report(root)
-            if not board.cooling_down() and str(board.cmd_digest_due(root)["reason"]).startswith("bad window"):
+            now = time.time()
+            with RUNS_LOCK:
+                run = RUNS.get(f"{project}/digest")
+                run = run if run and not run.get("limit_noted") and run["proc"].poll() is not None else None
+            if run:
+                hit, reset, _ = limit_reset(root, {"runlog": run["log"]})
+                if hit:
+                    run["limit_noted"] = True
+                    board.note_limit(run.get("account") or board.accounts()[0].name,
+                                     reset if reset and reset > now else now + AUTO_RESUME_EVERY)
+            if not board.cooling_down() and str(board.cmd_digest_due(root)["reason"]).startswith("bad window") \
+                    and board.pick_account(now)[0] is not None:
                 digest_now(project, root)
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: window report: {e}", file=sys.stderr, flush=True)
