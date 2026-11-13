@@ -3681,18 +3681,21 @@ class BoardTest(unittest.TestCase):
         (self.root / "jobs" / b / "spec.md").unlink()  # a job with only some of the three keeps what it has
         out = self.cli("digest-start")
         self.assertEqual(board.cmd_digest_trim(self.root, out["id"]), [a, b])
-        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["decision.md", "feature.md", "round-1", "spec.md"])
-        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / b).iterdir()), ["decision.md", "feature.md", "round-1"])
-        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a / "round-1").iterdir()), ["check.md", "review-code.md"])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["build.md", "decision.md", "feature.md", "rework.md", "round-1", "spec.md"])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / b).iterdir()), ["build.md", "decision.md", "feature.md", "rework.md", "round-1"])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a / "round-1").iterdir()), ["check.md", "review-code.md", "review-ui.md"])
         self.assertEqual((self.root / "jobs" / a / "round-1" / "review-code.md").read_text(), "round-1/review-code.md")
         self.assertEqual((self.root / "jobs" / a / "spec.md").read_text(), "spec.md")
         files = {j["id"]: j["files"] for j in self.jobs()}
-        self.assertEqual(files[a], ["decision.md", "feature.md", "round-1/check.md", "round-1/review-code.md", "spec.md"])
-        self.assertEqual(files[b], ["decision.md", "feature.md", "round-1/check.md", "round-1/review-code.md"])
-        self.assertIs(self.jobs()[0]["diverged"], False)  # build.md was trimmed away
+        self.assertEqual(files[a], ["build.md", "decision.md", "feature.md", "rework.md", "round-1/check.md", "round-1/review-code.md",
+                                    "round-1/review-ui.md", "spec.md"])
+        self.assertEqual(files[b], ["build.md", "decision.md", "feature.md", "rework.md", "round-1/check.md", "round-1/review-code.md",
+                                    "round-1/review-ui.md"])
+        self.assertIs(self.jobs()[0]["diverged"], True)  # build.md is kept
         self.assertTrue((self.root / "digests" / "001" / "trimmed").exists())
         self.assertEqual(self.cli("digest-trim", "001"), [a, b])  # idempotent
-        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()), ["decision.md", "feature.md", "round-1", "spec.md"])
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs" / a).iterdir()),
+                         ["build.md", "decision.md", "feature.md", "rework.md", "round-1", "spec.md"])
         for bad in ("1", "../x", "abc", "999"):
             with self.assertRaises(SystemExit, msg=bad):
                 board.cmd_digest_trim(self.root, bad)
@@ -3708,19 +3711,21 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_digest_trim(self.root, "001"), [listed])
         self.assertEqual(len(list((self.root / "jobs" / unlisted).rglob("*"))), 11)
         self.assertEqual(len(list((self.root / "jobs" / review).rglob("*"))), 11)
-        self.assertEqual(len(list((self.root / "jobs" / listed).rglob("*"))), 6)
+        self.assertEqual(len(list((self.root / "jobs" / listed).rglob("*"))), 9)
 
     def test_digest_trim_round_dirs(self):
         a = self.done_jobs(1)[0]
         for rel in ("feature.md", "round-1/check.md", "round-1/review-code.md", "round-1/head.txt", "round-2/review-code.md",
                     "round-2/shot/a.png", "round-3/review-ui.md", "other/review-code.md"):
             self.write(f"{a}/{rel}", rel)
+        for rel in ("unblock-1.md", "nh-comment.txt", "pr-body.txt"):
+            self.write(f"{a}/{rel}", rel)
         out = self.cli("digest-start")
         board.cmd_digest_trim(self.root, out["id"])
         board.cmd_digest_trim(self.root, out["id"])  # idempotent
         got = sorted(str(p.relative_to(self.root / "jobs" / a)) for p in (self.root / "jobs" / a).rglob("*"))
-        self.assertEqual(got, ["feature.md", "round-1", "round-1/check.md", "round-1/review-code.md",
-                               "round-2", "round-2/review-code.md"])
+        self.assertEqual(got, ["feature.md", "nh-comment.txt", "round-1", "round-1/check.md", "round-1/review-code.md",
+                               "round-2", "round-2/review-code.md", "round-3", "round-3/review-ui.md", "unblock-1.md"])
 
     # --- watchdog ---
     def aged(self, title, minutes, **fields):
