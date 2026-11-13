@@ -1236,6 +1236,13 @@ class ContractTest(unittest.TestCase):
         runall = self.lane("runall")
         self.assertIn("B watchdog", runall)
 
+    def test_lilguy_build_parks_on_blocking_job(self):
+        build = self.section(self.lane("lilguy"), "2. **Build.**", "3. **Check.**")
+        self.assertIn('B wait-on $ID <that id> --then "approve $ID"', build)
+        self.assertIn("the worktree and its commits stay", build)
+        self.assertIn("exits non-zero", build)
+        self.assertIn("--title BUILDER_BLOCKED", build)
+
     def test_skill_headless_sessions_block(self):
         text = skill_text()
         self.assertIn("**Headless sessions block.**", text)
