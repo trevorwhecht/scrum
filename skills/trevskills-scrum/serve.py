@@ -210,7 +210,9 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     RAM) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
     None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
-    digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account)."""
+    digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
+    While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
+    for auto_resume and launches nothing (None); a park that fails launches as usual."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -219,6 +221,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             on_board = True
         except (SystemExit, OSError, ValueError):
             pass
+    if (on_board and action == "start" and not manual and job.get("started_by") in ("serve", "runall")
+            and board.cooling_down() and board.cmd_cooldown_park(root, job_id)["parked"]):
+        print(f"cool down: refused start of {project}/{job_id}", file=sys.stderr, flush=True)
+        return None
     if on_board:
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
@@ -2079,10 +2085,10 @@ def weekly_tick():
 
 def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     """Append one JSON line to board.pulse_path(): sessions, CPU load, free RAM, swap, cool-down, 5h/7d usage, the focus
-    project (rank 0) and per project its claimable backlog lines, parked waiting jobs, busy (watchdog_tick's) and top
-    job number. A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
-    older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace) to the
-    last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
+    project (rank 0) and per project its claimable backlog lines, parked waiting jobs, busy (watchdog_tick's), top
+    job number and auto (Auto continue is set). A project whose board.json is unreadable is left out. Unknown readings
+    are null. When the first line is older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first
+    rewritten (tmp + os.replace) to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
     now = time.time() if now is None else now
     names, usage, projects = board.projects(), claude_usage(now), {}
     for project, repo in names.items():
@@ -2094,7 +2100,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
                 "claimable": claimable_count(root),
                 "waiting": sum(board.parked_waiting(j) and all(d in done for d in j["depends_on"]) for j in jobs),
                 "busy": bool(busy.get(project)),
-                "top": max((int(m.group(1)) for j in jobs if (m := re.match(r"(\d+)-", str(j.get("id"))))), default=None)}
+                "top": max((int(m.group(1)) for j in jobs if (m := re.match(r"(\d+)-", str(j.get("id"))))), default=None),
+                "auto": auto_continue(root) is not None}
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: {e}", file=sys.stderr, flush=True)
     line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),

@@ -10603,8 +10603,8 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(self.lines(), [{
             "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 42.0, "swap": 3.0, "cooldown": True,
             "u5h": 30, "u7d": 60, "focus": "app",
-            "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12},
-                         "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None}}}])
+            "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False},
+                         "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False}}}])
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
                 mock.patch.object(s.board, "swap_used_pct", return_value=None), \
@@ -10626,6 +10626,12 @@ class PulseTest(unittest.TestCase):
             s.watchdog_tick()
         (line,) = self.lines()  # one watchdog tick, one line
         self.assertEqual(sorted(line["projects"]), ["app", "lib"])
+
+    def test_tick_records_auto_continue(self):
+        (self.base / "app" / "scrum" / "project.md").write_text("# Project\n- Auto continue: 1\n")
+        self.serve.pulse_tick({}, now=self.NOW)
+        projects = self.lines()[0]["projects"]
+        self.assertEqual((projects["app"]["auto"], projects["lib"]["auto"]), (True, False))
 
     def test_waiting_counts_only_unblocked(self):
         def waiting(jobs):
@@ -10862,3 +10868,70 @@ class ProdErrorsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpawnCooldownTest(unittest.TestCase):
+    """Job 842: spawn refuses an automatic start of a serve or runall job while cooling down, parking it for
+    auto_resume; a wake or hand job, a manual start or a park that fails still launches."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "scrum"
+        flag = Path(tmp.name) / "cooldown"
+        flag.write_text("")
+        for p in (mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)),
+                  mock.patch.object(self.board, "ram_room", return_value=5),
+                  mock.patch.object(self.board, "cpu_load_pct", return_value=0.0),
+                  mock.patch.object(self.board, "caller_claude_pid", return_value=None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def job(self, by, stage="spec"):
+        job_id = self.board.cmd_new(self.root, f"job by {by}", started_by=by)
+        self.board.cmd_set(self.root, job_id, [f"stage={stage}"])
+        self.addCleanup(lambda: self.serve.RUNS.pop(f"repo/{job_id}", None))
+        return job_id
+
+    def get(self, job_id):
+        return self.board.find(self.board.read_board(self.root), job_id)
+
+    def start(self, job_id, manual=False):
+        err = io.StringIO()
+        with mock.patch.object(self.board, "spawn", return_value=(mock.Mock(), f"runs/{job_id}-start.log")) as bspawn, \
+                mock.patch("sys.stderr", new=err):
+            out = self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=manual)
+        return out, bspawn, err.getvalue()
+
+    def test_runall_start_refused_in_cool_down(self):
+        for by in ("runall", "serve"):
+            job_id = self.job(by)
+            out, bspawn, err = self.start(job_id)
+            self.assertIsNone(out)
+            bspawn.assert_not_called()
+            job = self.get(job_id)
+            self.assertEqual((job["stage"], job.get("stalled"), job["reason"]),
+                             ("spec", True, "stalled: parked for cool down; resumes when cool down ends"))
+            self.assertNotIn("play_queued", job)
+            self.assertNotIn("queued_launch", job)
+            self.assertEqual(err, f"cool down: refused start of repo/{job_id}\n")
+
+    def test_wake_and_hand_start_in_cool_down(self):
+        for by in ("wake", "hand"):
+            job_id = self.job(by)
+            out, bspawn, _ = self.start(job_id)
+            self.assertEqual(out, f"runs/{job_id}-start.log", by)
+            bspawn.assert_called_once()
+            self.assertFalse(self.get(job_id).get("stalled"), by)
+
+    def test_manual_start_in_cool_down(self):
+        job_id = self.job("runall")
+        out, bspawn, _ = self.start(job_id, manual=True)
+        self.assertEqual(out, f"runs/{job_id}-start.log")
+        bspawn.assert_called_once()
+        unparked = self.job("runall", stage="review")  # a stage cooldown-park refuses: the start still launches
+        out, bspawn, _ = self.start(unparked)
+        self.assertEqual(out, f"runs/{unparked}-start.log")
+        bspawn.assert_called_once()

@@ -3416,9 +3416,10 @@ class BoardTest(unittest.TestCase):
                       " · stalls 1\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
 
-    def pulse_digest(self, lines, since=None, error_since=None):
+    def pulse_digest(self, lines, since=None, error_since=None, boards=None):
         """digest-start over a pulse.log of `lines` (dicts or raw strings); `since` and `error_since` (epoch) set the
-        jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. Returns (pulse.md, stderr)."""
+        jobs.txt mtime of an earlier digest 001, and of a failed digest 002 after it. `boards` ({project: jobs}) writes
+        a registry whose repo <project> has those board jobs. Returns (pulse.md, stderr)."""
         self.done_jobs(1)
         for name, at, err in (("001", since, False), ("002", error_since, True)):
             if at is not None:
@@ -3426,6 +3427,11 @@ class BoardTest(unittest.TestCase):
                 os.utime(self.root / "digests" / name / "jobs.txt", (at, at))
         reg = Path(self.tmp.name) / "reg"
         reg.mkdir()
+        for name, jobs in (boards or {}).items():
+            (reg / name / "scrum").mkdir(parents=True)
+            (reg / name / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+        if boards:
+            (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards]))
         if lines is not None:
             (reg / "pulse.log").write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json")}):
@@ -3440,7 +3446,7 @@ class BoardTest(unittest.TestCase):
         def line(t, sessions, cooldown, cpu, app, lib):
             keys = ("claimable", "waiting", "busy", "top")
             return {"t": t, "sessions": sessions, "cooldown": cooldown, "cpu_load": cpu, "focus": "app",
-                    "projects": {"app": dict(zip(keys, app)), "lib": dict(zip(keys, lib))}}
+                    "projects": {"app": {**dict(zip(keys, app)), "auto": True}, "lib": {**dict(zip(keys, lib)), "auto": True}}}
         text, _ = self.pulse_digest([
             line(s - 60, 9, False, 900, (1, 0, False, 1), (0, 0, True, 1)),  # before the last digest: not counted
             line(s, 0, False, 100, (1, 0, False, 10), (0, 0, True, 3)),  # idle, non-focus
@@ -3453,9 +3459,10 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(text, "# Pulse: digest 002\n\n"
                                "Window: 2023-11-14T22:13+00:00 to 2023-11-14T22:17+00:00 · ticks: 5\n"
                                "Idle with claimable work: 3 min (longest stretch 2 min)\n"
+                               "Idle held by Auto continue off or cool down: 1 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
-                               "Claims during cool down: 3 — app 12, lib 5\n"
+                               "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
 
@@ -3466,8 +3473,35 @@ class BoardTest(unittest.TestCase):
             {"t": s, "sessions": 1, "cooldown": False, "cpu_load": 100, "focus": "app", "projects": {"app": pr(None)}},
             {"t": s + 60, "sessions": 1, "cooldown": True, "cpu_load": 600, "focus": "app",
              "projects": {"app": pr(2), "new": pr(5)}}])  # "new" absent from the earlier line: no claim
-        self.assertIn("Claims during cool down: 2 — app 2\n", text)
+        self.assertIn("Claims during cool down: 2 — app 1 2\n", text)
         self.assertIn("Claims while CPU load over 500%: 2\n", text)
+
+    def test_pulse_idle_skips_auto_continue_off(self):
+        s = 1_700_000_000
+        pr = lambda claimable, auto=None: {"claimable": claimable, "waiting": 0, "busy": False, "top": 1,
+                                           **({} if auto is None else {"auto": auto})}
+        tick = lambda t, sessions, cooldown, app, lib: {"t": t, "sessions": sessions, "cooldown": cooldown,
+                                                         "focus": "app", "projects": {"app": app, "lib": lib}}
+        text, _ = self.pulse_digest([
+            tick(s, 0, False, pr(2, False), pr(0, True)),  # only claimable project has Auto continue off: held
+            tick(s + 60, 0, False, pr(2), pr(0, True)),  # no auto key (an old line): off, held
+            tick(s + 120, 0, True, pr(0, True), pr(1, True)),  # cool down: held
+            tick(s + 180, 1, False, pr(2, False), pr(0, True)),  # a session runs: neither
+            tick(s + 240, 0, False, pr(0, True), pr(0, False)),  # nothing claimable: neither
+        ])
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\n"
+                      "Idle held by Auto continue off or cool down: 3 min\n", text)
+
+    def test_pulse_cool_down_skips_hand_claims(self):
+        s = 1_700_000_000
+        pr = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}
+        text, _ = self.pulse_digest([
+            {"t": s, "sessions": 1, "cooldown": True, "focus": "app", "projects": {"app": pr(10)}},
+            {"t": s + 60, "sessions": 1, "cooldown": True, "focus": "app", "projects": {"app": pr(12)}}],
+            boards={"app": [{"id": "010-old", "stage": "done", "started_by": "runall"},
+                            {"id": "011-a", "stage": "spec", "started_by": "hand"},
+                            {"id": "012-b", "stage": "spec", "started_by": "runall"}]})
+        self.assertIn("Claims during cool down: 1 — app 12\n", text)
 
     def test_pulse_missing_log(self):
         empty = "# Pulse: digest 001\n\nNo pulse lines since the last digest.\n"
@@ -9416,6 +9450,74 @@ class CooldownParkTest(unittest.TestCase):
         self.assertEqual(self.park(j), {"parked": False}, "cool down off")
         self.assertNotIn("stalled", self.get(j))
         self.assertIn("cooldown-park <id>", board.__doc__)
+
+
+class StartedByTest(unittest.TestCase):
+    """Job 842: every new board job records who started it (serve, runall, wake or hand)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.root.mkdir()
+        no_claude_pid(self)
+
+    def by(self, job_id):
+        return board.find(board.read_board(self.root), job_id).get("started_by")
+
+    def test_new_defaults_hand(self):
+        self.assertEqual(self.by(board.cmd_new(self.root, "a job")), "hand")
+        r = run_board("--dir", str(self.root), "new", "cli job")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.by(r.stdout.strip()), "hand")
+
+    def test_new_by_flag(self):
+        r = run_board("--dir", str(self.root), "new", "by serve", "--by", "serve")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.by(r.stdout.strip()), "serve")
+        before = (self.root / "board.json").read_text()
+        bad = run_board("--dir", str(self.root), "new", "bad", "--by", "robot")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual((self.root / "board.json").read_text(), before)
+        self.assertIn("--by <serve|runall|wake|hand>", board.__doc__)
+
+    def test_next_auto_runall_index_hand(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Alpha\n- [ ] Beta\n")
+        self.assertEqual(self.by(board.cmd_next(self.root)["id"]), "runall")
+        self.assertEqual(self.by(board.cmd_next(self.root, 1)["id"]), "hand")
+
+    def test_runall_start_children_runall(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Alpha\n- [ ] Beta\n")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual([self.by(j) for j in [out["id"], *out["children"]]], ["runall", "runall", "runall"])
+        with board.locked_board(self.root) as b:  # a parent with no started_by (made before job 842): runall
+            parent = board.find(b, out["id"])
+            parent.pop("started_by")
+            kid = board.add_child(self.root, b, parent, {"ticket": None, "title": "Gamma", "text": "Gamma",
+                                                         "parallel": True}, [], "", plain=True)
+            parent["started_by"] = "hand"
+            hand_kid = board.add_child(self.root, b, parent, {"ticket": None, "title": "Delta", "text": "Delta",
+                                                              "parallel": True}, [], "", plain=True)
+        self.assertEqual((self.by(kid), self.by(hand_kid)), ("runall", "hand"))
+
+    def test_cloud_claim_serve(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Alpha\n")
+        (self.root / "backlog-specs").mkdir()
+        (self.root / "backlog-specs" / (hashlib.sha1(b"Alpha").hexdigest()[:12] + ".md")).write_text(
+            "# Alpha\n\n## Likely files\n- `a.py`: edit\n")
+        (claimed,) = board.cmd_cloud_claim(self.root, 1)["claimed"]
+        self.assertEqual(self.by(claimed["id"]), "serve")
+
+    def test_wake_waiting_sets_wake(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-first", "stage": "done"},
+            {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "started_by": "hand"},
+            {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"], "wake": "start", "started_by": "runall"},
+            {"id": "004-held", "stage": "waiting", "depends_on": ["005-open"], "started_by": "hand"},
+            {"id": "005-open", "stage": "build"}]}))
+        out = board.wake_waiting(self.root)
+        self.assertEqual((out["ready"], out["retry"]), (["002-second"], ["003-third"]))
+        self.assertEqual([self.by(j) for j in ("002-second", "003-third", "004-held")], ["wake", "wake", "hand"])
 
 
 if __name__ == "__main__":
