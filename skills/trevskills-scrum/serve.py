@@ -580,7 +580,10 @@ def stall_spent(key, stage):
     return sum(f"{key}/{stage}{n}" in STALL_RESUMED for n in ("", "#2")) >= STALL_RESUMES.get(stage, 1)
 def stall_mark(key, stage):
     STALL_RESUMED.add(f"{key}/{stage}" if f"{key}/{stage}" not in STALL_RESUMED else f"{key}/{stage}#2")
-LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:usage|spend) limit|limit reached|usage_limit_reached|rate.?limit", re.I)
+# Claude Code's own limit lines only (job 811): "You've hit your weekly limit · resets ...", an API error line, or the
+# usage_limit_reached code. A bare "usage limit" in an agent's Summary prose must not match.
+LIMIT_RE = re.compile(r"^\W*(?:(?:you've|you have) )?hit your (?:[\w-]+ )?limit|^\W*API Error\b.*(?:rate.?limit|usage.?limit|limit reached)"
+                      r"|^\W*rate_limit\b|usage_limit_reached", re.I | re.M)
 NET_RE = re.compile(r"ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|Can't reach the API server", re.I)
 NET_RETRY_EVERY = 5 * 60  # a network outage ends on its own: retry soon, sharing AUTO_RESUME_MAX (~1 h of outage)
 RESET_RE = re.compile(r"resets?(?: at)?(?:\s+([A-Z][a-z]{2}) (\d{1,2})(?: at)?)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
