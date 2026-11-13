@@ -1161,7 +1161,8 @@ DIGEST_RE = re.compile(r"^\d{3}$")
 TRIM_KEEP = {"feature.md", "spec.md", "decision.md", "build.md", "rework.md", "nh-comment.txt"}  # plus unblock-*.md (UNBLOCK_RE)
 UNBLOCK_RE = re.compile(r"unblock-.*\.md")
 ROUND_KEEP = {"review-code.md", "review-ui.md", "review-ux.md", "review-security.md", "review-e2e.md", "check.md"}  # kept inside each round-<N>/ of a trimmed job
-QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many lines since the last one
+QUESTIONS_DIGEST_LINES = 15  # a digest is also due once questions.log grew this many own-project lines since the last one ...
+QUESTIONS_DIGEST_MIN_SECS = 6 * 3600  # ... and the last digest is this old
 BAD_WASTED_PCT = 20  # a window scorecard is bad above this wasted_pct
 BAD_FIRST_PASS = 0.5  # ... or below this first_pass_rate, once it has BAD_MIN_JOBS done jobs
 BAD_MIN_JOBS = 3
@@ -1187,22 +1188,46 @@ def undigested(root, board):
 
 
 def questions_lines(root):
-    """Number of newline bytes in <scrum>/questions.log; 0 when it is missing."""
+    """Number of this project's lines in <scrum>/questions.log: JSON objects whose `project` is the project folder's name
+    or is missing. Blank and unparseable lines do not count; 0 when the file is missing."""
     path = Path(root) / "questions.log"
-    return path.read_bytes().count(b"\n") if path.is_file() else 0
+    if not path.is_file():
+        return 0
+    name = Path(root).resolve().parent.name
+    n = 0
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        n += isinstance(d, dict) and d.get("project", name) == name
+    return n
 
 
-def questions_growth(root):
-    """questions.log lines added since the newest digest with an integer questions.lines and no error.md, floored at 0.
-    With no such digest, the whole line count."""
+def questions_marker(root):
+    """(count, mtime) of the questions.lines of the newest digest with an integer marker and no error.md; None when none."""
     d = Path(root) / "digests"
     for p in sorted((x for x in d.iterdir() if DIGEST_RE.fullmatch(x.name)), reverse=True) if d.is_dir() else []:
         try:
             if not (p / "error.md").exists() and re.fullmatch(r"\d+", text := (p / "questions.lines").read_text().strip()):
-                return max(questions_lines(root) - int(text), 0)
+                return int(text), (p / "questions.lines").stat().st_mtime
         except (OSError, UnicodeDecodeError):
             pass
-    return questions_lines(root)
+    return None
+
+
+def questions_growth(root):
+    """Own questions.log lines added since the newest digest with an integer questions.lines and no error.md, floored
+    at 0. With no such digest, the whole line count."""
+    m = questions_marker(root)
+    return max(questions_lines(root) - m[0], 0) if m else questions_lines(root)
+
+
+def questions_due(root):
+    """True when questions_growth reaches QUESTIONS_DIGEST_LINES and the last digest (questions_marker) is at least
+    QUESTIONS_DIGEST_MIN_SECS old; with no such digest there is no age gate."""
+    m = questions_marker(root)
+    return questions_growth(root) >= QUESTIONS_DIGEST_LINES and (m is None or time.time() - m[1] >= QUESTIONS_DIGEST_MIN_SECS)
 
 
 def bad_window(card: dict) -> bool:
@@ -1249,7 +1274,7 @@ def cmd_digest_due(root):
     path = Path(root) / "board.json"
     n = len(undigested(root, json.loads(path.read_text()) if path.exists() else {"jobs": []}))
     growth = questions_growth(root)
-    reason = "10 done" if n >= 10 else "questions" if growth >= QUESTIONS_DIGEST_LINES else None
+    reason = "10 done" if n >= 10 else "questions" if questions_due(root) else None
     if reason is None and n >= EARLY_DIGEST_MIN and (name := early_window(root)):
         reason = f"bad window {name}"
     return {"due": reason is not None, "undigested": n, "questionsGrowth": growth, "reason": reason}
@@ -1257,11 +1282,11 @@ def cmd_digest_due(root):
 
 def cmd_digest_start(root):
     """Claim every undigested done job as digest NNN, under the lock, so two triggers never share a job. Also starts
-    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES since the last digest; questions.lines records its count.
+    with no jobs when questions.log grew QUESTIONS_DIGEST_LINES own lines and the last digest is QUESTIONS_DIGEST_MIN_SECS old; questions.lines records its count.
     Also claims every valid windows/ scorecard no live digest lists: names to windows.txt, contents to windows.json."""
     with locked_board(root) as board:
         jobs = undigested(root, board)
-        if not jobs and questions_growth(root) < QUESTIONS_DIGEST_LINES:
+        if not jobs and not questions_due(root):
             return {"id": None, "jobs": [], "windows": []}
         digest_id = claim_folder(Path(root) / "digests")
         d = Path(root) / "digests" / digest_id

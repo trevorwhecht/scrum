@@ -3339,6 +3339,7 @@ class BoardTest(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "jobs.txt").write_text("")
         (d / "questions.lines").write_text(text)
+        os.utime(d / "questions.lines", (time.time() - 7 * 3600,) * 2)  # past the 6h gate
         if error:
             (d / "error.md").write_text("failed\n")
 
@@ -3378,6 +3379,28 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 0, "reason": None})
         self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
         self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
+
+    def test_questions_growth_counts_own_project_only(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        own = self.root.resolve().parent.name
+        lines = [json.dumps({"project": "other"}) for _ in range(10)] + [json.dumps({"project": own}) for _ in range(5)]
+        lines += [json.dumps({"n": 1}) for _ in range(5)] + ["", "junk"]
+        (self.root / "questions.log").write_text("\n".join(lines) + "\n")
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 10, "reason": None})
+
+    def test_questions_trigger_waits_six_hours(self):
+        self.write_questions_log(20)
+        self.marker("001", "5\n")
+        m = self.root / "digests" / "001" / "questions.lines"
+        os.utime(m, (time.time() - 3600,) * 2)
+        self.assertEqual(self.cli("digest-due"), {"due": False, "undigested": 0, "questionsGrowth": 15, "reason": None})
+        self.assertEqual(self.cli("digest-start"), {"id": None, "jobs": [], "windows": []})
+        self.assertEqual(sorted(p.name for p in (self.root / "digests").iterdir()), ["001"])
+        os.utime(m, (time.time() - 7 * 3600,) * 2)
+        self.assertEqual(self.cli("digest-due")["reason"], "questions")
+        self.assertEqual(self.cli("digest-start")["id"], "002")
+        self.write_questions_log(40)  # 002 is fresh; 001's old mtime must not count
+        self.assertFalse(self.cli("digest-due")["due"])
 
     def test_digest_start_writes_timing(self):
         (job,) = self.done_jobs(1)
