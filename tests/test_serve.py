@@ -7108,6 +7108,20 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual((live["stage"], live["limitResetAt"]), ("build", 1_800_003_600))
         self.assertNotIn("stalled", live)
 
+    def test_limit_reset_ignores_agent_prose_about_a_usage_limit(self):
+        log, job = self.root / "runs" / "prose.log", {"runlog": "runs/prose.log"}
+        log.write_text("## Summary\n**Action Needed** — job 1063 is held until Nov 14, 17:00 PST by a usage limit.\n"
+                       "Resume it later; the rate limit resets then.\n")
+        self.assertEqual(self.serve.limit_reset(self.root, job), (False, None, False))
+
+    def test_limit_reset_real_cli_line_still_hits(self):
+        log, job = self.root / "runs" / "real.log", {"runlog": "runs/real.log"}
+        for line in ("You've hit your weekly limit · resets Nov 14 at 5pm (America/Los_Angeles)",
+                     "You've hit your 5-hour limit · resets 1:50am (America/Los_Angeles)",
+                     "API Error: 429 rate_limit_error", '{"type":"usage_limit_reached"}'):
+            log.write_text("working\n" + line + "\n")
+            self.assertTrue(self.serve.limit_reset(self.root, job)[0], line)
+
     def test_limit_reset_clock_time_after_log_mtime_stays_within_5h(self):
         log, job = self.root / "runs" / "limit.log", {"runlog": "runs/limit.log"}
         day = datetime.now().replace(second=0, microsecond=0)
