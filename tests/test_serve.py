@@ -7971,9 +7971,11 @@ class ResumeFirstTest(unittest.TestCase):
         self.assertEqual(self.parent(root), ("running", "waiting: files overlap 009-bk, 010-st"))
 
     def test_outside_holder_unknown_files_holds_all(self):
-        root = self.tree([("007-solo", "build", None, {})], [("002-w", "waiting", ["src/a.py"], {})])
+        root = self.tree([("007-solo", "build", [], {})], [("002-w", "waiting", ["src/a.py"], {})])  # a spec, no Likely files
         self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
         self.assertEqual(self.parent(root), ("running", "waiting: files overlap 007-solo"))
+        root = self.tree([("007-solo", "build", None, {})], [("002-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"], "job 859: no spec, no named file: holds nothing")
         root = self.tree([("007-solo", "build", ["src/b.py"], {"parallel": False})],
                          [("002-w", "waiting", ["src/a.py"], {})])
         self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"], "parallel=no never blocks another tree")
