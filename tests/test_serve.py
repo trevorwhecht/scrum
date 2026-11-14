@@ -9579,22 +9579,26 @@ class IdleClaimTest(unittest.TestCase):
     def started(self, spawn):
         return [(c.args[2], c.args[3], c.kwargs.get("idle")) for c in spawn.call_args_list]
 
-    def test_waits_ten_minutes(self):
+    def test_claims_on_first_tick(self):
         s = self.serve
         self.write()
-        got, spawn = self.claim()
-        self.assertEqual((got, spawn.call_args_list), (False, []))
-        self.assertIn("ic", s.IDLE_SINCE)
-        self.assertEqual(s.IDLE_CLAIM_SECS, 600)
-        got, spawn = self.claim(age=590)
-        self.assertEqual((got, spawn.call_args_list), (False, []))
-        got, spawn = self.claim(age=610)
+        self.assertEqual(s.IDLE_CLAIM_SECS, 0)
+        got, spawn = self.claim()  # no timer entry: first tick, or after a serve.py restart
         self.assertIs(got, True)
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
-        s.IDLE_SINCE.clear()  # a serve.py restart: the 10 minutes start over, never an immediate claim
-        got, spawn = self.claim()
+
+    def test_no_claim_without_free_slot(self):
+        s = self.serve
+        self.write()
+        with mock.patch.object(self.board, "live_sessions", return_value=self.board.MAX_SESSIONS):
+            got, spawn = self.claim()
         self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        with mock.patch.object(self.board, "machine_ok", return_value="free RAM 7% (< 20%)"):
+            got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertNotIn("ic", s.IDLE_SINCE)
 
     def test_claims_smallest(self):
         self.write(kids={"002-big": ["a.py", "b.py"], "004-one": ["d.py"], "003-one": ["c.py"]})

@@ -472,7 +472,7 @@ def play_queue_tick(project, root, jobs) -> bool:
     return started
 
 
-IDLE_CLAIM_SECS = 600  # idle_claim: a free slot with held work this long starts one held job
+IDLE_CLAIM_SECS = 0  # idle_claim: a free slot with held work this long starts one held job (0: the first tick that sees both)
 IDLE_SINCE: dict[str, float] = {}  # project -> when its free slot with held work began (epoch s); a restart drops it
 
 
