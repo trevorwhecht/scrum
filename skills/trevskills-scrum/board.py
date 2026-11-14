@@ -1609,7 +1609,11 @@ def _real_review(p):
         text = p.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return False
-    return not ORCH_REVIEW_RE.fullmatch(text) and FAST_STUB not in text
+    lines = text.splitlines()
+    stub = (len(lines) >= 2 and lines[0].strip() == "VERDICT: PASS"
+            and lines[1].startswith(("Carried forward from round", "Skipped by orchestrator:"))
+            and "## Findings" not in text)
+    return not stub and not ORCH_REVIEW_RE.fullmatch(text) and FAST_STUB not in text
 
 
 def _fit_diff(root, job):
