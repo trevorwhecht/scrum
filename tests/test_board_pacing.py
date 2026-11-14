@@ -159,6 +159,9 @@ class ReadyPacingTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SCRUM_USAGE": str(self.usage)})
         env.start()
         self.addCleanup(env.stop)
+        pace = mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # these fixtures sit at 50 % elapsed: test the ladder alone
+        pace.start()
+        self.addCleanup(pace.stop)
 
     def write_usage(self, p5):
         """A fresh usage file whose five_hour window projects to p5 % (half the window elapsed)."""
@@ -306,6 +309,9 @@ class AccountEnv(unittest.TestCase):
         patch = mock.patch.dict(os.environ, env, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
+        pace = mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # 9000 s fixtures are 50 % elapsed: the ladder and reserves alone
+        pace.start()
+        self.addCleanup(pace.stop)
 
     def write(self, folder, five=None, seven=None, written_at=NOW):
         (folder / "usage.json").write_text(json.dumps(usage(five, seven, written_at)))

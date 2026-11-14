@@ -317,7 +317,7 @@ def start_ready(project, root, parent_id, manual=False):
 
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
-    `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance (board.pick_account). A full machine leaves
+    `start` spawn start_ready makes, capped like cmd_ready by ram_room(floor=0) and the usage allowance (board.pick_account). A full machine leaves
     them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True), except
     a `wake` job, which is approved work in flight and only needs RAM room. A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
@@ -329,7 +329,9 @@ def wake_waiting(project, root):
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
         return
-    room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
+    room = board.ram_room(floor=0)  # spawn's own gate: a start it would queue stays waiting, never claimed
+    if room < 1:
+        return
     live = board.live_sessions()
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
@@ -531,8 +533,9 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds automatic starts of new work, never a resume); a Run-all/BigBoy child also waits
-    for the overlap rules `ready` applies to new claims."""
+    (board.machine_ok; cool-down holds automatic starts of new work, never a resume), nor, unless `manual`, while no
+    account has usage room (board.pick_account: a limit, a reserve, the ladder or the 5h pace); a Run-all/BigBoy child
+    also waits for the overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM
@@ -541,6 +544,8 @@ def resume_refusal(project, root, job, manual=False):
         RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
     if machine:
         return f"{board.MACHINE_WAIT}{machine}. Fix: click Resume once memory or disk frees up."
+    if not manual and (pick := board.pick_account(time.time()))[0] is None:  # usage or the 5h pace holds auto-resumes
+        return f"{board.MACHINE_WAIT}{pick[1].reason}. Fix: click Resume to start it now."
     blocker = job.get("parent") and board.resume_blocker(root, job["id"], live_ids(project))
     if not blocker:
         return None
@@ -977,7 +982,9 @@ def auto_resume(project, root, jobs):
     at one per watchdog_tick across all projects (E2E_RESUMED), and one per call outside a tick. A cool-down park
     (board.COOLDOWN_PARK) waits, spending no try and not busy, while cooling down; after it, it is resumed whatever
     its parent, with no per-stage limit. A job parked on the Check queue (CHECK_WAIT) is resumed the same way, one
-    per call, once a check.lock slot is free and nobody waits on it."""
+    per call, once a check.lock slot is free and nobody waits on it. A spec stall with no spec.md (a claim whose
+    launch never started) is resumed whatever its parent, with no per-stage limit, once board.ram_room(floor=0) >= 1;
+    it waits, spending no try and not busy, until then."""
     global E2E_RESUMED
     now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
 
@@ -1055,6 +1062,12 @@ def auto_resume(project, root, jobs):
                         AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
                 continue
             m = board.stall_stage(job)
+            if m == "spec" and not (Path(root) / "jobs" / job["id"] / "spec.md").exists():  # no spec work done yet
+                if board.ram_room(floor=0) >= 1 and resume_refusal(project, root, job) is None and take_room():
+                    busy = True
+                    AUTO_RESUME[key] = [tries + 1, now]
+                    resume_job(project, root, job, jobs)
+                continue
             parent = next((j for j in jobs if j["id"] == job.get("parent")), None)
             run_child = parent and parent.get("stage") == "running" and not parent.get("paused") \
                 and parent.get("lane") in ("runall", "bigboy")
@@ -2204,7 +2217,9 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     job number, auto (Auto continue is set) and gates (runs_alone / overlap:<id> from board.resume_blocker, only when it
     blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
-    is null. A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
+    is null. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
+    board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
+    A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
     to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
     now = time.time() if now is None else now
@@ -2241,10 +2256,19 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     except (Exception, SystemExit) as e:
         print(f"watchdog: pulse: gates: {e}", file=sys.stderr, flush=True)
         gates = None
+    try:
+        guard = board.machine_ok(next(iter(names.values())) / "scrum", claim=False) if names else None
+        if not guard:
+            live = board.live_sessions()
+            acc, allow = board.pick_account(now, live)
+            guard = allow.reason if acc is None or allow is not None and live >= allow else None
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: pulse: guard: {e}", file=sys.stderr, flush=True)
+        guard = None
     line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
             "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
-            "gates": gates}
+            "gates": gates, "guard": guard}
     path = board.pulse_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
