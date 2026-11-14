@@ -5002,6 +5002,9 @@ class Handler(BaseHTTPRequestHandler):
             if askme is not None and (type(askme) is not int or askme not in (1, 2, 3)):  # bool is an int subclass; reject it
                 raise SystemExit("askme must be 1, 2, 3 or null")
         if rest == "/backlog/run":
+            cpu = board.cpu_load_pct() if body.get("index") is None else None  # read per request; the item stays open for the next try
+            if cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT:
+                return 409, {"error": f"CPU load {cpu:.0f}% is over {board.MAX_LAUNCH_CPU_LOAD_PCT}%; nothing claimed, try again shortly"}
             out = board.cmd_next(root, body.get("index"))
             (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
             if askme:  # interactive, like discuss: questions first, then the same session runs the job

@@ -3733,6 +3733,14 @@ class BoardTest(unittest.TestCase):
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
 
+    def test_pulse_hot_claims_skip_hand(self):
+        line = lambda t, top: {"t": t, "sessions": 0, "cooldown": False, "cpu_load": 600, "projects": {
+            "app": {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}}}
+        text, _ = self.pulse_digest([line(1_700_000_000, 10), line(1_700_000_060, 13)], since=1_700_000_000, boards={
+            "app": [{"id": "011-a", "stage": "spec", "started_by": "hand"},
+                    {"id": "012-b", "stage": "spec", "started_by": "runall"}]})
+        self.assertIn("Claims while CPU load over 500%: 2\n", text)
+
     def test_pulse_idle_minutes_capped_at_window(self):
         """Digest 088 read 240 idle minutes in a 79-minute window: idle, its stretch and non-focus never pass the window."""
         lib = {"claimable": 0, "waiting": 0, "busy": True, "top": 1, "auto": True}
