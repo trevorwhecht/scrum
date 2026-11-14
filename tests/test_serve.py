@@ -11095,7 +11095,8 @@ class ProdErrorsTest(unittest.TestCase):
         (self.root / "prod-errors.json").write_text('["a list"]')
         self.sweep(raw='not json\n[1, 2]\n"s"\n' + json.dumps(self.row("/a", "Error: x", 1762736400000)) + "\n")
         self.assertEqual(list(self.state()["seen"].values()), [{"route": "/a", "message": "Error: x",
-                                                                "first": 1762736400.0, "last": 1762736400.0}])
+                                                                "first": 1762736400.0, "last": 1762736400.0, "fullMessage": "Error: x",
+                                                                   "errorCode": None}])
         self.assertEqual(len(self.backlog()), 1)
 
     def test_watchdog_survives_tick_exception(self):
