@@ -1123,7 +1123,7 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(text.count(phrase), 1, name)
             para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
             self.assertIn(phrase, para, name)
-            self.assertLessEqual(len(text), 20400, name)
+            self.assertLessEqual(len(text), 20880 if name == "review-ui" else 20400, name)  # +Real data review-ui, job 830
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
@@ -2434,6 +2434,30 @@ class ContractTest(unittest.TestCase):
                        "never write `Rendered: blocked` or `Rendered: no` for a database reason"):
             self.assertIn(phrase, para, phrase)
         self.assertNotIn("a required DB or session backend was unreachable", text)
+
+    # --- job 830: reviewers judge the real rendered table ---
+    def test_review_ui_e2e_real_data_render(self):
+        ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        para = next(l for l in ui.splitlines() if l.startswith("**Real data.**"))
+        for phrase in ("rendered screenshot of real dev data", "`[blocking]` (confidence ≥ 80)",
+                       "a column empty in every row", "truncated key text",
+                       "rows taller than one line for no reason", "a big gap"):
+            self.assertIn(phrase, para, phrase)
+        e2e = (ROOT / "agents" / "scrum-review-e2e.md").read_text()
+        rule = next(l for l in e2e.splitlines() if "**Real data.**" in l)
+        for name, text in (("ui", para), ("e2e", rule)):
+            for phrase in ("With a reachable dev DB, render the real page with real dev rows first",
+                           "a mock only when the DB is unreachable, and then with sparse rows (optional columns empty) "
+                           "as well as full ones",
+                           "loading, empty or error state is not `Rendered: yes`", "wait for the data and re-shoot",
+                           "data table at 1440px", "UB-3 (no big empty column beside cramped or wrapping ones)",
+                           "UB-4 (no wrapped headers)"):
+                self.assertIn(phrase, text, f"{name}: {phrase}")
+        sec = self.lane("review").split("\n## Visual diff (Check gate)\n")[1].split("\n## ")[0]
+        for phrase in ("never counts as a table-layout pass",
+                       "no BASE install or render happened",
+                       "`scrum-review-ui` and `scrum-review-ux` must render the real table at 1440px themselves"):
+            self.assertIn(phrase, sec, phrase)
 
     def test_review_ux_ui_find_cloud_chromium(self):
         lookup = ("If that binary is missing, look for Chromium under `${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}` "
@@ -3912,6 +3936,14 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = DASHBOARD.read_text()
         for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
             self.assertIn(phrase, text, phrase)
+
+    # --- job 832: Dev migrate never writes the prod marker ---
+    def test_dev_migrate_never_writes_migrated_md(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "merge.md").read_text()
+        dev = self.section(text, "## Dev migrate (Check gate)", "## Resuming the builder")
+        self.assertIn("never writes `migrated.md`", dev)
+        self.assertIn("dev-migrated.md", dev)
+        self.assertIn("Only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`", dev)
 
 
 if __name__ == "__main__":

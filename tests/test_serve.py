@@ -845,7 +845,7 @@ class ServeTest(unittest.TestCase):
         ps, fake = self.launch_ps()
         swap_log = Path(self.tmp.name) / "swap-gate.json"
         swap_log.write_text(json.dumps([[time.time() - 100, 10.0]]))  # an old low reading: swap 20 is growth
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="66", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps),
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps),
                              SCRUM_SWAP_LOG=str(swap_log)), \
                 mock.patch.object(b, "spawn", side_effect=fake) as spawn:
             out = [s.spawn("repo", self.root, i, "approve", f"/trevskills-scrum approve {i}") for i in ids]
@@ -6365,6 +6365,70 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(list(self.backups()), [])
         self.assertEqual(self.board.backlog_items(self.scrum), [])
         self.assertFalse((self.scrum / "questions.log").exists())
+
+    def test_digest_apply_records_companion_test_file(self):
+        self.git_repo()
+        self.pin_tests("assert 'old line'\n")
+        x, y = self.reg / "agents" / "scrum-x.md", self.reg / "agents" / "scrum-y.md"
+        y.write_text("keep A\nold line\nkeep B\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "y")
+        self.git("push", "-q")
+        self.digest([self.prop("p1", x), self.prop("p2", y, old="keep A", new="kept A")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["applied", "applied"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([p.get("companion") for p in data], ["tests/test_contracts.py", None])
+        self.assertEqual([a.get("companion") for a in out["applied"]], ["tests/test_contracts.py", None])
+
+    def test_valid_proposal_companion(self):
+        p = self.prop("p1", self.rule())
+        self.assertEqual(self.serve.valid_proposal(p | {"companion": "tests/test_x.py"})["companion"], "tests/test_x.py")
+        self.assertNotIn("companion", self.serve.valid_proposal(p | {"companion": 7}))
+
+    def companion_repo(self, tests_text="assert 'new line'\n", companion="tests/test_contracts.py"):
+        """An applied p1 (old line -> new line) whose companion holds tests_text; the contract tests always pass."""
+        if not (self.reg / ".git").exists():  # a subTest loop calls this again: only the test file and proposal change
+            self.git_repo(text="keep A\nnew line\nkeep B\n")
+            patch = mock.patch.object(self.serve, "digest_contract_ok", return_value=True)
+            patch.start()
+            self.addCleanup(patch.stop)
+        (self.reg / "tests" / "test_contracts.py").write_text(tests_text)
+        self.git("commit", "-q", "--allow-empty", "-am", "tests")
+        self.git("push", "-q")
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md", status="applied", companion=companion)])
+
+    def test_digest_revert_reverses_companion_explicitly(self):
+        self.companion_repo()
+        code, body = self.serve.digest_revert(self.scrum, "001", "p1")
+        self.assertEqual((code, body["status"]), (200, "reverted"))
+        self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual((self.reg / "tests" / "test_contracts.py").read_text(), "assert 'old line'\n")
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), ["agents/scrum-x.md", "tests/test_contracts.py"])
+        self.assertEqual(self.statuses(), ["reverted"])
+
+    def test_digest_revert_companion_text_changed_409(self):
+        for tests_text, n in (("nothing here\n", 0), ("new line\nnew line\n", 2)):
+            with self.subTest(n=n):
+                self.companion_repo(tests_text)
+                heads = self.head_count()
+                self.assertEqual(self.serve.digest_revert(self.scrum, "001", "p1"),
+                                 (409, {"error": f"companion tests/test_contracts.py: old text found {n} times"}))
+                self.assertEqual(self.head_count(), heads)
+                self.assertEqual(self.statuses(), ["applied"])
+                self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
+                self.assertEqual((self.reg / "tests" / "test_contracts.py").read_text(), tests_text)
+
+    def test_digest_revert_companion_path_untrusted_409(self):
+        for bad in ("../outside.py", "agents/scrum-x.md", "tests/sub/x.py", "tests/test_contracts.txt", "/etc/passwd"):
+            with self.subTest(bad=bad):
+                self.companion_repo(companion=bad)
+                heads = self.head_count()
+                self.assertEqual(self.serve.digest_revert(self.scrum, "001", "p1"),
+                                 (409, {"error": f"companion {bad} is not a tests/*.py file"}))
+                self.assertEqual(self.head_count(), heads)
+                self.assertEqual(self.statuses(), ["applied"])
+                self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nnew line\nkeep B\n")
 
     def test_digest_revert_non_applied_returns_409(self):
         rule = self.rule("keep A\nnew line\nkeep B\n")
