@@ -2118,8 +2118,8 @@ PULSE_GATES = (("free RAM", "ram"), ("swap used", "swap"), ("free disk", "disk")
 def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     """Append one JSON line to board.pulse_path(): sessions, CPU load, free RAM, swap, cool-down, 5h/7d usage, the focus
     project (rank 0) and per project its claimable backlog lines, parked waiting jobs, busy (watchdog_tick's), top
-    job number, auto (Auto continue is set) and gates (runs_alone / overlap:<id> from board.resume_blocker on those
-    waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
+    job number, auto (Auto continue is set) and gates (runs_alone / overlap:<id> from board.resume_blocker, only when it
+    blocks every one of those waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
@@ -2141,12 +2141,11 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             print(f"watchdog: pulse: {project}: {e}", file=sys.stderr, flush=True)
             continue
         try:
+            hits = [board.resume_blocker(root, j["id"]) for j in jobs
+                    if board.parked_waiting(j) and all(d in done for d in j["depends_on"])]
             gates = []
-            for j in jobs:
-                if board.parked_waiting(j) and all(d in done for d in j["depends_on"]):
-                    hit = board.resume_blocker(root, j["id"])
-                    if hit:
-                        gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
+            for hit in hits if hits and all(hits) else []:  # one resumable job means the project is not gated
+                gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
             projects[project]["gates"] = list(dict.fromkeys(gates))
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)
