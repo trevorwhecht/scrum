@@ -4700,6 +4700,13 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
                 continue
             k_slots, k_outside = (held_by(slots), held_by(outside)) if critical(k) else (slots, outside)
+            skipped = []
+            if (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
+                    or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in ("fast", "lilguy"):
+                # a fast or lilguy kid skips a holder still in spec (nothing in its tree yet) unless Likely files meet
+                skipped = [o["id"] for o in k_slots + k_outside
+                           if o.get("stage") == "spec" and not shared_files(files[k["id"]], files[o["id"]])]
+                k_slots, k_outside = ([o for o in pool if o["id"] not in skipped] for pool in (k_slots, k_outside))
             hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files)  # only: never runs alone
             out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files)
             if out_hit:
@@ -4711,6 +4718,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                         else [f"overlap:{i}" for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
+            for i in skipped:
+                note_queue_gate(root, k["id"], f"overlap_skipped:{i}")
             k.update(stage="spec", updatedAt=now())
             k.pop("overlap_hold", None)
             try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)

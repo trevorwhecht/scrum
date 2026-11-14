@@ -1120,6 +1120,49 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.child(c2)["stage"], "waiting")
         self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
 
+    def fast_pair(self, lane="fast", holder_files=("src/a.py",), kid_files=()):
+        """A parent with holder 002 (stage spec), fast kid 003 and standard kid 004, all waiting but 002 claimed."""
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
+                           self.ticket(4, deps="T1, T2, T3", exposure="yes"))
+        c1, c2, c3, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        if holder_files:
+            self.spec(c1, *holder_files)
+        if kid_files:
+            self.spec(c2, *kid_files)
+        board.cmd_set(self.root, c1, ["stage=spec"])
+        board.cmd_set(self.root, c2, [f"lane={lane}"])
+        return parent, c1, c2, c3
+
+    def test_ready_fast_child_skips_overlap_with_unbuilt_holder(self):
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
+            if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
+        parent, c1, c2, c3 = self.fast_pair()
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        self.assertEqual(self.child(c2)["stage"], "spec")
+        self.assertEqual(self.child(c3)["stage"], "waiting")  # the standard kid is held as before
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(gates(c2), [f"overlap_skipped:{c1}"])  # once, and no overlap: or runs_alone: line
+        # holder at build: a second waiting fast child is held
+        board.cmd_set(self.root, c1, ["stage=build"])
+        board.cmd_set(self.root, c2, ["stage=done"])
+        board.cmd_set(self.root, c3, ["lane=fast"])
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(c3)["stage"], "waiting")
+        self.assertIn(c1, self.child(c3)["overlap_hold"]["ids"])
+
+    def test_ready_lilguy_child_skips_unbuilt_outside_holder(self):
+        out = board.cmd_new(self.root, "Outside")  # stage spec, another tree's leaf job
+        self.spec(out, "src/a.py")
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        board.cmd_set(self.root, c1, ["lane=lilguy"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+
+    def test_ready_fast_child_still_held_when_files_intersect_unbuilt_holder(self):
+        parent, c1, c2, _ = self.fast_pair(kid_files=("src/a.py",))
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c2)["overlap_hold"]["ids"], [c1])
+
     def test_ready_critical_skips_unbuilt_outside_holder(self):
         out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
         self.spec(out, "src/a.py", "src/b.py")
