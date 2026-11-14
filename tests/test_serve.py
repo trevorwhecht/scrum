@@ -579,6 +579,19 @@ class ServeTest(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: any(f"/trevskills-scrum start {job_id}" in a for c in self.calls() for a in c)))
         self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 400)  # already claimed
 
+    def test_backlog_run_refused_at_high_cpu_load(self):
+        path = self.root / "backlog.md"
+        text = path.read_text()
+        self.addCleanup(path.write_text, text)
+        before = self.serve.board.backlog_items(self.root)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {})[0], 409)
+            self.assertEqual(self.serve.board.backlog_items(self.root), before)
+            self.assertFalse(any("start" in a for c in self.calls() for a in c))
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {"index": 1})[0], 202)  # explicit index: ungated
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="500"):
+            self.assertEqual(self.req("POST", "/api/p/repo/backlog/run", {})[0], 202)
+
     def test_backlog_run_refuses_waiting_item(self):
         path = self.root / "backlog.md"
         before = path.read_text()

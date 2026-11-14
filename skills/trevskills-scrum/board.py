@@ -1487,7 +1487,7 @@ def write_pulse(root, digest_id):
                             cool += 1
                             claimed.setdefault(name, []).append(str(n))
                 if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
-                    hot += top - was
+                    hot += sum(not _hand_started(boards, name, n) for n in range(int(was) + 1, int(top) + 1))
 
         def peak(key):
             nums = [l for l in lines if is_num(l.get(key))]
