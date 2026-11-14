@@ -8324,7 +8324,7 @@ class DigestTrevorTest(unittest.TestCase):
 class PipelineFitTest(unittest.TestCase):
     """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
 
-    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit"}
+    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit", "sensitive"}
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -8434,11 +8434,13 @@ class PipelineFitTest(unittest.TestCase):
             "added": 200, "deleted": 50, "files": 4,
             "verdicts": {"1": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
                          "2": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}},
-            "fix_rounds": 1, "over_routed": False, "fit": "standard"})
+            "fix_rounds": 1, "over_routed": False, "fit": "standard", "sensitive": False})
         self.assertEqual(jd, {"id": d, "lane": "debug", "agents": ["spec", "approver"], "added": None, "deleted": None,
-                              "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "debug"})
+                              "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "debug",
+                              "sensitive": False})
         self.assertEqual(gone, {"id": "998-gone", "lane": "standard", "agents": [], "added": None, "deleted": None,
-                                "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "standard"})
+                                "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "standard",
+                                "sensitive": False})
         self.assertEqual(je["agents"], [])
         self.assertEqual(je["verdicts"], {"1": {"security": None, "ux": None, "ui": "PASS", "code": None}})
         self.assertEqual(je["fit"], "fast")
@@ -8463,6 +8465,32 @@ class PipelineFitTest(unittest.TestCase):
         self.assertEqual((j["added"], j["deleted"], j["files"]), (20, 0, 2))
         self.assertEqual(j["agents"], ["spec", "builder", "review-ux", "review-ui", "review-code", "approver"])
         self.assertEqual((j["over_routed"], j["fit"]), (True, "lilguy"))
+        self.assertIs(j["sensitive"], False)
+
+    def test_pipeline_fit_bumped_lane_not_over_routed(self):
+        cases = [("Lane: standard - bumped from fast for the sensitive path\n\n## Why\n", True),
+                 ("Lane: standard - bumped from fast\n", False),
+                 ("# t\n\n## Why\nLane: standard - bumped for the sensitive path\n", False)]
+        for feature, want in cases:
+            with self.subTest(feature=feature):
+                job = self.small_standard()
+                self.put(job, "feature.md", feature)
+                self.digest(job)
+                j = self.fit()["jobs"][0]
+                self.assertEqual((j["sensitive"], j["over_routed"]), (want, not want))
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+
+    def test_pipeline_fit_prod_migrate_payment_path_not_over_routed(self):
+        for path in ("scripts/seed-prod.py", "db/migrations/001.sql", "src/Payments.py"):
+            with self.subTest(path=path):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard(lines=10, files=1)
+                self.commit({path: "y\n" * 10})
+                self.digest(job)
+                j = self.fit()["jobs"][0]
+                self.assertEqual((j["sensitive"], j["over_routed"]), (True, False))
 
     def test_pipeline_fit_sensitive_path_not_over_routed(self):
         (self.root / "project.md").parent.mkdir(parents=True, exist_ok=True)
@@ -8629,6 +8657,17 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "1188-b", "lane": "standard", "added": 95, "deleted": 16, "files": 4, "over_routed": False, "fit": "standard"},
             {"id": "1189-c", "lane": "standard", "added": 18, "deleted": 14, "files": 2, "over_routed": False, "fit": "standard"}]}))
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
+
+    def test_cheaper_lane_jobs_skips_sensitive(self):
+        self.board(("101-a", "done", "standard", "", "merged"), ("102-b", "done", "standard", "", "merged"),
+                   ("103-c", "done", "standard", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "101-a", "over_routed": True, "sensitive": True},
+            {"id": "102-b", "over_routed": True, "sensitive": False},
+            {"id": "103-c", "over_routed": True}]}))
+        m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
+        self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
 
     def test_waste_empty_likely_uses_real_diff(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
@@ -9271,7 +9310,7 @@ class UsageAllowanceTest(unittest.TestCase):
         at = datetime.fromtimestamp(USAGE_NOW + 14400).strftime("%H:%M")
         a = board.usage_allowance(u, USAGE_NOW, 2)
         self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 2 live)"))
-        a = board.usage_allowance(u, USAGE_NOW, ["1-a", "2-b", "3-c"])
+        a = board.usage_allowance(u, USAGE_NOW, ["101-a", "102-b", "103-c"])
         self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 3 live)"))
         self.assertEqual(int(board.usage_allowance(u, USAGE_NOW, 40)), 1, "the number never depends on live")
         seven_at = datetime.fromtimestamp(USAGE_NOW + 3600).strftime("%H:%M")
