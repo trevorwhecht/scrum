@@ -8411,6 +8411,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
         env.start(); self.addCleanup(env.stop)
         serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("idle/")])
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
 
     def write(self, parent, kids, lane="runall"):
         """parent stage, {child id: stage}."""
@@ -9141,6 +9143,8 @@ class AutoContinueTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
         env.start(); self.addCleanup(env.stop)
         self.projects = {}
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
 
     def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=(), focus=False):
         root = self.base / name / "scrum"
@@ -9579,22 +9583,26 @@ class IdleClaimTest(unittest.TestCase):
     def started(self, spawn):
         return [(c.args[2], c.args[3], c.kwargs.get("idle")) for c in spawn.call_args_list]
 
-    def test_waits_ten_minutes(self):
+    def test_claims_on_first_tick(self):
         s = self.serve
         self.write()
-        got, spawn = self.claim()
-        self.assertEqual((got, spawn.call_args_list), (False, []))
-        self.assertIn("ic", s.IDLE_SINCE)
-        self.assertEqual(s.IDLE_CLAIM_SECS, 600)
-        got, spawn = self.claim(age=590)
-        self.assertEqual((got, spawn.call_args_list), (False, []))
-        got, spawn = self.claim(age=610)
+        self.assertEqual(s.IDLE_CLAIM_SECS, 0)
+        got, spawn = self.claim()  # no timer entry: first tick, or after a serve.py restart
         self.assertIs(got, True)
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
-        s.IDLE_SINCE.clear()  # a serve.py restart: the 10 minutes start over, never an immediate claim
-        got, spawn = self.claim()
+
+    def test_no_claim_without_free_slot(self):
+        s = self.serve
+        self.write()
+        with mock.patch.object(self.board, "live_sessions", return_value=self.board.MAX_SESSIONS):
+            got, spawn = self.claim()
         self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        with mock.patch.object(self.board, "machine_ok", return_value="free RAM 7% (< 20%)"):
+            got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertNotIn("ic", s.IDLE_SINCE)
 
     def test_claims_smallest(self):
         self.write(kids={"002-big": ["a.py", "b.py"], "004-one": ["d.py"], "003-one": ["c.py"]})
@@ -9808,6 +9816,8 @@ class ParkedParentTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp())
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.base / "no-usage.json"))
         env.start(); self.addCleanup(env.stop)
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
         for s in (serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
             s.clear(); self.addCleanup(s.clear)
         self.root = self.base / "p" / "scrum"
