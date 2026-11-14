@@ -8411,6 +8411,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
         env.start(); self.addCleanup(env.stop)
         serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear()
         self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("idle/")])
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
 
     def write(self, parent, kids, lane="runall"):
         """parent stage, {child id: stage}."""
@@ -9141,6 +9143,8 @@ class AutoContinueTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
         env.start(); self.addCleanup(env.stop)
         self.projects = {}
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
 
     def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=(), focus=False):
         root = self.base / name / "scrum"
@@ -9812,6 +9816,8 @@ class ParkedParentTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp())
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.base / "no-usage.json"))
         env.start(); self.addCleanup(env.stop)
+        ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
+        ic.start(); self.addCleanup(ic.stop)
         for s in (serve.ORPHAN_RESPAWN, serve.STALL_RESUMED, serve.AUTO_RESUME):
             s.clear(); self.addCleanup(s.clear)
         self.root = self.base / "p" / "scrum"
