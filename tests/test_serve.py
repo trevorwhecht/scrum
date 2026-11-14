@@ -7953,6 +7953,7 @@ class ResumeFirstTest(unittest.TestCase):
                   ("010-st", "build", ["src/z/"], {"parent": "008-big", "stalled": True,
                                                   "reason": "stalled: no live session. Fix: click Resume."})]
         root = self.tree(bigboy, [("002-w", "waiting", ["src/x.py"], {})])
+        (root.parent / "src").mkdir()  # in-repo folder: src/ paths are not another repo's
         for _ in range(2):  # held again on the next call: same reason, never needs-human
             self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
             self.assertEqual(self.job(root, "002-w")["stage"], "waiting")
@@ -11382,7 +11383,7 @@ class PulseTest(unittest.TestCase):
         usage = {"rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": self.NOW + 3600},
                                  "seven_day": {"used_percentage": 60, "resets_at": self.NOW + 86400}}, "written_at": self.NOW}
         for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PS=str(self.base / "ps.txt"),
-                                  SCRUM_FREE_RAM="42", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="250",
+                                  SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="250",
                                   SCRUM_COOLDOWN=str(self.base / "cooldown")),
                   mock.patch.object(serve.board, "read_usage", lambda: usage)):
             p.start()
@@ -11396,7 +11397,7 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(s.board.pulse_path(), self.log)
         s.pulse_tick({"app": True}, now=self.NOW)
         self.assertEqual(self.lines(), [{
-            "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 42.0, "swap": 3.0, "cooldown": True,
+            "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 40.0, "swap": 3.0, "cooldown": True,
             "u5h": 30, "u7d": 60, "focus": "app",
             "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False, "gates": []},
                          "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False, "gates": []}},

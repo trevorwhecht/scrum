@@ -34,7 +34,7 @@ class StaleSwap(unittest.TestCase):
         self.falling_then_rebound()
         self.ps.write_text("   30:00 claude -p /trevskills-scrum run-all\n   00:30 claude -p /trevskills-scrum start 1-a\n")
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="27"):
-            self.assertEqual(board.ram_room(floor=0), 1, "71% free, one young session: room for one more")
+            self.assertEqual(board.ram_room(floor=0), 9, "71% free (over 2x min): no young cap, 51 // 5 - 1 young")
 
 
 if __name__ == "__main__":
