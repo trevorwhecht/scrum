@@ -10897,13 +10897,28 @@ class IdleCleanupTest(unittest.TestCase):
         self.assertEqual(self.stop({"a": a, "b": b}, listening, live=2)[0], [], "a headless session runs")
         self.assertEqual(self.stop({"a": a, "b": b}, listening, live=0)[0], [1, 2])
 
+    def test_watchdog_tick_passes_run_exits(self):
+        s = self.serve
+        (self.repo("quiet") / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+        done, live, other = mock.Mock(), mock.Mock(), mock.Mock()
+        done.poll.return_value, live.poll.return_value, other.poll.return_value = 137, None, 1
+        runs = {"quiet/101-a": {"proc": done, "log": "runs/20261101-100000-start-101-a.log"},
+                "quiet/102-b": {"proc": live, "log": "runs/20261101-100001-start-102-b.log"},
+                "loud/103-c": {"proc": other, "log": "runs/20261101-100002-start-103-c.log"}}
+        with mock.patch.dict(s.RUNS, runs, clear=True), \
+                mock.patch.object(s.board, "projects", return_value={"quiet": self.base / "quiet"}), \
+                mock.patch.object(s.board, "cmd_watchdog", return_value=[]) as watch, \
+                mock.patch.object(s, "idle_cleanup"), mock.patch("sys.stderr", new=io.StringIO()):
+            s.watchdog_tick()
+        self.assertEqual(watch.call_args.kwargs, {"exits": {"runs/20261101-100000-start-101-a.log": 137}})
+
     def test_watchdog_tick_calls_idle_cleanup(self):
         s = self.serve
         projects = {}
         for name in ("broken", "quiet"):
             (self.repo(name) / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
             projects[name] = self.base / name
-        def watchdog(root):
+        def watchdog(root, **kw):
             if root.parent.name == "broken":
                 raise RuntimeError("bad board")
             return []

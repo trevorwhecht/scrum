@@ -2079,6 +2079,13 @@ def terminal_batch_tick(project, root, jobs):
             print(f"watchdog: {project}: opened Terminal batch {live['id']}", file=sys.stderr, flush=True)
 
 
+def run_exits(project) -> dict:
+    """{run log: exit code} for each RUNS session of project that has exited, for cmd_watchdog's stall line."""
+    with RUNS_LOCK:
+        return {r["log"]: code for key, r in RUNS.items() if key.startswith(f"{project}/")
+                and r.get("proc") is not None and (code := r["proc"].poll()) is not None}
+
+
 def watchdog_tick():
     """Three passes over every registered project; one project's failure never stops the others.
     1. Resume: per project, move old .claude parks into the Terminal batch (claude_migrate), flag exited and stalled sessions (respawn_exited, cmd_watchdog), then start Trevor's queued
@@ -2116,7 +2123,7 @@ def watchdog_tick():
                 claude_migrate(project, root)
                 respawn_exited(project, root)
                 record_outcomes(project, root)
-                flagged = set(board.cmd_watchdog(root))
+                flagged = set(board.cmd_watchdog(root, exits=run_exits(project)))
                 if not (root / "board.json").exists():
                     busy[project] = False
                     continue
