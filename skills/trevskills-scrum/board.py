@@ -1428,7 +1428,9 @@ def write_pulse(root, digest_id):
     line's top-level `gates` (serve.py pulse_tick) is non-empty, or no project has claimable work with Auto continue on
     and every project with waiting work has non-empty `gates`; ends an idle stretch; minutes per token, overlap:<id>
     counted as overlap; a missing or null `gates` is ungated), idle held (no session, some claimable or waiting work,
-    not idle: Auto continue off or cool-down), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
+    not idle: Auto continue off or cool-down), idle held by the machine guard (would be idle with claimable work, but
+    the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
+    as before), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
     jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
     while another project was busy."""
     since = _pulse_since(root, digest_id)
@@ -1444,7 +1446,7 @@ def write_pulse(root, digest_id):
         pos = lambda v: is_num(v) and v > 0
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
         gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
-        idle = held = guard = streak = longest = nonfocus = gated = 0
+        idle = held = guard = streak = longest = nonfocus = gated = guarded = 0
         by_gate = {}
         for l, nxt in zip(lines, lines[1:] + [None]):
             dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else 0
@@ -1461,6 +1463,8 @@ def write_pulse(root, digest_id):
                     gated, streak = gated + dt, 0
                     for g in dict.fromkeys("overlap" if g.startswith("overlap:") else g for g in why):
                         by_gate[g] = by_gate.get(g, 0) + dt
+                elif isinstance(l.get("guard"), str) and l["guard"]:
+                    guarded, streak = guarded + dt, 0
                 else:
                     idle, streak = idle + dt, streak + dt
                     longest = max(longest, streak)
@@ -1471,7 +1475,8 @@ def write_pulse(root, digest_id):
             f = l.get("focus") if isinstance(l.get("focus"), str) else None
             if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
                 nonfocus += dt
-        idle, held, guard, longest, nonfocus, gated = (round(x / 60) for x in (idle, held, guard, longest, nonfocus, gated))
+        idle, held, guard, longest, nonfocus, gated, guarded = (
+            round(x / 60) for x in (idle, held, guard, longest, nonfocus, gated, guarded))
         cool, hot, claimed, boards = 0, 0, {}, {}
         for a, b in zip(lines, lines[1:]):
             pa, pb = projs(a), projs(b)
@@ -1500,6 +1505,7 @@ def write_pulse(root, digest_id):
                 + (" (" + ", ".join(f"{g} {round(v / 60)}" for g, v in by_gate.items()) + ")" if gated else ""),
                 f"Held by machine guard: {guard} min",
                 f"Idle held by Auto continue off or cool down: {held} min",
+                f"Idle held by the machine guard: {guarded} min",
                 f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
                 f"Peak CPU load: {c['cpu_load']:.0f}% at {iso(c['t'])}" if c else "Peak CPU load: unknown",
                 f"Claims during cool down: {cool}"
@@ -3578,6 +3584,7 @@ USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the 
 USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
 USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
 USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
+PACE_LEAD_PCT = 15  # the 5h window's used % this many points ahead of its elapsed % holds automated claims (allowance 0)
 
 
 class Allowance(int):
@@ -3593,12 +3600,20 @@ def usage_allowance(usage, now, live):
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
-    only feeds the reason text. Trevor's own Play/Resume never call this."""
+    only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour window whose used % runs
+    PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ...") before the ladder."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
         return None
     at = usage.get("written_at")
     if not is_num(at) or now - at > USAGE_STALE_SECS:
         return None
+    w = usage["rate_limits"].get("five_hour")
+    if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now:
+        span = WINDOW_SECS["five_hour"]
+        elapsed = min(100, max(0, (span - (w["resets_at"] - now)) / span * 100))
+        if w["used_percentage"] - elapsed >= PACE_LEAD_PCT:
+            return Allowance(0, f"pace 5h {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, resets "
+                                f"{datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
     rungs = (None,) + USAGE_STEPS
     best = None
     for key, label in WINDOWS:
@@ -4370,7 +4385,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     "Waiting on" line); a claim or a depends_on wait drops it.
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
     siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
-    machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim."""
+    machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
+    Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -4419,7 +4435,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
             outside = [j for j in outside if has_session(j)]
         files.update({j["id"]: child_files(jobs_dir, j["id"]) for j in outside})
         overlap = []  # outside holder ids that alone hold a waiting child
-        room = (1 if only else ram_room()) if go and not machine else 0  # one claim = one new session
+        room = (1 if only else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
+        ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
         if cap is not None:
             room = min(room, cap)
         ready = []
@@ -4458,7 +4475,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if only and not ready:  # an idle claim that claimed nothing leaves the parent as it was
+        if (only or ram_full) and not ready:  # an idle claim that claimed nothing leaves the parent as it was
             pass
         elif machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):

@@ -3740,11 +3740,25 @@ class BoardTest(unittest.TestCase):
                                "Gated with claimable work: 0 min\n"
                                "Held by machine guard: 1 min\n"
                                "Idle held by Auto continue off or cool down: 0 min\n"
+                               "Idle held by the machine guard: 0 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
+
+    def test_pulse_idle_splits_machine_guard(self):
+        """Job 848: an idle minute whose pulse line names a `guard` gets its own line and breaks the idle stretch."""
+        text = self.pulse_ticks(
+            (0, 0, {}), (60, 0, {}),  # idle, stretch 2
+            (120, 0, {"guard": "pace 5h 90% used"}),  # guard-held: not idle, ends the stretch
+            (180, 0, {"guard": "free RAM 9%"}),  # guard-held
+            (240, 0, {"guard": ""}), (300, 0, {"guard": None}), (360, 0, {"guard": 5}),  # not a non-empty string: idle
+            (420, 2, {"guard": "pace 5h 90% used"}),  # a session runs: neither
+            (480, 0, {}))
+        self.assertIn("Idle with claimable work: 5 min (longest stretch 3 min)\n", text)
+        self.assertIn("Idle held by Auto continue off or cool down: 0 min\n"
+                      "Idle held by the machine guard: 2 min\nPeak sessions:", text)
 
     def test_pulse_hot_claims_skip_hand(self):
         line = lambda t, top: {"t": t, "sessions": 0, "cooldown": False, "cpu_load": 600, "projects": {
@@ -9035,6 +9049,7 @@ class UsageAllowanceTest(unittest.TestCase):
         a = board.usage_allowance(u, USAGE_NOW, live)
         return None if a is None else int(a)
 
+    @mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # the ladder alone: 95.5 % at 80 % elapsed would pace-hold
     def test_ladder_steps(self):
         """A reset 1 h away neither relaxes nor tightens: remaining >= 10 None, < 10 gives 3, < 5 gives 1, < 2 gives 0."""
         for used, want in ((0, None), (89, None), (90, None), (91, 3), (95, 3), (95.5, 1), (98, 1), (98.5, 0), (100, 0)):
@@ -9083,6 +9098,7 @@ class UsageAllowanceTest(unittest.TestCase):
             self.assertIsNone(self.allow(usage(five=(99, after))), after)
             self.assertEqual(self.allow(usage(five=(99, after), seven=(91, 3600))), 3, after)
 
+    @mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # the ladder's reason text: 93.4 % at 20 % elapsed would pace-hold
     def test_reason_text(self):
         u = usage(five=(93.4, 14400), seven=(50, 86400))
         at = datetime.fromtimestamp(USAGE_NOW + 14400).strftime("%H:%M")
@@ -9096,6 +9112,31 @@ class UsageAllowanceTest(unittest.TestCase):
         self.assertEqual(a.reason, f"usage 7d 97% used, resets {seven_at} (allowance 1, 0 live)")
         a = board.usage_allowance(usage(five=(92, 3600), seven=(93, 3600)), USAGE_NOW, 0)
         self.assertEqual(a.reason, f"usage 5h 92% used, resets {seven_at} (allowance 3, 0 live)", "tie: five_hour")
+
+    def test_pace_lead_holds(self):
+        """The digest 094 case: 90 % used 1h32m into the 5h window (lead about 59) holds with allowance 0."""
+        a = board.usage_allowance(usage(five=(90, 5 * 3600 - 92 * 60)), USAGE_NOW, 0)
+        self.assertEqual(int(a), 0)
+        self.assertTrue(a.reason.startswith("pace 5h "), a.reason)
+        a = board.usage_allowance(usage(five=(35, 4 * 3600)), USAGE_NOW, 0)  # 20 % elapsed: lead exactly 15
+        self.assertEqual((int(a), a.reason[:8]), (0, "pace 5h "))
+        a = board.usage_allowance(usage(five=(20, 5 * 3600 + 600)), USAGE_NOW, 0)  # reset past a full window: 0 % elapsed
+        self.assertEqual((int(a), a.reason[:8]), (0, "pace 5h "))
+
+    def test_pace_under_lead_passes(self):
+        self.assertIsNone(board.usage_allowance(usage(five=(40, 3 * 3600)), USAGE_NOW, 0), "40 % at 2 h: lead 0")
+        self.assertIsNone(board.usage_allowance(usage(five=(34.9, 4 * 3600)), USAGE_NOW, 0), "lead 14.9")
+        a = board.usage_allowance(usage(five=(96, 1300)), USAGE_NOW, 0)  # lead about 3: the ladder's rung 2
+        self.assertEqual((int(a), a.reason[:9]), (1, "usage 5h "))
+        a = board.usage_allowance(usage(seven=(90, 6 * 86400)), USAGE_NOW, 0)  # the 7d window never paces
+        self.assertIsNone(a)
+
+    def test_pace_stale_or_reset_never_holds(self):
+        hot = usage(five=(90, 5 * 3600 - 92 * 60))
+        self.assertIsNone(board.usage_allowance({**hot, "written_at": USAGE_NOW - 301}, USAGE_NOW, 0), "stale")
+        self.assertIsNone(board.usage_allowance(usage(), USAGE_NOW, 0), "no five_hour window")
+        for after in (0, -60):
+            self.assertIsNone(board.usage_allowance(usage(five=(90, after)), USAGE_NOW, 0), after)
 
     def test_windows_constant_drives_allowance(self):
         self.assertEqual(board.WINDOWS, (("five_hour", "5h"), ("seven_day", "7d")))
@@ -9270,8 +9311,8 @@ class ReadyUsageTest(unittest.TestCase):
             spec.write_text(f"# x\n## Likely files\n- `src/{i}.py`: why\n")
             board.cmd_set(self.root, k, ["lane=fast"])
 
-    def write_usage(self, used):
-        self.usage.write_text(json.dumps(usage(five=(used, 3600), written_at=int(time.time()))))
+    def write_usage(self, used, resets=1300):  # 1300 s left: the pace lead stays under PACE_LEAD_PCT, no relax
+        self.usage.write_text(json.dumps(usage(five=(used, resets), written_at=int(time.time()))))
 
     def live(self, n):
         self.ps.write_text("claude -p /trevskills-scrum start 1-a\n" * n)
@@ -9280,7 +9321,7 @@ class ReadyUsageTest(unittest.TestCase):
         return next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == self.parent)
 
     def test_ready_caps_batch_to_allowance(self):
-        self.write_usage(96)  # 4 % left, reset 1 h away: allowance 1
+        self.write_usage(96)  # 4 % left, reset 1300 s away: allowance 1
         self.live(1)
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [], "1 live of allowance 1: no slot")
         self.live(0)
@@ -9301,6 +9342,40 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:board.MAX_YOUNG_SESSIONS])
         p = self.parent_job()
         self.assertEqual((p["stage"], p["reason"]), ("running", None))
+
+
+    def test_ready_holds_on_pace(self):
+        """Run-all: 90 % used 1h32m in paces every account; no child is claimed and the parent waits on the pace."""
+        self.write_usage(90, 5 * 3600 - 92 * 60)
+        self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [])
+        jobs = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual({jobs[k]["stage"] for k in self.kids}, {"waiting"})
+        p = jobs[self.parent]
+        self.assertEqual(p["stage"], "running")
+        self.assertTrue(p["reason"].startswith("waiting: no account has room: main pace 5h 90% used"), p["reason"])
+        big = board.cmd_new(self.root, "Big")  # BigBoy: the same hold
+        board.cmd_set(self.root, big, ["lane=bigboy", "stage=plan"])
+        (self.root / "jobs" / big / "plan.md").write_text(
+            "PLAN: READY\n# Big\n## Goal\nShip.\n## Done when\n1. It works.\n## Tickets\n"
+            + BoardTest.ticket(1) + BoardTest.ticket(2, deps="T1", exposure="yes") + "## Assumptions\n- none\n")
+        first = board.cmd_plan_apply(self.root, big)["children"][0]
+        self.assertEqual(board.cmd_ready(self.root, big)["ready"], [])
+        jobs = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual(jobs[first]["stage"], "waiting")
+        self.assertTrue(jobs[big]["reason"].startswith("waiting: no account has room: main pace 5h "), jobs[big]["reason"])
+
+    def test_ready_claims_nothing_without_ram_room(self):
+        """ram_room(floor=0) == 0 with machine_ok passing: nothing claimed, no claimed-at.txt, parent left as it was."""
+        before = self.parent_job()
+        with mock.patch.object(board, "ram_room", side_effect=lambda floor=1, light=False: 0 if floor == 0 else 1):
+            self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [])
+        jobs = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual({jobs[k]["stage"] for k in self.kids}, {"waiting"})
+        self.assertFalse(any((self.root / "jobs" / k / "claimed-at.txt").exists() for k in self.kids))
+        self.assertEqual((jobs[self.parent]["stage"], jobs[self.parent].get("reason")),
+                         (before["stage"], before.get("reason")))
+        with mock.patch.object(board, "ram_room", side_effect=lambda floor=1, light=False: 1):
+            self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:1], "room back: one claim")
 
 
 class ReadyHighUsageTest(unittest.TestCase):

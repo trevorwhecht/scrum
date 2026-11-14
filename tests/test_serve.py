@@ -1822,11 +1822,11 @@ class ServeTest(unittest.TestCase):
         return usage
 
     def test_resume_refusal_ignores_usage(self):
-        """Trevor's Resume/Play is never tapered by the usage ladder: resume_refusal does not even ask it."""
+        """Trevor's Resume/Play is never tapered by the usage ladder: resume_refusal(manual=True) does not even ask it."""
         usage = self.low_usage(Path(tempfile.mkdtemp(dir=self.tmp.name)))
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)), \
                 mock.patch.object(self.serve.board, "usage_allowance", wraps=self.serve.board.usage_allowance) as allow:
-            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "fast"}))
+            self.assertIsNone(self.serve.resume_refusal("repo", self.root, {"id": "9-x", "lane": "fast"}, manual=True))
         self.assertEqual(allow.call_count, 0)
 
     def test_start_ready_usage_hold_not_needs_human(self):
@@ -1840,7 +1840,7 @@ class ServeTest(unittest.TestCase):
         spawn.assert_not_called()
         job = self.serve.board.find(self.serve.board.read_board(root), parent)
         self.assertEqual(job["stage"], "running")
-        self.assertTrue(job["reason"].startswith("waiting: no account has room: main usage "), job["reason"])
+        self.assertTrue(job["reason"].startswith("waiting: no account has room: main pace 5h "), job["reason"])
 
     @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_ignores_pace_and_session_count(self):
@@ -2044,7 +2044,7 @@ class ServeTest(unittest.TestCase):
     def test_api_machine_usage(self):
         usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
         now = time.time()
-        fresh = {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": now + 7200},
+        fresh = {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": now + 3600},
                                                     "seven_day": {"used_percentage": 40, "resets_at": now + 3 * 86400}}}
         usage.write_text(json.dumps(fresh))
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
@@ -2052,7 +2052,7 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertEqual(sorted(out.pop("server")), ["disconnects", "routes", "slow", "worst"])
             self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
-                                            "five_hour_resets_at": now + 7200, "allowance": 3,
+                                            "five_hour_resets_at": now + 3600, "allowance": 3,
                                             "fable": "paused"})  # 7 % left: rung 1
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
@@ -6971,6 +6971,14 @@ class DigestTest(unittest.TestCase):
 
 
 
+def pace_usage(path):
+    """usage.json at the digest 094 pace: 5h 90 % used 1h32m into the window (lead about 59 points)."""
+    now = time.time()
+    path.write_text(json.dumps({"written_at": now, "rate_limits": {
+        "five_hour": {"used_percentage": 90, "resets_at": now + 5 * 3600 - 92 * 60}}}))
+    return path
+
+
 class AutoResumeTest(unittest.TestCase):
     """The watchdog sweep resumes a job only when its log shows the usage limit killed it: at the reset time the
     log names, else every 30 min, at most 12 times; never a paused job or one stalled for another reason."""
@@ -7609,6 +7617,54 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), ["q"], "a limit-held check job, here or in o, runs nothing until its reset")
         rh.assert_called_once()
 
+    def test_pace_holds_auto_resume_not_manual(self):
+        s = self.serve
+        (self.root / "runs" / "crash.log").write_text("Traceback: something else broke")
+        self.jobs = [{"id": "solo", "stage": "needs-human", "runlog": "runs/crash.log",
+                      "reason": "stalled in build: no live session. Fix: click Resume."}]
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(pace_usage(self.root / "usage.json"))):
+            why = s.resume_refusal("p", self.root, self.jobs[0])
+            self.assertTrue(why.startswith(s.board.MACHINE_WAIT + "no account has room: main pace 5h "), why)
+            self.assertIsNone(s.resume_refusal("p", self.root, self.jobs[0], manual=True), "Trevor's click ignores usage")
+            self.assertEqual(self.sweep(), [], "pace-held: no automatic resume")
+        self.assertEqual((s.STALL_RESUMED, s.AUTO_RESUME), (set(), {}), "a pace refusal spends no try")
+
+    def spec_stall(self, spec_md=False):
+        self.jobs = [{"id": "p0", "stage": "needs-human", "reason": "blocked", "lane": "runall", "children": ["s1"]},
+                     {"id": "s1", "stage": "spec", "parent": "p0", "stalled": True,
+                      "reason": "stalled: no session picked the job up in spec."}]
+        if spec_md:
+            (self.root / "jobs" / "s1").mkdir(parents=True)
+            (self.root / "jobs" / "s1" / "spec.md").write_text("# s1\n")
+
+    def test_spec_stall_resumes_when_ram_frees(self):
+        s = self.serve
+        self.spec_stall()
+        with mock.patch.object(s.board, "ram_room", side_effect=lambda floor=1, light=False: 1):
+            self.assertEqual(self.sweep(), ["s1"], "a non-running parent never holds it")
+            self.assertEqual(s.AUTO_RESUME["p/s1"][0], 1)
+            self.assertEqual(self.sweep(), ["s1"], "no once-per-stage limit")
+            self.assertEqual(s.AUTO_RESUME["p/s1"][0], 2)
+            s.AUTO_RESUME["p/s1"] = [s.AUTO_RESUME_MAX, 0.0]
+            with mock.patch.object(s, "park_spent") as spent:
+                self.assertEqual(self.sweep(), [])
+            spent.assert_called_once()
+            self.assertEqual(spent.call_args.args[1:], (self.jobs[1], "spec", s.AUTO_RESUME_MAX))
+
+    def test_spec_stall_waits_without_ram_no_try(self):
+        s = self.serve
+        self.spec_stall()
+        with mock.patch.object(s.board, "ram_room", side_effect=lambda floor=1, light=False: 1 if floor else 0):
+            self.assertEqual(self.sweep(), [])
+        self.assertNotIn("p/s1", s.AUTO_RESUME)
+
+    def test_spec_stall_with_spec_md_unchanged(self):
+        s = self.serve
+        self.spec_stall(spec_md=True)
+        with mock.patch.object(s.board, "ram_room", side_effect=lambda floor=1, light=False: 1):
+            self.assertEqual(self.sweep(), [], "a child of a non-running parent stays for a click, as before")
+        self.assertNotIn("p/s1", s.AUTO_RESUME)
+
     def test_auto_resume_standalone_stall_waits_for_machine(self):
         s = self.serve
         (self.root / "runs" / "crash.log").write_text("Traceback: something else broke")
@@ -7618,7 +7674,9 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), [], "low RAM: no resume")
         self.assertEqual(s.STALL_RESUMED, set(), "a machine refusal spends nothing")
         with mock.patch.object(s.board, "usage_allowance", return_value=s.board.Allowance(0, "usage 99%")):
-            self.assertEqual(self.sweep(), ["solo"], "the usage taper never holds a resume")
+            self.assertEqual(self.sweep(), [], "job 848: no account with usage room holds an automatic resume")
+        self.assertEqual(s.STALL_RESUMED, set(), "a usage refusal spends nothing")
+        self.assertEqual(self.sweep(), ["solo"])
         self.assertEqual(s.STALL_RESUMED, {"p/solo/build"})
 
     def run_child(self, parent_stage="running", lane="runall", reason="stalled in build: no board update for 30 min "
@@ -8403,6 +8461,18 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["002-second"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("spec", "waiting"))
 
+    def test_wake_waiting_holds_without_ram_room(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", side_effect=lambda floor=1, light=False: 1 if floor else 0), \
+                mock.patch.object(self.board, "wake_waiting", wraps=self.board.wake_waiting) as wake:
+            self.serve.wake_waiting("idle", self.root)
+        wake.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+
     def test_wake_waiting_spawns_approve_for_wake_job(self):
         wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
                 "reason": "waiting on 001-first", "wake": "approve 002-second"}
@@ -8638,11 +8708,13 @@ class WatchdogIdleParentTest(unittest.TestCase):
         usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 99, "resets_at": now + 7200},
             "seven_day": {"used_percentage": 10, "resets_at": now + 3 * 86400}}}))
-        # the ladder itself never holds a resume
+        # job 848: the ladder (and the 5h pace) holds an automatic resume
         self.queue_board({"id": "012-c", "stage": "needs-human", "reason": self.STALLED, "lane": "fast"})
         with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
             self.assertEqual(self.board.usage_allowance(self.board.read_usage(), now, 0), 0)
             spawn, _, _ = self.tick()
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list if c.args[3] == "resume"], [])
+        spawn, _, _ = self.tick()  # no usage.json: the resume goes ahead
         self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("012-c", "resume")])
 
     def test_watchdog_starts_play_queued_first(self):
@@ -9127,7 +9199,7 @@ class AutoContinueTest(unittest.TestCase):
         self.project("a", n=1)
         ps = self.base / "ps.txt"
         self.usage.write_text(json.dumps({"written_at": time.time(), "rate_limits": {
-            "five_hour": {"used_percentage": 96, "resets_at": time.time() + 3600}}}))  # 4 % left: allowance 1
+            "five_hour": {"used_percentage": 96, "resets_at": time.time() + 1300}}}))  # 4 % left: allowance 1
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
             ps.write_text("claude -p /trevskills-scrum start 1-a\n")
             self.assertEqual(self.tick(), [], "1 live of allowance 1: held")
@@ -9852,6 +9924,24 @@ class HighUsageStartsTest(unittest.TestCase):
                 self.assertEqual(code, 202, out)
                 self.assertNotIn("error", out)
                 self.assertEqual([c.args[2:4] for c in self.spawn.call_args_list], [("001-std", verb)])
+
+    def test_pace_holds_wake_and_auto_continue(self):
+        s = self.serve
+        repo = self.root.parent
+        self.put({"id": "001-first", "stage": "done"}, {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
+        pace_usage(self.usage)
+        with mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=1), \
+                mock.patch.object(self.board, "projects", return_value={"repo": repo}), \
+                mock.patch.object(s, "auto_continue", return_value=1), mock.patch.object(s, "claimable", return_value=True):
+            s.wake_waiting("repo", self.root)
+            s.auto_continue_tick({"repo": False})
+            self.spawn.assert_not_called()
+            self.assertEqual(self.job("002-second")["stage"], "waiting")
+            self.usage.unlink()  # no usage data: both start
+            s.wake_waiting("repo", self.root)
+            s.auto_continue_tick({"repo": False})
+        self.assertEqual([c.args[2:4] for c in self.spawn.call_args_list], [("002-second", "start"), ("run-all", "run-all")])
 
     def test_resume_and_play_start_at_high_usage(self):
         s = self.serve
@@ -11072,7 +11162,7 @@ class PulseTest(unittest.TestCase):
             "u5h": 30, "u7d": 60, "focus": "app",
             "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False, "gates": []},
                          "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False, "gates": []}},
-            "gates": ["ram_room"]}])  # 2 young sessions: MAX_YOUNG_SESSIONS spent
+            "gates": ["ram_room"], "guard": "CPU load 250% of " + f"{os.cpu_count()} cores (> 150%)"}])  # 2 young sessions
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
                 mock.patch.object(s.board, "swap_used_pct", return_value=None), \
@@ -11097,6 +11187,22 @@ class PulseTest(unittest.TestCase):
 
     HEALTHY = {"SCRUM_FREE_RAM": "80", "SCRUM_SWAP_PCT": "0", "SCRUM_FREE_DISK_GB": "500", "SCRUM_CPU_BUSY_PCT": "10",
                "SCRUM_CPU_LOAD_PCT": "10"}
+
+    def test_pulse_records_guard(self):
+        """Job 848: guard names the machine_ok(claim=False) refusal, else the usage hold, else null."""
+        s = self.serve
+        usage = {"written_at": self.NOW, "rate_limits": {"five_hour": {"used_percentage": 90,
+                                                                       "resets_at": self.NOW + 5 * 3600 - 92 * 60}}}
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="9"):  # under MIN_FREE_RAM_PCT
+            s.pulse_tick({}, now=self.NOW)
+        self.assertTrue(self.lines()[-1]["guard"].startswith("free RAM 9%"), self.lines()[-1]["guard"])
+        with mock.patch.dict(os.environ, self.HEALTHY), mock.patch.object(s.board, "read_usage", lambda *a: usage):
+            s.pulse_tick({}, now=self.NOW + 1)
+        self.assertTrue(self.lines()[-1]["guard"].startswith("no account has room: main pace 5h 90% used"),
+                        self.lines()[-1]["guard"])
+        with mock.patch.dict(os.environ, self.HEALTHY), mock.patch.object(s.board, "read_usage", lambda *a: None):
+            s.pulse_tick({}, now=self.NOW + 2)
+        self.assertIsNone(self.lines()[-1]["guard"])
 
     def tick_line(self, **env):
         self.log.unlink(missing_ok=True)
