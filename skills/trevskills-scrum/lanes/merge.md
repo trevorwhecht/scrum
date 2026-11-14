@@ -79,6 +79,7 @@ Applies in the Check gate, step 2, before the E2E run, when `git -C "$WT" diff -
 1. `cd "$WT"` and invoke `/trevskills-migrate` (Skill tool) with args `base=$BASE dev-only`, running its Steps 0-7 only: never Step 8 (prod), and never `prod-approved=`. Every question it would put to Trevor is a stop: never answer one yourself.
 2. On success, run the E2E command as usual. Commit any migration it generated (`git -C "$WT" add prisma && git -C "$WT" commit -m "Add migration"`, skipped when nothing changed).
 3. On a stop, or when it cannot reach dev: skip only the E2E specs that need the new columns (name each in check.md as `E2E: skipped, needs migration: <spec>`), run the rest, and re-run the skipped specs after Merge's **Migrate** step succeeds. A skip never makes `CHECK: FAIL`.
+4. Dev migrate never writes `migrated.md`: it is Merge's prod marker, so a dev run that wrote it would make the schema guard skip the prod deploy. If a dev marker is needed, write `dev-migrated.md`. Only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`.
 
 ## Resuming the builder
 

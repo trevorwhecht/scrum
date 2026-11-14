@@ -3937,6 +3937,14 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ('data-do="setup-done"', 'op: "setup-done"', "waiting on you:", 'class="setup-list"', "Setup done?"):
             self.assertIn(phrase, text, phrase)
 
+    # --- job 832: Dev migrate never writes the prod marker ---
+    def test_dev_migrate_never_writes_migrated_md(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "merge.md").read_text()
+        dev = self.section(text, "## Dev migrate (Check gate)", "## Resuming the builder")
+        self.assertIn("never writes `migrated.md`", dev)
+        self.assertIn("dev-migrated.md", dev)
+        self.assertIn("Only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`", dev)
+
 
 if __name__ == "__main__":
     unittest.main()
