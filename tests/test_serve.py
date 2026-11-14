@@ -9526,13 +9526,22 @@ class IdleClaimTest(unittest.TestCase):
     def test_tick_order(self):
         s = self.serve
         self.write()
-        for pq, ar, want in ((False, False, ["play_queue_tick", "auto_resume", "idle_claim"]),
-                             (True, False, ["play_queue_tick", "auto_resume"]),
-                             (False, True, ["play_queue_tick", "auto_resume"])):
+        def launch(*args):
+            proc = mock.Mock(); proc.poll.return_value = None
+            s.RUNS["ic/009-new"] = {"action": "start", "started": time.time(), "proc": proc, "log": "x"}
+            return True
+        # (play_queue_tick, auto_resume): None returns False, True returns True with nothing started (a slot wait),
+        # "start" launches a RUNS entry
+        for pq, ar, want in ((None, None, ["play_queue_tick", "auto_resume", "idle_claim"]),
+                             (True, True, ["play_queue_tick", "auto_resume", "idle_claim"]),
+                             ("start", None, ["play_queue_tick", "auto_resume"]),
+                             (None, "start", ["play_queue_tick", "auto_resume"])):
             with self.subTest(pq=pq, ar=ar):
+                s.RUNS.pop("ic/009-new", None)
                 s.IDLE_SINCE["ic"] = 1.0
                 calls = mock.Mock()
-                calls.play_queue_tick.return_value, calls.auto_resume.return_value = pq, ar
+                for fn, how in ((calls.play_queue_tick, pq), (calls.auto_resume, ar)):
+                    fn.side_effect = launch if how == "start" else (lambda *a, r=bool(how): r)
                 calls.idle_claim.return_value = False
                 with mock.patch.object(self.board, "projects", return_value={"ic": self.repo}), \
                         mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
@@ -9542,7 +9551,33 @@ class IdleClaimTest(unittest.TestCase):
                         mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "spawn"):
                     s.watchdog_tick()
                 self.assertEqual([c[0] for c in calls.mock_calls], want)
-                self.assertEqual("ic" in s.IDLE_SINCE, not (pq or ar))  # a start this tick restarts the timer
+                self.assertEqual("ic" in s.IDLE_SINCE, "start" not in (pq, ar))  # a start this tick restarts the timer
+
+    def test_tick_claims_ram_held_queued_launch(self):
+        """Review round 1: a launch spawn's RAM gate held keeps play_queue_tick returning True every tick; after
+        IDLE_CLAIM_SECS the real tick still reaches idle_claim, which launches it past the RAM gate only."""
+        s = self.serve
+        launch = {"action": "approve", "prompt": "/trevskills-scrum approve 005-queued", "stage": "needs-human"}
+        self.write({"id": "005-queued", "stage": "needs-human", "play_queued": self.board.now(), "queued_launch": launch},
+                   kids={})
+        self.files("005-queued", ["q.py"])
+        proc = mock.Mock(); proc.poll.return_value = None
+        s.IDLE_SINCE["ic"] = time.time() - 610
+        with mock.patch.object(self.board, "projects", return_value={"ic": self.repo}), \
+                mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", side_effect=lambda floor=1: 0 if floor == 0 else 1), \
+                mock.patch.object(self.board, "cpu_load_pct", return_value=10.0), \
+                mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.board, "spawn", return_value=(proc, "runs/x.log")) as board_spawn, \
+                mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "e2e_full_tick"), \
+                mock.patch.object(s, "terminal_batch_tick"):
+            s.watchdog_tick()
+        self.assertEqual([c.args[1:3] for c in board_spawn.call_args_list], [("005-queued", "approve")])
+        self.assertIn("ic/005-queued", s.RUNS)
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        live = next(j for j in self.jobs() if j["id"] == "005-queued")
+        self.assertNotIn("queued_launch", live)
 
 
 class WatchdogResilienceTest(unittest.TestCase):

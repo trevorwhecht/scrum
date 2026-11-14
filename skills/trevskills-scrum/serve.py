@@ -395,6 +395,19 @@ def take_room() -> bool:
     return True
 
 
+def give_room():
+    """Hand back a session take_room spent on a launch that did not start."""
+    global RESUME_ROOM
+    if RESUME_ROOM is not None:
+        RESUME_ROOM += 1
+
+
+def launched_since(project, t) -> bool:
+    """A RUNS launch of the project started at or after t (epoch s)."""
+    with RUNS_LOCK:
+        return any(k.startswith(f"{project}/") and r.get("started", 0) >= t for k, r in RUNS.items())
+
+
 PLAY_QUEUED = "queued, starts next"
 
 
@@ -428,6 +441,7 @@ def play_queue_tick(project, root, jobs) -> bool:
                 mark_ram_hold(project, root, jobs)
                 return True
             if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
+                give_room()  # the gate held it: nothing started, so idle_claim may still use the session
                 mark_ram_hold(project, root, jobs, skip=job["id"])
                 return True
             started = True
@@ -479,9 +493,7 @@ def idle_claim(project, root, jobs) -> bool:
         return False
     now = time.time()
     since = IDLE_SINCE.setdefault(project, now)
-    with RUNS_LOCK:
-        launched = any(k.startswith(f"{project}/") and r.get("started", 0) > since for k, r in RUNS.items())
-    if launched:  # something started meanwhile: the slot was not idle
+    if launched_since(project, since):  # something started meanwhile: the slot was not idle
         IDLE_SINCE[project] = now
         return False
     if now - since < IDLE_CLAIM_SECS:
@@ -2041,13 +2053,15 @@ def watchdog_tick():
                     disk_short = bool(refused and refused.startswith("free disk"))
                 if refused:
                     RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
+                tick_start = time.time()
                 resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
                 resumed = auto_resume(project, root, jobs) or resumed
                 resumed = main_ff_tick(project, repo, root, jobs) or resumed
-                if resumed:  # a start this tick: the slot is not idle
+                # their True also means "waits on a slot", so a real start is read from RUNS
+                if launched_since(project, tick_start):  # a start this tick: the slot is not idle
                     IDLE_SINCE.pop(project, None)
                 else:
-                    resumed = idle_claim(project, root, jobs)
+                    resumed = idle_claim(project, root, jobs) or resumed
                 busy[project] = resumed or busy[project]
                 pending = pending or resumed
                 try:  # its own guard: a batch-window failure must not skip auto-play candidates or e2e
