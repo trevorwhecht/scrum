@@ -3968,8 +3968,16 @@ def child_files(jobs_dir, job_id):
                 # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
                 return {p for p in re.findall(r"`([^`\s]+)`", text)
                         if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
-            return likely_files(text)
+            found = likely_files(text)
+            return found if name == "spec.md" or found else prose_paths(text)  # no spec, no Likely files: the paths the ticket text names
     return set()
+
+
+def prose_paths(text):
+    """Every backticked token, and every bare token with a / or a file extension, in text that matches PATH_RE."""
+    bare = (t.rstrip(".,;:") for t in re.sub(r"`[^`]*`", " ", text).split())
+    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p)} | \
+           {t for t in bare if PATH_RE.match(t) and ("/" in t or re.search(r"\.\w{2,}$", t))}
 
 
 def shared_files(a, b):

@@ -1093,6 +1093,25 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_ready_spec_less_child_uses_paths_from_feature_text(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        jobs = self.root / "jobs"
+        self.write(f"{c2}/feature.md", "# x\nEdit `src/a.py` and docs/b.md, e.g. nothing else.\n")
+        self.assertEqual(board.child_files(jobs, c2), {"src/a.py", "docs/b.md"})
+        self.spec(c1, "src/z.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])  # disjoint: runs beside it
+        self.spec(c1, "src/a.py")
+        files = {c1: board.child_files(jobs, c1), c2: board.child_files(jobs, c2)}
+        self.assertEqual(board.slot_conflict({"id": c2, "parallel": True}, [{"id": c1, "parallel": True}], files),
+                         (f"sibling {c1} shares src/a.py", [c1]))
+        # a spec.md keeps only its Likely files: the prose path is ignored
+        self.write(f"{c2}/spec.md", "# x\nEdit `src/prose.py`.\n## Likely files\n- `src/q.py`\n")
+        self.assertEqual(board.child_files(jobs, c2), {"src/q.py"})
+        self.write(f"{c2}/feature.md", "# x\nNo paths here at all.\n")
+        (jobs / c2 / "spec.md").unlink()
+        self.assertEqual(board.child_files(jobs, c2), set())
+
     def test_child_files_terminal_batch_reads_claude_paths(self):
         batch = board.TERMINAL_BATCH_INTRO + "\n## From 1: a\n- `.claude/skills/scrum-digest-flow/SKILL.md`\n- `.claude/agents/x.md`\n- `tests/test_x.py`\n"
         self.write("b1/feature.md", batch)
