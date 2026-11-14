@@ -5881,7 +5881,7 @@ class DigestTest(unittest.TestCase):
 
     def test_digest_auto_trims_after_run(self):
         job_id = self.done_job()
-        (self.scrum / "jobs" / job_id / "build.md").write_text("x")
+        (self.scrum / "jobs" / job_id / "check.md").write_text("x")
         rule = self.rule()
         self.digest([self.prop("p1", rule), self.prop("p2", rule, old="not there"), self.prop("p3", self.user / "settings.json"),
                      self.prop("p4", rule, status="rejected")], jobs=[job_id])
@@ -5892,7 +5892,7 @@ class DigestTest(unittest.TestCase):
                          [("applied", None), ("skipped", "old text found 0 times"), ("skipped", "settings or hooks file"),
                           ("rejected", None)])
         self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
-        self.assertTrue((self.scrum / "jobs" / job_id / "build.md").exists())
+        self.assertFalse((self.scrum / "jobs" / job_id / "check.md").exists())
 
     def git(self, *args, check=True):
         r = subprocess.run(["git", "-C", str(self.reg), *args], capture_output=True, text=True, timeout=30)
