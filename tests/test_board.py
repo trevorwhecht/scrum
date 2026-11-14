@@ -6822,15 +6822,24 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
         self.assertEqual(self.files(1), [])
 
-    def test_real_review_rejects_drifted_stub(self):
+    def _real(self, text):
         p = self.rdir(1) / "review-ux.md"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("VERDICT: PASS\nCarried forward from round 1: nothing blocking, text drifted.\n")
-        self.assertFalse(board._real_review(p))
-        p.write_text("VERDICT: PASS\nSkipped by orchestrator: some new reason.\n")
-        self.assertFalse(board._real_review(p))
-        p.write_text("VERDICT: PASS\nSkipped by orchestrator: x.\n## Findings\n- a\n")
-        self.assertTrue(board._real_review(p))
+        p.write_text(text)
+        return board._real_review(p)
+
+    def test_real_review_drifted_carried_stub(self):
+        self.assertFalse(self._real("VERDICT: PASS\nCarried forward from round 2: reworded text.\n"))
+
+    def test_real_review_drifted_skip_stub(self):
+        self.assertFalse(self._real("VERDICT: PASS\nSkipped by orchestrator: some new reason.\n"))
+
+    def test_real_review_stub_with_findings_is_real(self):
+        self.assertTrue(self._real("VERDICT: PASS\nSkipped by orchestrator: x.\n## Findings\n- a\n"))
+
+    def test_real_review_plain_review_is_real(self):
+        self.assertTrue(self._real("VERDICT: PASS\nLooks good, checked the diff.\n"))
+        self.assertTrue(self._real("VERDICT: FAIL blocking\nSkipped by orchestrator: x.\n"))
 
     def test_review_plan_rerun_removes_stale_deletion_skip(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 100})
