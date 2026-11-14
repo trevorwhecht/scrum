@@ -5734,9 +5734,9 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(len(list((self.scrum / "jobs" / job_id).rglob("*"))), 6)
         self.assertFalse(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
         self.assertEqual([e["id"] for e in self.serve.digest_auto(self.scrum, "001")["applied"]], ["p2"])
-        self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["decision.md", "feature.md", "round-1", "spec.md"])
+        self.assertEqual(sorted(p.name for p in (self.scrum / "jobs" / job_id).iterdir()), ["build.md", "decision.md", "feature.md", "round-1", "spec.md"])
         job = next(j for j in json.loads((self.scrum / "board.json").read_text())["jobs"] if j["id"] == job_id)
-        self.assertEqual(job["files"], ["decision.md", "feature.md", "round-1/check.md", "spec.md"])
+        self.assertEqual(job["files"], ["build.md", "decision.md", "feature.md", "round-1/check.md", "spec.md"])
         self.assertTrue(self.get("/api/p/reg/digests")[1]["digests"][0]["trimmed"])
 
 
@@ -5868,7 +5868,7 @@ class DigestTest(unittest.TestCase):
                                                    "reason": "settings or hooks file"}]})
         self.assertEqual(self.statuses(), ["queued", "queued", "skipped"])
         self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
-        self.assertFalse((self.scrum / "jobs" / job_id / "build.md").exists())
+        self.assertTrue((self.scrum / "jobs" / job_id / "build.md").exists())
         before = (self.scrum / "digests" / "001" / "proposals.json").read_bytes()
         self.assertEqual(auto("001"), {"applied": [], "queued": [], "skipped": [], "job": None})  # a re-run changes nothing
         self.assertEqual((self.scrum / "digests" / "001" / "proposals.json").read_bytes(), before)
@@ -5891,7 +5891,7 @@ class DigestTest(unittest.TestCase):
                          [("applied", None), ("skipped", "old text found 0 times"), ("skipped", "settings or hooks file"),
                           ("rejected", None)])
         self.assertTrue((self.scrum / "digests" / "001" / "trimmed").exists())
-        self.assertFalse((self.scrum / "jobs" / job_id / "build.md").exists())
+        self.assertTrue((self.scrum / "jobs" / job_id / "build.md").exists())
 
     def git(self, *args, check=True):
         r = subprocess.run(["git", "-C", str(self.reg), *args], capture_output=True, text=True, timeout=30)
@@ -11463,6 +11463,22 @@ class SpawnCooldownTest(unittest.TestCase):
             self.assertNotIn("play_queued", job)
             self.assertNotIn("queued_launch", job)
             self.assertEqual(err, f"cool down: refused start of repo/{job_id}\n")
+
+    def test_cooldown_park_clears_play_queue(self):
+        job_id = self.job("runall")
+        with self.board.locked_board(self.root) as board:
+            job = self.board.find(board, job_id)
+            job.update(play_queued=time.time(), queued_launch={"action": "start", "prompt": "p", "stage": "spec"})
+        out, _, _ = self.start(job_id)
+        self.assertIsNone(out)
+        job = self.get(job_id)
+        self.assertEqual((job["stage"], job.get("stalled"), job["reason"]),
+                         ("spec", True, "stalled: parked for cool down; resumes when cool down ends"))
+        self.assertNotIn("play_queued", job)
+        self.assertNotIn("queued_launch", job)
+        with mock.patch.object(self.board, "spawn") as bspawn:
+            self.serve.play_queue_tick("repo", self.root, self.board.read_board(self.root)["jobs"])
+        bspawn.assert_not_called()
 
     def test_wake_and_hand_start_in_cool_down(self):
         for by in ("wake", "hand"):
