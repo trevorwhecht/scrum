@@ -6391,6 +6391,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     `account` None: pick_account, preferring the job's recorded account; with none free, the one whose limit ends soonest
     (the recorded account on a tie), else the first (Trevor's Play and Resume are never refused on usage). Any account but the first runs with
     CLAUDE_CONFIG_DIR=<its dir>; the first runs with CLAUDE_CONFIG_DIR removed. Returns (proc, log path relative to root)."""
+    root = Path(root)  # a chat hand-off passes a str
     if not SPAWN_ID_RE.fullmatch(job_id):
         raise SystemExit(f"bad spawn id {job_id!r}")
     if not SPAWN_ACTION_RE.fullmatch(action):
