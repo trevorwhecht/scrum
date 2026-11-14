@@ -843,11 +843,24 @@ def write_e2e_full(root, rec):
     os.replace(tmp, root / "e2e-full.json")
 
 
-def e2e_command(root) -> str:
-    """The `- E2E:` value from root/project.md, stripped; "" when the file or the line is missing."""
-    m = re.search(r"^\s*-\s*E2E:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
+def e2e_command(root, label="E2E") -> str:
+    """The `- <label>:` value (default E2E) from root/project.md, stripped; "" when the file or the line is missing."""
+    m = re.search(rf"^\s*-\s*{re.escape(label)}:(.*)$", (root / "project.md").read_text(errors="replace"), re.M) \
         if (root / "project.md").is_file() else None
     return m[1].strip() if m else ""
+
+
+def merges_since(repo, record) -> int:
+    """Commits on repo's HEAD since record's head (0 with no record); a git error counts as E2E_FULL_MERGES (due)."""
+    last = str((record or {}).get("head") or "")
+    if not record:
+        return 0
+    try:
+        if not last or last.startswith("-"):
+            raise ValueError("no recorded head")
+        return int(board._git(repo, "rev-list", "--count", f"{last}..HEAD"))
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return E2E_FULL_MERGES  # a git error counts as due
 
 
 def e2e_full_tick(project, repo, root) -> None:
@@ -866,14 +879,7 @@ def e2e_full_tick(project, repo, root) -> None:
         return
     record = e2e_full_record(root)
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
-    merges, last = 0, str((record or {}).get("head") or "")
-    if record:
-        try:
-            if not last or last.startswith("-"):
-                raise ValueError("no recorded head")
-            merges = int(board._git(repo, "rev-list", "--count", f"{last}..HEAD"))
-        except (ValueError, OSError, subprocess.SubprocessError):
-            merges = E2E_FULL_MERGES  # a git error counts as due
+    merges = merges_since(repo, record)
     settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
     if not e2e_full_due(record, head, merges, now, settled):
         return
@@ -936,6 +942,59 @@ def e2e_full_backlog(repo, root, failed, last_green, head):
         if len(text) > board.ITEM_MAX:  # never cut silently: say how much of the merge list was left out
             text = text[:board.ITEM_MAX - 40].rsplit("; ", 1)[0] + "; … more in git log"
         board.cmd_backlog_add(root, [text])
+
+
+# --- ui_sweep_tick: a later visual re-check of the screens merged on main (lanes/uisweep.md), on e2e_full_due's
+# schedule. One sweep in flight across projects: a `running` scrum/ui-sweep.json younger than E2E_FULL_STALE.
+def ui_sweep_record(root):
+    try:
+        rec = json.loads((root / "ui-sweep.json").read_text())
+        return rec if isinstance(rec, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_ui_sweep(root, rec):
+    tmp = root / "ui-sweep.json.tmp"
+    tmp.write_text(json.dumps(rec, indent=1) + "\n")
+    os.replace(tmp, root / "ui-sweep.json")
+
+
+def ui_sweep_tick(project, repo, root) -> None:
+    """Start one headless sweep session (spawn id ui-sweep) on repo's main checkout when project.md has UI globs and a
+    Dev command, no sweep runs anywhere, the tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
+    holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
+    kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
+    if not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
+        return
+    now = time.time()
+    for other in board.projects().values():
+        rec = ui_sweep_record(other / "scrum")
+        if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
+            return
+    if board._git(repo, "status", "--porcelain", "--untracked-files=no").strip() or board.machine_ok(root, claim=True):
+        return
+    record = ui_sweep_record(root)
+    head = board._git(repo, "rev-parse", "HEAD").decode().strip()
+    if not e2e_full_due(record, head, merges_since(repo, record), now):
+        return
+    since = str((record or {}).get("since" if (record or {}).get("result") in ("running", "error") else "head") or "")
+    if not since or since.startswith("-"):
+        try:
+            since = board._git(repo, "rev-parse", "--verify", "HEAD~5").decode().strip()
+        except (ValueError, OSError, subprocess.SubprocessError):
+            since = board._git(repo, "rev-list", "--max-parents=0", "HEAD").decode().split()[0]
+    out = board.ui_sweep_targets(repo, root, since, head)
+    if not out["targets"]:
+        write_ui_sweep(root, {"at": now, "head": head, "since": since, "result": "pass", "findings": 0})
+        return
+    d = root / "ui-sweep" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "targets.json").write_text(json.dumps(out, indent=1) + "\n")
+    write_ui_sweep(root, {"at": now, "head": head, "since": since, "result": "running", "dir": str(d)})
+    spawn(project, root, "ui-sweep", "ui-sweep",
+          f"Read $HOME/.claude/skills/trevskills-scrum/lanes/uisweep.md and follow it.\n"
+          f"SWEEP_DIR={d}\nPROJECT={root}/project.md\nREPO={repo}")
 
 
 E2E_FULL_BLOCKER = "E2E full run"  # restart_blockers' entry for a project whose full run is in flight
@@ -2027,7 +2086,8 @@ def watchdog_tick():
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project (a free-disk
        refusal first runs reclaim_disk on that project and checks again). Then resume
        BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick); when none of the three started
-       anything, idle_claim starts one long-held job. Then start a due full E2E run on the main checkout (e2e_full_tick).
+       anything, idle_claim starts one long-held job. Then start a due full E2E run on the main checkout (e2e_full_tick),
+       then, in its own guard, a due UI sweep there (ui_sweep_tick).
        Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick).
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
@@ -2090,7 +2150,13 @@ def watchdog_tick():
                 candidates += [(project, root, j, jobs) for j in jobs if j.get("paused")
                                and j["stage"] not in ("done", "aborted") and not running(project, j["id"])
                                and not j.get("holdPause") and not by_id.get(j.get("parent"), {}).get("paused")]
-                e2e_full_tick(project, repo, root)  # last, so its failure skips nothing above
+                try:
+                    e2e_full_tick(project, repo, root)  # last, so its failure skips nothing above
+                finally:  # its own guard: an E2E failure never skips the UI sweep
+                    try:
+                        ui_sweep_tick(project, repo, root)
+                    except (Exception, SystemExit) as e:
+                        print(f"watchdog: {project}: ui sweep: {e}", file=sys.stderr, flush=True)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
     finally:
@@ -3469,6 +3535,8 @@ def board_with_activity(root, project):
     data["actionsAlert"] = (ACTIONS_ALERT.get(str(root.parent)) or (0, None))[1]  # the watchdog's cache; never gh here
     rec = e2e_full_record(root)  # the dashboard's "E2E main" header line
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
+    rec = ui_sweep_record(root)  # the same line's "UI sweep" part
+    data["uiSweep"] = {k: rec.get(k) for k in ("at", "head", "result", "findings")} if rec else None
     return data
 
 

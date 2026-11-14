@@ -44,5 +44,27 @@ class E2eFull(unittest.TestCase):
         self.assertEqual(el["innerHTML"], "<span>E2E main stale abcdefg 2h ago</span>")
 
 
+    def test_ui_sweep_pass_next_to_e2e(self):
+        el = render([{"e2eFull": {"at": NOW - 3 * 3600, "head": "1a2b3c4d5e", "result": "pass"},
+                      "uiSweep": {"at": NOW - 60, "head": "9f8e7d6c5b", "result": "pass", "findings": 0}}])
+        self.assertEqual(el, {"innerHTML": "<span>E2E main pass 1a2b3c4 3h ago</span>"
+                                           " · <span>UI sweep pass 9f8e7d6 1m ago · 0 findings</span>", "hidden": False})
+
+    def test_ui_sweep_fail_is_danger(self):
+        el = render([{"e2eFull": {"at": NOW - 60, "head": "ffffffff", "result": "pass"},
+                      "uiSweep": {"at": NOW - 120, "head": "abcdefgh", "result": "fail", "findings": 3}},
+                     {"e2eFull": None, "uiSweep": None}])
+        self.assertEqual(el["innerHTML"], "<span>E2E main pass fffffff 1m ago</span>"
+                         ' · <span class="danger">UI sweep fail abcdefg 2m ago · 3 findings</span>')
+
+    def test_ui_sweep_without_e2e_record(self):
+        el = render([{"e2eFull": {"at": NOW - 60, "head": "ffffffff", "result": "pass"}},
+                     {"e2eFull": None, "uiSweep": {"at": NOW - 7200, "head": "abcdefgh", "result": "running"}}])
+        self.assertEqual(el["innerHTML"], "<span>a E2E main pass fffffff 1m ago</span>"
+                         " · <span>b UI sweep stale abcdefg 2h ago</span>")
+        self.assertEqual(render([{"uiSweep": {"at": NOW - 60, "head": "abcdefgh", "result": "running"}}])["innerHTML"],
+                         "<span>UI sweep running abcdefg</span>")
+
+
 if __name__ == "__main__":
     unittest.main()
