@@ -1643,6 +1643,25 @@ def _fit_diff(root, job):
     return *out, ((rows, names) if ok else None)
 
 
+FIT_PATH_RE = re.compile(r"prod|migrat|payment", re.I)
+
+
+def _bumped_lane(folder) -> bool:
+    """True when feature.md's first block (before the first `## ` line) has a `Lane:` line naming both `bumped` and
+    `sensitive`: the spec writer raised the lane on purpose."""
+    try:
+        text = (folder / "feature.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            return False
+        low = line.lower()
+        if line.startswith("Lane:") and "bumped" in low and "sensitive" in low:
+            return True
+    return False
+
+
 def _fit_job(root, job_id: str, job: dict, globs) -> dict:
     """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
     verdicts per round, fix rounds, over_routed and the cheapest lane that would have done."""
@@ -1658,13 +1677,15 @@ def _fit_job(root, job_id: str, job: dict, globs) -> dict:
                          for r in REVIEWERS} for n in rounds}
     added, deleted, files, paths = _fit_diff(root, job)
     size = None if added is None else added + deleted
-    over = (lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+    sensitive = _bumped_lane(folder) or bool(paths and any(FIT_PATH_RE.search(n) for n in paths[1]))
+    over = (not sensitive and lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
             and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
             and paths is not None and _promote_trigger(*paths) is None
             and not (globs and any(glob_match(n, globs) for n in paths[1])))
     fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
     return {"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
-            "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit}
+            "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit,
+            "sensitive": sensitive}
 
 
 def cmd_pipeline_fit(root, digest_id: str) -> dict:
@@ -1952,7 +1973,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
             continue
-        if e.get("over_routed") is True:  # the pipeline-fit row's own verdict; no second heuristic here
+        if e.get("over_routed") is True and not e.get("sensitive"):  # the pipeline-fit row's own verdict; no second heuristic here
             hits["cheaper_lane_jobs"].append(e["id"])
     globs, seconds = ui_globs(root), 0
     for job_id in listed:
