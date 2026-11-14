@@ -294,16 +294,23 @@ def start_ready(project, root, parent_id, manual=False):
 def wake_waiting(project, root):
     """Start each parentless job parked by `board.py wait-on` whose blocker merged (board.wake_waiting), the same
     `start` spawn start_ready makes, capped like cmd_ready by ram_room and the usage allowance (board.pick_account). A full machine leaves
-    them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True). A
+    them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True), except
+    a `wake` job, which is approved work in flight and only needs RAM room. A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
-    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])) or board.machine_ok(root, claim=True):
+    if not any(map(board.parked_waiting, board.read_board(root)["jobs"])):
+        return
+    why = board.machine_ok(root, claim=True)
+    cooling = why == board.COOLING
+    if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
+        why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
+    if why:
         return
     room = board.ram_room()  # machine_ok passed for the first start only: never burst past the free RAM
     live = board.live_sessions()
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
-    out = board.wake_waiting(root, room, hold=lambda j: j.get("wake") and board.resume_blocker(
+    out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
         root, j["id"], live_ids(project)))
     for job_id in out["ready"]:
         spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
