@@ -7307,6 +7307,39 @@ class LilguyFitTest(unittest.TestCase):
         self.assertIs(got["fit"], False)
         self.assertIn("auth", got["why"])
 
+    def test_lilguy_fit_over_estimate_refused(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Edit board.py, serve.py, dashboard.html and lanes/lilguy.md\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("about 40 added lines in 4 files", got["why"])
+        self.assertIn("limits 30 lines, 10 files", got["why"])
+        self.jev('{"type":"score","score":0.5,"confidence":0.95}')
+        self.assertIs(self.fit()["fit"], False)  # a confident Jev answer does not override it either
+
+    def test_lilguy_fit_names_file_passes(self):
+        (self.jd / "feature.md").write_text("Reword the hint in skills/trevskills-scrum/dashboard.html\n")
+        self.assertEqual(self.fit(), {"fit": True, "why": "names 1 file(s), estimate about 10 added lines"})
+        (self.jd / "feature.md").write_text("Touch board.py, tests/test_board.py and README.md\n")
+        got = self.fit()
+        self.assertIs(got["fit"], True)
+        self.assertTrue(got["why"].startswith("names "), got["why"])
+        self.assertIn("about 30 added lines", got["why"])
+
+    def test_lilguy_fit_names_file_still_refused(self):
+        for text in ("Fix the login copy in dashboard.html", "Edit .claude/rules/x.md",
+                     "Edit a.py, b.py, c.md and d.html"):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(text + "\n")
+                self.assertIs(self.fit()["fit"], False)
+        (self.jd / "feature.md").write_text("Tweak the dashboard label text\n")
+        self.assertTrue(self.fit()["why"].startswith("not tiny"))
+
+    def test_lilguy_fit_estimate_counts_distinct_paths(self):
+        self.assertEqual(board.lilguy_estimate("Edit board.py, then board.py again and `board.py`; also x.md\n"),
+                         (2, 20))
+        self.assertEqual(board.lilguy_estimate("No paths here\n"), (0, 0))
+
     def test_lilguy_fit_unknown_job_exits(self):
         r = run_board("--dir", str(self.root), "lilguy-fit", "999-nope")
         self.assertNotEqual(r.returncode, 0)

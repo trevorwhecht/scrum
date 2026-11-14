@@ -103,8 +103,9 @@
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
                                    git marks as moved (SKILL.md Review MOVE_ONLY); else exit 1 and print {"ok": false, "error"}
   board.py lilguy-fit <id>         print {"fit","why"}: whether the job is tiny (backlog points 1, or jev.log's last model
-                                   answer score < 1.5 at confidence >= 0.7) with no hard-stop word in feature.md
-                                   (SKILL.md New job step 3's Lilguy route)
+                                   answer score < 1.5 at confidence >= 0.7, or feature.md names a file path) with no
+                                   hard-stop word in feature.md and an estimate (10 lines per named path) within 30
+                                   lines, 10 files (SKILL.md New job step 3's Lilguy route)
   board.py claude-paths <id>       print {"paths","headless"}: the project .claude/ files spec.md's Likely files name, and
                                    whether this session is unattended (claude -p, or no claude ancestor found)
                                    (lanes/newjob.md step 3c)
@@ -2999,16 +3000,26 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
     return {"promote": promote, "clean_round": bool(clean_round), "approver_sonnet": bool(green)}
 
 
-# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, or Jev confident it is trivial) and no hard-stop
-# word in feature.md. Anything unreadable counts as not tiny.
+# --- lilguy-fit: SKILL.md New job step 3's Lilguy route. Tiny (1 point, Jev confident it is trivial, or a named file)
+# with no hard-stop word in feature.md and a small size estimate. Anything unreadable counts as not tiny.
 LILGUY_HARD_STOP_RE = re.compile(
     r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
     r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
     r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
 LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
+# lilguy_estimate: a feature.md's named file paths, at LILGUY_LINES_PER_FILE added lines each (a heuristic; Route
+# still promotes from the real diff).
+LILGUY_LINES_PER_FILE = 10
+LILGUY_PATH_RE = re.compile(r"[\w./~$-]+\.(?:py|md|html|js|ts|tsx|json|css|sh|ya?ml)\b")
 # A repo-relative .claude/ path (not ~/.claude, $HOME/.claude, an absolute path or a job worktree): Claude Code refuses
 # edits there in an unattended session, so such a job never takes the unattended Lilguy route.
 CLAUDE_DIR_RE = re.compile(r"(?<![\w~/.$}])\.claude/(?!worktrees/)")
+
+
+def lilguy_estimate(text: str) -> tuple[int, int]:
+    """(files, lines): the distinct file paths text names, and LILGUY_LINES_PER_FILE added lines per file."""
+    files = len(set(LILGUY_PATH_RE.findall(text)))
+    return files, files * LILGUY_LINES_PER_FILE
 
 
 def _jev_model(folder: Path) -> dict | None:
@@ -3050,8 +3061,8 @@ def job_complex(root: Path, job_id: str) -> bool:
 def cmd_lilguy_fit(root, job_id: str) -> dict:
     """{"fit", "why"}: a job already on another lane never fits, nor one whose feature.md or spec.md names a
     repo-relative `.claude/` path (CLAUDE_DIR_RE); then a feature.md header `Lane:` line decides (lilguy
-    fits, any other lane doesn't); else fit only when tiny by backlog points or by Jev, with no LILGUY_HARD_STOP_RE word
-    in its feature.md."""
+    fits, any other lane doesn't); then a LILGUY_HARD_STOP_RE word in feature.md, or a lilguy_estimate over
+    LILGUY_MAX_LINES / LILGUY_MAX_FILES, refuses; else fit when tiny by backlog points, by Jev, or by naming a file."""
     job = find(read_board(root), check_id(job_id))
     lane = job.get("lane")
     if lane and lane != "lilguy":
@@ -3063,8 +3074,13 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
             return {"fit": False, "why": "names a .claude/ path"}
     if pinned := header_value(feature, "Lane", LANES):
         return {"fit": pinned == "lilguy", "why": f"feature.md Lane: {pinned}"}
-    if m := LILGUY_HARD_STOP_RE.search(feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""):
+    text = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
+    if m := LILGUY_HARD_STOP_RE.search(text):
         return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
+    files, lines = lilguy_estimate(text)
+    if lines > LILGUY_MAX_LINES or files > LILGUY_MAX_FILES:
+        return {"fit": False, "why": f"estimate over lilguy limits: about {lines} added lines in {files} files "
+                                     f"(limits {LILGUY_MAX_LINES} lines, {LILGUY_MAX_FILES} files)"}
     item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
     if item and item["points"] == 1:
         return {"fit": True, "why": "backlog item is 1 point"}
@@ -3072,6 +3088,8 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
     score, conf = raw.get("score"), raw.get("confidence")
     if is_num(score) and is_num(conf) and score < LILGUY_JEV_MAX_SCORE and conf >= LILGUY_JEV_MIN_CONFIDENCE:
         return {"fit": True, "why": f"Jev score {score} at confidence {conf}"}
+    if files:
+        return {"fit": True, "why": f"names {files} file(s), estimate about {lines} added lines"}
     pts = f"{item['points']} points" if item and item["points"] else "no points"
     jev = f"Jev score {score} at confidence {conf}" if raw else "no Jev model answer"
     return {"fit": False, "why": f"not tiny: {pts}, {jev}"}
