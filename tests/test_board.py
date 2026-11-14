@@ -6775,6 +6775,151 @@ class RenderPathsTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), {"paths": ["/pricing"], "skipped": []})
 
 
+class UiSweepScreensTest(unittest.TestCase):
+    """board.ui_sweep_screens: decision.md's `## UI sweep` bullets as (screen, why) pairs (job 894)."""
+
+    def test_bullets(self):
+        text = ("APPROVE\n## Manual checks\n- look at /x — not this\n## UI sweep\n- /leads — rows 160 px tall\n"
+                "- the Leads table\n\n## Merge summary\nTitle: t\n- /y — nor this\n")
+        self.assertEqual(board.ui_sweep_screens(text), [("/leads", "rows 160 px tall"), ("the Leads table", "")])
+
+    def test_missing_empty_none(self):
+        self.assertEqual(board.ui_sweep_screens("APPROVE\n## Merge summary\n- /a — b\n"), [])
+        self.assertEqual(board.ui_sweep_screens("APPROVE\n## UI sweep\n\n## Merge summary\n"), [])
+        self.assertEqual(board.ui_sweep_screens("APPROVE\n## UI sweep\n- none\n## Merge summary\n"), [])
+
+
+class UiSweepTargetsTest(unittest.TestCase):
+    """board.ui_sweep_targets: the screens the commits since..head changed, with their merged job ids (job 894)."""
+
+    FILES = E2eSpecsTest.FILES
+    tearDown, git = E2eSpecsTest.tearDown, E2eSpecsTest.git
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / "repo"
+        for rel, text in self.FILES.items():
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / rel).write_text(text)
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        self.root = Path(self.tmp.name) / "scrum"
+        (self.root / "jobs" / "013-grid").mkdir(parents=True)
+        (self.root / "project.md").write_text("# Project\n- UI globs: *.tsx src/components/ src/app/\n")
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "011-price", "stage": "done", "pr": "https://github.com/o/r/pull/11"},
+            {"id": "012-docs", "stage": "done", "pr": "https://github.com/o/r/pull/12"},
+            {"id": "013-grid", "stage": "done", "pr": "https://github.com/o/r/pull/13"},
+            {"id": "014-gone", "stage": "aborted", "pr": "https://github.com/o/r/pull/14"}]}))
+        (self.root / "jobs" / "013-grid" / "decision.md").write_text(
+            "APPROVE\n## UI sweep\n- /leads — rows 160 px tall\n## Merge summary\nTitle: t\n")
+
+    def commit(self, subject, *rels):
+        for rel in rels:
+            p = self.repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text((p.read_text() if p.exists() else "x\n") + "// changed\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", subject)
+        return subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True).stdout.strip()
+
+    def test_targets(self):
+        since = self.commit("start")
+        self.commit("Price tweak (#11)", "src/components/Price.tsx")
+        self.commit("Docs only (#12)", "docs/notes.md", "README.md")
+        self.commit("Grid rows (#13)", "src/app/admin/views/Grid.tsx")
+        sha = self.commit("Hand edit", "src/components/Orphan.tsx")
+        out = board.ui_sweep_targets(self.repo, self.root, since, "HEAD")
+        self.assertEqual(out, {"since": since, "head": "HEAD", "targets": [
+            {"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "rows 160 px tall"},
+            {"path": "/", "jobs": [f"commit {sha[:7]}"], "marked": False, "why": "changed src/components/Orphan.tsx"},
+            {"path": "/admin/views", "jobs": ["013-grid"], "marked": False,
+             "why": "changed src/app/admin/views/Grid.tsx"},
+            {"path": "/pricing", "jobs": ["011-price", "013-grid"], "marked": False,
+             "why": "changed src/components/Price.tsx, src/app/admin/views/Grid.tsx"}]})
+
+    def test_docs_only_and_dash(self):
+        since = self.commit("start")
+        self.commit("Docs only (#12)", "docs/notes.md")
+        self.assertEqual(board.ui_sweep_targets(self.repo, self.root, since, "HEAD")["targets"], [])
+        with self.assertRaises(SystemExit):
+            board.ui_sweep_targets(self.repo, self.root, "-x", "HEAD")
+
+
+class UiSweepRecordTest(unittest.TestCase):
+    """board.py ui-sweep-record: the sweep review's findings and unrendered screens become p4 Trevor items (job 894)."""
+
+    TARGETS = {"since": "s0", "head": "h1", "targets": [
+        {"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "rows 160 px tall"},
+        {"path": "/", "jobs": ["commit abc1234"], "marked": False, "why": "changed x"},
+        {"path": "/admin/views", "jobs": ["013-grid"], "marked": False, "why": "changed y"},
+        {"path": "/pricing", "jobs": ["011-price", "013-grid"], "marked": False, "why": "changed z"}]}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "scrum"
+        self.dir = self.root / "ui-sweep" / "20261113T000000Z"
+        self.dir.mkdir(parents=True)
+        (self.dir / "targets.json").write_text(json.dumps(self.TARGETS))
+        self.rec = {"at": 1, "head": "h1", "since": "s0", "result": "running", "dir": str(self.dir)}
+        (self.root / "ui-sweep.json").write_text(json.dumps(self.rec))
+
+    def review(self, body):
+        (self.dir / "review.md").write_text(body)
+        return self.dir / "review.md"
+
+    def items(self):
+        return [(i["text"], i["priority"], i["by"]) for i in board.read_backlog(self.root)[1] if not i["done"]]
+
+    def record(self):
+        return json.loads((self.root / "ui-sweep.json").read_text())
+
+    def test_files_findings_and_unrendered_once(self):
+        f = self.review("VERDICT: CHANGES\n- [blocking] /leads — rows 160 px tall — /s/render/leads-1440.png\n"
+                        "- ok /pricing\n- Unrendered: /admin/views — needs a signed-in session\n")
+        out = board.cmd_ui_sweep_record(self.root, f)
+        want = [("UI sweep: /leads: rows 160 px tall (merged job 013-grid; screenshot /s/render/leads-1440.png)", 4, "t"),
+                ("UI sweep could not render /admin/views (merged job 013-grid): needs a signed-in session", 4, "t"),
+                ("UI sweep could not render / (merged job commit abc1234): not in the sweep review", 4, "t")]
+        self.assertEqual(self.items(), want)
+        rec = self.record()
+        self.assertEqual((rec["result"], rec["findings"], rec["head"], rec["since"]), ("fail", 3, "h1", "s0"))
+        self.assertEqual(out["result"], "fail")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), want, "a re-run adds no duplicate")
+
+    def test_all_ok_passes(self):
+        f = self.review("VERDICT: PASS\n- ok /leads\n- ok /\n- ok /admin/views\n- ok /pricing\n")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
+        self.assertEqual((self.record()["result"], self.record()["findings"]), ("pass", 0))
+
+    def test_stale_or_missing_changes_nothing(self):
+        f = self.review("VERDICT: CHANGES\n- [blocking] /leads — tall — /s/a.png\n")
+        (self.root / "ui-sweep.json").write_text(json.dumps({**self.rec, "dir": str(self.root / "ui-sweep" / "other")}))
+        with self.assertRaises(SystemExit):
+            board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.record()["result"], "running")
+        (self.root / "ui-sweep.json").write_text(json.dumps(self.rec))
+        with self.assertRaises(SystemExit):
+            board.cmd_ui_sweep_record(self.root, self.dir / "nope" / "review.md")
+        (self.dir / "targets.json").unlink()
+        with self.assertRaises(SystemExit):
+            board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual((self.items(), self.record()), ([], self.rec))
+
+    def test_cli(self):
+        self.assertIn("ui-sweep-record <review.md>", board.__doc__)
+        f = self.review("VERDICT: PASS\n- ok /leads\n- ok /\n- ok /admin/views\n- ok /pricing\n")
+        r = run_board("--dir", str(self.root), "ui-sweep-record", str(f))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["result"], "pass")
+
+
 class CheckReuseTest(unittest.TestCase):
     """board.py check-reuse: a round at an unchanged HEAD reuses the previous round's CHECK: PASS (job 613)."""
 

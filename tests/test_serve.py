@@ -11150,6 +11150,171 @@ class E2eFullTest(unittest.TestCase):
         self.assertIsNone(self.serve.E2E_FULL["running"])
 
 
+class UiSweepTickTest(unittest.TestCase):
+    """serve.py ui_sweep_tick: a later visual re-check of the screens merged on main, on e2e_full_due's schedule
+    (job 894). board._git, board.machine_ok and serve.spawn are mocked."""
+    HEAD = "head111aaaa"
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.repo, self.other = base / "repo", base / "other"
+        self.root = self.repo / "scrum"
+        for r in (self.root, self.other / "scrum"):
+            r.mkdir(parents=True)
+        self.project("- Dev command: npm run dev")
+        (base / "projects.json").write_text(json.dumps([str(self.repo), str(self.other)]))
+        p = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(base / "projects.json")})
+        p.start()
+        self.addCleanup(p.stop)
+        self.dirty, self.count, self.short = b"", b"5\n", False
+        self.targets = {"since": "x", "head": self.HEAD, "targets": []}
+
+    def project(self, dev):
+        (self.root / "project.md").write_text(f"# Project\n- UI globs: src/app/\n{dev}\n")
+
+    def git(self, repo, *args):
+        if args[0] == "status":
+            return self.dirty
+        if args == ("rev-parse", "HEAD"):
+            return (self.HEAD + "\n").encode()
+        if args[:2] == ("rev-list", "--count"):
+            if self.count is None:
+                raise ValueError("git rev-list failed")
+            return self.count
+        if args == ("rev-parse", "--verify", "HEAD~5"):
+            if self.short:
+                raise ValueError("git rev-parse failed")
+            return b"back5\n"
+        if args == ("rev-list", "--max-parents=0", "HEAD"):
+            return b"root000\n"
+        raise AssertionError(f"unexpected git {args}")
+
+    def record(self, **rec):
+        (self.root / "ui-sweep.json").write_text(json.dumps(rec))
+
+    def read(self):
+        f = self.root / "ui-sweep.json"
+        return json.loads(f.read_text()) if f.exists() else None
+
+    def tick(self, machine=None):
+        """(spawn mock, ui_sweep_targets mock) after one tick."""
+        with mock.patch.object(self.serve.board, "_git", side_effect=self.git), \
+                mock.patch.object(self.serve.board, "machine_ok", return_value=machine), \
+                mock.patch.object(self.serve.board, "ui_sweep_targets", return_value=self.targets) as targets, \
+                mock.patch.object(self.serve, "spawn") as spawn:
+            self.serve.ui_sweep_tick("p", self.repo, self.root)
+        return spawn, targets
+
+    def assert_skipped(self, machine=None, rec=None):
+        spawn, targets = self.tick(machine)
+        self.assertEqual((spawn.call_count, targets.call_count), (0, 0))
+        self.assertEqual(self.read(), rec)
+
+    def test_skip_no_ui_globs(self):
+        (self.root / "project.md").write_text("# Project\n- Dev command: npm run dev\n")
+        self.assert_skipped()
+
+    def test_skip_no_dev_command(self):
+        for dev in ("", "- Dev command:", "- Dev command: none"):
+            self.project(dev)
+            self.assert_skipped()
+
+    def test_skip_dirty(self):
+        self.dirty = b" M src/app/page.tsx\n"
+        self.assert_skipped()
+
+    def test_skip_fresh_running_anywhere(self):
+        (self.other / "scrum" / "ui-sweep.json").write_text(json.dumps({"at": time.time() - 600, "result": "running"}))
+        self.assert_skipped()
+
+    def test_skip_machine(self):
+        self.assert_skipped(machine="free RAM 5% (< 20%)")
+
+    def test_skip_not_due(self):
+        now = time.time()
+        for rec in ({"at": now - 60, "head": self.HEAD, "result": "pass"},
+                    {"at": now - 60, "head": "older", "result": "fail"}):
+            self.count = b"4\n"
+            self.record(**rec)
+            self.assert_skipped(rec=rec)
+
+    def test_due_cases(self):
+        now = time.time()
+        for rec, count in (({"at": now - 60, "head": "older", "result": "pass"}, b"5\n"),
+                           ({"at": now - 86400, "head": "older", "result": "pass"}, b"1\n"),
+                           ({"at": now - 86400, "head": self.HEAD, "result": "error", "since": "s"}, b"0\n"),
+                           ({"at": now - 86400, "head": self.HEAD, "result": "running", "since": "s"}, b"0\n"),
+                           ({"at": now - 60, "head": "older", "result": "pass"}, None)):
+            self.record(**rec)
+            self.count = count
+            self.assertEqual(self.tick()[1].call_count, 1, rec)
+
+    def test_no_targets_records_head(self):
+        spawn, targets = self.tick()
+        self.assertEqual(targets.call_args.args, (self.repo, self.root, "back5", self.HEAD))
+        rec = self.read()
+        self.assertEqual({k: rec[k] for k in ("head", "since", "result", "findings")},
+                         {"head": self.HEAD, "since": "back5", "result": "pass", "findings": 0})
+        self.assertLess(time.time() - rec["at"], 60)
+        self.assertEqual(spawn.call_count, 0)
+        self.assertFalse((self.root / "backlog.md").exists())
+        self.assertFalse((self.root / "ui-sweep").exists())
+
+    def test_short_history_starts_at_root(self):
+        self.short = True
+        self.assertEqual(self.tick()[1].call_args.args[2], "root000")
+
+    def test_targets_spawn_once(self):
+        self.targets = {"since": "back5", "head": self.HEAD,
+                        "targets": [{"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "tall"}]}
+        spawn, _ = self.tick()
+        self.assertEqual(spawn.call_count, 1)
+        rec = self.read()
+        d = Path(rec["dir"])
+        self.assertEqual(d.parent, self.root / "ui-sweep")
+        self.assertRegex(d.name, r"^\d{8}T\d{6}Z$")
+        self.assertEqual(json.loads((d / "targets.json").read_text()), self.targets)
+        self.assertEqual((rec["result"], rec["since"], rec["head"]), ("running", "back5", self.HEAD))
+        project, root, job, action, prompt = spawn.call_args.args
+        self.assertEqual((project, root, job, action), ("p", self.root, "ui-sweep", "ui-sweep"))
+        for phrase in ("lanes/uisweep.md", f"SWEEP_DIR={d}", f"PROJECT={self.root}/project.md", f"REPO={self.repo}"):
+            self.assertIn(phrase, prompt)
+        self.assertEqual(self.tick()[0].call_count, 0, "the fresh running record holds a second tick")
+
+    def test_since_after_error(self):
+        now = time.time()
+        for result, want in (("error", "kept0"), ("running", "kept0"), ("pass", "older"), ("fail", "older")):
+            self.record(at=now - 86400, head="older", since="kept0", result=result)
+            self.assertEqual(self.tick()[1].call_args.args[2], want, result)
+
+    def test_watchdog_runs_it_after_e2e_failure(self):
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        s = self.serve
+        with mock.patch.object(s.board, "projects", return_value={"p1": self.repo}), \
+                mock.patch.object(s, "spawn"), \
+                mock.patch.object(s, "e2e_full_tick", side_effect=RuntimeError("boom")), \
+                mock.patch.object(s, "ui_sweep_tick") as sweep, mock.patch.object(s, "prod_errors_tick"), \
+                mock.patch.object(s.board, "cmd_cloud_sync", return_value={"moved": [], "error": None}), \
+                mock.patch.object(s, "actions_alert", return_value=None), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err:
+            s.ACTIONS_ALERT.clear()
+            s.watchdog_tick()
+            s.ACTIONS_ALERT.clear()
+        self.assertEqual(sweep.call_args_list, [mock.call("p1", self.repo, self.root)])
+        self.assertIn("watchdog: p1: boom", err.getvalue())
+
+    def test_board_has_ui_sweep(self):
+        (self.root / "board.json").write_text('{"jobs": []}')
+        self.assertIsNone(self.serve.board_with_activity(self.root, "repo")["uiSweep"])
+        self.record(at=5, head="abc", since="s", result="fail", findings=2, dir="d")
+        self.assertEqual(self.serve.board_with_activity(self.root, "repo")["uiSweep"],
+                         {"at": 5, "head": "abc", "result": "fail", "findings": 2})
+
+
 class PulseTest(unittest.TestCase):
     """Job 755: each watchdog tick appends one pulse.log line; rotation keeps PULSE_KEEP_SECS. No real ps, top,
     memory_pressure or sysctl: SCRUM_PS and the SCRUM_* readings are fakes."""

@@ -98,6 +98,8 @@
                                    lanes/newjob.md Check gate step 2)
   board.py render-paths <id>       print {"paths","skipped"}: the app paths the diff's UI runtime files render, at most 8,
                                    dynamic routes skipped, ["/"] when none maps (lanes/review.md step 2 Shared render)
+  board.py ui-sweep-record <review.md>  file a UI sweep review's findings and unrendered screens as p4 Trevor backlog
+                                   items and close scrum/ui-sweep.json (lanes/uisweep.md)
   board.py check-reuse <id>        print {"reused"}: copy round-(n-1)'s CHECK: PASS into round-n/check.md when HEAD equals
                                    round-(n-1)/head.txt, else null (Check gate step 1)
   board.py move-ratio <id>         print {"added","moved","ratio"}: the share of the job worktree's BASE...HEAD added lines
@@ -2856,6 +2858,127 @@ def cmd_render_paths(root, job_id) -> dict:
     if not job.get("worktree") or not job.get("base"):
         raise SystemExit(f"job {job_id} has no {'worktree' if not job.get('worktree') else 'base'} on the board")
     return render_paths(job["worktree"], job["base"], Path(root) / "project.md")
+
+
+# --- ui-sweep: serve.py ui_sweep_tick's later visual re-check of the screens merged on main (lanes/uisweep.md).
+PR_SUBJECT_RE = re.compile(r"\(#(\d+)\)\s*$")
+
+
+def ui_sweep_screens(text) -> list[tuple[str, str]]:
+    """decision.md's `## UI sweep` bullets as [(screen, why)]; `- <screen>` alone gives why "". [] when the section is
+    missing, empty or only `- none`."""
+    out = []
+    for line in (md_section(text, "UI sweep") or "").splitlines():
+        if (m := re.match(r"^\s*-\s+(.+?)\s*$", line)) and m[1].lower() != "none":
+            screen, _, why = m[1].partition(" — ")
+            out.append((screen.strip(), why.strip()))
+    return out
+
+
+def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
+    """{"since", "head", "targets": [{"path", "jobs", "marked", "why"}]} for the commits since..head in repo. A commit
+    whose subject ends `(#n)` is labelled with the board job whose pr ends `/pull/n` (else `commit <sha7>`); its UI-glob
+    runtime files map to routes through changed_routes (none: `/`), and that job's decision.md `## UI sweep` screens come
+    first as marked. Each path appears once, with every label that touched it."""
+    for ref in (since, head):
+        if not ref or ref.startswith("-"):
+            raise SystemExit(f"ref {ref!r} is empty or starts with '-'")
+    repo, root = Path(repo), Path(root)
+    globs = ui_globs(root) or []
+    try:
+        by_pr = {m[1]: j["id"] for j in read_board(root)["jobs"]
+                 if (m := re.search(r"/pull/(\d+)$", str(j.get("pr") or "")))}
+    except (OSError, ValueError, KeyError):
+        by_pr = {}
+    commits = _git(repo, "rev-list", "--reverse", f"{since}..{head}", "--").decode().split()
+    marked, changed = {}, []  # changed: (label, ui files) per commit
+    for sha in commits:
+        subject = _git(repo, "log", "-1", "--format=%s", sha, "--").decode(errors="replace").strip()
+        job = by_pr.get(m[1]) if (m := PR_SUBJECT_RE.search(subject)) else None
+        label = job or f"commit {sha[:7]}"
+        if job:
+            try:
+                screens = ui_sweep_screens((root / "jobs" / job / "decision.md").read_text(errors="replace"))
+            except OSError:
+                screens = []
+            for screen, why in screens:
+                t = marked.setdefault(screen, {"path": screen, "jobs": [], "marked": True, "why": why})
+                t["jobs"] += [label] if label not in t["jobs"] else []
+        files = _git(repo, "-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "--name-only", "-r", sha,
+                     "--").decode(errors="replace").splitlines()
+        ui = [f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs)]
+        if ui:
+            changed.append((label, ui))
+    routes = changed_routes(repo, sorted({f for _, ui in changed for f in ui})) if changed else {}
+    plain = {}
+    for label, ui in changed:
+        for f in ui:
+            for path in sorted({r for r, _ in routes.get(f) or ()}) or ["/"]:
+                t = marked.get(path) or plain.setdefault(path, {"path": path, "jobs": [], "marked": False, "files": []})
+                t["jobs"] += [label] if label not in t["jobs"] else []
+                if not t["marked"] and f not in t["files"]:
+                    t["files"].append(f)
+    targets = list(marked.values()) + [
+        {"path": t["path"], "jobs": t["jobs"], "marked": False, "why": "changed " + ", ".join(t["files"])}
+        for t in sorted(plain.values(), key=lambda t: t["path"])]
+    return {"since": since, "head": head, "targets": targets}
+
+
+SWEEP_BLOCKING_RE = re.compile(r"^- \[blocking\] (.+?) — (.+) — (.+?)\s*$")
+SWEEP_UNRENDERED_RE = re.compile(r"^- Unrendered: (.+?)(?: — (.*?))?\s*$")
+SWEEP_OK_RE = re.compile(r"^- ok (.+?)\s*$")
+
+
+def _ui_sweep_live(root, d):
+    """The ui-sweep.json record when its dir is d, else SystemExit (a stale session)."""
+    try:
+        rec = json.loads((Path(root) / "ui-sweep.json").read_text())
+    except (OSError, ValueError):
+        rec = None
+    if not isinstance(rec, dict) or not rec.get("dir") or Path(rec["dir"]).resolve() != d.resolve():
+        raise SystemExit(f"{d} is not the current UI sweep (ui-sweep.json dir {(rec or {}).get('dir')!r})")
+    return rec
+
+
+def cmd_ui_sweep_record(root, review_file) -> dict:
+    """File the sweep review's findings (lanes/uisweep.md): each `- [blocking] <path> — <finding> — <png>` and each
+    target that is `- Unrendered:` or not named becomes a p4 Trevor backlog item (an open one is never added twice), then
+    ui-sweep.json gets result fail (anything filed) or pass and the count. A missing review.md or targets.json, or a
+    folder that is not the record's dir, changes nothing."""
+    review = Path(review_file)
+    d = review.parent
+    _ui_sweep_live(root, d)
+    try:
+        text = review.read_text(errors="replace")
+        targets = json.loads((d / "targets.json").read_text())
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"cannot read the sweep review or targets: {e}")
+    jobs = {t["path"]: ", ".join(t.get("jobs") or []) or "?" for t in targets.get("targets") or []}
+    named, items = set(), []  # items: (text, unless_open)
+    for line in text.splitlines():
+        if m := SWEEP_BLOCKING_RE.match(line):
+            named.add(m[1])
+            key = f"UI sweep: {m[1]}: {m[2]}"
+            items.append((f"{key} (merged job {jobs.get(m[1], '?')}; screenshot {m[3]})", key))
+        elif m := SWEEP_UNRENDERED_RE.match(line):
+            named.add(m[1])
+            items.append((f"UI sweep could not render {m[1]} (merged job {jobs.get(m[1], '?')}): "
+                          f"{m[2] or 'no reason given'}", f"UI sweep could not render {m[1]} ("))
+        elif m := SWEEP_OK_RE.match(line):
+            named.add(m[1])
+    items += [(f"UI sweep could not render {p} (merged job {ids}): not in the sweep review",
+               f"UI sweep could not render {p} (") for p, ids in jobs.items() if p not in named]
+    for item, key in items:
+        if len(item) > ITEM_MAX:  # never cut silently: say where the rest is
+            item = item[:ITEM_MAX - 40] + " … (cut; full line in review.md)"
+        cmd_backlog_add(root, [item], priority=4, by="t", unless_open=key)
+    rec = _ui_sweep_live(root, d)  # re-read: a newer sweep may have started meanwhile
+    out = {"at": time.time(), "head": targets.get("head") or rec.get("head"), "since": targets.get("since") or rec.get("since"),
+           "result": "fail" if items else "pass", "findings": len(items), "dir": rec["dir"]}
+    tmp = Path(root) / "ui-sweep.json.tmp"
+    tmp.write_text(json.dumps(out, indent=1) + "\n")
+    os.replace(tmp, Path(root) / "ui-sweep.json")
+    return out
 
 
 def cmd_check_reuse(root, job_id) -> dict:
@@ -6177,6 +6300,7 @@ def main(argv=None):
     es.add_argument("--project")
     sub.add_parser("check-reuse").add_argument("id")
     sub.add_parser("render-paths").add_argument("id")
+    sub.add_parser("ui-sweep-record").add_argument("review")
     cu = sub.add_parser("chain-unlock")
     cu.add_argument("id")
     cu.add_argument("holder")
@@ -6320,6 +6444,8 @@ def main(argv=None):
         print(json.dumps(cmd_check_reuse(a.dir, a.id)))
     elif a.cmd == "render-paths":
         print(json.dumps(cmd_render_paths(a.dir, a.id)))
+    elif a.cmd == "ui-sweep-record":
+        print(json.dumps(cmd_ui_sweep_record(a.dir, a.review)))
     elif a.cmd == "fable-ok":
         print(cmd_fable_ok(a.dir, a.id, a.role))
     elif a.cmd == "prod-ok":

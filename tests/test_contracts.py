@@ -1123,7 +1123,7 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(text.count(phrase), 1, name)
             para = next(l for l in text.splitlines() if l.startswith("**Compare with the base.**"))
             self.assertIn(phrase, para, name)
-            self.assertLessEqual(len(text), 21140 if name == "review-ui" else 20400, name)  # +Real data review-ui, job 830, +tall-row rule job 893
+            self.assertLessEqual(len(text), 21700 if name == "review-ui" else 20400, name)  # +Real data review-ui, job 830, +tall-row rule job 893, +Sweep mode, job 894
 
     def test_spec_writer_documents_obsolete_marker(self):
         self.assertIn("OBSOLETE:", (ROOT / "agents" / "scrum-spec-writer.md").read_text())
@@ -2496,6 +2496,31 @@ class ContractTest(unittest.TestCase):
                        "with no file paths, double quotes or backticks", "go in decision.md's body",
                        "to the stops.md bar", "why Trevor must decide", "with no internal term"):
             self.assertIn(phrase, stop, phrase)
+
+    def test_approver_ui_sweep_section(self):
+        text = (ROOT / "agents" / "scrum-approver.md").read_text()
+        template = self.section(text, "    APPROVE\n", "**ESCALATE only")
+        self.assertLess(template.index("    ## Manual checks"), template.index("    ## UI sweep"))
+        self.assertLess(template.index("    ## UI sweep"), template.index("    ## Merge summary"))
+        rule = next(l for l in text.splitlines() if l.startswith("**UI must be rendered.**"))
+        self.assertIn("under `## Manual checks` and their pages under `## UI sweep`", rule)
+        sweep = next(l for l in text.splitlines() if l.startswith("**UI sweep.**"))
+        for phrase in ("Note about layout it does not block on", "rows taller than one line", "a column empty in every row",
+                       "also puts that screen under `## UI sweep` as `- <route> — <note>`"):
+            self.assertIn(phrase, sweep, phrase)
+
+    def test_ui_sweep_mode(self):
+        ui = (ROOT / "agents" / "scrum-review-ui.md").read_text()
+        para = next(l for l in ui.splitlines() if l.startswith("**Sweep mode.**"))
+        for phrase in ("SWEEP_DIR=", "- Unrendered: <path>", "- [blocking] <path> — <finding> — <png>", "- ok <path>",
+                       "rows taller than one line", "manifest.json"):
+            self.assertIn(phrase, para, phrase)
+        lane = (SKILL_DIR / "lanes" / "uisweep.md").read_text()
+        for phrase in ("SWEEP_DIR=", "- Unrendered: <path>", "B ui-sweep-record", "RENDER_CAP", "--cookies",
+                       "**Shared dev server**", "never 8765 or 3001", "on every outcome"):
+            self.assertIn(phrase, lane, phrase)
+        self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
+        self.assertLess(lane.index("Spawn `scrum-review-ui`"), lane.index("Run `B ui-sweep-record"))
 
     def test_approver_retro_p1_blocked_render_never_hard_stop(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
