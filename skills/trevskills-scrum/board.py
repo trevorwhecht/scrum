@@ -4406,6 +4406,19 @@ def ram_share(light=False):
     return min(share, LIGHT_SESSION_RAM_PCT) if light else share
 
 
+def outside_repo_files(files, repo):
+    """True when `files` is non-empty and every path is absolute outside `repo`, `~`-prefixed, or a relative path whose
+    first folder is not in `repo`. An empty set is False: unknown files may touch anything."""
+    repo = Path(repo)
+    def foreign(f):
+        if f.startswith("~"):
+            return True
+        if f.startswith("/"):
+            return not Path(f).is_relative_to(repo)
+        return not (repo / Path(f).parts[0]).exists() if Path(f).parts else False
+    return bool(files) and all(foreign(f) for f in files)
+
+
 def ram_room_reason(light=False):
     """The queue-gates.txt token for a RAM hold, no whitespace: ram_room(free=<x>%,est=<share>%,min=<MIN_FREE_RAM_PCT>%,
     young=<n>/<MAX_YOUNG_SESSIONS>,sessions=<n>/<MAX_SESSIONS>); free=unknown when free_ram_pct is None."""
@@ -4419,7 +4432,7 @@ def ram_room(floor=1, light=False):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into shares of the measured session_rss_pct (SESSION_RAM_PCT when unknown, never below MIN_SESSION_RAM_PCT),
     minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
-    for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
+    for but not used yet), never past MAX_SESSIONS in all nor (unless free RAM is over 2 * MIN_FREE_RAM_PCT) MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS. light (serve.py, light_job): the free RAM left after the young
@@ -4435,7 +4448,10 @@ def ram_room(floor=1, light=False):
         fit = int((ram - MIN_FREE_RAM_PCT - young * share) // ram_share(True))
     else:
         fit = int((ram - MIN_FREE_RAM_PCT) // share) - young
-    room = min(fit, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
+    caps = [fit, MAX_SESSIONS - len(ages)]
+    if ram <= 2 * MIN_FREE_RAM_PCT:  # ample free RAM: the RAM fit alone ramps starts, no young-session cap
+        caps.append(MAX_YOUNG_SESSIONS - young)
+    room = min(caps)
     return max(floor, room) if floor else room
 
 
@@ -4677,6 +4693,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
             slots = [k for k in slots if has_session(k)]
             outside = [j for j in outside if has_session(j)]
         files.update({j["id"]: child_files(jobs_dir, j["id"]) for j in outside})
+        outside = [j for j in outside if not outside_repo_files(files[j["id"]], Path(root).parent)]  # another repo's job cannot clash
         overlap = []  # outside holder ids that alone hold a waiting child
         room = (1 if only else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
         ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
