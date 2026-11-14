@@ -1681,7 +1681,8 @@ def _fit_excluded(folder, lane: str, paths) -> bool:
 def _fit_job(root, job_id: str, job: dict, globs) -> dict:
     """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
     verdicts per round, fix rounds, over_routed and the cheapest lane that would have done; `excluded`
-    (_fit_excluded) is never over_routed."""
+    (_fit_excluded) is never over_routed. A fast job fits lilguy on one clean round with a lilguy-sized, readable,
+    non-UI diff that _promote_trigger passes."""
     folder = Path(root) / "jobs" / job_id
     lane = job.get("lane") or "standard"
     rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
@@ -1701,6 +1702,12 @@ def _fit_job(root, job_id: str, job: dict, globs) -> dict:
             and paths is not None and _promote_trigger(*paths) is None
             and not (globs and any(glob_match(n, globs) for n in paths[1])))
     fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
+    if (lane == "fast" and not sensitive and not excluded and len(rounds) <= 1  # one clean round, lilguy-sized
+            and "CHANGES" not in verdicts.get("1", {}).values()
+            and size is not None and size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES
+            and paths is not None and _promote_trigger(*paths) is None
+            and not (globs and any(glob_match(n, globs) for n in paths[1]))):
+        fit = "lilguy"  # over_routed stays False: it scores standard/debug only
     return {"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
             "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit,
             "sensitive": sensitive, "excluded": excluded}
@@ -1958,6 +1965,9 @@ def _previous_health(root, digest_id):
     return None, {}
 
 
+FIT_RANK = {"lilguy": 0, "fast": 1, "standard": 2, "debug": 2}  # cheaper_lane_jobs: a fit below its lane
+
+
 def cmd_process_health(root, digest_id: str) -> dict:
     """{"digest", "previous", "metrics"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
     questions.log, each job's routing.log, fable.log and round reviews, the digest's pipeline-fit.json and windows.json,
@@ -1994,7 +2004,9 @@ def cmd_process_health(root, digest_id: str) -> dict:
     for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
             continue
-        if e.get("over_routed") is True and not e.get("sensitive") and e.get("excluded") is not True:  # the pipeline-fit row's own verdict; no second heuristic here
+        lane, fit = FIT_RANK.get(e.get("lane")), FIT_RANK.get(e.get("fit"))
+        if lane is not None and fit is not None and fit < lane and not e.get("sensitive") \
+                and e.get("excluded") is not True:  # the pipeline-fit row's own fit; no second heuristic here
             if e.get("lane") == "fast" and _lilguy_refuses(root / "jobs" / str(e["id"])):
                 continue  # lilguy-fit would have refused it, so fast was the cheapest lane it could get
             hits["cheaper_lane_jobs"].append(e["id"])
@@ -2159,6 +2171,18 @@ def _build_start(root, job_id):
     return None
 
 
+def _run_starts(root, job_id):
+    """Sorted epoch secs of every runs/<YYYYMMDD-HHMMSS>-<action>-<job_id>.log (one per board.spawn), any action."""
+    out = []
+    for p in (Path(root) / "runs").glob(f"*-{job_id}.log"):
+        if re.fullmatch(r"\d{8}-\d{6}-[a-z]+-" + re.escape(job_id) + r"\.log", p.name):
+            try:
+                out.append(datetime.strptime(p.name[:15], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).timestamp())
+            except ValueError:
+                continue
+    return sorted(out)
+
+
 def _waited(prev, end, starts, mtimes):
     """Secs of [prev, end] spent waiting: each start in the window runs to the next file mtime (else end); overlaps count once."""
     spans = sorted((w, min(next((t for t in mtimes if t > w), end), end)) for w in starts if prev <= w < end)
@@ -2171,10 +2195,13 @@ def _waited(prev, end, starts, mtimes):
 
 
 def _timing_row(root, job_id, job, stalls, waits=()):
-    """(row cells, wall secs, rounds, no-change rounds, E2E lock waits) for one claimed job. The no-change cell is the count and the later round of each
+    """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
-    (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs)."""
+    (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs).
+    Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
+    spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
+    epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2203,16 +2230,37 @@ def _timing_row(root, job_id, job, stalls, waits=()):
         claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         claim = None
+    spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
-        spec, queue = spec_at - claim, queue + claim - created
+        spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
+    runs = _run_starts(root, job_id)
+    after = lambda t: next((r for r in runs if r > t), None)
+    try:  # cmd_wait_on: a parentless job's dependency wait counts as Queue, not Spec
+        dep = [float(l.split()[0]) for l in (folder / "dep-waits.txt").read_text(encoding="utf-8").splitlines()
+               if re.fullmatch(r"\d+(\.\d+)? \S+", l.strip())]
+    except OSError:
+        dep = []
+    if dep and spec is not None:
+        spans = sorted((max(w, spec_from), min(after(w) or spec_at, spec_at)) for w in dep)
+        total, upto = 0, spec_from
+        for a, b in spans:  # overlaps count once
+            a = max(a, upto)
+            if b > a:
+                total, upto = total + b - a, b
+        total = min(total, spec)
+        spec, queue = spec - total, queue + total
     try:  # serve.py note_queue_gate: the launch gates that queued it
         gates = ", ".join((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()) or "-"
     except OSError:
         gates = "-"
+    stall_cell, resume = [], 0
+    for at in sorted(stalls.get(job_id, ()), key=lambda t: (t is None, t or 0)):  # dated in order, then undated
+        nxt = None if at is None else after(at)
+        stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
+        resume += nxt - at if nxt else 0
     cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), ", ".join(times) or "-",
-             f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits),
-             str(stalls.get(job_id, 0))]
-    return cells, wall, len(rounds), len(same), waits
+             f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
+    return cells, wall, len(rounds), len(same), waits, resume
 
 
 RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M)  # a serve.py note_ram_hold line
@@ -2220,7 +2268,8 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 def write_timing(root, digest_id, jobs):
     """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
-    head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines),
+    head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines, each as
+    its minutes to the next run log),
     totals, every job on every registered board (and this one) now stalled waiting on the E2E queue, and per claimed
     job its ram-holds.txt lines (serve.py note_ram_hold): hold count, free RAM range and session range."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
@@ -2231,7 +2280,7 @@ def write_timing(root, digest_id, jobs):
                 q.get("kind") == "stall" and E2E_WAIT_REASON in str(q.get("reason") or ""))):
             waits.setdefault(q["job"], []).append(at)
         if q.get("kind") == "stall" and isinstance(q.get("job"), str):
-            stalls[q["job"]] = stalls.get(q["job"], 0) + 1
+            stalls.setdefault(q["job"], []).append(at)
     rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ())) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
@@ -2241,7 +2290,8 @@ def write_timing(root, digest_id, jobs):
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
               f" · no-change rounds {sum(r[3] for r in rows)} in {sum(1 for r in rows if r[3])} jobs"
               f" · E2E lock waits {sum(r[4] for r in rows)} in {sum(1 for r in rows if r[4])} jobs"
-              f" · stalls {sum(stalls.get(j, 0) for j in jobs)}", "", "## Waiting on the E2E queue"]
+              f" · stalls {sum(len(stalls.get(j, ())) for j in jobs)} ({_mins(sum(r[5] for r in rows))} to resume)",
+              "", "## Waiting on the E2E queue"]
     waiting, t = [], time.time()
     for scrum in dict.fromkeys([Path(root).resolve(), *((p / "scrum").resolve() for p in projects().values())]):
         try:
@@ -4015,6 +4065,17 @@ def child_files(jobs_dir, job_id):
     return set()
 
 
+def holder_files(jobs_dir, job):
+    """An outside holder's files while it has no spec.md: the backticked PATH_RE paths in its feature.md, plus the
+    paths its worktree diff touches (_route_diff). Prose words are never read, so an unwritten spec holds nothing."""
+    try:
+        text = (Path(jobs_dir) / job["id"] / "feature.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    diff = _route_diff(job) if job.get("worktree") else None
+    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p)} | set(diff[1] if diff else ())
+
+
 def prose_paths(text):
     """Every backticked token, and every bare token with a / or a file extension, in text that matches PATH_RE."""
     bare = (t.rstrip(".,;:") for t in re.sub(r"`[^`]*`", " ", text).split())
@@ -4628,6 +4689,14 @@ def stuck_on(kids, aborted):
     return bool(stuck)
 
 
+def overlap_gate(holder, mine, theirs):
+    """queue-gates.txt's `overlap:<holder>:<file>` for the first shared file (a non-test one when any), or a bare
+    `overlap:<holder>` when nothing is shared (the holder runs alone)."""
+    shared = shared_files(mine, theirs)
+    shared = {p for p in shared if not is_test_path(p)} or shared
+    return f"overlap:{holder}:{min(shared)}" if shared else f"overlap:{holder}"
+
+
 def note_queue_gate(root, job_id, gate):
     """Add `gate` to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column (serve.py's note_queue_gate
     writes ram_room and cpu_load the same way). A write error never blocks the queue."""
@@ -4644,7 +4713,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). Paused and stalled siblings keep their
     overlap slot, and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
-    one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no.
+    one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no; one
+    with no spec.md uses holder_files and holds nothing when that is empty. An overlap gate names the file (overlap_gate).
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
     BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
     all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text, since} (the card's
@@ -4699,7 +4769,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
             has_session = lambda j: j["id"] in live or (not idle(j) and j.get("stage") in WATCHED and alive(j))
             slots = [k for k in slots if has_session(k)]
             outside = [j for j in outside if has_session(j)]
-        files.update({j["id"]: child_files(jobs_dir, j["id"]) for j in outside})
+        specced = {j["id"] for j in outside if (jobs_dir / j["id"] / "spec.md").is_file()}
+        files.update({j["id"]: child_files(jobs_dir, j["id"]) if j["id"] in specced else holder_files(jobs_dir, j)
+                      for j in outside})
+        outside = [j for j in outside if j["id"] in specced or files[j["id"]]]  # a no-spec holder naming no file holds nothing
         outside = [j for j in outside if not outside_repo_files(files[j["id"]], Path(root).parent)]  # another repo's job cannot clash
         overlap = []  # outside holder ids that alone hold a waiting child
         room = (1 if only else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
@@ -4744,7 +4817,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                 hit = hit or out_hit
                 k["overlap_hold"] = {"ids": list(hit[1]), "text": hit[0], "since": since or now()}  # serve.py's waitingOn for the card
                 for g in [f"runs_alone:{i}" for i in hit[1]] if hit[0] == "this job runs alone" \
-                        else [f"overlap:{i}" for i in hit[1]]:
+                        else [overlap_gate(i, files[k["id"]], files.get(i, set())) for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
             for i in skipped:
@@ -4961,12 +5034,12 @@ def questions_log(root, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def log_stop(root, job_id, kind, reason, auto=False):
+def log_stop(root, job_id, kind, reason, auto=False, **extra):
     """Append one stop line (kind: stall, machine, bigboy or refused) to questions.log. Caller holds the board lock.
     `auto`: the scrum clears it on its own (a stall auto_resume retries, any machine wait); the line carries
-    "auto": true and process-health counts it for no metric."""
+    "auto": true and process-health counts it for no metric. `extra` keys go on the line as they are."""
     questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id, "kind": kind,
-                         "reason": reason, **({"auto": True} if auto else {})})
+                         "reason": reason, **({"auto": True} if auto else {}), **extra})
 
 
 UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render")
@@ -5054,7 +5127,8 @@ def cmd_wait_on(root, job_id, blocker, then=None) -> dict:
     """Park a builder-blocked job at stage waiting on another job on this board (SKILL.md New job step 5), so
     wake_waiting restarts it once that job merges. blocker is a full id or a number matching one id's NNN- start.
     then="approve <job_id>" (SKILL.md Migrate step 2) keeps the worktree and records it as `wake`: wake_waiting then
-    parks the job at needs-human with Try again, and serve.py spawns approve."""
+    parks the job at needs-human with Try again, and serve.py spawns approve. Appends `<epoch> <blocker>` to
+    dep-waits.txt and a `depends_on:<blocker>` queue gate, for timing.md."""
     if then is not None and then != f"approve {job_id}":
         raise SystemExit(f"bad --then {then!r}; expected \"approve {job_id}\"")
     with locked_board(root) as board:
@@ -5080,6 +5154,12 @@ def cmd_wait_on(root, job_id, blocker, then=None) -> dict:
             raise SystemExit(f"job {job_id} is a child of {job['parent']}; it may only wait on a sibling")
         job.update(stage="waiting", depends_on=[dep["id"]], reason=f"waiting on {dep['id']}", updatedAt=now(),
                    **({"wake": then} if then else {"worktree": None}))
+    try:  # timing.md: _timing_row moves this wait from Spec to Queue
+        with (Path(root) / "jobs" / job_id / "dep-waits.txt").open("a", encoding="utf-8") as f:
+            f.write(f"{int(time.time())} {dep['id']}\n")
+    except OSError:
+        pass
+    note_queue_gate(root, job_id, f"depends_on:{dep['id']}")
     return {"id": job_id, "waiting_on": dep["id"]}
 
 
@@ -5913,9 +5993,25 @@ def job_dir_idle(root, job_id, cutoff):
     return True
 
 
-def cmd_watchdog(root, alive=None):
+def last_log_line(root, runlog):
+    """The last non-empty line of the last 8 KB of root/<runlog>, cut to 300 characters; None when there is no runlog,
+    the file can't be read or holds no text."""
+    if not runlog:
+        return None
+    try:
+        with (Path(root) / runlog).open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(f.tell() - 8192, 0))
+            tail = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    return next((l.strip()[:300] for l in reversed(tail.splitlines()) if l.strip()), None)
+
+
+def cmd_watchdog(root, alive=None, exits=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
-    its stage with `stalled` true and a STALL reason, and plays no sound.
+    its stage with `stalled` true and a STALL reason, and plays no sound. Its stall line carries "exit" (exits, serve.py's
+    {run log: exit code}, looked up by the job's runlog) and "last_log" (last_log_line), each None when unknown.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
@@ -5953,7 +6049,8 @@ def cmd_watchdog(root, alive=None):
                     auto = not job.get("parent") or bool(parent and parent.get("stage") == "running"
                                                          and not parent.get("paused")
                                                          and parent.get("lane") in ("runall", "bigboy"))
-                    log_stop(root, job["id"], "stall", job["reason"], auto=auto)
+                    log_stop(root, job["id"], "stall", job["reason"], auto=auto,
+                             exit=(exits or {}).get(job.get("runlog")), last_log=last_log_line(root, job.get("runlog")))
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
             if not flagged and not requeued:

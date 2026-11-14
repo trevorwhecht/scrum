@@ -1015,7 +1015,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])  # no duplicate line on the second call
         self.assertEqual(gates(c1), [])  # claimed: no gate
-        self.assertEqual(gates(c2), [f"overlap:{c1}"])
+        self.assertEqual(gates(c2), [f"overlap:{c1}:src/a.py"])
         self.assertEqual(gates(c3), [f"depends_on:{c1}", f"depends_on:{c2}"])
         parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -1263,11 +1263,40 @@ class BoardTest(unittest.TestCase):
                          and "overlap:" in (self.root / "jobs" / c1 / "queue-gates.txt").read_text())
 
     def test_ready_outside_holder_in_repo_still_holds(self):
-        for files in (["src/a.py"], [], ["/elsewhere/x.py", "src/a.py"]):
+        for files in (["src/a.py"], ["/elsewhere/x.py", "src/a.py"]):
             with self.subTest(files=files):
                 self.tearDown(); self.setUp()
                 _, c1, ready = self.outside_holder_ready(files)
                 self.assertEqual(ready, [])
+
+    def test_ready_ignores_unrelated_outside_holder_without_spec(self):
+        # Job 859: an outside job still writing its spec holds only on the paths its feature.md backticks
+        cases = [("Wire `src/leads/intake.ts` into the form", True, None),
+                 ("Retry in `src/fetchWithBackoff.ts` and src/leads/intake.ts", False, "src/fetchWithBackoff.ts"),
+                 ("Fix the lead intake form", True, None),  # names no file: holds nothing
+                 ("Touch src/fetchWithBackoff.ts in prose", True, None)]  # bare words are never read as paths
+        for feature, claimed, shared in cases:
+            with self.subTest(feature=feature):
+                self.tearDown(); self.setUp()
+                (self.root.parent / "src").mkdir()  # an in-repo folder, so src/ paths are not foreign
+                out = board.cmd_new(self.root, "Outside")  # stage spec, no spec.md
+                self.write(f"{out}/feature.md", feature + "\n")
+                parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+                c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                self.spec(c1, "src/fetchWithBackoff.ts")
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1] if claimed else [])
+                gates = self.root / "jobs" / c1 / "queue-gates.txt"
+                self.assertEqual(gates.read_text().split() if gates.exists() else [],
+                                 [f"overlap:{out}:{shared}"] if shared else [])
+        board.cmd_set(self.root, c1, ["stage=waiting"])
+        wt, base = self.branch(0)  # prose-only feature.md, but its worktree diff touches the child's file
+        (Path(wt) / "src").mkdir()
+        (Path(wt) / "src" / "fetchWithBackoff.ts").write_text("x\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"], check=True)
+        board.cmd_set(self.root, out, [f"worktree={wt}", f"base={base}"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(gates.read_text().split(), [f"overlap:{out}:src/fetchWithBackoff.ts"])
 
     def test_ready_fast_child_still_held_when_files_intersect_unbuilt_holder(self):
         parent, c1, c2, _ = self.fast_pair(kid_files=("src/a.py",))
@@ -3960,9 +3989,9 @@ class BoardTest(unittest.TestCase):
         text = (self.root / "digests" / "001" / "timing.md").read_text()
         self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |\n"
                       "|---|---|---|---|---|---|---|---|---|---|\n", text)
-        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | ? |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
-                      " · stalls 1\n", text)
+                      " · stalls 1 (0m to resume)\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n\n"
                       "## RAM holds\nNone\n", text)
 
@@ -4382,7 +4411,54 @@ class BoardTest(unittest.TestCase):
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
-        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0 | 0 | 2 |", (self.root / "digests" / "001" / "timing.md").read_text())
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0 | 0 | open, open |", (self.root / "digests" / "001" / "timing.md").read_text())
+
+    def test_timing_moves_dependency_wait_to_queue(self):
+        t0 = 1_700_000_000
+        job, blocker = board.cmd_new(self.root, "Waits"), board.cmd_new(self.root, "Blocker")
+        self.write(f"{job}/feature.md", "f\n")
+        board.cmd_wait_on(self.root, job, blocker)
+        folder = self.root / "jobs" / job
+        self.assertRegex((folder / "dep-waits.txt").read_text(), rf"^\d+ {blocker}\n$")
+        self.assertEqual((folder / "queue-gates.txt").read_text(), f"depends_on:{blocker}\n")
+        (folder / "dep-waits.txt").write_text(f"{t0 + 600} {blocker}\n")
+        self.write(f"{job}/spec.md", "s\n")
+        os.utime(folder / "feature.md", (t0, t0))
+        os.utime(folder / "spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        (self.root / "runs").mkdir()
+        stamp = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{stamp}-start-{job}.log").write_text("x")
+        cells = lambda: board._timing_row(self.root, job, {}, {})[0][2:5]
+        self.assertEqual(cells(), ["20m", "2h50m", f"depends_on:{blocker}"])
+        (folder / "dep-waits.txt").unlink()
+        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker}"])
+        (folder / "dep-waits.txt").write_text("garbage\n")
+        self.assertEqual(cells(), ["3h10m", "0m", f"depends_on:{blocker}"])
+        (folder / "dep-waits.txt").write_text(f"{t0 - 7200} {blocker}\n{t0 + 600} {blocker}\n")  # one before created
+        self.assertEqual(cells(), ["10m", "3h00m", f"depends_on:{blocker}"])  # clipped at created, overlap counted once
+
+    def test_timing_stall_minutes_to_resume(self):
+        t0 = 1_700_000_000
+        self.write("j/spec.md", "s\n")
+        self.write("k/spec.md", "s\n")
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        stamp = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        runs = self.root / "runs"
+        runs.mkdir()
+        (runs / f"{stamp(0)}-start-j.log").write_text("x")  # before the first stall: not its resume
+        (runs / f"{stamp(3600 + 34 * 60)}-resume-j.log").write_text("x")
+        (runs / f"{stamp(3600 + 60)}-resume-xj.log").write_text("x")  # another job's log
+        (self.root / "questions.log").write_text("".join(json.dumps(d) + "\n" for d in (
+            {"job": "j", "kind": "stall", "reason": "stalled: no board update", "date": iso(9000)},
+            {"job": "j", "kind": "stall", "reason": "stalled: no board update"},
+            {"job": "j", "kind": "stall", "reason": "stalled: no board update", "date": iso(3600)})))
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            board.write_timing(self.root, "001", ["j", "k"])
+        text = (self.root / "digests" / "001" / "timing.md").read_text()
+        self.assertIn(" | 34m, open, ? |\n", text)
+        self.assertTrue(text.split("| k |")[1].split("\n")[0].endswith(" | 0 |"))
+        self.assertIn(" · stalls 3 (34m to resume)\n", text)
 
     def test_timing_wait_clamped_and_merged(self):
         self.assertEqual(self.timing_cell([6000, 6100]), "1h50m")  # overlapping spans count once
@@ -4394,7 +4470,7 @@ class BoardTest(unittest.TestCase):
             for n, h in heads.items():
                 self.write(f"{job}/round-{n}/head.txt", h + "\n")
         self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][7], "0")
-        cells, _, _, count, _ = board._timing_row(self.root, "b", {}, {})
+        cells, _, _, count, _, _ = board._timing_row(self.root, "b", {}, {})
         self.assertEqual((cells[7], count), ("1 (rounds 4)", 1))
 
     def test_timing_row_queue_gate_cell(self):
@@ -4669,13 +4745,32 @@ class BoardTest(unittest.TestCase):
         lines = self.log_lines()
         # job 825: a standalone job with no live session is auto-resumed, so its line is auto; live-but-idle is not
         self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason"},
-                                                   {"date", "project", "job", "kind", "reason", "auto"}])
+                                                   {"date", "project", "job", "kind", "reason", "auto", "exit", "last_log"}])
         for l in lines:
             self.assertRegex(l["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines], [
             (Path(self.tmp.name).name, idle, "stall", "stalled: no board or job-dir change for 2 h "
              "(session alive but idle)", None),
             (Path(self.tmp.name).name, dead, "stall", "stalled: no board update for 30 min and no live session", True)])
+
+    def test_watchdog_stall_logs_exit_and_last_line(self):
+        runs = self.root / "runs"
+        runs.mkdir(parents=True)
+        (runs / "20261101-100000-start-x.log").write_bytes(b"a" * 9000 + b"\nnot last\n" + b"E" * 400 + b"\n\n  \n")
+        dead = self.aged("Dead build", 45, stage="build", runlog="runs/20261101-100000-start-x.log")
+        bare = self.aged("No log", 45, stage="build")
+        gone = self.aged("Gone log", 45, stage="build", runlog="runs/20261101-110000-start-y.log")
+        exits = {"runs/20261101-100000-start-x.log": 137, "runs/other.log": 1}
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False, exits=exits), [dead, bare, gone])
+        got = {l["job"]: (l["exit"], l["last_log"]) for l in self.log_lines()}
+        self.assertEqual(got, {dead: (137, "E" * 300), bare: (None, None), gone: (None, None)})
+        idle = self.aged("Idle build", 180, stage="build")
+        (self.root / "jobs" / idle).mkdir(parents=True, exist_ok=True)
+        (self.root / "jobs" / idle / "build.md").write_text("x")
+        self.age_job_dir(idle, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True, exits=exits), [idle])
+        self.assertNotIn("exit", self.log_lines()[-1])  # the live-but-idle line carries neither key
+        self.assertNotIn("last_log", self.log_lines()[-1])
 
     def test_watchdog_stall_auto_only_when_resumable(self):
         # Job 825: auto only when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
@@ -9033,6 +9128,34 @@ class PipelineFitTest(unittest.TestCase):
         self.digest(job)
         self.assertEqual(self.fit()["jobs"][0]["over_routed"], False)
 
+    def fast_fit(self, lines=10, files=1, rounds=1, **round1):
+        """(over_routed, fit) of one fast-lane job with a `lines`-line diff over `files` files and `rounds` rounds."""
+        self.git("checkout", "-q", "main")
+        self.git("checkout", "-q", "-B", "work")
+        job = self.small_standard(lines=lines, files=files, **round1)
+        board.cmd_set(self.root, job, ["lane=fast"])
+        for n in range(2, rounds + 1):
+            self.reviews(job, n)
+        self.digest(job)
+        j = self.fit()["jobs"][0]
+        return j["over_routed"], j["fit"]
+
+    def test_pipeline_fit_fast_job_fits_lilguy(self):
+        self.assertEqual(self.fast_fit(), (False, "lilguy"))
+        self.assertEqual(self.fast_fit(lines=30, files=2), (False, "lilguy"))
+        self.assertEqual(self.fast_fit(lines=31), (False, "fast"))  # over LILGUY_MAX_LINES
+        self.assertEqual(self.fast_fit(rounds=2), (False, "fast"))  # a fix round: not a cheap job
+        self.assertEqual(self.fast_fit(code="VERDICT: CHANGES\nfix\n"), (False, "fast"))
+        board.cmd_set(self.root, self.fit()["jobs"][0]["id"], ["worktree="])  # unreadable diff
+        self.assertEqual(self.fit()["jobs"][0]["fit"], "fast")
+
+    def test_pipeline_fit_fast_ui_job_stays_fast(self):
+        self.root.mkdir()
+        (self.root / "project.md").write_text("- UI globs: src/f0.py\n")
+        self.assertEqual(self.fast_fit(), (False, "fast"))
+        (self.root / "project.md").write_text("- UI globs: web/*.html\n")
+        self.assertEqual(self.fast_fit(), (False, "lilguy"))
+
     def fit_and_cheaper(self):
         """(pipeline-fit's only row, cheaper_lane_jobs ids) for digest 001, health read from that pipeline-fit.json."""
         out = self.fit()
@@ -9145,6 +9268,21 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "1189-c", "lane": "standard", "added": 18, "deleted": 14, "files": 2, "over_routed": False, "fit": "standard"}]}))
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
 
+    def test_cheaper_lane_follows_fit(self):
+        ids = ("101-a", "102-b", "103-c", "104-d", "105-e", "106-f", "107-g", "108-h")
+        self.digest("001", *ids)
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "101-a", "lane": "fast", "fit": "fast", "added": 10, "files": 1, "over_routed": False},
+            {"id": "102-b", "lane": "fast", "fit": "lilguy", "added": 10, "files": 1, "over_routed": False},
+            {"id": "103-c", "lane": "debug", "fit": "fast", "over_routed": True},
+            {"id": "104-d", "lane": "standard", "added": 5, "files": 1},
+            {"id": "105-e", "lane": "bigboy", "fit": "lilguy"},
+            {"id": "106-f", "lane": "runall", "fit": "fast"},
+            {"id": "107-g", "lane": "lilguy", "fit": "lilguy"},
+            {"id": "108-h", "lane": "standard", "fit": "debug"}]}))
+        m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
+        self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
+
     def test_cheaper_lane_needs_over_routed(self):
         self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "standard", "", "merged"),
                    ("103-c", "done", "fast", "", "merged"))
@@ -9180,9 +9318,9 @@ class ProcessHealthTest(unittest.TestCase):
                    ("103-c", "done", "standard", "", "merged"))
         self.digest("001", "101-a", "102-b", "103-c")
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "101-a", "over_routed": True, "sensitive": True},
-            {"id": "102-b", "over_routed": True, "sensitive": False},
-            {"id": "103-c", "over_routed": True}]}))
+            {"id": "101-a", "lane": "standard", "fit": "fast", "over_routed": True, "sensitive": True},
+            {"id": "102-b", "lane": "standard", "fit": "fast", "over_routed": True, "sensitive": False},
+            {"id": "103-c", "lane": "standard", "fit": "lilguy", "over_routed": True}]}))
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
         self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
 
@@ -9196,11 +9334,11 @@ class ProcessHealthTest(unittest.TestCase):
         self.put("jobs/104-d/feature.md", "Tweak the label, see ~/.claude/CLAUDE.md\n")
         self.put("jobs/105-e/feature.md", "Fix the auth redirect\n")
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "101-a", "lane": "fast", "over_routed": True},
-            {"id": "102-b", "lane": "fast", "over_routed": True},
-            {"id": "103-c", "lane": "fast", "over_routed": True},
-            {"id": "104-d", "lane": "fast", "over_routed": True},
-            {"id": "105-e", "lane": "standard", "over_routed": True}]}))
+            {"id": "101-a", "lane": "fast", "fit": "lilguy"},
+            {"id": "102-b", "lane": "fast", "fit": "lilguy"},
+            {"id": "103-c", "lane": "fast", "fit": "lilguy"},
+            {"id": "104-d", "lane": "fast", "fit": "lilguy"},
+            {"id": "105-e", "lane": "standard", "fit": "lilguy", "over_routed": True}]}))
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
         self.assertEqual((m["value"], m["jobs"]), (2, ["104-d", "105-e"]))
 
@@ -9275,8 +9413,8 @@ class ProcessHealthTest(unittest.TestCase):
             {"job": "199-other", "kind": "ask", "question": "Resume? rule 9",
              "options": [{"command": "resume 199-other"}, {"command": "abort 199-other"}]}, "garbage"])
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "101-alpha", "added": 50, "files": 3, "over_routed": True},
-            {"id": "102-beta", "lane": "fast", "added": 20, "files": 2, "over_routed": True},
+            {"id": "101-alpha", "lane": "standard", "fit": "fast", "added": 50, "files": 3, "over_routed": True},
+            {"id": "102-beta", "lane": "fast", "fit": "lilguy", "added": 20, "files": 2},
             {"id": "103-gamma", "lane": "standard", "added": 500, "files": 4, "over_routed": False},
             {"id": "104-delta", "lane": "lilguy", "added": 5, "files": 1},
             {"id": "199-other", "lane": "standard", "added": 1, "files": 1, "over_routed": True}]}))
