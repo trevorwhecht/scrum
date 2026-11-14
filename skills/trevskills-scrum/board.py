@@ -4486,19 +4486,26 @@ def live_sessions():
     return len(session_ages())
 
 
+# Files nearly every job names; two jobs may share one, the third waits (git merges edits to different parts).
+BIG_SHARED_FILES = {"skills/trevskills-scrum/board.py", "skills/trevskills-scrum/serve.py"}
+SHARED_BIG_LIMIT = 2
+
+
 def slot_conflict(k, busy, files):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
-    (shared_files: a folder shares every file under it)."""
+    (shared_files: a folder shares every file under it), except BIG_SHARED_FILES, which clash only once 2 siblings name one."""
     busy = [o for o in busy if o["id"] != k["id"]]
     if not busy:
         return None
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
-    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(shared_files(files[k['id']], files[o['id']]))}")
-             for o in busy if alone(o) or shared_files(files[k["id"]], files[o["id"]])]
+    shared = {o["id"]: set() if alone(o) else shared_files(files[k["id"]], files[o["id"]]) for o in busy}
+    held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in shared.values()) >= SHARED_BIG_LIMIT
+    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
+             for o in busy if alone(o) or any(held(p) for p in shared[o["id"]])]
     return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
 
 
