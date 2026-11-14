@@ -4030,8 +4030,8 @@ def cooling_down():
 
 
 def swap_grew(swap):
-    """True when swap is more than 1 point of RAM above the oldest reading of the last SWAP_GROWTH_SECS (net growth: a
-    fall then a rebound is not growth). Records swap
+    """True when swap is more than 1 point of RAM above the oldest reading of the last SWAP_GROWTH_SECS, or more than
+    5 points above the lowest reading in that window (a large rebound after a fall). Records swap
     in SCRUM_SWAP_LOG (default: system temp dir), pruned to that window; a missing or corrupt file means no growth."""
     log = os.environ.get("SCRUM_SWAP_LOG") or os.path.join(tempfile.gettempdir(), "scrum-swap-log.json")
     now = time.time()
@@ -4039,7 +4039,7 @@ def swap_grew(swap):
         keep = [[t, v] for t, v in json.loads(Path(log).read_text()) if now - t < SWAP_GROWTH_SECS]
     except (OSError, ValueError, TypeError):
         keep = []
-    grew = bool(keep) and swap - keep[0][1] > 1
+    grew = bool(keep) and (swap - keep[0][1] > 1 or swap - min(v for _, v in keep) > 5)
     try:
         with open(log, "w") as fh:
             json.dump(keep + [[now, swap]], fh)

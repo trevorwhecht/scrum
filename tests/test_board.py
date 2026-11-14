@@ -2158,8 +2158,12 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.machine_ok(self.tmp.name), msg)
         with self.swap_log([(700, 50.0)]), self.machine("71", "1000"), env:
             self.assertIsNone(board.machine_ok(self.tmp.name), "old sample")
+        with self.swap_log([(500, 60.0), (400, 55.0)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "fell then rebounded 1.4: net down, not growth")
+        with self.swap_log([(500, 60.0), (400, 51.4)]), self.machine("71", "1000"), env:
+            self.assertIsNone(board.machine_ok(self.tmp.name), "exactly 5.0 above the minimum passes")
         with self.swap_log([(500, 60.0), (400, 50.0)]), self.machine("71", "1000"), env:
-            self.assertIsNone(board.machine_ok(self.tmp.name), "fell then rebounded: net down, not growth")
+            self.assertEqual(board.machine_ok(self.tmp.name), msg, "rebound 6.4 above the minimum, net down")
         with self.swap_log([(500, 50.0), (400, 40.0)]), self.machine("71", "1000"), env:
             self.assertEqual(board.machine_ok(self.tmp.name), msg, "net up over the window")
         with self.swap_log([(120, 56.0)]), self.machine("71", "1000"), env:
