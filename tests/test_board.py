@@ -9832,7 +9832,7 @@ class TestDbUp(unittest.TestCase):
             r = run_board("db-up", "--env", str(env))
         self.assertEqual(r.returncode, 1)
         self.assertEqual(json.loads(r.stdout), {"up": False, "started": True})
-        start.assert_called_once_with()
+        start.assert_called_once_with(cwd=env.parent)
 
     def test_skips_remote_and_missing_url(self):
         start = mock.Mock()

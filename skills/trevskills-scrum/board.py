@@ -5858,7 +5858,7 @@ def start_local_db(cwd=None, sleep=time.sleep) -> str | None:
 def db_up(env_file, wait=120, start=None, probe=None, sleep=None) -> dict:
     """The Check gate's database probe. Reads DATABASE_URL (quotes stripped) from env_file and TCP-probes its host:port
     (5432 when the URL has none). Open: {"up": true, "started": false}. Refused on a LOCAL_DB_HOSTS host: call start
-    (default start_local_db) once, re-probe every 5 s for up to wait seconds, and return {"up", "started": true}, plus
+    (default start_local_db in env_file's folder) once, re-probe every 5 s for up to wait seconds, and return {"up", "started": true}, plus
     "error" when the start failed. A missing file, a missing or unparsable URL, or a non-local host returns
     {"up": null, "skipped": reason} and starts nothing."""
     probe, sleep = probe or port_open, sleep or time.sleep
@@ -5881,7 +5881,7 @@ def db_up(env_file, wait=120, start=None, probe=None, sleep=None) -> dict:
     if probe(host, port):
         return {"up": True, "started": False}
     try:
-        error = (start or start_local_db)()
+        error = start() if start else start_local_db(cwd=Path(env_file).parent)  # compose file sits beside env_file
     except Exception as e:  # a starter failure is reported, never raised
         error = f"database start failed: {e}"
     up = False
