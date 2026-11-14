@@ -8876,14 +8876,14 @@ class ProcessHealthTest(unittest.TestCase):
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
 
     def test_cheaper_lane_needs_over_routed(self):
-        self.board(("1-a", "done", "fast", "", "merged"), ("2-b", "done", "standard", "", "merged"),
-                   ("3-c", "done", "fast", "", "merged"))
-        self.digest("001", "1-a", "2-b", "3-c")
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "standard", "", "merged"),
+                   ("103-c", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "1-a", "lane": "fast", "added": 5, "files": 1, "over_routed": False, "fit": "fast"},
-            {"id": "2-b", "lane": "standard", "added": 5, "files": 1, "over_routed": True, "fit": "fast"},
-            {"id": "3-c", "lane": "fast", "added": 5, "files": 1}]}))
-        self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["jobs"], ["2-b"])
+            {"id": "101-a", "lane": "fast", "added": 5, "files": 1, "over_routed": False, "fit": "fast"},
+            {"id": "102-b", "lane": "standard", "added": 5, "files": 1, "over_routed": True, "fit": "fast"},
+            {"id": "103-c", "lane": "fast", "added": 5, "files": 1}]}))
+        self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["jobs"], ["102-b"])
 
     def test_waste_needs_minutes(self):
         self.board(("101-a", "done", "lilguy", "", "merged"), ("102-b", "done", "lilguy", "", "merged"),
