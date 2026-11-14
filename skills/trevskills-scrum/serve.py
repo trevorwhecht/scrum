@@ -1613,16 +1613,18 @@ def prod_errors_tick(project, repo, root, now=None) -> None:
         sig, route, message = prod_error_signature(row)
         ts = row["timestamp"] / 1000 if num(row.get("timestamp")) is not None else now
         g = groups.setdefault(sig, {"route": route, "message": message, "count": 0, "first": ts, "last": ts,
-                                    "deployment": row.get("deploymentId")})
+                                    "deployment": row.get("deploymentId"), "full": row.get("message"),
+                                    "code": row.get("errorCode")})
         g["count"] += 1
         g["first"] = min(g["first"], ts)
         if ts >= g["last"]:
-            g["last"], g["deployment"] = ts, row.get("deploymentId")
+            g["last"], g["deployment"], g["full"], g["code"] = ts, row.get("deploymentId"), row.get("message"), row.get("errorCode")
     for sig, g in groups.items():
         prev = seen.get(sig) if isinstance(seen.get(sig), dict) else {}
         g["first"] = min(g["first"], num(prev.get("first")) or g["first"])
         seen[sig] = {"route": g["route"], "message": g["message"], "first": g["first"],
-                     "last": max(g["last"], num(prev.get("last")) or 0)}
+                     "last": max(g["last"], num(prev.get("last")) or 0), "fullMessage": g["full"],
+                     "errorCode": g["code"] if isinstance(g["code"], str) else None}
     tmp = root / "prod-errors.json.tmp"  # written before the backlog, so a backlog failure never re-fetches each tick
     tmp.write_text(json.dumps(state, indent=1) + "\n")
     os.replace(tmp, root / "prod-errors.json")
