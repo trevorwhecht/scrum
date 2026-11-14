@@ -1633,10 +1633,11 @@ class ContractTest(unittest.TestCase):
     def test_digest_reader_reads_pulse(self):
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("`DIGEST_DIR/pulse.md`", "For `## Pulse`, use `DIGEST_DIR/pulse.md`", "says `No pulse lines`",
-                       "claims while CPU load over 500%"):
+                       "claims while CPU load over 500%", "non-focus minutes, and claims by account"):
             self.assertIn(phrase, reader, phrase)
         template = reader[reader.index("    ## Time sinks\n"):]
         self.assertIn("    ## Pulse\n    Idle with claimable work:", template)
+        self.assertIn("(focus: <name>) · claims by account: <main n, owa n>\n", template)
         rule = reader[reader.index("For `## Pulse`"):]
         rule = rule[:rule.index("\n")]
         self.assertIn("exempt from the 2 or more different jobs rule", rule)

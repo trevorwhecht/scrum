@@ -7404,6 +7404,37 @@ class AutoResumeTest(unittest.TestCase):
                 dict(held, id="w", account="main", stage="waiting")]
         self.assertEqual(self.held_sweep(jobs), [])
 
+    def test_start_ready_run_all_fails_over_to_owa(self):
+        """Job 850: the Auto continue run-all starts on owa while main is limited or tapered, on main while it is free."""
+        s, now = self.serve, time.time()
+        self.two_accounts()
+        root = self.root / "repo" / "scrum"
+        root.mkdir(parents=True)
+        (root / "project.md").write_text("- Auto continue: 1\n")
+        (root / "backlog.md").write_text("- [ ] Open work\n")
+        (root / "board.json").write_text(json.dumps({"jobs": []}))
+        self.addCleanup(lambda: s.RUNS.pop("p/run-all", None))
+
+        def run_all_env():
+            s.RUNS.pop("p/run-all", None)
+            with mock.patch.object(s.board, "projects", return_value={"p": root.parent}), \
+                    mock.patch.object(s.board, "machine_ok", return_value=None), \
+                    mock.patch.object(s.board, "live_sessions", return_value=0), \
+                    mock.patch.object(s, "running", return_value=False), \
+                    mock.patch.object(s.board.subprocess, "Popen") as popen:
+                s.auto_continue_tick({"p": False})
+            [call] = popen.call_args_list
+            self.assertEqual(call.args[0][1:3], ["-p", "/trevskills-scrum run-all"])
+            return call.kwargs["env"].get("CLAUDE_CONFIG_DIR")
+        self.assertIsNone(run_all_env(), "main free: main")
+        s.board.note_limit("main", int(now) + 3600)
+        self.assertEqual(run_all_env(), str(self.owa), "main limited: owa")
+        (self.main / "limit_until").unlink()
+        (self.main / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 99, "resets_at": now + 4 * 3600}}}))
+        self.assertEqual(s.board.usage_allowance(s.board.read_usage("main"), now, 0), 0)  # tapered
+        self.assertEqual(run_all_env(), str(self.owa), "main tapered: owa")
+
     def test_limit_held_early_failover_drops_limit_reset_at(self):
         self.two_accounts()
         reset = int(time.time()) + 3600

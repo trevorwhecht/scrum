@@ -1403,16 +1403,21 @@ def _pulse_since(root, digest_id):
     return None
 
 
-def _hand_started(cache, name, n):
-    """True when project `name`'s board job numbered n has started_by "hand". A project not in projects(), an
-    unreadable board or a missing job is not hand, so write_pulse still counts its claim. cache: {name: board jobs}."""
+def _board_job(cache, name, n):
+    """Project `name`'s board job numbered n, or None (a project not in projects(), an unreadable board or a missing
+    job). cache: {name: board jobs}."""
     if name not in cache:
         try:
             cache[name] = read_board(projects()[name] / "scrum")["jobs"]
         except (KeyError, OSError, ValueError, SystemExit):
             cache[name] = []
-    return any(j.get("started_by") == "hand" for j in cache[name]
-               if (m := re.match(r"(\d+)-", str(j.get("id")))) and int(m.group(1)) == n)
+    return next((j for j in cache[name] if (m := re.match(r"(\d+)-", str(j.get("id")))) and int(m.group(1)) == n), None)
+
+
+def _hand_started(cache, name, n):
+    """True when project `name`'s board job numbered n has started_by "hand". A job _board_job does not find is not
+    hand, so write_pulse still counts its claim."""
+    return (_board_job(cache, name, n) or {}).get("started_by") == "hand"
 
 
 PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
@@ -1431,8 +1436,9 @@ def write_pulse(root, digest_id):
     not idle: Auto continue off or cool-down), idle held by the machine guard (would be idle with claimable work, but
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
     as before), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
-    jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
-    while another project was busy."""
+    jobs started_by hand (_hand_started), or at CPU load over 500%, minutes the focus project had claimable work
+    while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
+    (none: the first account; job not on the board: unknown), in accounts() order."""
     since = _pulse_since(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
@@ -1477,7 +1483,8 @@ def write_pulse(root, digest_id):
                 nonfocus += dt
         idle, held, guard, longest, nonfocus, gated, guarded = (
             round(x / 60) for x in (idle, held, guard, longest, nonfocus, gated, guarded))
-        cool, hot, claimed, boards = 0, 0, {}, {}
+        cool, hot, claimed, boards, by_acc = 0, 0, {}, {}, {}
+        names = [a.name for a in accounts()]
         for a, b in zip(lines, lines[1:]):
             pa, pb = projs(a), projs(b)
             for name, p in pb.items():
@@ -1486,6 +1493,11 @@ def write_pulse(root, digest_id):
                     was = 0  # no jobs yet: the first job is a claim
                 if not (is_num(was) and is_num(top) and top > was):
                     continue
+                for n in range(int(was) + 1, int(top) + 1):
+                    job = _board_job(boards, name, n)
+                    if (job or {}).get("started_by") != "hand":  # no account: the first, as elsewhere
+                        acc = "unknown" if job is None else job.get("account") or names[0]
+                        by_acc[acc] = by_acc.get(acc, 0) + 1
                 if b.get("cooldown") is True:
                     for n in range(int(was) + 1, int(top) + 1):
                         if not _hand_started(boards, name, n):
@@ -1511,7 +1523,9 @@ def write_pulse(root, digest_id):
                 f"Claims during cool down: {cool}"
                 + (" — " + ", ".join(f"{n} {' '.join(v)}" for n, v in claimed.items()) if claimed else ""),
                 f"Claims while CPU load over 500%: {hot}",
-                f"Non-focus work while focus had claimable work: {nonfocus} min (focus: {focus})"]
+                f"Non-focus work while focus had claimable work: {nonfocus} min (focus: {focus})",
+                "Claims by account: " + (", ".join(f"{k} {by_acc[k]}" for k in sorted(by_acc, key=lambda k: (
+                    k == "unknown", names.index(k) if k in names else len(names)))) or "none")]
     (Path(root) / "digests" / digest_id / "pulse.md").write_text("\n".join(out) + "\n")
 
 
