@@ -2573,6 +2573,7 @@ class ServeTest(unittest.TestCase):
         self.edit_job(live, stage="build")
         self.edit_job(gone, stage="done")
         text = (self.root / "board.json").read_text()
+        self.serve.BOARD_CACHE.pop(str(self.root), None)  # no entry from an earlier test or an equal-key rewrite
         with mock.patch.object(self.serve.json, "loads", wraps=json.loads) as loads:
             first = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
             parses = sum(1 for c in loads.call_args_list if c.args and c.args[0] == text)
