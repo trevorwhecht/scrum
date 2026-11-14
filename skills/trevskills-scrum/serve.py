@@ -4260,6 +4260,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
     applied entry carries that file as `companion`. A proposal carrying a `companion` (a revert) swaps old to new in that
     tests/*.py file first, which must hold the old text once, whether or not the tests would fail without it."""
     repo = repo_of(props[0]["target"])[0]
+    staged = {}  # companion path as recorded -> the resolved file git must stage
     comp = {}  # proposal id -> repo-relative companion test file
     entry = lambda p, why=None: ({k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
                                  | ({"companion": comp[p["id"]]} if not why and p["id"] in comp else {}))
@@ -4293,10 +4294,10 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
             if (n := text.count(p["old"])) != 1:
                 queued.append(entry(p, f"old text found {n} times"))
                 continue
-            extra = None
+            extra = extra_rel = None
             if isinstance(c := p.get("companion"), str):  # stored in untrusted proposals.json: tests/*.py directly under wt only
                 tf = (wt_real / c).resolve()
-                if Path(c).parent != Path("tests") or not c.endswith(".py") or tf.parent != wt_real / "tests":
+                if Path(c).parent != Path("tests") or not c.endswith(".py") or wt_real not in tf.parents:  # same containment guard as the search below
                     queued.append(entry(p, f"companion {c} is not a tests/*.py file"))
                     continue
                 try:
@@ -4307,7 +4308,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
                 if n != 1:
                     queued.append(entry(p, f"companion {c}: old text found {n} times"))
                     continue
-                extra = tf
+                extra, extra_rel = tf, c
             try:
                 target.write_bytes(text.replace(p["old"], p["new"], 1).encode())
                 if extra:
@@ -4324,23 +4325,23 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
                     queued.append(entry(p, f"contract tests failed: {name}" if name else "contract tests failed"))
                     continue
                 holders = []
-                for tf in sorted((wt_real / "tests").glob("*.py")):
-                    tf = tf.resolve()  # same symlink guard as target
+                for link in sorted((wt_real / "tests").glob("*.py")):
+                    tf = link.resolve()  # same symlink guard as target; the recorded companion stays the unresolved tests/<name>
                     if wt_real not in tf.parents:
                         continue
                     try:
                         if tf.read_bytes().decode().count(p["old"]) == 1:
-                            holders.append((tf, tf.read_bytes()))
+                            holders.append((tf, tf.read_bytes(), str(link.relative_to(wt_real))))
                     except (OSError, UnicodeDecodeError):
                         pass
                 if len(holders) == 1:
-                    tf, tf_orig = holders[0]
+                    tf, tf_orig, rel_c = holders[0]
                     try:
                         tf.write_bytes(tf_orig.decode().replace(p["old"], p["new"], 1).encode())
                     except OSError:
                         pass
                     else:
-                        extra = tf
+                        extra, extra_rel = tf, rel_c
                 if extra is None or not digest_contract_ok(wt):
                     if extra is not None:
                         extra.write_bytes(holders[0][1])
@@ -4350,11 +4351,12 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
                     continue
             done.append((p, rel))
             if extra is not None:
-                done.append((p, comp.setdefault(p["id"], str(extra.relative_to(wt_real)))))
+                done.append((p, comp.setdefault(p["id"], extra_rel)))
+                staged[extra_rel] = str(extra.relative_to(wt_real))  # git stages the file behind a symlinked tests/<name>
         order = {p["id"]: i for i, p in enumerate(props)}
         if not done:
             return [], queued, None
-        scrum, files = repo / "scrum", list(dict.fromkeys(rel for _, rel in done))
+        scrum, files = repo / "scrum", list(dict.fromkeys(staged.get(rel, rel) for _, rel in done))
         pids = ", ".join(dict.fromkeys(p["id"] for p, _ in done))
         lines = "".join(f"- digest {digest_id} {p['id']} → {rel}: {board.clean(p['why'])}\n" for p, rel in done)
         title = title or f"Apply digest {digest_id} {pids}"
