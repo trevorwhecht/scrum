@@ -1416,12 +1416,6 @@ def _board_job(cache, name, n):
     return next((j for j in cache[name] if (m := re.match(r"(\d+)-", str(j.get("id")))) and int(m.group(1)) == n), None)
 
 
-def _hand_started(cache, name, n):
-    """True when project `name`'s board job numbered n has started_by "hand". A job _board_job does not find is not
-    hand, so write_pulse still counts its claim."""
-    return (_board_job(cache, name, n) or {}).get("started_by") == "hand"
-
-
 PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
 PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 
@@ -1438,9 +1432,10 @@ def write_pulse(root, digest_id):
     counted as overlap; a missing or null `gates` is ungated), idle held (no session, some claimable or waiting work,
     not idle: Auto continue off or cool-down), idle held by the machine guard (would be idle with claimable work, but
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
-    as before), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
-    jobs started_by hand (_hand_started), or at CPU load over 500%, minutes the focus project had claimable work
-    while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
+    as before), peaks, claims (each job number in a rise of a project's numeric top job number between two lines at
+    most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it rises nothing) during
+    cool-down or at CPU load over 500%, only jobs on the board (_board_job) not started_by hand, minutes the focus
+    project had claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
     (none: the first account; job not on the board: unknown), in accounts() order."""
     since = _pulse_since(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
@@ -1489,6 +1484,8 @@ def write_pulse(root, digest_id):
         cool, hot, claimed, boards, by_acc = 0, 0, {}, {}, {}
         names = [a.name for a in accounts()]
         for a, b in zip(lines, lines[1:]):
+            if b["t"] - a["t"] > PULSE_TICK_CAP_S:
+                continue  # a gap: the rise may span a reset or pruned board, so it counts no claim
             pa, pb = projs(a), projs(b)
             for name, p in pb.items():
                 was, top = pa.get(name, {}).get("top"), p.get("top")
@@ -1498,16 +1495,17 @@ def write_pulse(root, digest_id):
                     continue
                 for n in range(int(was) + 1, int(top) + 1):
                     job = _board_job(boards, name, n)
-                    if (job or {}).get("started_by") != "hand":  # no account: the first, as elsewhere
-                        acc = "unknown" if job is None else job.get("account") or names[0]
-                        by_acc[acc] = by_acc.get(acc, 0) + 1
-                if b.get("cooldown") is True:
-                    for n in range(int(was) + 1, int(top) + 1):
-                        if not _hand_started(boards, name, n):
-                            cool += 1
-                            claimed.setdefault(name, []).append(str(n))
-                if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
-                    hot += sum(not _hand_started(boards, name, n) for n in range(int(was) + 1, int(top) + 1))
+                    if (job or {}).get("started_by") == "hand":
+                        continue
+                    acc = "unknown" if job is None else job.get("account") or names[0]  # no account: the first
+                    by_acc[acc] = by_acc.get(acc, 0) + 1
+                    if job is None:  # off the board: no cool-down or hot claim
+                        continue
+                    if b.get("cooldown") is True:
+                        cool += 1
+                        claimed.setdefault(name, []).append(str(n))
+                    if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
+                        hot += 1
 
         def peak(key):
             nums = [l for l in lines if is_num(l.get(key))]
