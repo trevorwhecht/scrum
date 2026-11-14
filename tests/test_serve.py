@@ -8283,6 +8283,19 @@ class WatchdogIdleParentTest(unittest.TestCase):
                          [("002-second", "approve", "/trevskills-scrum approve 002-second")])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
 
+    def test_wake_waiting_cool_down_lets_wake_job_through_only(self):
+        wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"}
+        self.queue_board({"id": "001-first", "stage": "done"}, wake,
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["001-first"]})
+        with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr, \
+                mock.patch.object(self.board, "machine_ok", side_effect=lambda r, claim=False: self.board.COOLING if claim else None), \
+                mock.patch.object(self.board, "ram_room", return_value=2), \
+                mock.patch.object(self.board, "usage_allowance", return_value=None):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        appr.assert_called_once()
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
+
     def test_wake_waiting_holds_child_while_sibling_blocks(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
@@ -8360,7 +8373,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual(self.job("002-second")["stage"], "waiting")
 
     def test_wake_waiting_held_during_cooldown(self):
-        """Job 466: a parked wait-on job and a --then retry are automatic starts, so cool-down holds them."""
+        """Job 466: a parked wait-on job is an automatic start, so cool-down holds it. Job 831: a --then retry job is
+        approved work in flight, so it still goes through."""
         flag = self.repo / "cooldown"
         wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
                 "reason": "waiting on 001-first", "wake": "approve 002-second"}
@@ -8368,20 +8382,28 @@ class WatchdogIdleParentTest(unittest.TestCase):
         healthy = mock.patch.dict(os.environ, SCRUM_FREE_RAM="80", SCRUM_SWAP_PCT="0", SCRUM_FREE_DISK_GB="500",
                                   SCRUM_CPU_BUSY_PCT="5", SCRUM_CPU_LOAD_PCT="5", SCRUM_COOLDOWN=str(flag))
         self.queue_board({"id": "001-first", "stage": "done"}, dict(wake), dict(plain))
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(plain))
         before = (self.root / "board.json").read_bytes()
         flag.write_text("")
         with healthy, mock.patch.object(self.board, "live_sessions", return_value=0), \
                 mock.patch.object(self.serve, "spawn") as spawn:
             self.serve.wake_waiting("idle", self.root)
         spawn.assert_not_called()
-        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "waiting"))
+        self.assertEqual(self.job("003-third")["stage"], "waiting")
         self.assertEqual((self.root / "board.json").read_bytes(), before, "board.json not rewritten")
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(wake), dict(plain))
+        with healthy, mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr:
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        appr.assert_called_once()
+        self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
+        self.queue_board({"id": "001-first", "stage": "done"}, dict(plain))
         flag.unlink()
         with healthy, mock.patch.object(self.board, "live_sessions", return_value=0), \
                 mock.patch.object(self.serve, "spawn") as spawn:
             self.serve.wake_waiting("idle", self.root)
-        self.assertEqual(sorted(c.args[2:4] for c in spawn.call_args_list),
-                         [("002-second", "approve"), ("003-third", "start")])
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("003-third", "start")])
 
     def test_watchdog_tick_resume_blocks_claims(self):
         held = {"id": "010-held", "stage": "build", "limitResetAt": int(time.time()) - 300}  # reset + 120 s is past
