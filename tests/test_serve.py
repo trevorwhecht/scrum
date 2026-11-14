@@ -947,12 +947,14 @@ class ServeTest(unittest.TestCase):
                                                 "stage": "needs-human"})
 
     # --- job 669: queue-gates.txt names the gate that queued a launch ---
-    def gate_spawn(self, job_id, ram=1, cpu=0.0, manual=False):
+    def gate_spawn(self, job_id, ram=1, cpu=0.0, manual=False, idle=False, runs=None):
+        """spawn with RUNS holding only `runs` (no run another test left live), so the RAM gate token is known."""
         b = self.serve.board
-        with mock.patch.object(b, "ram_room", return_value=ram), mock.patch.object(b, "cpu_load_pct", return_value=cpu), \
+        with mock.patch.dict(self.serve.RUNS, runs or {}, clear=True), \
+                mock.patch.object(b, "ram_room", return_value=ram), mock.patch.object(b, "cpu_load_pct", return_value=cpu), \
                 mock.patch.object(b, "spawn", return_value=(mock.Mock(), f"runs/{job_id}-approve.log")):
             return self.serve.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}",
-                                    manual=manual)
+                                    manual=manual, idle=idle)
 
     def gates_file(self, job_id):
         return self.root / "jobs" / job_id / "queue-gates.txt"
@@ -961,6 +963,29 @@ class ServeTest(unittest.TestCase):
         job_id = self.gate_job("RAM gate")
         self.assertIsNone(self.gate_spawn(job_id, ram=0))
         self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\n")
+        # job 825: with the project's runs live, the token names each one
+        named = self.gate_job("RAM gate named")
+        proc = mock.Mock(); proc.poll.return_value = None
+        run = {"action": "start", "started": time.time(), "proc": proc, "log": "x"}
+        runs = {"repo/901-live": run, "repo/900-live": run, "other/902-elsewhere": run}
+        self.assertIsNone(self.gate_spawn(named, ram=0, runs=runs))
+        self.assertEqual(self.gates_file(named).read_text(), "ram_room:900-live\nram_room:901-live\n")
+
+    def test_spawn_idle_skips_ram_gate_only(self):
+        # job 825: idle=True launches past a full ram_room; the CPU gate still queues it and keeps the queue fields
+        job_id = self.gate_job("Idle spawn")
+        self.assertEqual(self.gate_spawn(job_id, ram=0, idle=True), f"runs/{job_id}-approve.log")
+        self.assertFalse(self.gates_file(job_id).exists())
+        held = self.gate_job("Idle spawn CPU")
+        hot = self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1
+        self.assertIsNone(self.gate_spawn(held, ram=0))
+        first = self.stage_of(held)["play_queued"]
+        self.assertIsNone(self.gate_spawn(held, ram=0, cpu=hot, idle=True))
+        job = self.stage_of(held)
+        self.assertEqual(job["play_queued"], first)
+        self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {held}",
+                                                "stage": "needs-human"})
+        self.assertEqual(self.gates_file(held).read_text(), "ram_room\ncpu_load\n")
 
     def test_spawn_queue_records_cpu_gate(self):
         job_id = self.gate_job("CPU gate")
@@ -9327,6 +9352,232 @@ class MainFocusMigrationTest(unittest.TestCase):
                 mock.patch("sys.stdout", new=io.StringIO()):
             serve.main()
         self.assertEqual(calls, ["migrate", "watchdog", "serve"])
+
+
+class IdleClaimTest(unittest.TestCase):
+    """Job 825: idle_claim starts the smallest held job whose files overlap no running job, once a free slot has sat
+    beside held work for IDLE_CLAIM_SECS."""
+
+    def setUp(self):
+        import serve
+        self.serve, self.board = serve, serve.board
+        self.repo = Path(tempfile.mkdtemp()); self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.repo / "no-usage.json"))  # no usage pacing
+        env.start(); self.addCleanup(env.stop)
+        serve.IDLE_SINCE.clear(); self.addCleanup(serve.IDLE_SINCE.clear)
+        self.addCleanup(lambda: [serve.RUNS.pop(k, None) for k in list(serve.RUNS) if k.startswith("ic/")])
+        alive = mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False)
+        alive.start(); self.addCleanup(alive.stop)
+
+    def write(self, *extra, kids=None):
+        """A running Run-all parent 001-par with waiting children {id: Likely files}, plus `extra` jobs."""
+        kids = kids if kids is not None else {"002-big": ["a.py", "b.py"], "003-small": ["c.py"]}
+        jobs = [{"id": "001-par", "stage": "running", "lane": "runall", "children": list(kids)}]
+        jobs += [{"id": k, "stage": "waiting", "parent": "001-par"} for k in kids] + list(extra)
+        for j in jobs:
+            j.update(updatedAt=self.board.now(), reason=j.get("reason"))
+        for k, paths in kids.items():
+            self.files(k, paths)
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        return jobs
+
+    def files(self, job_id, paths):
+        if paths:
+            (self.root / "jobs" / job_id).mkdir(exist_ok=True)
+            (self.root / "jobs" / job_id / "spec.md").write_text(
+                "# x\n## Likely files\n" + "".join(f"- `src/{p}`\n" for p in paths))
+
+    def jobs(self):
+        return json.loads((self.root / "board.json").read_text())["jobs"]
+
+    def stage(self, job_id):
+        return next(j for j in self.jobs() if j["id"] == job_id)["stage"]
+
+    def claim(self, age=None):
+        """idle_claim with the timer `age` seconds old (None: as it stands); (result, spawn mock)."""
+        s = self.serve
+        if age is not None:
+            s.IDLE_SINCE["ic"] = time.time() - age
+        with mock.patch.object(s, "spawn", return_value="runs/x.log") as spawn:
+            return s.idle_claim("ic", self.root, self.jobs()), spawn
+
+    def live(self, job_id):
+        proc = mock.Mock(); proc.poll.return_value = None
+        self.serve.RUNS[f"ic/{job_id}"] = {"action": "start", "started": time.time() - 3600, "proc": proc, "log": "x"}
+
+    def started(self, spawn):
+        return [(c.args[2], c.args[3], c.kwargs.get("idle")) for c in spawn.call_args_list]
+
+    def test_waits_ten_minutes(self):
+        s = self.serve
+        self.write()
+        got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertIn("ic", s.IDLE_SINCE)
+        self.assertEqual(s.IDLE_CLAIM_SECS, 600)
+        got, spawn = self.claim(age=590)
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+        got, spawn = self.claim(age=610)
+        self.assertIs(got, True)
+        self.assertEqual(self.started(spawn), [("003-small", "start", True)])
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        s.IDLE_SINCE.clear()  # a serve.py restart: the 10 minutes start over, never an immediate claim
+        got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+
+    def test_claims_smallest(self):
+        self.write(kids={"002-big": ["a.py", "b.py"], "004-one": ["d.py"], "003-one": ["c.py"]})
+        got, spawn = self.claim(age=610)
+        self.assertIs(got, True)
+        self.assertEqual(self.started(spawn), [("003-one", "start", True)])  # a tie on one file: the lowest id
+        self.assertEqual([self.stage(k) for k in ("002-big", "003-one", "004-one")], ["waiting", "spec", "waiting"])
+        # a queued launch with fewer files goes before the waiting children, through spawn(idle=True)
+        launch = {"action": "approve", "prompt": "/trevskills-scrum approve 005-queued", "stage": "needs-human"}
+        self.write({"id": "005-queued", "stage": "needs-human", "play_queued": self.board.now(), "queued_launch": launch},
+                   kids={"002-big": ["a.py", "b.py"], "003-one": ["c.py", "e.py"]})
+        self.files("005-queued", ["q.py"])
+        got, spawn = self.claim(age=610)
+        self.assertIs(got, True)
+        self.assertEqual(spawn.call_args.args[2:], ("005-queued", "approve", "/trevskills-scrum approve 005-queued"))
+        self.assertEqual(spawn.call_args.kwargs, {"manual": False, "idle": True})
+        self.assertEqual([self.stage(k) for k in ("002-big", "003-one")], ["waiting", "waiting"])
+
+    def test_resets_on_launch(self):
+        s = self.serve
+        self.write()
+        s.IDLE_SINCE["ic"] = time.time() - 610
+        proc = mock.Mock(); proc.poll.return_value = 0
+        s.RUNS["ic/009-new"] = {"action": "start", "started": time.time() - 5, "proc": proc, "log": "x"}  # a launch since
+        got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list), (False, []))
+        self.assertGreater(s.IDLE_SINCE["ic"], time.time() - 5)  # the timer started over
+        s.IDLE_SINCE["ic"] = time.time() - 610
+        with mock.patch.object(self.board, "machine_ok", return_value="free RAM 7% (< 20%)"):
+            self.assertEqual(self.claim()[0], False)
+        self.assertNotIn("ic", s.IDLE_SINCE)  # no free slot: cleared
+        s.IDLE_SINCE["ic"] = time.time() - 610
+        with mock.patch.object(self.board, "live_sessions", return_value=self.board.MAX_SESSIONS):
+            self.assertEqual(self.claim()[0], False)
+        self.assertNotIn("ic", s.IDLE_SINCE)
+
+    def test_skips_overlap_with_running(self):
+        self.write({"id": "006-run", "stage": "build", "parent": "001-par"},
+                   kids={"002-big": ["a.py", "b.py"], "003-small": ["c.py"]})
+        self.files("006-run", ["c.py"])
+        self.live("006-run")
+        got, spawn = self.claim(age=610)
+        self.assertIs(got, True)
+        self.assertEqual(self.started(spawn), [("002-big", "start", True)])  # 003-small shares src/c.py
+        # a WATCHED job with a live claude session counts as running too
+        self.serve.RUNS.pop("ic/006-run")
+        self.write({"id": "007-term", "stage": "review"}, kids={"002-big": ["a.py"], "003-small": ["c.py", "d.py"]})
+        self.files("007-term", ["a.py"])
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: job["id"] == "007-term"):
+            got, spawn = self.claim(age=610)
+        self.assertEqual(self.started(spawn), [("003-small", "start", True)])
+        self.write({"id": "007-term", "stage": "review"}, kids={"002-big": ["a.py"]})
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: job["id"] == "007-term"):
+            got, spawn = self.claim(age=610)
+        self.assertEqual((got, spawn.call_args_list, self.stage("002-big")), (False, [], "waiting"))
+
+    def test_unknown_files_only_when_nothing_runs(self):
+        self.write({"id": "006-run", "stage": "build"}, kids={"002-nofiles": []})
+        self.files("006-run", ["z.py"])
+        self.live("006-run")
+        got, spawn = self.claim(age=610)
+        self.assertEqual((got, spawn.call_args_list, self.stage("002-nofiles")), (False, [], "waiting"))
+        self.serve.RUNS.pop("ic/006-run")
+        got, spawn = self.claim(age=610)
+        self.assertIs(got, True)
+        self.assertEqual(self.started(spawn), [("002-nofiles", "start", True)])
+
+    def test_no_held_work_no_timer(self):
+        s = self.serve
+        (self.root / "board.json").write_text(json.dumps({"jobs": []}))
+        self.assertEqual(self.claim()[0], False)
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        # not held: setup pending, wake, an undone dep, a paused parent, a queued launch that left its stage
+        launch = {"action": "approve", "prompt": "p", "stage": "needs-human"}
+        jobs = [{"id": "001-par", "stage": "running", "lane": "bigboy", "children": ["002-a", "003-b", "004-c"]},
+                {"id": "002-a", "stage": "waiting", "parent": "001-par", "setup": "pending"},
+                {"id": "003-b", "stage": "waiting", "parent": "001-par", "wake": True},
+                {"id": "004-c", "stage": "waiting", "parent": "001-par", "depends_on": ["002-a"]},
+                {"id": "005-p", "stage": "running", "lane": "runall", "paused": True, "children": ["006-d"]},
+                {"id": "006-d", "stage": "waiting", "parent": "005-p"},
+                {"id": "007-q", "stage": "build", "queued_launch": launch}]
+        (self.root / "board.json").write_text(json.dumps({"jobs": jobs}))
+        self.assertEqual(self.claim(age=None)[0], False)
+        self.assertNotIn("ic", s.IDLE_SINCE)
+
+    def test_claim_spends_tick_room(self):
+        s = self.serve
+        self.write()
+        old = s.RESUME_ROOM
+        self.addCleanup(setattr, s, "RESUME_ROOM", old)
+        s.RESUME_ROOM = 0
+        got, spawn = self.claim(age=610)
+        self.assertEqual((got, spawn.call_args_list, self.stage("003-small")), (False, [], "waiting"))
+        self.assertIn("ic", s.IDLE_SINCE)  # still idle: tried again next tick
+        s.RESUME_ROOM = 1
+        self.assertIs(self.claim()[0], True)
+        self.assertEqual(s.RESUME_ROOM, 0)
+
+    def test_tick_order(self):
+        s = self.serve
+        self.write()
+        def launch(*args):
+            proc = mock.Mock(); proc.poll.return_value = None
+            s.RUNS["ic/009-new"] = {"action": "start", "started": time.time(), "proc": proc, "log": "x"}
+            return True
+        # (play_queue_tick, auto_resume): None returns False, True returns True with nothing started (a slot wait),
+        # "start" launches a RUNS entry
+        for pq, ar, want in ((None, None, ["play_queue_tick", "auto_resume", "idle_claim"]),
+                             (True, True, ["play_queue_tick", "auto_resume", "idle_claim"]),
+                             ("start", None, ["play_queue_tick", "auto_resume"]),
+                             (None, "start", ["play_queue_tick", "auto_resume"])):
+            with self.subTest(pq=pq, ar=ar):
+                s.RUNS.pop("ic/009-new", None)
+                s.IDLE_SINCE["ic"] = 1.0
+                calls = mock.Mock()
+                for fn, how in ((calls.play_queue_tick, pq), (calls.auto_resume, ar)):
+                    fn.side_effect = launch if how == "start" else (lambda *a, r=bool(how): r)
+                calls.idle_claim.return_value = False
+                with mock.patch.object(self.board, "projects", return_value={"ic": self.repo}), \
+                        mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
+                        mock.patch.object(s, "play_queue_tick", calls.play_queue_tick), \
+                        mock.patch.object(s, "auto_resume", calls.auto_resume), \
+                        mock.patch.object(s, "idle_claim", calls.idle_claim), \
+                        mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "spawn"):
+                    s.watchdog_tick()
+                self.assertEqual([c[0] for c in calls.mock_calls], want)
+                self.assertEqual("ic" in s.IDLE_SINCE, "start" not in (pq, ar))  # a start this tick restarts the timer
+
+    def test_tick_claims_ram_held_queued_launch(self):
+        """Review round 1: a launch spawn's RAM gate held keeps play_queue_tick returning True every tick; after
+        IDLE_CLAIM_SECS the real tick still reaches idle_claim, which launches it past the RAM gate only."""
+        s = self.serve
+        launch = {"action": "approve", "prompt": "/trevskills-scrum approve 005-queued", "stage": "needs-human"}
+        self.write({"id": "005-queued", "stage": "needs-human", "play_queued": self.board.now(), "queued_launch": launch},
+                   kids={})
+        self.files("005-queued", ["q.py"])
+        proc = mock.Mock(); proc.poll.return_value = None
+        s.IDLE_SINCE["ic"] = time.time() - 610
+        with mock.patch.object(self.board, "projects", return_value={"ic": self.repo}), \
+                mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
+                mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", side_effect=lambda floor=1: 0 if floor == 0 else 1), \
+                mock.patch.object(self.board, "cpu_load_pct", return_value=10.0), \
+                mock.patch.object(self.board, "live_sessions", return_value=0), \
+                mock.patch.object(self.board, "spawn", return_value=(proc, "runs/x.log")) as board_spawn, \
+                mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "e2e_full_tick"), \
+                mock.patch.object(s, "terminal_batch_tick"):
+            s.watchdog_tick()
+        self.assertEqual([c.args[1:3] for c in board_spawn.call_args_list], [("005-queued", "approve")])
+        self.assertIn("ic/005-queued", s.RUNS)
+        self.assertNotIn("ic", s.IDLE_SINCE)
+        live = next(j for j in self.jobs() if j["id"] == "005-queued")
+        self.assertNotIn("queued_launch", live)
 
 
 class WatchdogResilienceTest(unittest.TestCase):

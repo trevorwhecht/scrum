@@ -160,7 +160,7 @@ GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gat
 
 
 def note_queue_gate(root, job_id, gate):
-    """Add `gate` (ram_room or cpu_load) to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column. It
+    """Add `gate` (ram_room[:<live id>] or cpu_load) to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column. It
     outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error never blocks the queue."""
     path = Path(root) / "jobs" / job_id / "queue-gates.txt"
     try:
@@ -216,7 +216,7 @@ def mark_ram_hold(project, root, jobs, skip=None):
                 live["ram_hold"] = hold
 
 
-def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False):
+def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
@@ -225,7 +225,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
     While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
-    for auto_resume and launches nothing (None); a park that fails launches as usual."""
+    for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
+    the ram_room check. A RAM hold notes ram_room:<id> per live run of the project (live_ids), plain ram_room with none."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -241,10 +242,12 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     if on_board:
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
-            ram_short = board.ram_room(floor=0) < 1
+            ram_short = not idle and board.ram_room(floor=0) < 1
             if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
-                note_queue_gate(root, job_id, "ram_room" if ram_short else "cpu_load")
+                gates = ([f"ram_room:{i}" for i in sorted(live_ids(project))] or ["ram_room"]) if ram_short else ["cpu_load"]
+                for gate in gates:
+                    note_queue_gate(root, job_id, gate)
                 if ram_short:
                     note_ram_hold(root, job_id)
                 if ram_short and held_over(queued_at):
@@ -392,6 +395,19 @@ def take_room() -> bool:
     return True
 
 
+def give_room():
+    """Hand back a session take_room spent on a launch that did not start."""
+    global RESUME_ROOM
+    if RESUME_ROOM is not None:
+        RESUME_ROOM += 1
+
+
+def launched_since(project, t) -> bool:
+    """A RUNS launch of the project started at or after t (epoch s)."""
+    with RUNS_LOCK:
+        return any(k.startswith(f"{project}/") and r.get("started", 0) >= t for k, r in RUNS.items())
+
+
 PLAY_QUEUED = "queued, starts next"
 
 
@@ -425,6 +441,7 @@ def play_queue_tick(project, root, jobs) -> bool:
                 mark_ram_hold(project, root, jobs)
                 return True
             if spawn(project, root, job["id"], launch["action"], launch["prompt"], manual=manual) is None:
+                give_room()  # the gate held it: nothing started, so idle_claim may still use the session
                 mark_ram_hold(project, root, jobs, skip=job["id"])
                 return True
             started = True
@@ -445,6 +462,60 @@ def play_queue_tick(project, root, jobs) -> bool:
         unqueue(root, job)
         started = True
     return started
+
+
+IDLE_CLAIM_SECS = 600  # idle_claim: a free slot with held work this long starts one held job
+IDLE_SINCE: dict[str, float] = {}  # project -> when its free slot with held work began (epoch s); a restart drops it
+
+
+def idle_claim(project, root, jobs) -> bool:
+    """Start one held job once the project has had held work and a free slot for IDLE_CLAIM_SECS (IDLE_SINCE).
+    Held work: a queued launch (queued_launch, not running, still in its stage) or a waiting child of a running,
+    unpaused Run-all/BigBoy parent (setup not pending, no wake, every depends_on done). A free slot: fewer than
+    MAX_SESSIONS sessions and machine_ok(claim=True) passes. Either failing, or any launch of the project meanwhile
+    (a RUNS start), restarts the timer. The claim takes one session of the tick's budget (take_room) and starts the
+    held job with the fewest Likely files (child_files; ties: lowest id) whose files share none with a running job (a
+    live_ids run, or a WATCHED leaf job whose session is alive); a running job with unreadable files blocks all, and
+    a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
+    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. True when one started."""
+    by_id = {j["id"]: j for j in jobs}
+
+    def waiting_child(k):
+        p = by_id.get(k.get("parent")) or {}
+        return k.get("stage") == "waiting" and p.get("stage") == "running" and not p.get("paused") \
+            and p.get("lane") in ("runall", "bigboy") and k.get("setup") != "pending" and not k.get("wake") \
+            and all(by_id.get(d, {}).get("stage") == "done" for d in k.get("depends_on") or [])
+
+    held = [j for j in jobs if (launch := j.get("queued_launch")) and j.get("stage") == launch.get("stage")
+            and not running(project, j["id"]) or waiting_child(j)]
+    if not held or board.live_sessions() >= board.MAX_SESSIONS or board.machine_ok(root, claim=True):
+        IDLE_SINCE.pop(project, None)
+        return False
+    now = time.time()
+    since = IDLE_SINCE.setdefault(project, now)
+    if launched_since(project, since):  # something started meanwhile: the slot was not idle
+        IDLE_SINCE[project] = now
+        return False
+    if now - since < IDLE_CLAIM_SECS:
+        return False
+    live, jobs_dir = live_ids(project), Path(root) / "jobs"
+    watched = [j for j in jobs if not j.get("children") and j["id"] not in live and j.get("stage") in board.WATCHED]
+    alive = board.session_alive_fn() if watched else None  # ps only when needed
+    busy = [board.child_files(jobs_dir, j["id"]) for j in jobs
+            if not j.get("children") and (j["id"] in live or j in watched and alive(j))]
+    files = {j["id"]: board.child_files(jobs_dir, j["id"]) for j in held}
+    ok = [j for j in held if (all(b and not board.shared_files(files[j["id"]], b) for b in busy) if files[j["id"]]
+                              else not busy)]
+    if not ok or not take_room():
+        return False
+    pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
+    IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
+    if launch := pick.get("queued_launch"):
+        return spawn(project, root, pick["id"], launch["action"], launch["prompt"],
+                     manual=bool(pick.get("play_queued_manual")), idle=True) is not None
+    out = board.cmd_ready(root, pick["parent"], live, only=pick["id"])  # re-checks the live child under the lock
+    return any([spawn(project, root, c, "start", f"/trevskills-scrum start {c}", idle=True) is not None
+                for c in out["ready"]])
 
 
 LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the change by hand in the main checkout and run "
@@ -1936,8 +2007,8 @@ def watchdog_tick():
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project (a free-disk
        refusal first runs reclaim_disk on that project and checks again). Then resume
-       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick), and start a due full E2E run on
-       the main checkout (e2e_full_tick).
+       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick); when none of the three started
+       anything, idle_claim starts one long-held job. Then start a due full E2E run on the main checkout (e2e_full_tick).
        Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick).
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
@@ -1982,9 +2053,15 @@ def watchdog_tick():
                     disk_short = bool(refused and refused.startswith("free disk"))
                 if refused:
                     RESUME_ROOM = 0  # no room on this machine: nothing resumes this tick
+                tick_start = time.time()
                 resumed = play_queue_tick(project, root, jobs)  # Trevor's queued Play goes first
                 resumed = auto_resume(project, root, jobs) or resumed
                 resumed = main_ff_tick(project, repo, root, jobs) or resumed
+                # their True also means "waits on a slot", so a real start is read from RUNS
+                if launched_since(project, tick_start):  # a start this tick: the slot is not idle
+                    IDLE_SINCE.pop(project, None)
+                else:
+                    resumed = idle_claim(project, root, jobs) or resumed
                 busy[project] = resumed or busy[project]
                 pending = pending or resumed
                 try:  # its own guard: a batch-window failure must not skip auto-play candidates or e2e
