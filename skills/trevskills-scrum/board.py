@@ -1941,7 +1941,13 @@ def cmd_process_health(root, digest_id: str) -> dict:
             spec = (folder / "spec.md").read_text(encoding="utf-8", errors="replace")
         except OSError:
             spec = ""
-        no_ui = not globs or not any(glob_match(p, globs) for p in likely_files(spec))
+        likely = likely_files(spec)
+        if globs and not likely:  # no Likely files: ask the real diff; unreadable diff = UI unknown, not waste
+            paths = _fit_diff(root, board.get(job_id, {}))[3]
+            likely, unknown = (paths[1], False) if paths else ([], True)
+        else:
+            unknown = False
+        no_ui = not unknown and (not globs or not any(glob_match(p, globs) for p in likely))
         if reviewed and (lane in ("lilguy", "fast") or no_ui):
             hits["test_waste_jobs"].append(job_id)
             seconds += sum(r["duration_s"] for r in routed if is_num(r.get("duration_s"))
@@ -2201,9 +2207,10 @@ HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ", re.M)
 BLAME_SHA_RE = re.compile(r"^([0-9a-f]{40,64}) \d+ \d+", re.M)
 
 
-def _escape_lines(repo, bug, board):
+def _escape_lines(repo, bug, board, root=None):
     """The escapes.md lines for debug job `bug`: its newest HEAD commit naming scrum/jobs/<bug>/, each non-test file's
-    -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes."""
+    -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes
+    (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is a skip stub is left out)."""
     shas = _git(repo, "log", "HEAD", "-F", f"--grep=scrum/jobs/{bug}/", "--format=%H").decode().split()
     if not shas:
         return [f"- {bug} ← origin unknown: no merge commit"]
@@ -2235,7 +2242,10 @@ def _escape_lines(repo, bug, board):
     out = []
     for origin, files in origins.items():
         rounds = board[origin].get("rounds") or [{}]
-        passed = sorted(k for k, v in rounds[-1].items() if v == "PASS" and k != "check") or ["none"]
+        folder = Path(root) / "jobs" / origin / f"round-{len(board[origin].get('rounds') or [])}" if root else None
+        passed = sorted(k for k, v in rounds[-1].items() if v == "PASS" and k != "check"
+                        and not (folder and (folder / f"review-{k}.md").is_file()
+                                 and not _real_review(folder / f"review-{k}.md"))) or ["none"]
         out.append(f"- {bug} ← {origin} · {sum(files.values())} lines in {', '.join(files)} · passed by: {', '.join(passed)}")
     return out
 
@@ -2245,7 +2255,7 @@ def write_escapes(root, digest_id, jobs):
     (_escape_lines, git in the repo that holds root), or `No bug jobs`."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
     repo = Path(root).resolve().parent
-    lines = [l for j in jobs if board.get(j, {}).get("lane") == "debug" for l in _escape_lines(repo, j, board)]
+    lines = [l for j in jobs if board.get(j, {}).get("lane") == "debug" for l in _escape_lines(repo, j, board, root)]
     (Path(root) / "digests" / digest_id / "escapes.md").write_text("\n".join(lines or ["No bug jobs"]) + "\n")
 
 
