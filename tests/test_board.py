@@ -1158,12 +1158,37 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, c1, ["lane=lilguy"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
 
+    def outside_holder_ready(self, files):
+        (self.root.parent / "src").mkdir(exist_ok=True)
+        out = board.cmd_new(self.root, "Outside")
+        board.cmd_set(self.root, out, ["stage=build"])
+        if files:
+            self.spec(out, *files)
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py")
+        return parent, c1, board.cmd_ready(self.root, parent)["ready"]
+
+    def test_ready_ignores_outside_holder_in_other_repo(self):
+        parent, c1, ready = self.outside_holder_ready(["/elsewhere/repo/board.py"])
+        self.assertEqual(ready, [c1])
+        self.assertFalse((self.root / "jobs" / c1 / "queue-gates.txt").exists()
+                         and "overlap:" in (self.root / "jobs" / c1 / "queue-gates.txt").read_text())
+
+    def test_ready_outside_holder_in_repo_still_holds(self):
+        for files in (["src/a.py"], [], ["/elsewhere/x.py", "src/a.py"]):
+            with self.subTest(files=files):
+                self.tearDown(); self.setUp()
+                _, c1, ready = self.outside_holder_ready(files)
+                self.assertEqual(ready, [])
+
     def test_ready_fast_child_still_held_when_files_intersect_unbuilt_holder(self):
         parent, c1, c2, _ = self.fast_pair(kid_files=("src/a.py",))
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         self.assertEqual(self.child(c2)["overlap_hold"]["ids"], [c1])
 
     def test_ready_critical_skips_unbuilt_outside_holder(self):
+        (self.root.parent / "src").mkdir(exist_ok=True)  # an in-repo folder, so src/ paths are not foreign
         out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
         self.spec(out, "src/a.py", "src/b.py")
         parent = self.plan(self.ticket(1, title="Critical: fix the queue"), self.ticket(2),
@@ -2260,11 +2285,26 @@ class BoardTest(unittest.TestCase):
 
     def test_ram_room(self):
         self.assertEqual(board.SESSION_RAM_PCT, 5)
-        for ram, room in (("66", 2), ("100", 2), ("26", 1), ("20", 1)):  # 66/100: the MAX_YOUNG_SESSIONS ramp
+        for ram, room in (("66", 9), ("100", 14), ("41", 4), ("40", 2), ("26", 1), ("20", 1)):  # 41+: no young cap; 40: the ramp
             with self.subTest(ram=ram), self.machine(ram, "1000"):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):
             self.assertEqual(board.ram_room(), 1, "unknown RAM: one claim per call")
+
+    def test_ram_room_young_cap_passes_at_ample_ram(self):
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 2)
+        with self.machine("53", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            # standard: 33 // 5 - 2 young = 4; light: (33 - 2 * 5) // 3 = 7
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (4, 7))
+
+    def test_ram_room_young_cap_holds_at_low_ram(self):
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 2)
+        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            self.assertEqual(board.ram_room(floor=0), 0)  # 20 // 5 - 2 = 2, young cap 0
+        with self.machine("66", "1000"), self.sessions(13):
+            self.assertEqual(board.ram_room(floor=0), 1, "MAX_SESSIONS still caps at ample RAM")
 
     def test_ram_room_light_share(self):
         """Digest 088: a fast or lilguy job sizes at LIGHT_SESSION_RAM_PCT, so it fits where a standard one waits."""
@@ -9865,6 +9905,18 @@ class TranscriptTokensTest(unittest.TestCase):
         self.assertIn("for line in f", body)
 
 
+class OutsideRepoFilesTest(unittest.TestCase):
+    def test_outside_repo_files(self):
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "src").mkdir()
+            f = lambda *x: board.outside_repo_files(set(x), t)
+            self.assertFalse(f())
+            self.assertTrue(f("/other/a.py", "~/b.py", "nodir/c.py"))
+            self.assertFalse(f(f"{t}/src/a.py"))
+            self.assertFalse(f("src/a.py"))
+            self.assertFalse(f("/other/a.py", "src/a.py"))
+
+
 class ReadyUsageTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -9872,7 +9924,7 @@ class ReadyUsageTest(unittest.TestCase):
         base = Path(self.tmp.name)
         self.root, self.usage, self.ps = base / "scrum", base / "usage.json", base / "ps.txt"
         self.ps.write_text("")
-        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage), SCRUM_PS=str(self.ps))
+        env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage), SCRUM_PS=str(self.ps), SCRUM_FREE_RAM="30")  # 30%: the young ramp applies
         env.start()
         self.addCleanup(env.stop)
         self.root.mkdir()

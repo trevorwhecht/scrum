@@ -198,9 +198,9 @@ class ReadyPacingTest(unittest.TestCase):
         return parent, kids[:-1]  # the last (exposure) child depends on all the others
 
     def test_ready_ignores_usage_pacing_and_runall_cap(self):
-        """8 waiting non-overlapping children beside 6 in progress: only free RAM and the young-session ramp (ram_room)
+        """8 waiting non-overlapping children beside 6 in progress: only free RAM and, at 40% free or less, the young-session ramp (ram_room)
         and machine_ok limit the batch, never usage.json or a Run-all count cap."""
-        for ram, claims, reason in (("90", board.MAX_YOUNG_SESSIONS, None), ("14", 0, "waiting: free RAM 14% (< 20%)")):
+        for ram, claims, reason in (("40", board.MAX_YOUNG_SESSIONS, None), ("14", 0, "waiting: free RAM 14% (< 20%)")):
             self.tmp.cleanup()
             self.root.parent.mkdir(parents=True, exist_ok=True)
             self.write_usage(130)  # projected 130 %: the old pace cap was 1
@@ -213,10 +213,10 @@ class ReadyPacingTest(unittest.TestCase):
             self.assertEqual(self.jobs()[parent].get("reason"), reason, ram)
 
     def test_ram_room_ramps_young_sessions(self):
-        """Lots of free RAM still starts at most MAX_YOUNG_SESSIONS at once: the 2026-11-04 wake burst started 10."""
+        """Free RAM at 2x the minimum still starts at most MAX_YOUNG_SESSIONS at once: the 2026-11-04 wake burst started 10."""
         for young, room in ((0, 2), (1, 1), (2, 0)):
             ages = [5] * young + [600] * 3
-            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="90", SCRUM_SWAP_PCT="0"), \
+            with mock.patch.dict(os.environ, SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="0"), \
                     mock.patch.object(board, "session_ages", return_value=ages):
                 self.assertEqual(board.ram_room(floor=0), room, young)
 
