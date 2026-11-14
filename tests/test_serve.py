@@ -6409,6 +6409,58 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([p.get("companion") for p in data], ["tests/test_contracts.py", None])
         self.assertEqual([a.get("companion") for a in out["applied"]], ["tests/test_contracts.py", None])
 
+    def link_tests(self, target, text, outside=False):
+        """tests/test_contracts.py becomes a committed symlink to target (holding text); pin_tests then reads through it."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        link = self.reg / "tests" / "test_contracts.py"
+        link.unlink(missing_ok=True)
+        link.symlink_to(target if outside else os.path.relpath(target, link.parent))  # a worktree checkout needs a relative in-repo link
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", "link")
+        self.git("push", "-q")
+
+    def test_digest_apply_records_unresolved_symlink_companion(self):
+        self.git_repo()
+        self.pin_tests("assert 'old line'\n")
+        self.link_tests(self.reg / "real" / "holder.txt", "assert 'old line'\n")
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["applied"])
+        data = json.loads((self.scrum / "digests" / "001" / "proposals.json").read_text())["proposals"]
+        self.assertEqual([p.get("companion") for p in data], ["tests/test_contracts.py"])
+        self.assertEqual([a.get("companion") for a in out["applied"]], ["tests/test_contracts.py"])
+        self.assertEqual(self.git("show", "main:real/holder.txt"), "assert 'new line'\n")
+
+    def test_digest_revert_symlink_companion(self):
+        self.companion_repo()
+        self.link_tests(self.reg / "real" / "holder.txt", "assert 'new line'\n")
+        code, body = self.serve.digest_revert(self.scrum, "001", "p1")
+        self.assertEqual((code, body["status"]), (200, "reverted"))
+        self.assertEqual(self.git("show", "main:real/holder.txt"), "assert 'old line'\n")
+        self.assertEqual((self.reg / "agents" / "scrum-x.md").read_text(), "keep A\nold line\nkeep B\n")
+        self.assertEqual(self.statuses(), ["reverted"])
+
+    def test_digest_companion_symlink_outside_repo_refused(self):
+        outside = Path(self.tmp.name) / "outside" / "holder.txt"
+        self.companion_repo()
+        self.link_tests(outside, "assert 'new line'\n", outside=True)
+        heads = self.head_count()
+        self.assertEqual(self.serve.digest_revert(self.scrum, "001", "p1"),
+                         (409, {"error": "companion tests/test_contracts.py is not a tests/*.py file"}))
+        self.assertEqual(outside.read_text(), "assert 'new line'\n")
+        self.assertEqual(self.head_count(), heads)
+
+    def test_digest_discovery_skips_symlink_outside_repo(self):
+        outside = Path(self.tmp.name) / "outside" / "holder.txt"
+        self.git_repo()
+        self.pin_tests("assert 'old line'\n")
+        self.link_tests(outside, "assert 'old line'\n", outside=True)
+        self.digest([self.prop("p1", self.reg / "agents" / "scrum-x.md")])
+        self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual(self.statuses(), ["queued"])
+        self.assertEqual(outside.read_text(), "assert 'old line'\n")
+
     def test_valid_proposal_companion(self):
         p = self.prop("p1", self.rule())
         self.assertEqual(self.serve.valid_proposal(p | {"companion": "tests/test_x.py"})["companion"], "tests/test_x.py")
@@ -9948,7 +10000,7 @@ class ReclaimDiskTest(unittest.TestCase):
         done, aborted, live, shared, outside, target = (self.wt("done"), self.wt("aborted"), self.wt("live"),
                                                         self.wt("shared"), self.wt("outside", inside=False), self.wt("target"))
         link = self.base / "link"
-        link.symlink_to(target)
+        link.symlink_to(target if outside else os.path.relpath(target, link.parent))  # a worktree checkout needs a relative in-repo link
         jobs = [{"id": "1", "stage": "done", "worktree": str(done)},
                 {"id": "2", "stage": "aborted", "worktree": str(aborted)},
                 {"id": "3", "stage": "running", "worktree": str(live)},
