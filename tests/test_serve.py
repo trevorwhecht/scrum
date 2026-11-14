@@ -10839,6 +10839,14 @@ class PulseTest(unittest.TestCase):
         with mock.patch.object(b, "resume_blocker", return_value=None):
             self.assertEqual(self.tick_line()["projects"]["app"]["gates"], [])
 
+    def test_tick_project_gates_partial(self):
+        jobs = [{"id": "006-dep", "stage": "done"}, {"id": "007-wait", "stage": "waiting", "depends_on": ["006-dep"]},
+                {"id": "008-wait", "stage": "waiting", "depends_on": ["006-dep"]}]
+        (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+        b = self.serve.board
+        with mock.patch.object(b, "resume_blocker", side_effect=[b.Blocker("this job runs alone", ["5-x"]), None]):
+            self.assertEqual(self.tick_line()["projects"]["app"]["gates"], [])
+
     def test_tick_gate_error(self):
         b = self.serve.board
         with mock.patch.object(b, "ram_room", side_effect=RuntimeError("ps")), mock.patch("sys.stderr", new=io.StringIO()):
