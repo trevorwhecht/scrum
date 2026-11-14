@@ -1444,10 +1444,30 @@ class BoardTest(unittest.TestCase):
                 board.cmd_ready(self.root, parent)
         self.assertEqual(self.child(parent)["reason"], "waiting: free RAM 6% (< 20%)")
         [line] = self.log_lines()
-        self.assertEqual(set(line), {"date", "project", "job", "kind", "reason"})
+        self.assertEqual(set(line), {"date", "project", "job", "kind", "reason", "auto"})
+        self.assertIs(line["auto"], True)
         self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual((line["project"], line["job"], line["kind"], line["reason"]),
                          (Path(self.tmp.name).name, parent, "machine", "waiting: free RAM 7% (< 20%)"))
+
+    def test_ready_swap_and_cooling_waits_log_auto_and_no_stops(self):
+        # Job 889: every machine wait is auto, so process-health counts none of them.
+        parent, _ = self.five()
+        board.cmd_ready(self.root, parent)
+        texts = ("swap used 27.0% of RAM (> 20%)", "cooling down")
+        for text in texts:
+            with mock.patch.object(board, "machine_ok", return_value=text):
+                board.cmd_ready(self.root, parent)
+            board.cmd_ready(self.root, parent)  # hold clears, so the next wait logs again
+        got = [(l["kind"], l["reason"], l["auto"]) for l in self.log_lines()]
+        self.assertEqual(got, [("machine", "waiting: swap used 27.0% of RAM (> 20%)", True),
+                               ("machine", "waiting: cooling down", True)])
+        (self.root / "digests" / "001").mkdir(parents=True)
+        (self.root / "digests" / "001" / "jobs.txt").write_text(parent + "\n")
+        with redirect_stdout(io.StringIO()) as out:
+            board.main(["--dir", str(self.root), "process-health", "001"])
+        m = json.loads(out.getvalue())["metrics"]["stops_per_job"]
+        self.assertEqual((m["value"], m["jobs"]), (0, []))
 
     def test_cmd_ready_cpu_load_wait_is_silent(self):
         # Job 825: a CPU-load wait passes on its own, so its machine line is auto and the parent keeps running.
