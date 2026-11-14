@@ -6670,6 +6670,37 @@ class DigestTest(unittest.TestCase):
         self.serve.digest_auto(self.scrum, "001")
         self.assertEqual(len(self.board.backlog_items(self.scrum)), 1)
 
+    def test_digest_auto_routes_pipeline_backlog_proposal_to_scrum_board(self):
+        home = self.scrum.parent / "home-scrum"
+        home.mkdir()
+        line = "Fix serve.py watchdog"
+        self.digest([self.bl("b1", backlog=line)])
+        with mock.patch.object(self.serve, "research_home", return_value=("home", home)):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([(i["text"], i["priority"]) for i in self.board.backlog_items(home)], [(line, 3)])
+        self.assertEqual(self.board.backlog_items(self.scrum), [])
+        self.assertEqual(self.statuses(), ["applied"])
+        self.assertEqual([e["id"] for e in out["applied"]], ["b1"])
+        self.digest([self.bl("b2", backlog="Dashboard row clips")])
+        with mock.patch.object(self.serve, "research_home", return_value=("reg", self.scrum)):
+            self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([i["text"] for i in self.board.backlog_items(self.scrum)], ["Dashboard row clips"])
+
+    def test_digest_auto_pipeline_backlog_proposal_stays_when_no_research_home(self):
+        self.digest([self.bl("b1", backlog="Fix board.py lock")])
+        with mock.patch.object(self.serve, "research_home", return_value=None):
+            self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([(i["text"], i["priority"]) for i in self.board.backlog_items(self.scrum)], [("Fix board.py lock", 3)])
+        self.assertEqual(self.statuses(), ["applied"])
+
+    def test_digest_auto_skips_pipeline_backlog_proposal_when_home_add_fails(self):
+        self.digest([self.bl("b1", backlog="Fix serve.py")])
+        with mock.patch.object(self.serve, "research_home", return_value=("home", self.scrum.parent / "nope")), \
+                mock.patch.object(self.board, "cmd_backlog_add", side_effect=OSError("x")):
+            out = self.serve.digest_auto(self.scrum, "001")
+        self.assertEqual([(e["id"], e["reason"]) for e in out["skipped"]], [("b1", "backlog add failed")])
+        self.assertEqual(self.statuses(), ["skipped"])
+
     def test_digest_auto_skips_backlog_proposal_when_add_fails(self):
         rule = self.rule()
         self.digest([self.bl("b1"), self.prop("p2", rule)])
