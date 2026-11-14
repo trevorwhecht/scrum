@@ -1927,6 +1927,7 @@ HEALTH_LIMITS = {"stops_per_job": 0.5, "resume_abort_stops": 0, "waiting_on_job_
                  "overburned_windows": 0, "not_shipped": 0}
 HEALTH_UNUSED_PCT = 15  # a window left more than this % unused at reset
 HEALTH_EARLY_90_SECS = 3600  # a window that reached 90% more than this long before reset burned too early
+HEALTH_MACHINE_LOAD_RE = re.compile(r"waiting: (?:CPU |swap |usage |no account has room)")  # machine_ok / Allowance.reason waits that clear alone
 HEALTH_WAITING_RE = re.compile(r"(?i)blocked on sibling|waiting (?:on|for) (?:job |another job|\d{3})")
 HEALTH_UNREADABLE_RE = re.compile(r"[\w.-]*/[\w.-]+\.[A-Za-z]{1,5}\b|\brule \d+\b", re.I)
 HEALTH_STOP_KINDS = ("ask", "stall", "machine", "refused", "bigboy")
@@ -1974,6 +1975,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
             continue
         if str(job) not in claimed or not (kind in HEALTH_STOP_KINDS or "question" in q and kind is None):
             continue
+        if kind == "machine" and HEALTH_MACHINE_LOAD_RE.match(str(q.get("reason") or "")):
+            continue  # clears on its own, like an auto line
         hits["stops_per_job"].append(job)
         if HEALTH_WAITING_RE.search(str(q.get("reason") or q.get("question") or "")):
             hits["waiting_on_job_stops"].append(job)

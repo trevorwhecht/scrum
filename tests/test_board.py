@@ -8917,6 +8917,16 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "103-c", "lane": "fast", "added": 5, "files": 1}]}))
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["jobs"], ["102-b"])
 
+    def test_machine_load_waits_not_stops(self):
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b")
+        self.lines("questions.log", [
+            {"job": "101-a", "kind": "machine", "reason": "waiting: CPU load 178% of 10 cores (> 150%)"},
+            {"job": "101-a", "kind": "machine", "reason": "waiting: swap used 80% of RAM (> 50%)"},
+            {"job": "101-a", "kind": "machine", "reason": "waiting: usage 5h 90% used, resets 14:00"},
+            {"job": "102-b", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)"}])
+        self.assertEqual(self.run_health("001")["metrics"]["stops_per_job"]["jobs"], ["102-b"])
+
     def test_waste_needs_minutes(self):
         self.board(("101-a", "done", "lilguy", "", "merged"), ("102-b", "done", "lilguy", "", "merged"),
                    ("103-c", "done", "lilguy", "", "merged"))
