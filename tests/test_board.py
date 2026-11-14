@@ -3758,7 +3758,7 @@ class BoardTest(unittest.TestCase):
                                "Idle with claimable work: 2 min (longest stretch 2 min)\n"
                                "Gated with claimable work: 0 min\n"
                                "Held by machine guard: 1 min\n"
-                               "Idle held by Auto continue off or cool down: 0 min\n"
+                               "Idle held by Auto continue off or cool down: 1 min\n"
                                "Idle held by the machine guard: 0 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
@@ -3796,8 +3796,8 @@ class BoardTest(unittest.TestCase):
             (180, 0, {"guard": "free RAM 9%"}),  # guard-held
             (240, 0, {"guard": ""}), (300, 0, {"guard": None}), (360, 0, {"guard": 5}),  # not a non-empty string: idle
             (420, 2, {"guard": "pace 5h 90% used"}),  # a session runs: neither
-            (480, 0, {}))
-        self.assertIn("Idle with claimable work: 5 min (longest stretch 3 min)\n", text)
+            (480, 0, {}))  # the last line weighs one tick
+        self.assertIn("Idle with claimable work: 6 min (longest stretch 3 min)\n", text)
         self.assertIn("Idle held by Auto continue off or cool down: 0 min\n"
                       "Idle held by the machine guard: 2 min\nPeak sessions:", text)
 
@@ -3810,21 +3810,22 @@ class BoardTest(unittest.TestCase):
         self.assertIn("Claims while CPU load over 500%: 2\n", text)
 
     def test_pulse_idle_minutes_capped_at_window(self):
-        """Digest 088 read 240 idle minutes in a 79-minute window: idle, its stretch and non-focus never pass the window."""
+        """Digest 088 read 240 idle minutes in a 79-minute window: idle, its stretch and non-focus never pass the window
+        plus the last line's one tick."""
         lib = {"claimable": 0, "waiting": 0, "busy": True, "top": 1, "auto": True}
         ticks = lambda ts: self.pulse_ticks(*((t, 0, {"projects": {
             "app": {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}, "lib": lib}}) for t in ts))
         text = ticks(range(0, 50, 5))  # ten idle lines inside one wall-clock minute
-        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\n", text)
-        self.assertIn("Non-focus work while focus had claimable work: 1 min (focus: app)\n", text)
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)  # 45 s + 60 s
+        self.assertIn("Non-focus work while focus had claimable work: 2 min (focus: app)\n", text)
         self.tearDown(); self.setUp()
         text = ticks(t * 7.5 for t in range(81))  # 81 idle lines over 600 s, 8 a minute
         idle, longest = map(int, re.search(r"Idle with claimable work: (\d+) min \(longest stretch (\d+) min\)", text).groups())
         nonfocus = int(re.search(r"Non-focus work while focus had claimable work: (\d+) min", text)[1])
-        self.assertEqual((idle, longest, nonfocus), (10, 10, 10), text)
+        self.assertEqual((idle, longest, nonfocus), (11, 11, 11), text)
         self.tearDown(); self.setUp()
         text = ticks([600, 0, 300, 60, 120, 180, 240, 360, 420, 480, 540])  # two writers' lines out of order
-        self.assertIn("Idle with claimable work: 10 min (longest stretch 10 min)\n", text)
+        self.assertIn("Idle with claimable work: 11 min (longest stretch 11 min)\n", text)
 
     def pulse_ticks(self, *ticks):
         """pulse_digest over (t, sessions, extra) ticks, app claimable with Auto continue on; returns the pulse.md text."""
@@ -3851,15 +3852,23 @@ class BoardTest(unittest.TestCase):
                       "Held by machine guard: 0 min\n", text)
 
     def test_pulse_idle_uses_elapsed_time(self):
-        text = self.pulse_ticks(*((t, 0, {}) for t in (0, 20, 40, 60, 80)))
-        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n", text)
+        text = self.pulse_ticks(*((t, 0, {}) for t in (0, 20, 40, 60, 80)))  # 80 s + the last line's 60 s
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n", text)
 
     def test_pulse_idle_gap_capped(self):
-        text = self.pulse_ticks((0, 0, {}), (600, 0, {}))
-        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
+        text = self.pulse_ticks((0, 0, {}), (600, 0, {}))  # 120 s capped gap + the last line's 60 s
+        self.assertIn("Idle with claimable work: 3 min (longest stretch 3 min)\n", text)
         self.tearDown(); self.setUp()
         text = self.pulse_ticks((0, 0, {}), (600, 0, {}), (1200, 1, {}))  # two capped gaps, then a session
         self.assertIn("Idle with claimable work: 4 min (longest stretch 4 min)\n", text)
+
+    def test_pulse_weights_by_gap(self):
+        """Digest 095 read 130 idle minutes from 130 ticks in 49 minutes: a line weighs its gap, not one minute."""
+        text = self.pulse_ticks(*((t * 22, 0, {}) for t in range(130)))
+        self.assertIn(" · ticks: 130\nIdle with claimable work: 48 min (longest stretch 48 min)\n", text)
+        self.tearDown(); self.setUp()
+        text = self.pulse_ticks((0, 0, {}), (600, 1, {}))  # 10 minutes to a busy line
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
 
     def test_pulse_hot_tick_held_by_guard(self):
         text = self.pulse_ticks(
@@ -3871,17 +3880,17 @@ class BoardTest(unittest.TestCase):
             (300, 2, {"cpu_load": 900, "swap": 90}),  # a session runs: neither, even hot
             (360, 0, {"cpu_load": 900, "cooldown": True}),  # cool down: neither idle nor guard
             (420, 0, {}))
-        self.assertIn("Idle with claimable work: 3 min (longest stretch 2 min)\n"
+        self.assertIn("Idle with claimable work: 4 min (longest stretch 2 min)\n"
                       "Gated with claimable work: 0 min\n"
                       "Held by machine guard: 2 min\n"
                       "Idle held by Auto continue off or cool down: 1 min\n", text)
 
     def test_pulse_idle_never_exceeds_window(self):
-        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n",
-                      self.pulse_ticks((0, 0, {})))
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n",
+                      self.pulse_ticks((0, 0, {})))  # one line: one tick
         self.tearDown(); self.setUp()
-        text = self.pulse_ticks((0, 0, {}), (50, 0, {"cpu_load": 900}), (100, 0, {}), (130, 0, {}))  # 130 s window
-        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 1 min\n", text)
+        text = self.pulse_ticks((0, 0, {}), (50, 0, {"cpu_load": 900}), (100, 0, {}), (130, 0, {}))  # 130 s + one tick
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\nGated with claimable work: 0 min\nHeld by machine guard: 1 min\n", text)
 
     def test_pulse_null_top_baseline(self):
         s = 1_700_000_000
@@ -8343,7 +8352,8 @@ class DigestTrevorTest(unittest.TestCase):
 class PipelineFitTest(unittest.TestCase):
     """board.py pipeline-fit: per-job lane, agents, diff size, verdicts and fix rounds for one digest."""
 
-    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit", "sensitive"}
+    KEYS = {"id", "lane", "agents", "added", "deleted", "files", "verdicts", "fix_rounds", "over_routed", "fit", "sensitive",
+            "excluded"}
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -8453,13 +8463,14 @@ class PipelineFitTest(unittest.TestCase):
             "added": 200, "deleted": 50, "files": 4,
             "verdicts": {"1": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "CHANGES"},
                          "2": {"security": "PASS", "ux": "PASS", "ui": "PASS", "code": "PASS"}},
-            "fix_rounds": 1, "over_routed": False, "fit": "standard", "sensitive": False})
+            "fix_rounds": 1, "over_routed": False, "fit": "standard", "sensitive": False,
+            "excluded": False})
         self.assertEqual(jd, {"id": d, "lane": "debug", "agents": ["spec", "approver"], "added": None, "deleted": None,
                               "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "debug",
-                              "sensitive": False})
+                              "sensitive": False, "excluded": False})
         self.assertEqual(gone, {"id": "998-gone", "lane": "standard", "agents": [], "added": None, "deleted": None,
                                 "files": None, "verdicts": {}, "fix_rounds": 0, "over_routed": False, "fit": "standard",
-                                "sensitive": False})
+                                "sensitive": False, "excluded": False})
         self.assertEqual(je["agents"], [])
         self.assertEqual(je["verdicts"], {"1": {"security": None, "ux": None, "ui": "PASS", "code": None}})
         self.assertEqual(je["fit"], "fast")
@@ -8609,6 +8620,49 @@ class PipelineFitTest(unittest.TestCase):
         self.digest(job)
         self.assertEqual(self.fit()["jobs"][0]["over_routed"], False)
 
+    def fit_and_cheaper(self):
+        """(pipeline-fit's only row, cheaper_lane_jobs ids) for digest 001, health read from that pipeline-fit.json."""
+        out = self.fit()
+        (self.root / "digests" / "001" / "pipeline-fit.json").write_text(json.dumps(out))
+        return out["jobs"][0], board.cmd_process_health(self.root, "001")["metrics"]["cheaper_lane_jobs"]["jobs"]
+
+    def test_fit_excludes_sensitive_path(self):
+        for path, excluded in (("lib/auth/login.ts", True), ("lib/util/format.ts", False)):
+            with self.subTest(path=path):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard(lines=10, files=1)
+                self.commit({path: "y\n" * 10})
+                self.digest(job)
+                j, cheaper = self.fit_and_cheaper()
+                self.assertEqual((j["excluded"], j["over_routed"], j["fit"]),
+                                 (True, False, "standard") if excluded else (False, True, "lilguy"))
+                self.assertEqual(cheaper, [] if excluded else [job])
+
+    def test_fit_excludes_hard_stop(self):
+        cases = [("spec.md", "# s\nHard stops: money\n", True), ("feature.md", "Critical: fix the nightly job\n", True),
+                 ("spec.md", "# s\nHard stops: none\n", False), ("feature.md", "Tidy the nightly job\n", False)]
+        for name, text, excluded in cases:
+            with self.subTest(text=text):
+                self.git("checkout", "-q", "main")
+                self.git("checkout", "-q", "-B", "work")
+                job = self.small_standard()
+                self.put(job, name, text)
+                self.digest(job)
+                j, cheaper = self.fit_and_cheaper()
+                self.assertEqual((j["excluded"], j["over_routed"]), (excluded, not excluded))
+                self.assertEqual(cheaper, [] if excluded else [job])
+
+    def test_fit_debug_assessment(self):
+        job = self.small_standard()
+        board.cmd_set(self.root, job, ["lane=debug"])
+        self.digest(job)
+        j, cheaper = self.fit_and_cheaper()
+        self.assertEqual((j["excluded"], j["over_routed"], j["fit"], cheaper), (False, True, "lilguy", [job]))
+        self.put(job, "assessment.md", "# a\n")
+        j, cheaper = self.fit_and_cheaper()
+        self.assertEqual((j["excluded"], j["over_routed"], j["fit"], cheaper), (True, False, "debug", []))
+
     def test_pipeline_fit_rejects_unknown_digest(self):
         self.digest()
         for bad in ("1", "../x", "999"):
@@ -8688,6 +8742,26 @@ class ProcessHealthTest(unittest.TestCase):
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
         self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
 
+    def test_test_waste_fast_ui(self):
+        ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"),
+                   ("103-c", "done", "lilguy", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
+        for job, path in (("101-a", ui), ("102-b", other), ("103-c", ui)):
+            self.put(f"jobs/{job}/spec.md", f"# s\n## Likely files\n- `{path}`\n")
+            self.put(f"jobs/{job}/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
+        self.assertEqual(self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"], ["102-b", "103-c"])
+
+    def test_unused_windows_zero_with_tokens(self):
+        self.board()
+        self.digest("001")
+        card = lambda r, tokens: {"window": "five_hour", "resets_at": r, "tokens": tokens,
+                                  "budget": {"used_pct": 0, "left_at_reset_pct": 100, "cap_idle_secs": 0, "hit_90_at": None}}
+        self.put("digests/001/windows.json", json.dumps([
+            card(1, {"total": 385000000, "by_job": {}}), card(2, None), card(3, {"total": 0, "by_job": {}})]))
+        m = self.run_health("001")["metrics"]["unused_windows"]
+        self.assertEqual(m["jobs"], ["five_hour-2", "five_hour-3"])
+
     def test_waste_empty_likely_uses_real_diff(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
         self.assertEqual(self.waste_for("# s\n", [other, ui], 1), [])
@@ -8762,7 +8836,7 @@ class ProcessHealthTest(unittest.TestCase):
             "waiting_on_job_stops": (2, 0, ["101-alpha", "102-beta"]),
             "unreadable_asks": (2, 0, ["102-beta", "103-gamma"]),
             "cheaper_lane_jobs": (2, 0, ["101-alpha", "102-beta"]),
-            "test_waste_jobs": (2, 0, ["101-alpha", "102-beta"]),
+            "test_waste_jobs": (1, 0, ["101-alpha"]),  # 102-beta: fast lane, but its Likely file is UI
             "fable_misuse": (3, 0, ["101-alpha", "102-beta"]),
             "unused_windows": (1, 0, ["five_hour-1000000"]),
             "overburned_windows": (2, 0, ["five_hour-3000000", "seven_day-2000000"]),
@@ -8771,7 +8845,7 @@ class ProcessHealthTest(unittest.TestCase):
         for name, (value, limit, jobs) in want.items():
             self.assertEqual((m[name]["value"], m[name]["limit"], m[name]["jobs"]), (value, limit, jobs), name)
             self.assertEqual((m[name]["previous"], m[name]["flag"]), (None, None), name)
-        self.assertEqual(m["test_waste_jobs"]["minutes"], 9)
+        self.assertEqual(m["test_waste_jobs"]["minutes"], 8)  # 101-alpha's 300 s + 150 s
 
     def test_auto_lines_not_stops(self):
         # Job 825: self-resumed stalls and CPU-load waits carry "auto": true and count for no metric.
@@ -8986,6 +9060,13 @@ class WindowReportTest(unittest.TestCase):
                                        "cap_idle_secs": 2000})
         self.assertEqual(c["points_done"], 5)
         self.assertEqual(c["headline"], 0.05)
+
+    def test_window_keeps_peak_used_pct(self):
+        self.five(used=40, written_at=self.R - 1000)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 1000), [])
+        self.five(used=0, written_at=self.R - 500)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 500), [])
+        self.assertEqual(self.open_json()[f"five_hour-{self.R}"]["used_pct"], 40)
 
     def test_window_report_null_budget(self):
         self.board(("101-a", "done", self.R - 100))
