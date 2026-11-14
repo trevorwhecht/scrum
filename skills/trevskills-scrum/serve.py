@@ -160,11 +160,14 @@ GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gat
 
 
 def note_queue_gate(root, job_id, gate):
-    """Add `gate` (ram_room[:<live id>] or cpu_load) to jobs/<id>/queue-gates.txt once, for timing.md's Queue gate column. It
-    outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error never blocks the queue."""
+    """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load) to
+    jobs/<id>/queue-gates.txt once per name (the text before `(`), so a job held twice keeps its first readings, for
+    timing.md's Queue gate column. It outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error
+    never blocks the queue."""
     path = Path(root) / "jobs" / job_id / "queue-gates.txt"
+    name = lambda g: g.split("(", 1)[0]
     try:
-        if gate not in (path.read_text(encoding="utf-8").split() if path.exists() else []):
+        if name(gate) not in (map(name, path.read_text(encoding="utf-8").split()) if path.exists() else []):
             with path.open("a", encoding="utf-8") as f:
                 f.write(gate + "\n")
     except OSError:
@@ -219,14 +222,15 @@ def mark_ram_hold(project, root, jobs, skip=None):
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
-    on a board job starts only while board.ram_room(floor=0) >= 1 (every session ps sees, young ones counted as spent
-    RAM) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
+    on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
+    young ones counted as spent RAM; a fast or lilguy job sizes at the light share) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
     None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
     While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
-    the ram_room check. A RAM hold notes ram_room:<id> per live run of the project (live_ids), plain ram_room with none."""
+    the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
+    project (live_ids)."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -242,10 +246,12 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     if on_board:
         with LAUNCH_LOCK:
             cpu = None if manual else board.cpu_load_pct()
-            ram_short = not idle and board.ram_room(floor=0) < 1
+            light = board.light_job(root, job)
+            ram_short = not idle and board.ram_room(floor=0, light=light) < 1
             if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
-                gates = ([f"ram_room:{i}" for i in sorted(live_ids(project))] or ["ram_room"]) if ram_short else ["cpu_load"]
+                gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
+                         if ram_short else ["cpu_load"])
                 for gate in gates:
                     note_queue_gate(root, job_id, gate)
                 if ram_short:
