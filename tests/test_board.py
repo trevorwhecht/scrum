@@ -8659,15 +8659,15 @@ class ProcessHealthTest(unittest.TestCase):
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
 
     def test_cheaper_lane_jobs_skips_sensitive(self):
-        self.board(("1-a", "done", "standard", "", "merged"), ("2-b", "done", "standard", "", "merged"),
-                   ("3-c", "done", "standard", "", "merged"))
-        self.digest("001", "1-a", "2-b", "3-c")
+        self.board(("101-a", "done", "standard", "", "merged"), ("102-b", "done", "standard", "", "merged"),
+                   ("103-c", "done", "standard", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "1-a", "over_routed": True, "sensitive": True},
-            {"id": "2-b", "over_routed": True, "sensitive": False},
-            {"id": "3-c", "over_routed": True}]}))
+            {"id": "101-a", "over_routed": True, "sensitive": True},
+            {"id": "102-b", "over_routed": True, "sensitive": False},
+            {"id": "103-c", "over_routed": True}]}))
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
-        self.assertEqual((m["value"], m["jobs"]), (2, ["2-b", "3-c"]))
+        self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
 
     def test_waste_empty_likely_uses_real_diff(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
@@ -9310,7 +9310,7 @@ class UsageAllowanceTest(unittest.TestCase):
         at = datetime.fromtimestamp(USAGE_NOW + 14400).strftime("%H:%M")
         a = board.usage_allowance(u, USAGE_NOW, 2)
         self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 2 live)"))
-        a = board.usage_allowance(u, USAGE_NOW, ["1-a", "2-b", "3-c"])
+        a = board.usage_allowance(u, USAGE_NOW, ["101-a", "102-b", "103-c"])
         self.assertEqual((int(a), a.reason), (1, f"usage 5h 93% used, resets {at} (allowance 1, 3 live)"))
         self.assertEqual(int(board.usage_allowance(u, USAGE_NOW, 40)), 1, "the number never depends on live")
         seven_at = datetime.fromtimestamp(USAGE_NOW + 3600).strftime("%H:%M")
