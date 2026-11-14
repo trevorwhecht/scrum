@@ -1909,6 +1909,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
     hits = {name: [] for name in HEALTH_LIMITS}  # one entry per counted line, job or window
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
+        if q.get("auto") is True:  # cleared without Trevor (log_stop auto): never a stop
+            continue
         if str(job) not in claimed or not (kind in HEALTH_STOP_KINDS or "question" in q and kind is None):
             continue
         hits["stops_per_job"].append(job)
@@ -4311,7 +4313,7 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
-def cmd_ready(root, parent_id, live=(), manual=False):
+def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). Paused and stalled siblings keep their
     overlap slot, and every live, paused or stalled leaf job of another tree is an outside holder: a child clashes with
@@ -4319,7 +4321,10 @@ def cmd_ready(root, parent_id, live=(), manual=False):
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
     BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
     all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text} (the card's
-    "Waiting on" line); a claim or a depends_on wait drops it."""
+    "Waiting on" line); a claim or a depends_on wait drops it.
+    `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
+    siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
+    machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -4361,16 +4366,21 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
                    and j["id"] != parent["id"] and not j.get("children")
                    and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live or parked(j))]
+        if only:  # the idle claim: only jobs with a live session hold it
+            alive = session_alive_fn() if any(j.get("stage") in WATCHED for j in slots + outside) else None
+            has_session = lambda j: j["id"] in live or (not idle(j) and j.get("stage") in WATCHED and alive(j))
+            slots = [k for k in slots if has_session(k)]
+            outside = [j for j in outside if has_session(j)]
         files.update({j["id"]: child_files(jobs_dir, j["id"]) for j in outside})
         overlap = []  # outside holder ids that alone hold a waiting child
-        room = ram_room() if go and not machine else 0  # one claim = one new session
+        room = (1 if only else ram_room()) if go and not machine else 0  # one claim = one new session
         if cap is not None:
             room = min(room, cap)
         ready = []
         for k in kids if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
-            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake"):
+            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only:
                 continue
             undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if undone:
@@ -4378,14 +4388,15 @@ def cmd_ready(root, parent_id, live=(), manual=False):
                 for dep in undone:
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
                 continue
-            hit = slot_conflict(k, slots, files)
+            hit = slot_conflict(dict(k, parallel=True) if only else k, slots, files)  # only: never runs alone
             out_hit = None if hit else slot_conflict(dict(k, parallel=True), outside, files)
             if out_hit:
                 overlap += out_hit[1]
             if hit or out_hit:
                 hit = hit or out_hit
                 k["overlap_hold"] = {"ids": list(hit[1]), "text": hit[0]}  # serve.py's waitingOn for the card
-                for g in ["runs_alone"] if hit[0] == "this job runs alone" else [f"overlap:{i}" for i in hit[1]]:
+                for g in [f"runs_alone:{i}" for i in hit[1]] if hit[0] == "this job runs alone" \
+                        else [f"overlap:{i}" for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
             k.update(stage="spec", updatedAt=now())
@@ -4401,7 +4412,9 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
+        if only and not ready:  # an idle claim that claimed nothing leaves the parent as it was
+            pass
+        elif machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):
                 new = "running", MACHINE_WAIT + machine
         elif blocked and (ready or busy or finished == len(kids)):
@@ -4430,7 +4443,8 @@ def cmd_ready(root, parent_id, live=(), manual=False):
         if new != (parent["stage"], parent.get("reason")):
             if (new[1] or "").startswith(MACHINE_WAIT) and not (new[1].startswith(OVERLAP_WAIT)
                                                                 or reason.startswith(MACHINE_WAIT)):  # once per hold
-                log_stop(root, parent["id"], "machine", new[1])
+                # a CPU-load wait clears on its own while the parent keeps running: no stop for Trevor
+                log_stop(root, parent["id"], "machine", new[1], auto=new[1].startswith(MACHINE_WAIT + "CPU load"))
             elif (new[1] or "").startswith(BLOCKED):
                 log_stop(root, parent["id"], "bigboy", new[1])
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
@@ -4596,10 +4610,12 @@ def questions_log(root, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def log_stop(root, job_id, kind, reason):
-    """Append one stop line (kind: stall, machine, bigboy or refused) to questions.log. Caller holds the board lock."""
+def log_stop(root, job_id, kind, reason, auto=False):
+    """Append one stop line (kind: stall, machine, bigboy or refused) to questions.log. Caller holds the board lock.
+    `auto`: the scrum clears it on its own (a stall auto_resume retries, a CPU-load wait); the line carries
+    "auto": true and process-health counts it for no metric."""
     questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id, "kind": kind,
-                         "reason": reason})
+                         "reason": reason, **({"auto": True} if auto else {})})
 
 
 UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", "render")
@@ -5579,7 +5595,12 @@ def cmd_watchdog(root, alive=None):
                 else:
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board update "
                                f"for {STALL_MINUTES} min and no live session")
-                    log_stop(root, job["id"], "stall", job["reason"])
+                    # auto: serve.py's auto_resume retries it (its run_child test), so it is no stop for Trevor
+                    parent = next((j for j in board["jobs"] if j["id"] == job.get("parent")), None)
+                    auto = not job.get("parent") or bool(parent and parent.get("stage") == "running"
+                                                         and not parent.get("paused")
+                                                         and parent.get("lane") in ("runall", "bigboy"))
+                    log_stop(root, job["id"], "stall", job["reason"], auto=auto)
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
             if not flagged and not requeued:

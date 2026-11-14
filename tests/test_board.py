@@ -1021,7 +1021,7 @@ class BoardTest(unittest.TestCase):
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
         self.spec(d1, "src/x.py")
         board.cmd_ready(self.root, parent)
-        self.assertEqual(gates(d2), ["runs_alone"])
+        self.assertEqual(gates(d2), [f"runs_alone:{d1}"])  # job 825: names the holder
 
     def test_ready_records_overlap_hold(self):
         # Job 764: the card shows why a waiting child is held; a claim or a dep wait drops a stale hold.
@@ -1212,6 +1212,47 @@ class BoardTest(unittest.TestCase):
         self.assertRegex(line["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual((line["project"], line["job"], line["kind"], line["reason"]),
                          (Path(self.tmp.name).name, parent, "machine", "waiting: free RAM 7% (< 20%)"))
+
+    def test_cmd_ready_cpu_load_wait_is_silent(self):
+        # Job 825: a CPU-load wait passes on its own, so its machine line is auto and the parent keeps running.
+        parent, _ = self.five()
+        board.cmd_ready(self.root, parent)
+        with mock.patch.object(board, "machine_ok", return_value="CPU load 178% of 8 cores (> 150%)"):
+            board.cmd_ready(self.root, parent)
+        p = self.child(parent)
+        self.assertEqual((p["stage"], p["reason"]), ("running", "waiting: CPU load 178% of 8 cores (> 150%)"))
+        [line] = self.log_lines()
+        self.assertEqual((line["job"], line["kind"], line["reason"], line["auto"]),
+                         (parent, "machine", "waiting: CPU load 178% of 8 cores (> 150%)", True))
+
+    def test_cmd_ready_only_idle_claim(self):
+        # Job 825: only= claims that one waiting child, as parallel, past a parked sibling and ram_room 0.
+        parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3), self.ticket(4),
+                           self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
+        c1, c2, c3, c4, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        for k, f in ((c1, "src/a.py"), (c2, "src/b.py"), (c3, "src/b.py"), (c4, "src/a.py")):
+            self.spec(k, f)
+        board.cmd_set(self.root, c1, ["stage=build"])
+        board.cmd_set(self.root, c3, ["stage=build"])
+        board.cmd_pause(self.root, c3)  # parked on src/b.py: holds no slot for only=
+        alive = mock.patch.object(board, "session_alive_fn", return_value=lambda job: False)
+        alive.start()
+        self.addCleanup(alive.stop)
+        self.assertEqual(board.cmd_ready(self.root, parent, live=[c1])["ready"], [])  # c2 runs alone, c4 shares
+        with mock.patch.object(board, "ram_room", return_value=0):
+            self.assertEqual(board.cmd_ready(self.root, parent, live=[c1], only=c4)["ready"], [])  # shares src/a.py
+            self.assertEqual(self.child(c4)["stage"], "waiting")
+            out = board.cmd_ready(self.root, parent, live=[c1], only=c2)
+        self.assertEqual(out["ready"], [c2])
+        self.assertEqual([self.child(k)["stage"] for k in (c2, c4)], ["spec", "waiting"])  # nothing else claimed
+        self.assertEqual(board.cmd_ready(self.root, parent, live=[c1], only=c2)["ready"], [])  # no longer waiting
+        board.cmd_set(self.root, c1, ["stage=done"])
+        with mock.patch.object(board, "machine_ok", return_value="free RAM 7% (< 20%)"):
+            self.assertEqual(board.cmd_ready(self.root, parent, only=c4)["ready"], [])
+        with mock.patch.object(board, "pick_account", return_value=(None, board.Allowance(0, "usage held"))):
+            self.assertEqual(board.cmd_ready(self.root, parent, only=c4)["ready"], [])
+        self.assertEqual(self.child(c4)["stage"], "waiting")
+        self.assertEqual(board.cmd_ready(self.root, parent, only=c4)["ready"], [c4])
 
     def test_bigboy_stops_log_kind_bigboy(self):
         parent, (c1, c2, c3, c4, c5) = self.five()
@@ -4102,13 +4143,31 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [dead])
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])  # flags nothing: no line
         lines = self.log_lines()
-        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason"}] * 2)
+        # job 825: a standalone job with no live session is auto-resumed, so its line is auto; live-but-idle is not
+        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason"},
+                                                   {"date", "project", "job", "kind", "reason", "auto"}])
         for l in lines:
             self.assertRegex(l["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
-        self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"]) for l in lines], [
+        self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines], [
             (Path(self.tmp.name).name, idle, "stall", "stalled: no board or job-dir change for 2 h "
-             "(session alive but idle)"),
-            (Path(self.tmp.name).name, dead, "stall", "stalled: no board update for 30 min and no live session")])
+             "(session alive but idle)", None),
+            (Path(self.tmp.name).name, dead, "stall", "stalled: no board update for 30 min and no live session", True)])
+
+    def test_watchdog_stall_auto_only_when_resumable(self):
+        # Job 825: auto only when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
+        cases = [("Run parent", dict(stage="running", lane="runall"), True),
+                 ("Big parent", dict(stage="running", lane="bigboy"), True),
+                 ("Paused parent", dict(stage="running", lane="runall", paused=True), None),
+                 ("Stuck parent", dict(stage="needs-human", lane="bigboy"), None),
+                 ("Plain parent", dict(stage="running", lane="standard"), None)]
+        for title, fields, want in cases:
+            with self.subTest(title):
+                parent = self.aged(title, 1, **fields)
+                kid = self.aged(f"{title} kid", 45, stage="build", parent=parent)
+                self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [kid])
+                line = self.log_lines()[-1]
+                self.assertEqual((line["job"], line["kind"], line.get("auto")), (kid, "stall", want))
+                self.assertEqual("auto" in line, want is True)
 
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
@@ -8373,6 +8432,24 @@ class ProcessHealthTest(unittest.TestCase):
             self.assertEqual((m[name]["value"], m[name]["limit"], m[name]["jobs"]), (value, limit, jobs), name)
             self.assertEqual((m[name]["previous"], m[name]["flag"]), (None, None), name)
         self.assertEqual(m["test_waste_jobs"]["minutes"], 9)
+
+    def test_auto_lines_not_stops(self):
+        # Job 825: self-resumed stalls and CPU-load waits carry "auto": true and count for no metric.
+        self.board(("101-alpha", "done", "standard", None, "merged"), ("102-beta", "done", "standard", None, "merged"))
+        self.digest("001", "101-alpha", "102-beta")
+        self.lines("questions.log", [
+            {"job": "101-alpha", "kind": "stall", "reason": "stalled: blocked on sibling 102-beta", "auto": True},
+            {"job": "102-beta", "kind": "machine", "reason": "waiting: CPU load 178% of 8 cores (> 150%)", "auto": True},
+            {"job": "102-beta", "kind": "ask", "auto": True, "question": "Waiting for job 101 rule 4 to merge?",
+             "options": [{"command": "resume 102-beta"}, {"command": "abort 102-beta"}]}])
+        m = self.run_health("001")["metrics"]
+        for name in ("stops_per_job", "resume_abort_stops", "waiting_on_job_stops", "unreadable_asks"):
+            self.assertEqual((m[name]["value"], m[name]["jobs"]), (0, []), name)
+        self.lines("questions.log", [
+            {"job": "101-alpha", "kind": "stall", "reason": "stalled: no board update", "auto": True},
+            {"job": "102-beta", "kind": "stall", "reason": "stalled: no board update"}])
+        m = self.run_health("001")["metrics"]
+        self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["jobs"]), (0.5, ["102-beta"]))
 
     def test_previous_and_flags(self):
         self.board(("101-alpha", "done", "standard", None, "merged"))
