@@ -3767,7 +3767,12 @@ def child_files(jobs_dir, job_id):
     """A child's Likely files: from spec.md, or from feature.md (plan-apply's Parallel: paths) while it has no spec."""
     for name in ("spec.md", "feature.md"):
         if (f := Path(jobs_dir) / job_id / name).is_file():
-            return likely_files(f.read_text(encoding="utf-8", errors="replace"))
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if name == "feature.md" and TERMINAL_BATCH_TITLE in text:
+                # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
+                return {p for p in re.findall(r"`([^`\s]+)`", text)
+                        if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
+            return likely_files(text)
     return set()
 
 

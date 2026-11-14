@@ -1093,6 +1093,23 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_child_files_terminal_batch_reads_claude_paths(self):
+        batch = board.TERMINAL_BATCH_INTRO + "\n## From 1: a\n- `.claude/skills/scrum-digest-flow/SKILL.md`\n- `.claude/agents/x.md`\n- `tests/test_x.py`\n"
+        self.write("b1/feature.md", batch)
+        self.assertEqual(board.child_files(self.root / "jobs", "b1"),
+                         {".claude/skills/scrum-digest-flow/SKILL.md", ".claude/agents/x.md"})
+        self.write("b2/feature.md", board.TERMINAL_BATCH_INTRO)  # names no .claude/ path: runs alone
+        self.assertEqual(board.child_files(self.root / "jobs", "b2"), set())
+
+    def test_ready_terminal_batch_holds_only_overlapping_claude_jobs(self):
+        self.write("b1/feature.md", board.TERMINAL_BATCH_INTRO + "- `.claude/skills/scrum-digest-flow/SKILL.md`\n")
+        self.spec("j1", "skills/trevskills-scrum/board.py")
+        self.spec("j2", ".claude/skills/scrum-digest-flow/SKILL.md")
+        files = {i: board.child_files(self.root / "jobs", i) for i in ("b1", "j1", "j2")}
+        batch = {"id": "b1", "parallel": True}
+        self.assertIsNone(board.slot_conflict({"id": "j1", "parallel": True}, [batch], files))
+        self.assertIsNotNone(board.slot_conflict({"id": "j2", "parallel": True}, [batch], files))
+
     def test_chain_lock_acquire_wait_reenter_stale(self):
         parent, _ = self.three()
         lock = self.root / "jobs" / parent / ".chain.lock"
