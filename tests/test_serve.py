@@ -3769,6 +3769,11 @@ class LatestWindowsTest(unittest.TestCase):
             "seven_day": {"headline": None, "points_done": 20, "budget": {"used_pct": None}, "first_pass_rate": None,
                           "wasted_pct": None, "escapes": None, "resets_at": 500}})
 
+    def test_account_suffixed_card_ignored(self):
+        self.card("five_hour-900-owa.json", {"points_done": 9, "resets_at": 900})
+        self.card("five_hour-100.json", {"points_done": 3, "resets_at": 100})
+        self.assertEqual(self.serve.latest_windows(self.dir)["five_hour"]["points_done"], 3)
+
     def test_missing_dir_and_only_open_json(self):
         self.assertEqual(self.serve.latest_windows(self.dir), {"five_hour": None, "seven_day": None})
         self.card("open.json", {"five_hour": {"resets_at": 1}})

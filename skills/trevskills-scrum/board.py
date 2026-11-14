@@ -1168,7 +1168,7 @@ BAD_WASTED_PCT = 20  # a window scorecard is bad above this wasted_pct
 BAD_FIRST_PASS = 0.5  # ... or below this first_pass_rate, once it has BAD_MIN_JOBS done jobs
 BAD_MIN_JOBS = 3
 EARLY_DIGEST_MIN = 3  # a bad window brings the digest forward once this many done jobs are undigested
-WINDOW_FILE_RE = re.compile(r"(five_hour|seven_day)-\d+\.json")
+WINDOW_FILE_RE = re.compile(r"(five_hour|seven_day)-\d+(-[a-z0-9-]{1,20})?\.json")
 
 
 def digested_ids(root):
@@ -2300,13 +2300,17 @@ def _project_idle(root, board) -> bool:
     return any(not i["done"] and not i["setup"] and not waiting_on(i, items, board) for i in items)
 
 
-def _scorecard(root, e, t, board, questions):
-    """The scorecard dict for one remembered window entry `e` (resets_at <= t)."""
+def _scorecard(root, e, t, board, questions, acc=None):
+    """The scorecard dict for one remembered window entry `e` (resets_at <= t) of account `acc` (default: the first).
+    Only that account's jobs (a job with no `account` is the first account's) and transcripts are counted."""
     root = Path(root)
+    first = accounts()[0]
+    acc = acc or first
     end = e["resets_at"]
     start = end - WINDOW_SECS[e["window"]]
     within = lambda ts: ts is not None and start <= ts < end
-    jobs = {j["id"]: j for j in board["jobs"] if isinstance(j, dict) and isinstance(j.get("id"), str)}
+    jobs = {j["id"]: j for j in board["jobs"] if isinstance(j, dict) and isinstance(j.get("id"), str)
+            and (j.get("account") or first.name) == acc.name}
     # budget
     used = e.get("used_pct")
     if is_num(used):
@@ -2327,8 +2331,9 @@ def _scorecard(root, e, t, board, questions):
     # tokens: only this project's rows
     me = root.resolve().parent
     name = next((n for n, p in projects().items() if p.resolve() == me), None)
-    rows = [r for r in transcript_tokens(start, end) if r["project"] == name] \
-        if name is not None and transcripts_dir().is_dir() else None
+    pdir = transcripts_dir() if acc.name == first.name else acc.dir / "projects"
+    rows = [r for r in transcript_tokens(start, end, pdir) if r["project"] == name] \
+        if name is not None and pdir.is_dir() else None
     tok = lambda r: sum(r[k] for k in TOKEN_KEYS)
     tokens = model_mix = None
     if rows is not None:
@@ -2402,7 +2407,7 @@ def _scorecard(root, e, t, board, questions):
         needs_human += max(0, min(nxt, end) - max(q["_ts"], start))
     label = dict(WINDOWS)[e["window"]]
     return {
-        "window": e["window"], "label": label, "resets_at": end, "start": start, "end": end,
+        "account": acc.name, "window": e["window"], "label": label, "resets_at": end, "start": start, "end": end,
         "written_at": datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds"),
         "budget": budget, "headline": round(points_done / used, 3) if is_num(used) and used else None,
         "points_done": points_done, "done_jobs": done_jobs, "tokens": tokens,
@@ -2441,32 +2446,34 @@ def cmd_window_report(root, now=None) -> list[dict]:
             raw = {}
         opened = {k: v for k, v in raw.items() if isinstance(v, dict) and v.get("window") in WINDOW_SECS
                   and type(v.get("resets_at")) is int} if isinstance(raw, dict) else {}
-        usage = read_usage() or {}
-        limits = usage.get("rate_limits") if isinstance(usage.get("rate_limits"), dict) else {}
-        at = usage["written_at"] if is_num(usage.get("written_at")) else t
-        board, idle = read_board(root), None
-        for key, _ in WINDOWS:
-            w = limits.get(key)
-            if not isinstance(w, dict) or not is_num(w.get("resets_at")):
-                continue
-            r = int(w["resets_at"])
-            e = opened.setdefault(f"{key}-{r}", {"window": key, "resets_at": r, "used_pct": None, "hit_90_at": None,
-                                                 "hit_cap_at": None, "idle_secs": 0, "last_tick": None})
-            used = w.get("used_percentage")
-            if is_num(used):
-                e["used_pct"] = used
-                if used >= HIT_PCT and e.get("hit_90_at") is None:
-                    e["hit_90_at"] = at
-                if 100 - used < USAGE_STOP_PCT and e.get("hit_cap_at") is None:
-                    e["hit_cap_at"] = at
-            if r > t:
-                gap = t - e["last_tick"] if is_num(e.get("last_tick")) else None
-                if gap is not None and 0 < gap <= IDLE_SAMPLE_MAX_SECS:
-                    if idle is None:
-                        idle = _project_idle(root, board)
-                    if idle:
-                        e["idle_secs"] = (e.get("idle_secs") or 0) + gap
-                e["last_tick"] = t
+        board, idle, accs = read_board(root), None, accounts()
+        for acc in accs:
+            usage = read_usage(acc.name) or {}
+            limits = usage.get("rate_limits") if isinstance(usage.get("rate_limits"), dict) else {}
+            at = usage["written_at"] if is_num(usage.get("written_at")) else t
+            for key, _ in WINDOWS:
+                w = limits.get(key)
+                if not isinstance(w, dict) or not is_num(w.get("resets_at")):
+                    continue
+                r = int(w["resets_at"])
+                e = opened.setdefault(f"{key}-{r}" + ("" if acc is accs[0] else f"-{acc.name}"), {
+                    "window": key, "resets_at": r, "used_pct": None, "hit_90_at": None, "hit_cap_at": None,
+                    "idle_secs": 0, "last_tick": None, **({} if acc is accs[0] else {"account": acc.name})})
+                used = w.get("used_percentage")
+                if is_num(used):
+                    e["used_pct"] = used
+                    if used >= HIT_PCT and e.get("hit_90_at") is None:
+                        e["hit_90_at"] = at
+                    if 100 - used < USAGE_STOP_PCT and e.get("hit_cap_at") is None:
+                        e["hit_cap_at"] = at
+                if r > t:
+                    gap = t - e["last_tick"] if is_num(e.get("last_tick")) else None
+                    if gap is not None and 0 < gap <= IDLE_SAMPLE_MAX_SECS:
+                        if idle is None:
+                            idle = _project_idle(root, board)
+                        if idle:
+                            e["idle_secs"] = (e.get("idle_secs") or 0) + gap
+                    e["last_tick"] = t
         written, questions = [], None
         for name, e in sorted(opened.items()):
             if e["resets_at"] > t:
@@ -2475,7 +2482,11 @@ def cmd_window_report(root, now=None) -> list[dict]:
             if not path.exists():
                 if questions is None:
                     questions = [{**q, "_ts": _epoch(q.get("date"))} for q in _json_lines(Path(root) / "questions.log")]
-                card = _scorecard(root, e, t, board, questions)
+                acc = next((a for a in accounts() if a.name == (e.get("account") or accounts()[0].name)), None)
+                if acc is None:  # an account since removed: drop the entry, write no card
+                    del opened[name]
+                    continue
+                card = _scorecard(root, e, t, board, questions, acc)
                 _write_json(path, card)
                 written.append(card)
             del opened[name]

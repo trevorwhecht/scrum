@@ -3446,6 +3446,13 @@ class BoardTest(unittest.TestCase):
                     if j["stage"] != "aborted":
                         board.cmd_abort(self.root, j["id"], requeue=False)
 
+    def test_digest_start_claims_account_window(self):
+        self.done_jobs(1)
+        w = self.root / "windows"
+        w.mkdir()
+        (w / "five_hour-200-owa.json").write_text(json.dumps({"window": "five_hour", "account": "owa"}))
+        self.assertEqual(self.cli("digest-start")["windows"], ["five_hour-200-owa.json"])
+
     def test_digest_start_claims_windows_once(self):
         a = self.done_jobs(1)
         self.assertEqual(self.cli("digest-start"), {"id": "001", "jobs": a, "windows": []})  # no windows/ folder
@@ -8925,6 +8932,69 @@ class WindowReportTest(unittest.TestCase):
                 self.assertEqual(c["lane_fit"], {"over_routed": [], "over_routed_tokens": None,
                                                  "over_routed_pct": None})
                 self.assertEqual((c["points_done"], c["first_pass_rate"], c["escapes"]), (3, 0.5, 0))
+
+    def two_accounts(self, owa_five=(70, None)):
+        """main (usage = SCRUM_USAGE) and owa (<base>/owa/usage.json); owa_five = (used %, resets_at) or None."""
+        (self.base / "owa").mkdir(exist_ok=True)
+        env = mock.patch.dict(os.environ, {"SCRUM_ACCOUNTS": json.dumps(
+            [["main", str(self.base / "main"), None], ["owa", str(self.base / "owa"), [80, 90]]])})
+        env.start()
+        self.addCleanup(env.stop)
+        if owa_five:
+            (self.base / "owa" / "usage.json").write_text(json.dumps({"rate_limits": {"five_hour": {
+                "used_percentage": owa_five[0], "resets_at": owa_five[1] or self.R + 100}}}))
+
+    def test_window_report_per_account(self):
+        self.two_accounts()
+        self.five(used=40)
+        self.assertEqual(board.cmd_window_report(self.root, self.R - 10), [])
+        self.assertEqual(sorted(self.open_json()), [f"five_hour-{self.R}", f"five_hour-{self.R + 100}-owa"])
+        self.assertEqual(self.open_json()[f"five_hour-{self.R + 100}-owa"]["account"], "owa")
+        main = board.cmd_window_report(self.root, self.R + 60)
+        self.assertEqual([(c["account"], c["budget"]["used_pct"]) for c in main], [("main", 40)])
+        owa = board.cmd_window_report(self.root, self.R + 160)
+        self.assertEqual([(c["account"], c["budget"]["used_pct"], c["resets_at"]) for c in owa],
+                         [("owa", 70, self.R + 100)])
+        self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()),
+                         [".lock", f"five_hour-{self.R}.json", f"five_hour-{self.R + 100}-owa.json", "open.json"])
+        self.assertEqual(board.cmd_window_report(self.root, self.R + 200), [])
+
+    def test_window_report_points_by_account(self):
+        self.two_accounts()
+        self.board(("101-a", "done", self.R - 50, {"account": "owa"}), ("102-b", "done", self.R - 60),
+                   ("103-c", "done", self.R - 70, {"account": "main"}))
+        self.backlog("- [x] [3] A → 101-a", "- [x] [5] B → 102-b", "- [x] [2] C → 103-c")
+        self.five(used=40)
+        main = board.cmd_window_report(self.root, self.R + 200)
+        by = {c["account"]: c for c in main}
+        self.assertEqual(by["main"]["points_done"], 7)
+        self.assertEqual([d["id"] for d in by["main"]["done_jobs"]], ["102-b", "103-c"])
+        self.assertEqual(by["owa"]["points_done"], 3)
+        self.assertEqual(by["owa"]["done_jobs"], [{"id": "101-a", "points": 3}])
+
+    def test_window_report_tokens_by_account(self):
+        self.two_accounts()
+        self.transcript("p/s1.jsonl", [prompt("JOB_DIR=/x/scrum/jobs/101-a"),
+                                       reply(self.R - 100, "m1", cwd=str(self.repo), input_tokens=11)])
+        p = self.base / "owa" / "projects" / "p" / "s2.jsonl"
+        p.parent.mkdir(parents=True)
+        p.write_text("".join(json.dumps(x) + "\n" for x in [
+            prompt("JOB_DIR=/x/scrum/jobs/102-b"), reply(self.R - 50, "m2", cwd=str(self.repo), input_tokens=222)]))
+        self.board()
+        self.five(used=40)
+        by = {c["account"]: c for c in board.cmd_window_report(self.root, self.R + 200)}
+        self.assertEqual(by["main"]["tokens"]["total"], 11)
+        self.assertEqual(by["owa"]["tokens"]["total"], 222)
+
+    def test_window_report_skips_account_without_usage(self):
+        self.two_accounts(owa_five=None)
+        self.five(used=40)
+        self.assertEqual([c["account"] for c in board.cmd_window_report(self.root, self.R + 60)], ["main"])
+        self.assertEqual(self.open_json(), {})
+        self.usage_file.write_text("{}")
+        (self.base / "owa" / "usage.json").write_text(json.dumps({"rate_limits": {"five_hour": {
+            "used_percentage": 5, "resets_at": self.R + 100}}}))
+        self.assertEqual([c["account"] for c in board.cmd_window_report(self.root, self.R + 160)], ["owa"])
 
 
 USAGE_NOW = 1_000_000
