@@ -349,6 +349,18 @@ class PickAccountTest(AccountEnv):
         self.write(self.main, five=self.FULL)
         self.assertEqual(board.pick_account(NOW), ("owa", None))
 
+    def test_tapered_main_filled_by_live_sessions_fails_over(self):
+        self.write(self.main, five=(91, 9000))  # allowance 3
+        self.assertEqual(board.pick_account(NOW, 3)[0], "owa")
+        self.assertEqual(board.pick_account(NOW, [1, 2, 3])[0], "owa")
+        name, allow = board.pick_account(NOW, 2)
+        self.assertEqual((name, int(allow)), ("main", 3))
+        self.write(self.owa, five=self.FULL)
+        name, allow = board.pick_account(NOW, 3)
+        self.assertEqual((name, int(allow)), (None, 0))
+        self.assertIn("main usage", allow.reason)
+        self.assertIn("owa usage", allow.reason)
+
     def test_owa_at_reserve_with_main_full_gives_none(self):
         self.write(self.main, five=self.FULL)
         for five, seven in (((80, 9000), (10, 90000)), ((10, 9000), (90, 90000))):
