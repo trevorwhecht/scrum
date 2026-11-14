@@ -306,9 +306,18 @@ def setup_done(project, root, job_id):
     return 200, {"id": job_id, **start_ready(project, root, job["parent"], manual=True)}
 
 
+def cpu_hot(manual=False):
+    """True when, unless `manual` (Trevor's click), board.cpu_load_pct() read now is above MAX_LAUNCH_CPU_LOAD_PCT: the
+    claim paths re-read it right before claiming, so no job is claimed only for spawn to queue it."""
+    cpu = None if manual else board.cpu_load_pct()
+    return cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT
+
+
 def start_ready(project, root, parent_id, manual=False):
-    """Claim the parent's startable children and start each one headless. Returns cmd_ready's output. Cool-down holds
-    the claims unless `manual` (Trevor's click)."""
+    """Claim the parent's startable children and start each one headless. Returns cmd_ready's output ({"ready": []}
+    when CPU load holds it: cpu_hot claims nothing). Cool-down and CPU load hold the claims unless `manual`."""
+    if cpu_hot(manual):
+        return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}", manual=manual)
@@ -320,7 +329,8 @@ def wake_waiting(project, root):
     `start` spawn start_ready makes, capped like cmd_ready by ram_room(floor=0) and the usage allowance (board.pick_account). A full machine leaves
     them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True), except
     a `wake` job, which is approved work in flight and only needs RAM room. A
-    `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room."""
+    `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room.
+    CPU load over the launch limit (cpu_hot, read just before the claim) leaves every one waiting."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])):
         return
     why = board.machine_ok(root, claim=True)
@@ -336,6 +346,8 @@ def wake_waiting(project, root):
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
+    if cpu_hot():  # re-read right before the claim
+        return
     out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
         root, j["id"], live_ids(project)))
     for job_id in out["ready"]:
@@ -485,7 +497,9 @@ def idle_claim(project, root, jobs) -> bool:
     held job with the fewest Likely files (child_files; ties: lowest id) whose files share none with a running job (a
     live_ids run, or a WATCHED leaf job whose session is alive); a running job with unreadable files blocks all, and
     a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
-    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. True when one started."""
+    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
+    limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing and keeps the pick
+    held. True when one started."""
     by_id = {j["id"]: j for j in jobs}
 
     def waiting_child(k):
@@ -514,9 +528,11 @@ def idle_claim(project, root, jobs) -> bool:
     files = {j["id"]: board.child_files(jobs_dir, j["id"]) for j in held}
     ok = [j for j in held if (all(b and not board.shared_files(files[j["id"]], b) for b in busy) if files[j["id"]]
                               else not busy)]
-    if not ok or not take_room():
+    if not ok:
         return False
     pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
+    if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual"))) or not take_room():
+        return False
     IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
     if launch := pick.get("queued_launch"):
         return spawn(project, root, pick["id"], launch["action"], launch["prompt"],

@@ -1842,6 +1842,26 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["stage"], "running")
         self.assertTrue(job["reason"].startswith("waiting: no account has room: main pace 5h "), job["reason"])
 
+    def test_start_ready_holds_at_hot_load(self):
+        """Job 899: start_ready re-reads CPU load right before claiming; over MAX_LAUNCH_CPU_LOAD_PCT it claims nothing
+        unless manual."""
+        b, base = self.serve.board, Path(tempfile.mkdtemp(dir=self.tmp.name))
+        root = base / "scrum"
+        root.mkdir()
+        (root / "backlog.md").write_text("- [ ] one\n")
+        out = b.cmd_runall_start(root)
+        parent, (kid,) = out["id"], out["children"]
+        kid_job = lambda: b.find(b.read_board(root), kid)
+        self.assertEqual(b.MAX_LAUNCH_CPU_LOAD_PCT, 500)
+        with mock.patch.object(b, "machine_ok", return_value=None), mock.patch.object(b, "ram_room", return_value=4):
+            for load, manual, ready in (("501", False, []), ("500", False, [kid]), ("501", True, [kid])):
+                b.cmd_set(root, kid, ["stage=waiting"])
+                with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=load), mock.patch.object(self.serve, "spawn") as spawn:
+                    self.assertEqual(self.serve.start_ready("repo", root, parent, manual=manual)["ready"], ready)
+                self.assertEqual(([c.args[2] for c in spawn.call_args_list], kid_job()["stage"]),
+                                 (ready, "spec" if ready else "waiting"), (load, manual))
+        self.assertEqual(kid_job()["started_by"], "runall")
+
     @mock.patch("board.session_alive_fn", new=lambda: (lambda job: True))  # the in-progress sibling has a live session
     def test_resume_ignores_pace_and_session_count(self):
         """No usage pace and no session count stops a resume (job 282): only machine_ok and a Run-all/BigBoy child's
@@ -8527,6 +8547,20 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["002-second"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("spec", "waiting"))
 
+    def test_wake_waiting_holds_at_hot_load(self):
+        """Job 899: wake_waiting re-reads CPU load right before claiming; over MAX_LAUNCH_CPU_LOAD_PCT nothing wakes."""
+        for load, woke in (("501", False), ("500", True)):
+            self.queue_board({"id": "001-first", "stage": "done"},
+                             {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "started_by": "hand"})
+            with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=load), \
+                    mock.patch.object(self.board, "machine_ok", return_value=None), \
+                    mock.patch.object(self.board, "ram_room", return_value=1), \
+                    mock.patch.object(self.board, "usage_allowance", return_value=None):
+                self.serve.wake_waiting("idle", self.root)
+            job = self.job("002-second")
+            self.assertEqual(([c.args[2] for c in spawn.call_args_list], job["stage"], job["started_by"]),
+                             (["002-second"], "spec", "wake") if woke else ([], "waiting", "hand"), load)
+
     def test_wake_waiting_holds_without_ram_room(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]})
@@ -9592,6 +9626,25 @@ class IdleClaimTest(unittest.TestCase):
         self.assertIs(got, True)
         self.assertEqual(self.started(spawn), [("003-small", "start", True)])
         self.assertNotIn("ic", s.IDLE_SINCE)
+
+    def test_idle_claim_holds_at_hot_load(self):
+        """Job 899: idle_claim re-reads CPU load right before claiming; over MAX_LAUNCH_CPU_LOAD_PCT the held job stays
+        held, except a manual queued launch."""
+        with mock.patch.object(self.board, "machine_ok", return_value=None):
+            self.write()
+            with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+                got, spawn = self.claim()
+            self.assertEqual((got, spawn.call_args_list, self.stage("002-big"), self.stage("003-small")),
+                             (False, [], "waiting", "waiting"))
+            with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="500"):
+                got, spawn = self.claim()
+            self.assertEqual((got, self.started(spawn), self.stage("003-small")), (True, [("003-small", "start", True)], "spec"))
+            launch = {"action": "start", "prompt": "/trevskills-scrum start 005-q", "stage": "spec"}
+            self.write({"id": "005-q", "stage": "spec", "play_queued": self.board.now(), "queued_launch": launch,
+                        "play_queued_manual": True}, kids={})
+            with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+                got, spawn = self.claim()
+            self.assertEqual((got, spawn.call_args.args[2], spawn.call_args.kwargs["manual"]), (True, "005-q", True))
 
     def test_no_claim_without_free_slot(self):
         s = self.serve

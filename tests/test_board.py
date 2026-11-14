@@ -4004,7 +4004,8 @@ class BoardTest(unittest.TestCase):
             "junk", {"t": "x", "sessions": 0},
             line(s + 180, 0, False, 550, (1, 0, False, 12), (0, 0, False, 4)),  # idle, lib +1 at 550%
             line(s + 240, 0, True, 100, (1, 0, False, 12), (0, 0, False, 5)),  # cool down: not idle; lib +1 in cool down
-        ], since=s)
+        ], since=s, boards={"app": [{"id": "011-a", "account": "x"}, {"id": "012-b", "account": "x"}],
+                            "lib": [{"id": "004-c", "account": "x"}, {"id": "005-d", "account": "x"}]})
         self.assertEqual(text, "# Pulse: digest 002\n\n"
                                "Window: 2023-11-14T22:13+00:00 to 2023-11-14T22:17+00:00 · ticks: 5\n"
                                "Idle with claimable work: 2 min (longest stretch 2 min)\n"
@@ -4017,7 +4018,7 @@ class BoardTest(unittest.TestCase):
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n"
-                               "Claims by account: unknown 4\n")
+                               "Claims by account: x 4\n")
 
     def test_pulse_claims_by_account(self):
         """Job 850: every claim in the window by its board job's account, whatever the cool-down or load."""
@@ -4058,7 +4059,8 @@ class BoardTest(unittest.TestCase):
             "app": {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}}}
         text, _ = self.pulse_digest([line(1_700_000_000, 10), line(1_700_000_060, 13)], since=1_700_000_000, boards={
             "app": [{"id": "011-a", "stage": "spec", "started_by": "hand"},
-                    {"id": "012-b", "stage": "spec", "started_by": "runall"}]})
+                    {"id": "012-b", "stage": "spec", "started_by": "runall"},
+                    {"id": "013-c", "stage": "spec", "started_by": "serve"}]})
         self.assertIn("Claims while CPU load over 500%: 2\n", text)
 
     def test_pulse_idle_minutes_capped_at_window(self):
@@ -4150,9 +4152,36 @@ class BoardTest(unittest.TestCase):
         text, _ = self.pulse_digest([
             {"t": s, "sessions": 1, "cooldown": False, "cpu_load": 100, "focus": "app", "projects": {"app": pr(None)}},
             {"t": s + 60, "sessions": 1, "cooldown": True, "cpu_load": 600, "focus": "app",
-             "projects": {"app": pr(2), "new": pr(5)}}])  # "new" absent from the earlier line: no claim
+             "projects": {"app": pr(2), "new": pr(5)}}],  # "new" absent from the earlier line: no claim
+            boards={"app": [{"id": "001-a", "started_by": "serve"}, {"id": "002-b", "started_by": "runall"}],
+                    "new": [{"id": f"00{n}-n", "started_by": "serve"} for n in range(1, 6)]})
         self.assertIn("Claims during cool down: 2 — app 1 2\n", text)
         self.assertIn("Claims while CPU load over 500%: 2\n", text)
+
+    def claim_pulse(self, gap, boards, cpu=100):
+        """pulse_digest over two cool-down lines `gap` s apart, app's top 10 then 13; returns the pulse.md text."""
+        pr = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}
+        return self.pulse_digest([
+            {"t": 1_700_000_000 + t, "sessions": 1, "cooldown": True, "cpu_load": cpu, "focus": "app",
+             "projects": {"app": pr(top)}} for t, top in ((0, 10), (gap, 13))], boards=boards)[0]
+
+    def test_pulse_claims_consecutive_numeric(self):
+        text = self.claim_pulse(60, {"app": [{"id": "011-a", "started_by": "hand"}, {"id": "012-b", "started_by": "runall"},
+                                             {"id": "013-c", "started_by": "runall"}]})
+        self.assertIn("Claims during cool down: 2 — app 12 13\n", text)
+
+    def test_pulse_claims_skip_jobs_off_board(self):
+        """Digest pulse.md read 118 claims in 56 min: a rise whose jobs are not on the board is no cool-down or hot claim."""
+        text = self.claim_pulse(60, {"app": [{"id": "010-old", "started_by": "runall"}]}, cpu=600)
+        self.assertIn("Claims during cool down: 0\nClaims while CPU load over 500%: 0\n", text)
+
+    def test_pulse_claims_skip_gap(self):
+        boards = {"app": [{"id": f"01{n}-x", "started_by": "runall"} for n in (1, 2, 3)]}
+        text = self.claim_pulse(121, boards, cpu=600)
+        self.assertIn("Claims during cool down: 0\nClaims while CPU load over 500%: 0\n", text)
+        self.assertTrue(text.endswith("\nClaims by account: none\n"), text)
+        self.tearDown(); self.setUp()
+        self.assertIn("Claims during cool down: 3 — app 11 12 13\n", self.claim_pulse(120, boards))
 
     def test_pulse_idle_skips_auto_continue_off(self):
         s = 1_700_000_000
