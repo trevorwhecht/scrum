@@ -1930,10 +1930,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
             continue
-        added, files, lane = e.get("added"), e.get("files"), e.get("lane") or "standard"
-        if type(added) is int and type(files) is int and files <= LILGUY_MAX_FILES and (
-                lane in ("fast", "standard", "debug") and added <= LILGUY_MAX_LINES
-                or lane in ("standard", "debug") and added <= FAST_MAX_LINES):
+        if e.get("over_routed") is True:  # the pipeline-fit row's own verdict; no second heuristic here
             hits["cheaper_lane_jobs"].append(e["id"])
     globs, seconds = ui_globs(root), 0
     for job_id in listed:

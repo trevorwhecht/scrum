@@ -8412,6 +8412,15 @@ class ProcessHealthTest(unittest.TestCase):
             self.assertEqual(fit.call_count, calls)
         return got
 
+    def test_cheaper_lane_follows_over_routed_flag(self):
+        """Rows shaped like digest 098's 1096, 1188 and 1189: small diffs, over_routed false, so 0 (not counted from added/files)."""
+        self.digest("001", "1096-a", "1188-b", "1189-c")
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "1096-a", "lane": "fast", "added": 19, "deleted": 0, "files": 1, "over_routed": False, "fit": "fast"},
+            {"id": "1188-b", "lane": "standard", "added": 95, "deleted": 16, "files": 4, "over_routed": False, "fit": "standard"},
+            {"id": "1189-c", "lane": "standard", "added": 18, "deleted": 14, "files": 2, "over_routed": False, "fit": "standard"}]}))
+        self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
+
     def test_waste_empty_likely_uses_real_diff(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
         self.assertEqual(self.waste_for("# s\n", [other, ui], 1), [])
@@ -8462,11 +8471,11 @@ class ProcessHealthTest(unittest.TestCase):
             {"job": "199-other", "kind": "ask", "question": "Resume? rule 9",
              "options": [{"command": "resume 199-other"}, {"command": "abort 199-other"}]}, "garbage"])
         self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
-            {"id": "101-alpha", "added": 50, "files": 3},
-            {"id": "102-beta", "lane": "fast", "added": 20, "files": 2},
-            {"id": "103-gamma", "lane": "standard", "added": 500, "files": 4},
+            {"id": "101-alpha", "added": 50, "files": 3, "over_routed": True},
+            {"id": "102-beta", "lane": "fast", "added": 20, "files": 2, "over_routed": True},
+            {"id": "103-gamma", "lane": "standard", "added": 500, "files": 4, "over_routed": False},
             {"id": "104-delta", "lane": "lilguy", "added": 5, "files": 1},
-            {"id": "199-other", "lane": "standard", "added": 1, "files": 1}]}))
+            {"id": "199-other", "lane": "standard", "added": 1, "files": 1, "over_routed": True}]}))
         self.put("digests/001/windows.json", json.dumps([
             {"window": "five_hour", "resets_at": 1000000,
              "budget": {"left_at_reset_pct": 40, "cap_idle_secs": 0, "hit_90_at": None}},
