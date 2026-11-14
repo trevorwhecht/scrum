@@ -7720,6 +7720,32 @@ class LilguyFitTest(unittest.TestCase):
         (self.jd / "jev.log").write_text('2026-10-23T10:00:00\treview\tq\t{"score":0.1,"confidence":0.99}\tskip\t0.1\n')
         self.assertIs(self.fit()["fit"], False)  # no model line
 
+    def jev_lines(self, *rows):
+        (self.jd / "jev.log").write_text("".join(f"2026-10-23T10:00:00\t{step}\tHow hard\t{raw}\tsonnet\t0.10\n"
+                                                 for step, raw in rows))
+
+    def test_jev_model_falls_back_to_spec_model(self):
+        self.jev_lines(("spec-model", '{"score":0.26,"confidence":0.75}'))
+        self.assertEqual(board._jev_model(self.jd), {"score": 0.26, "confidence": 0.75})
+
+    def test_jev_model_prefers_model_line(self):
+        for rows in ((("model", '{"score":3}'), ("spec-model", '{"score":0.26}')),
+                     (("spec-model", '{"score":0.26}'), ("model", '{"score":3}'))):
+            with self.subTest(rows):
+                self.jev_lines(*rows)
+                self.assertEqual(board._jev_model(self.jd), {"score": 3})
+
+    def test_jev_model_no_lines_none(self):
+        self.assertIsNone(board._jev_model(self.jd))
+        self.jev_lines(("review", '{"score":0.1}'))
+        self.assertIsNone(board._jev_model(self.jd))
+        self.jev_lines(("spec-model", "JevError"))
+        self.assertIsNone(board._jev_model(self.jd))
+
+    def test_lilguy_fit_uses_spec_model_rating(self):
+        self.jev_lines(("spec-model", '{"score":0.26,"confidence":0.75}'))
+        self.assertEqual(self.fit(), {"fit": True, "why": "Jev score 0.26 at confidence 0.75"})
+
     def test_lilguy_fit_missing_jevlog_fails(self):
         self.assertIs(self.fit()["fit"], False)
         self.points(1)
@@ -8839,6 +8865,24 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "103-c", "over_routed": True}]}))
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
         self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "103-c"]))
+
+    def test_process_health_cheaper_skips_lilguy_refused(self):
+        ids = ("101-a", "102-b", "103-c", "104-d", "105-e")
+        self.board(*((i, "done", "fast", "", "merged") for i in ids))
+        self.digest("001", *ids)
+        self.put("jobs/101-a/feature.md", "Edit `.claude/rules/x.md`\n")
+        self.put("jobs/102-b/spec.md", "## Likely files\n- `.claude/skills/y/SKILL.md`\n")
+        self.put("jobs/103-c/feature.md", "Fix the auth redirect\n")
+        self.put("jobs/104-d/feature.md", "Tweak the label, see ~/.claude/CLAUDE.md\n")
+        self.put("jobs/105-e/feature.md", "Fix the auth redirect\n")
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "101-a", "lane": "fast", "over_routed": True},
+            {"id": "102-b", "lane": "fast", "over_routed": True},
+            {"id": "103-c", "lane": "fast", "over_routed": True},
+            {"id": "104-d", "lane": "fast", "over_routed": True},
+            {"id": "105-e", "lane": "standard", "over_routed": True}]}))
+        m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
+        self.assertEqual((m["value"], m["jobs"]), (2, ["104-d", "105-e"]))
 
     def test_test_waste_fast_ui(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"

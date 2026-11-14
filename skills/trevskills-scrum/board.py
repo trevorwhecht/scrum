@@ -1990,6 +1990,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
             continue
         if e.get("over_routed") is True and not e.get("sensitive") and e.get("excluded") is not True:  # the pipeline-fit row's own verdict; no second heuristic here
+            if e.get("lane") == "fast" and _lilguy_refuses(root / "jobs" / str(e["id"])):
+                continue  # lilguy-fit would have refused it, so fast was the cheapest lane it could get
             hits["cheaper_lane_jobs"].append(e["id"])
     globs, seconds = ui_globs(root), 0
     for job_id in listed:
@@ -3226,14 +3228,29 @@ def lilguy_estimate(text: str) -> tuple[int, int]:
     return files, files * LILGUY_LINES_PER_FILE
 
 
+def _lilguy_refuses(folder: Path) -> bool:
+    """True when cmd_lilguy_fit would refuse the job by text: feature.md or spec.md names a repo-relative `.claude/`
+    path, or feature.md holds a LILGUY_HARD_STOP_RE word. Missing files count as no match."""
+    def read(name):
+        try:
+            return (folder / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+    feature = read("feature.md")
+    return bool(CLAUDE_DIR_RE.search(feature) or CLAUDE_DIR_RE.search(read("spec.md"))
+                or LILGUY_HARD_STOP_RE.search(feature))
+
+
 def _jev_model(folder: Path) -> dict | None:
     """The raw JSON answer of the last `model` line in folder/jev.log (fields: time, step, question, raw, decision,
-    seconds), or None when there is no such line or it isn't a JSON object."""
+    seconds), else of the last `spec-model` line (the only one written before New job's lilguy-fit), or None when
+    there is no such line or it isn't a JSON object."""
     try:
         lines = (folder / "jev.log").read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    fields = next((f for f in (l.split("\t") for l in reversed(lines)) if len(f) > 3 and f[1] == "model"), None)
+    rows = [f for f in (l.split("\t") for l in reversed(lines)) if len(f) > 3]
+    fields = next((f for f in rows if f[1] == "model"), None) or next((f for f in rows if f[1] == "spec-model"), None)
     try:
         raw = json.loads(fields[3]) if fields else None
     except ValueError:
