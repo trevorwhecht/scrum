@@ -4616,6 +4616,9 @@ def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
     return 200, entry | {"status": "reverted"}
 
 
+PIPELINE_LINE_RE = re.compile(r"board\.py|serve\.py|dashboard", re.I)  # a backlog line about the pipeline itself
+
+
 def digest_auto(root, digest_id):
     """Apply, queue or skip every pending proposal, so none is left pending and the digest is trimmed. A repo edit is
     applied and committed (digest_apply) or queued as a backlog item when it can't be; a file outside every repo is
@@ -4663,8 +4666,9 @@ def digest_auto(root, digest_id):
                 many = "," in skill_pid
                 skip(p, f"references skill{'s' if many else ''} {skill_pid}, which do{'' if many else 'es'} not exist yet")
         elif p["kind"] == "backlog":
+            home = research_home() if PIPELINE_LINE_RE.search(p["backlog"]) else None  # pipeline lines belong on the scrum board
             try:
-                board.cmd_backlog_add(root, [p["backlog"]], priority=3)
+                board.cmd_backlog_add(home[1] if home else root, [p["backlog"]], priority=3)
             except (SystemExit, OSError):
                 skip(p, "backlog add failed")
             else:
