@@ -11012,7 +11012,8 @@ class ProdErrorsTest(unittest.TestCase):
                 f"last seen 2025-11-10T01:00:00Z, deployment dpl_new (sig {sig})")
         self.assertEqual([(i["text"], i["done"]) for i in self.backlog()], [(want, False)])
         self.assertEqual(self.state()["seen"][sig], {"route": "/api/orders/:id", "message": "Error: upstream N",
-                                                     "first": 1762732800.0, "last": 1762736400.0})
+                                                     "first": 1762732800.0, "last": 1762736400.0,
+                                                     "fullMessage": "Error: upstream 502", "errorCode": None})
         day = self.NOW + 86400
         self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762822800000)], now=day)  # 2025-11-11T01:00Z
         self.assertEqual(len(self.backlog()), 1, "an open item for the sig adds nothing")
@@ -11029,6 +11030,29 @@ class ProdErrorsTest(unittest.TestCase):
         (self.root / "backlog.md").write_text("# Backlog\n")
         self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762995600000)], now=day + 2 * 86400)
         self.assertEqual(len(self.backlog()), 1, "a deleted item is added again")
+
+    def test_stores_full_message_and_error_code(self):
+        full = "\n  Error: boom 7\n    at f (x.js:1:2)\n" + "z" * 300
+        old = self.row("/a/1", "Error: boom 1", 1762732800000)
+        old["errorCode"] = "OLD"
+        new = self.row("/a/2", full, 1762736400000)
+        new["errorCode"] = "P2002"
+        self.sweep([new, old])
+        (sig,) = self.state()["seen"]
+        e = self.state()["seen"][sig]
+        self.assertEqual(e["fullMessage"], full)
+        self.assertEqual(e["message"], "Error: boom N")
+        self.assertEqual(e["errorCode"], "P2002")
+        other = self.row("/b", "Error: other", 1762736400000)
+        other["errorCode"] = 5
+        self.sweep([other, self.row("/a/3", "Error: boom 3", 1762822800000)], now=self.NOW + 86400)
+        seen = self.state()["seen"]
+        self.assertEqual(seen[sig]["fullMessage"], "Error: boom 3")
+        self.assertIsNone(seen[sig]["errorCode"])
+        (osig,) = [k for k in seen if k != sig]
+        self.assertIsNone(seen[osig]["errorCode"], "a non-string code is stored as null")
+        self.sweep([other], now=self.NOW + 2 * 86400)
+        self.assertEqual(self.state()["seen"][sig], seen[sig], "an unseen signature keeps its stored values")
 
     def test_caps_five_items_plus_one_summary(self):
         rows = [self.row(f"/r{chr(97 + n)}", "Error: boom", 1762736400000) for n in range(8) for _ in range(n + 1)]
@@ -11071,7 +11095,8 @@ class ProdErrorsTest(unittest.TestCase):
         (self.root / "prod-errors.json").write_text('["a list"]')
         self.sweep(raw='not json\n[1, 2]\n"s"\n' + json.dumps(self.row("/a", "Error: x", 1762736400000)) + "\n")
         self.assertEqual(list(self.state()["seen"].values()), [{"route": "/a", "message": "Error: x",
-                                                                "first": 1762736400.0, "last": 1762736400.0}])
+                                                                "first": 1762736400.0, "last": 1762736400.0, "fullMessage": "Error: x",
+                                                                   "errorCode": None}])
         self.assertEqual(len(self.backlog()), 1)
 
     def test_watchdog_survives_tick_exception(self):
