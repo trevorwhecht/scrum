@@ -1048,6 +1048,104 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
         self.assertEqual(self.child(d2)["overlap_hold"], {"ids": [d1], "text": "this job runs alone"})
 
+    def branch(self, commits):
+        """A git worktree whose HEAD sits `commits` commits past its base. Returns (worktree, base sha)."""
+        wt = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        git = lambda *a: subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "base")
+        base = git("rev-parse", "HEAD")
+        for i in range(commits):
+            git("commit", "-q", "--allow-empty", "-m", f"c{i}")
+        return str(wt), base
+
+    def set_branch(self, job_id, commits):
+        wt, base = self.branch(commits)
+        with board.locked_board(self.root) as b:
+            board.find(b, job_id).update(worktree=wt, base=base)
+
+    def test_unbuilt_holder(self):
+        # Job 855: spec or stalled, and no commits on the branch; a git failure counts as built (fails closed).
+        empty, one = self.branch(0), self.branch(1)
+        on = lambda branch: {"worktree": branch[0], "base": branch[1]}
+        self.assertTrue(board.unbuilt(self.root, {"stage": "spec"}))
+        self.assertTrue(board.unbuilt(self.root, {"stage": "spec", "worktree": empty[0]}))  # no base
+        self.assertTrue(board.unbuilt(self.root, {"stage": "spec", **on(empty)}))
+        self.assertTrue(board.unbuilt(self.root, {"stage": "build", "stalled": True, **on(empty)}))
+        self.assertTrue(board.unbuilt(self.root, {"stage": "needs-human", "reason": board.STALLED + "spec: x"}))
+        self.assertFalse(board.unbuilt(self.root, {"stage": "spec", **on(one)}))
+        self.assertFalse(board.unbuilt(self.root, {"stage": "build", "stalled": True, **on(one)}))
+        for stage in ("build", "check", "review"):
+            self.assertFalse(board.unbuilt(self.root, {"stage": stage, **on(empty)}))
+            self.assertFalse(board.unbuilt(self.root, {"stage": stage}))
+        self.assertFalse(board.unbuilt(self.root, {"stage": "spec", "worktree": empty[0], "base": "no-such-ref"}))
+        self.assertFalse(board.unbuilt(self.root, {"stage": "spec", "worktree": empty[0], "base": "-x"}))
+        self.assertFalse(board.unbuilt(self.root, {"stage": "spec", "worktree": "/nonexistent/wt", "base": empty[1]}))
+
+    def critical_pair(self, title):
+        """c1 (Part 1) in stage spec holding src/a.py, c2 titled `title` waiting on the same file."""
+        parent = self.plan(self.ticket(1), self.ticket(2, title=title),
+                           self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
+        c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/a.py")
+        board.cmd_set(self.root, c1, ["stage=spec"])
+        return parent, (c1, c2, c3)
+
+    def finish(self, *ids):
+        for c in ids:  # job 751: the first tree's live children would hold the next tree's claims
+            board.cmd_set(self.root, c, ["stage=done"])
+
+    def test_ready_critical_skips_unbuilt_holder(self):
+        parent, (c1, c2, c3) = self.critical_pair("Critical: fix the queue")
+        self.assertEqual(self.child(c2)["title"], "Critical: fix the queue")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        self.assertEqual(self.child(c2)["stage"], "spec")
+        self.assertNotIn("overlap_hold", self.child(c2))
+        self.finish(c1, c2, c3)
+        parent, (d1, d2, _) = self.critical_pair("Fix the queue")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(d2)["stage"], "waiting")
+        self.assertEqual(self.child(d2)["overlap_hold"], {"ids": [d1], "text": f"sibling {d1} shares src/a.py"})
+
+    def test_ready_critical_waits_for_built_holder(self):
+        parent, (c1, c2, _) = self.critical_pair("Critical: fix the queue")
+        board.cmd_set(self.root, c1, ["stage=build"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+        board.cmd_set(self.root, c1, ["stage=spec"])
+        self.set_branch(c1, 1)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c2)["stage"], "waiting")
+        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+
+    def test_ready_critical_skips_unbuilt_outside_holder(self):
+        out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
+        self.spec(out, "src/a.py", "src/b.py")
+        parent = self.plan(self.ticket(1, title="Critical: fix the queue"), self.ticket(2),
+                           self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
+        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/b.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertNotIn("overlap_hold", self.child(c1))
+        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [out], "text": f"sibling {out} shares src/b.py"})
+        board.cmd_set(self.root, c1, ["stage=waiting"])
+        self.set_branch(out, 1)  # built: it holds the Critical kid too
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c1)["overlap_hold"], {"ids": [out], "text": f"sibling {out} shares src/a.py"})
+
+    def test_ready_critical_first_for_room(self):
+        parent = self.plan(self.ticket(1), self.ticket(2, title="Critical: fix the queue"),
+                           self.ticket(3, deps="T1, T2", parallel="no — wires both", exposure="yes"))
+        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/b.py")
+        with mock.patch.object(board, "ram_room", return_value=1):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
+        self.assertEqual(self.child(c1)["stage"], "waiting")
+
     def test_ready_waiting_children_use_plan_paths(self):
         # Job 673: a waiting child has no spec.md; its plan's Parallel: paths stand in as its Likely files.
         plan = lambda: self.plan(self.ticket(1, parallel="yes — touches only `src/app/(pages)/`"),

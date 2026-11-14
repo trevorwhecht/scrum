@@ -4485,6 +4485,23 @@ def slot_conflict(k, busy, files):
     return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
 
 
+def unbuilt(root, job) -> bool:
+    """True when `job` is in stage spec or stalled and has no commits on its branch (no worktree or base recorded,
+    or `<base>..HEAD` is empty). A Critical waiting kid skips such a holder in cmd_ready (job 855). A git failure
+    or a base starting with `-` counts as built, so the holder still holds."""
+    if job.get("stage") != "spec" and not stalled(job):
+        return False
+    wt, base = job.get("worktree"), job.get("base")
+    if not wt or not base:
+        return True
+    if str(base).startswith("-"):
+        return False
+    try:
+        return int(_git(wt, "rev-list", "--count", f"{base}..HEAD", "--")) == 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 class Blocker(str):
     """resume_blocker's text; .ids names the siblings it waits on."""
     def __new__(cls, text, ids):
@@ -4624,7 +4641,12 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         if cap is not None:
             room = min(room, cap)
         ready = []
-        for k in kids if go and not machine else []:
+        critical = lambda j: str(j.get("title") or "").startswith("Critical")
+        built = {}  # holder id -> not unbuilt(), so each holder's branch is read once per call
+        held_by = lambda pool: [o for o in pool  # a Critical kid skips holders that produced nothing (job 855)
+                                if built.setdefault(o["id"], not unbuilt(root, o))]
+        # Critical kids first, so they take the first ram_room slots; sorted is stable, so the rest keep plan order
+        for k in sorted(kids, key=lambda j: not critical(j)) if go and not machine else []:
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
                 break
             if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only:
@@ -4635,8 +4657,9 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                 for dep in undone:
                     note_queue_gate(root, k["id"], f"depends_on:{dep}")
                 continue
-            hit = slot_conflict(dict(k, parallel=True) if only else k, slots, files)  # only: never runs alone
-            out_hit = None if hit else slot_conflict(dict(k, parallel=True), outside, files)
+            k_slots, k_outside = (held_by(slots), held_by(outside)) if critical(k) else (slots, outside)
+            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files)  # only: never runs alone
+            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files)
             if out_hit:
                 overlap += out_hit[1]
             if hit or out_hit:
