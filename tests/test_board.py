@@ -2232,6 +2232,45 @@ class BoardTest(unittest.TestCase):
             with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
                 self.assertEqual(board.ram_room(floor=0), 0, "unknown RAM, one young: none")
 
+    def test_session_rss_pct_reads_ps(self):
+        """Job 820: ram_room's share is the measured mean session RSS, not a fixed guess."""
+        ps_out = ["   1677722 /opt/homebrew/bin/claude -p /trevskills-scrum start 1-a\n"
+                  "1677722 claude -p /trevskills-scrum start 2-b\n"
+                  "  1677722 claude -p /trevskills-scrum start 3-c\n"
+                  "  9999999 /Applications/Chrome.app/Contents/MacOS/Chrome\n"]
+
+        def fake_run(cmd, *a, **kw):
+            if list(cmd[:2]) == ["ps", "-Ao"]:
+                return mock.Mock(stdout=ps_out[0])
+            if cmd[-1] == "hw.memsize":
+                return mock.Mock(stdout="17179869184\n")
+            raise AssertionError(cmd)
+        with mock.patch.dict(os.environ), mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+            os.environ.pop("SCRUM_PS", None)
+            os.environ.pop("SCRUM_SESSION_RSS_PCT", None)
+            self.assertAlmostEqual(board.session_rss_pct(), 10, delta=0.01)
+            ps_out[0] = "  9999999 /Applications/Chrome.app/Contents/MacOS/Chrome\n"
+            self.assertIsNone(board.session_rss_pct(), "no session")
+        with mock.patch.dict(os.environ), mock.patch.object(board.subprocess, "run", side_effect=OSError("ps")):
+            os.environ.pop("SCRUM_PS", None)
+            os.environ.pop("SCRUM_SESSION_RSS_PCT", None)
+            self.assertIsNone(board.session_rss_pct(), "ps raised")
+        with mock.patch.dict(os.environ, SCRUM_PS=os.devnull), \
+                mock.patch.object(board.subprocess, "run", side_effect=AssertionError("real ps read")):
+            os.environ.pop("SCRUM_SESSION_RSS_PCT", None)
+            self.assertIsNone(board.session_rss_pct(), "SCRUM_PS set: never the real ps")
+
+    @mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS)  # RAM math alone, not the wake ramp
+    def test_ram_room_uses_measured_rss(self):
+        self.assertEqual(board.MIN_SESSION_RAM_PCT, 2)
+        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="0", SCRUM_PS=os.devnull):
+            os.environ.pop("SCRUM_SESSION_RSS_PCT", None)
+            self.assertEqual(board.ram_room(floor=0), 4, "unknown: 20 points in 5% shares")
+            with mock.patch.dict(os.environ, SCRUM_SESSION_RSS_PCT="10"):
+                self.assertEqual(board.ram_room(floor=0), 2, "measured 10%: 2 shares")
+            with mock.patch.dict(os.environ, SCRUM_SESSION_RSS_PCT="0.5"):
+                self.assertEqual(board.ram_room(floor=0), 10, "0.5% counts as MIN_SESSION_RAM_PCT (2%)")
+
     def test_pause_and_abort_clear_queued_launch(self):
         launch = {"action": "start", "prompt": "/trevskills-scrum start x", "stage": "build"}
         paused, aborted = board.cmd_new(self.root, "paused"), board.cmd_new(self.root, "aborted")
@@ -3441,7 +3480,21 @@ class BoardTest(unittest.TestCase):
         self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | 1 |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1\n", text)
-        self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n", text)
+        self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n\n"
+                      "## RAM holds\nNone\n", text)
+
+    def test_timing_ram_holds_section(self):
+        held, unknown, plain = self.done_jobs(3)
+        self.write(f"{held}/ram-holds.txt", "2026-11-12T10:00:00+00:00 free=12% sessions=13\n"
+                                            "2026-11-12T10:01:00+00:00 free=8% sessions=14\n")
+        self.write(f"{unknown}/ram-holds.txt", "2026-11-12T10:00:00+00:00 free=unknown sessions=3\n")
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            self.assertEqual(self.cli("digest-start")["id"], "001")
+        text = (self.root / "digests" / "001" / "timing.md").read_text()
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |\n", text)
+        self.assertIn(f"## RAM holds\n- {held}: 2 holds, free RAM 8%-12%, sessions 13-14\n"
+                      f"- {unknown}: 1 holds, free RAM unknown, sessions 3-3\n", text)
+        self.assertNotIn(f"- {plain}:", text.split("## RAM holds")[1])
 
     def escape_digest(self, jobs, commits=()):
         """digest-start over a board of `jobs` (dicts, stage done unless set) with a git repo at root.parent holding
@@ -3540,6 +3593,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(text, "# Pulse: digest 002\n\n"
                                "Window: 2023-11-14T22:13+00:00 to 2023-11-14T22:17+00:00 · ticks: 5\n"
                                "Idle with claimable work: 2 min (longest stretch 2 min)\n"
+                               "Gated with claimable work: 0 min\n"
                                "Held by machine guard: 1 min\n"
                                "Idle held by Auto continue off or cool down: 0 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
@@ -3554,9 +3608,27 @@ class BoardTest(unittest.TestCase):
         return self.pulse_digest([{"t": 1_700_000_000 + t, "sessions": n, "cooldown": False, "focus": "app",
                                    "projects": {"app": app}, **x} for t, n, x in ticks])[0]
 
+    def test_pulse_gated_minutes(self):
+        """Job 820: a minute a launch gate held is not idle; it gets its own line, per gate."""
+        wait = lambda g: {"app": {"claimable": 0, "waiting": 0, "auto": True},
+                          "lib": {"claimable": 0, "waiting": 1, "auto": True, **({"gates": g} if g is not None else {})}}
+        text = self.pulse_ticks(
+            (0, 0, {}),  # idle
+            (60, 0, {"gates": ["ram_room"]}),  # gated: ends the stretch
+            (120, 0, {}), (180, 0, {}),  # idle, stretch 2
+            (240, 0, {"gates": ["ram_room", "cpu_load"]}),  # gated
+            (300, 0, {"gates": None}),  # null: idle, stretch 1
+            (360, 0, {"gates": [], "projects": wait(["overlap:5-x", "overlap:6-y"])}),  # only waiting work, all gated
+            (420, 0, {"gates": [], "projects": wait([])}),  # waiting, nothing gates it: idle
+            (480, 0, {"projects": wait(None)}),  # no gates key: idle
+            (540, 1, {}))
+        self.assertIn("Idle with claimable work: 6 min (longest stretch 2 min)\n"
+                      "Gated with claimable work: 3 min (ram_room 2, cpu_load 1, overlap 1)\n"
+                      "Held by machine guard: 0 min\n", text)
+
     def test_pulse_idle_uses_elapsed_time(self):
         text = self.pulse_ticks(*((t, 0, {}) for t in (0, 20, 40, 60, 80)))
-        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nHeld by machine guard: 0 min\n", text)
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n", text)
 
     def test_pulse_idle_gap_capped(self):
         text = self.pulse_ticks((0, 0, {}), (600, 0, {}))
@@ -3576,15 +3648,16 @@ class BoardTest(unittest.TestCase):
             (360, 0, {"cpu_load": 900, "cooldown": True}),  # cool down: neither idle nor guard
             (420, 0, {}))
         self.assertIn("Idle with claimable work: 3 min (longest stretch 2 min)\n"
+                      "Gated with claimable work: 0 min\n"
                       "Held by machine guard: 2 min\n"
                       "Idle held by Auto continue off or cool down: 1 min\n", text)
 
     def test_pulse_idle_never_exceeds_window(self):
-        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nHeld by machine guard: 0 min\n",
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n",
                       self.pulse_ticks((0, 0, {})))
         self.tearDown(); self.setUp()
         text = self.pulse_ticks((0, 0, {}), (50, 0, {"cpu_load": 900}), (100, 0, {}), (130, 0, {}))  # 130 s window
-        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nHeld by machine guard: 1 min\n", text)
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 1 min\n", text)
 
     def test_pulse_null_top_baseline(self):
         s = 1_700_000_000
@@ -3609,7 +3682,7 @@ class BoardTest(unittest.TestCase):
             tick(s + 180, 1, False, pr(2, False), pr(0, True)),  # a session runs: neither
             tick(s + 240, 0, False, pr(0, True), pr(0, False)),  # nothing claimable: neither
         ])
-        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nHeld by machine guard: 0 min\n"
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n"
                       "Idle held by Auto continue off or cool down: 3 min\n", text)
 
     def test_pulse_cool_down_skips_hand_claims(self):

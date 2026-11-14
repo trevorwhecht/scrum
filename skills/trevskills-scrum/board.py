@@ -1422,7 +1422,10 @@ def write_pulse(root, digest_id):
     next line, capped at PULSE_TICK_CAP_S (the last line 0 s); totals are rounded whole minutes. Idle with claimable
     work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line without it is
     off) or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT / MAX_SWAP_PCT), held by machine guard
-    (would be idle but over either limit; ends an idle stretch), idle held (no session, some claimable or waiting work,
+    (would be idle but over either limit; ends an idle stretch), gated (would be idle, within both limits, but the
+    line's top-level `gates` (serve.py pulse_tick) is non-empty, or no project has claimable work with Auto continue on
+    and every project with waiting work has non-empty `gates`; ends an idle stretch; minutes per token, overlap:<id>
+    counted as overlap; a missing or null `gates` is ungated), idle held (no session, some claimable or waiting work,
     not idle: Auto continue off or cool-down), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
     jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
     while another project was busy."""
@@ -1437,14 +1440,24 @@ def write_pulse(root, digest_id):
                            if isinstance(v, dict)}
         pos = lambda v: is_num(v) and v > 0
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
-        idle = held = guard = streak = longest = nonfocus = 0
+        gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
+        idle = held = guard = streak = longest = nonfocus = gated = 0
+        by_gate = {}
         for l, nxt in zip(lines, lines[1:] + [None]):
             dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else 0
             ps = projs(l)
+            claim = lambda p: pos(p.get("claimable")) and p.get("auto") is True
             if l.get("sessions") == 0 and not l.get("cooldown") and any(
-                    (pos(p.get("claimable")) and p.get("auto") is True) or pos(p.get("waiting")) for p in ps.values()):
+                    claim(p) or pos(p.get("waiting")) for p in ps.values()):
+                waits = [gates(p.get("gates")) for p in ps.values() if pos(p.get("waiting"))]
+                why = gates(l.get("gates")) or (
+                    sum(waits, []) if not any(claim(p) for p in ps.values()) and all(waits) else [])
                 if over(l, "cpu_load", MAX_CPU_LOAD_PCT) or over(l, "swap", MAX_SWAP_PCT):
                     guard, streak = guard + dt, 0
+                elif why:
+                    gated, streak = gated + dt, 0
+                    for g in dict.fromkeys("overlap" if g.startswith("overlap:") else g for g in why):
+                        by_gate[g] = by_gate.get(g, 0) + dt
                 else:
                     idle, streak = idle + dt, streak + dt
                     longest = max(longest, streak)
@@ -1455,7 +1468,7 @@ def write_pulse(root, digest_id):
             f = l.get("focus") if isinstance(l.get("focus"), str) else None
             if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
                 nonfocus += dt
-        idle, held, guard, longest, nonfocus = (round(x / 60) for x in (idle, held, guard, longest, nonfocus))
+        idle, held, guard, longest, nonfocus, gated = (round(x / 60) for x in (idle, held, guard, longest, nonfocus, gated))
         cool, hot, claimed, boards = 0, 0, {}, {}
         for a, b in zip(lines, lines[1:]):
             pa, pb = projs(a), projs(b)
@@ -1480,6 +1493,8 @@ def write_pulse(root, digest_id):
         focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
         out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
                 f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                f"Gated with claimable work: {gated} min"
+                + (" (" + ", ".join(f"{g} {round(v / 60)}" for g, v in by_gate.items()) + ")" if gated else ""),
                 f"Held by machine guard: {guard} min",
                 f"Idle held by Auto continue off or cool down: {held} min",
                 f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
@@ -2122,10 +2137,14 @@ def _timing_row(root, job_id, job, stalls, waits=()):
     return cells, wall, len(rounds), len(same), waits
 
 
+RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M)  # a serve.py note_ram_hold line
+
+
 def write_timing(root, digest_id, jobs):
     """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
     head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines),
-    totals, and every job on every registered board (and this one) now stalled waiting on the E2E queue."""
+    totals, every job on every registered board (and this one) now stalled waiting on the E2E queue, and per claimed
+    job its ram-holds.txt lines (serve.py note_ram_hold): hold count, free RAM range and session range."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
     stalls, waits = {}, {}
     for q in _json_lines(Path(root) / "questions.log"):
@@ -2156,6 +2175,21 @@ def write_timing(root, digest_id, jobs):
             if stalled(j) and E2E_WAIT_REASON in str(j.get("reason") or "") and at:
                 waiting.append(f"- {scrum.parent.name}/{j['id']}: {_mins(t - at)}")
     lines += waiting or ["None"]
+    lines += ["", "## RAM holds"]
+    holds = []
+    for j in jobs:
+        try:
+            text = (Path(root) / "jobs" / j / "ram-holds.txt").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        got = RAM_HOLD_RE.findall(text)
+        if not got:
+            continue
+        free = [int(f) for f, _ in got if f]
+        n = [int(c) for _, c in got]
+        holds.append(f"- {j}: {len(got)} holds, free RAM " + (f"{min(free)}%-{max(free)}%" if free else "unknown")
+                     + f", sessions {min(n)}-{max(n)}")
+    lines += holds or ["None"]
     (Path(root) / "digests" / digest_id / "timing.md").write_text("\n".join(lines) + "\n")
 
 
@@ -3896,7 +3930,8 @@ CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples 
 CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog ticks), so one spike never flips the gate
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
-SESSION_RAM_PCT = 5  # ram_room: estimated share of RAM one new headless session takes (16 GB Mac); tune here
+SESSION_RAM_PCT = 5  # ram_room: share of RAM one new headless session takes when session_rss_pct is unknown; tune here
+MIN_SESSION_RAM_PCT = 2  # ram_room: the measured share (session_rss_pct) never counts below this (claude only, not its children)
 MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
 #                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24).
 #                   14, not 12: Trevor keeps it as a backstop until further notice in case the RAM reading misleads (job 284)
@@ -4084,7 +4119,8 @@ def machine_ok(path, manual=False, claim=False):
 
 def ram_room(floor=1):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
-    split into SESSION_RAM_PCT shares, minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
+    split into shares of the measured session_rss_pct (SESSION_RAM_PCT when unknown, never below MIN_SESSION_RAM_PCT),
+    minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
     for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
@@ -4095,7 +4131,8 @@ def ram_room(floor=1):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
     young = sum(a < SESSION_RAMP_SECS for a in ages)
-    room = min(int((ram - MIN_FREE_RAM_PCT) // SESSION_RAM_PCT) - young, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
+    share = max(session_rss_pct() or SESSION_RAM_PCT, MIN_SESSION_RAM_PCT)
+    room = min(int((ram - MIN_FREE_RAM_PCT) // share) - young, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
     return max(floor, room) if floor else room
 
 
@@ -4124,6 +4161,26 @@ def session_ages():
         if SESSION_RE.match(cmd):
             ages.append(int(d or 0) * 86400 + int(h or 0) * 3600 + int(mi) * 60 + int(sec) if m else 10 ** 9)
     return ages
+
+
+def session_rss_pct():
+    """The mean RSS of the running sessions SESSION_RE matches, as a percent of physical RAM (ps rss is KB), or None
+    when no session runs or ps/sysctl fails. SCRUM_SESSION_RSS_PCT stands in for the reading; with SCRUM_PS set and
+    no stand-in it is None, so a test never reads the real ps."""
+    fake = os.environ.get("SCRUM_SESSION_RSS_PCT")
+    if fake:
+        return float(fake)
+    if "SCRUM_PS" in os.environ:
+        return None
+    try:
+        out = subprocess.run(["ps", "-Ao", "rss=,command="], capture_output=True, text=True, timeout=10).stdout
+        mem = int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                 timeout=10).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    rss = [int(m.group(1)) for line in out.splitlines()
+           if (m := re.match(r"\s*(\d+) (.*)", line)) and SESSION_RE.match(m.group(2))]
+    return sum(rss) / len(rss) * 1024 / mem * 100 if rss and mem > 0 else None
 
 
 def live_sessions():

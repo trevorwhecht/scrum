@@ -171,6 +171,19 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
+def note_ram_hold(root, job_id):
+    """Append "<ISO time> free=<x>% sessions=<n>" (free=unknown when unread) to jobs/<id>/ram-holds.txt, one line per
+    launch the RAM gate holds, for timing.md's RAM holds section. Called under LAUNCH_LOCK; a write error never blocks
+    the queue."""
+    free = board.free_ram_pct()
+    line = f"{board.now()} free={'unknown' if free is None else f'{free:.0f}%'} sessions={len(board.session_ages())}\n"
+    try:
+        with (Path(root) / "jobs" / job_id / "ram-holds.txt").open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
 RAM_HOLD_SECS = 3600  # a launch the RAM gate holds longer than this names the reading on the job (ram_hold)
 
 
@@ -232,6 +245,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
                 proc = None
                 note_queue_gate(root, job_id, "ram_room" if ram_short else "cpu_load")
+                if ram_short:
+                    note_ram_hold(root, job_id)
                 if ram_short and held_over(queued_at):
                     hold = ram_hold_text()
             else:
@@ -2094,12 +2109,19 @@ def weekly_tick():
         spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
 
 
+PULSE_GATES = (("free RAM", "ram"), ("swap used", "swap"), ("free disk", "disk"), ("CPU busy", "cpu_busy"),
+               ("CPU load", "cpu_load"), ("sessions running", "sessions"))  # pulse_tick: machine_ok reason -> gate token
+
+
 def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     """Append one JSON line to board.pulse_path(): sessions, CPU load, free RAM, swap, cool-down, 5h/7d usage, the focus
     project (rank 0) and per project its claimable backlog lines, parked waiting jobs, busy (watchdog_tick's), top
-    job number and auto (Auto continue is set). A project whose board.json is unreadable is left out. Unknown readings
-    are null. When the first line is older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first
-    rewritten (tmp + os.replace) to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
+    job number, auto (Auto continue is set) and gates (runs_alone / overlap:<id> from board.resume_blocker on those
+    waiting jobs), and top-level gates: ram_room when board.ram_room(floor=0) < 1, plus a PULSE_GATES token (other when
+    unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
+    is null. A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
+    older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
+    to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
     now = time.time() if now is None else now
     names, usage, projects = board.projects(), claude_usage(now), {}
     for project, repo in names.items():
@@ -2115,9 +2137,30 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
                 "auto": auto_continue(root) is not None}
         except (Exception, SystemExit) as e:
             print(f"watchdog: pulse: {project}: {e}", file=sys.stderr, flush=True)
+            continue
+        try:
+            gates = []
+            for j in jobs:
+                if board.parked_waiting(j) and all(d in done for d in j["depends_on"]):
+                    hit = board.resume_blocker(root, j["id"])
+                    if hit:
+                        gates += ["runs_alone"] if hit == "this job runs alone" else [f"overlap:{i}" for i in hit.ids]
+            projects[project]["gates"] = list(dict.fromkeys(gates))
+        except (Exception, SystemExit) as e:
+            print(f"watchdog: pulse: {project}: gates: {e}", file=sys.stderr, flush=True)
+            projects[project]["gates"] = None
+    try:
+        gates = ["ram_room"] if board.ram_room(floor=0) < 1 else []
+        why = board.machine_ok(next(iter(names.values())) / "scrum", claim=True) if names else None
+        if why and why != board.COOLING:
+            gates.append(next((tok for pre, tok in PULSE_GATES if pre in why), "other"))
+    except (Exception, SystemExit) as e:
+        print(f"watchdog: pulse: gates: {e}", file=sys.stderr, flush=True)
+        gates = None
     line = {"t": int(now), "sessions": board.live_sessions(), "cpu_load": board.cpu_load_pct(),
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
-            "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects}
+            "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
+            "gates": gates}
     path = board.pulse_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:

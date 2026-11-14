@@ -987,6 +987,34 @@ class ServeTest(unittest.TestCase):
         self.assertIn("queued_launch", self.stage_of(job_id))
         self.assertTrue(self.stage_of(job_id)["play_queued"])
 
+    # --- job 820: ram-holds.txt records the reading at each RAM hold ---
+    def test_ram_hold_appends_ram_holds_line(self):
+        job_id = self.gate_job("RAM holds")
+        path = self.root / "jobs" / job_id / "ram-holds.txt"
+        b = self.serve.board
+        with mock.patch.object(b, "session_ages", return_value=[500] * 13), mock.patch.object(b, "free_ram_pct", return_value=12.4):
+            self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        with mock.patch.object(b, "session_ages", return_value=[]), mock.patch.object(b, "free_ram_pct", return_value=None):
+            self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        lines = path.read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertRegex(line, r"^\S+ free=(\d+%|unknown) sessions=\d+$")
+        self.assertTrue(lines[0].endswith(" free=12% sessions=13"), lines[0])
+        self.assertTrue(lines[1].endswith(" free=unknown sessions=0"), lines[1])
+        self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
+        self.assertEqual(self.gate_spawn(job_id), f"runs/{job_id}-approve.log")
+        self.assertEqual(len(path.read_text().splitlines()), 2, "a CPU hold or a launch adds no line")
+        other = self.gate_job("Never held")
+        self.assertIsNone(self.gate_spawn(other, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
+        self.assertFalse((self.root / "jobs" / other / "ram-holds.txt").exists())
+
+    def test_ram_hold_write_error_does_not_block(self):
+        job_id = self.gate_job("RAM holds write error")
+        (self.root / "jobs" / job_id / "ram-holds.txt").mkdir(parents=True)  # open() raises IsADirectoryError
+        self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        self.assertTrue(self.stage_of(job_id)["play_queued"])
+
     # --- job 692: ram_hold names what holds a launch at the RAM gate after 1h ---
     def held_job(self, title, hours):
         job_id = self.gate_job(title)
@@ -10704,8 +10732,9 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(self.lines(), [{
             "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 42.0, "swap": 3.0, "cooldown": True,
             "u5h": 30, "u7d": 60, "focus": "app",
-            "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False},
-                         "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False}}}])
+            "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False, "gates": []},
+                         "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False, "gates": []}},
+            "gates": ["ram_room"]}])  # 2 young sessions: MAX_YOUNG_SESSIONS spent
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
                 mock.patch.object(s.board, "swap_used_pct", return_value=None), \
@@ -10727,6 +10756,51 @@ class PulseTest(unittest.TestCase):
             s.watchdog_tick()
         (line,) = self.lines()  # one watchdog tick, one line
         self.assertEqual(sorted(line["projects"]), ["app", "lib"])
+
+    HEALTHY = {"SCRUM_FREE_RAM": "80", "SCRUM_SWAP_PCT": "0", "SCRUM_FREE_DISK_GB": "500", "SCRUM_CPU_BUSY_PCT": "10",
+               "SCRUM_CPU_LOAD_PCT": "10"}
+
+    def tick_line(self, **env):
+        self.log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {**self.HEALTHY, "SCRUM_PS": os.devnull, **env}):
+            self.serve.pulse_tick({}, now=self.NOW)
+        return self.lines()[0]
+
+    def test_tick_gates(self):
+        (self.base / "cooldown").unlink()
+        line = self.tick_line()
+        self.assertEqual((line["gates"], line["projects"]["app"]["gates"], line["projects"]["lib"]["gates"]), ([], [], []))
+        self.assertEqual(self.tick_line(SCRUM_FREE_RAM="15")["gates"], ["ram_room", "ram"])
+        self.assertEqual(self.tick_line(SCRUM_CPU_LOAD_PCT="900")["gates"], ["cpu_load"])
+        (self.base / "cooldown").write_text("")
+        self.assertEqual(self.tick_line()["gates"], [], "cool-down is logged as cooldown, not a gate")
+
+    def test_tick_project_gates(self):
+        jobs = [{"id": "006-dep", "stage": "done"}, {"id": "007-wait", "stage": "waiting", "depends_on": ["006-dep"]},
+                {"id": "008-wait", "stage": "waiting", "depends_on": ["006-dep"]}]
+        (self.base / "app" / "scrum" / "board.json").write_text(json.dumps({"jobs": jobs}))
+        b = self.serve.board
+        with mock.patch.object(b, "resume_blocker", return_value=b.Blocker("this job runs alone", ["5-x"])):
+            self.assertEqual(self.tick_line()["projects"]["app"]["gates"], ["runs_alone"])
+        with mock.patch.object(b, "resume_blocker", return_value=b.Blocker("sibling 5-x shares a.py", ["5-x"])):
+            self.assertEqual(self.tick_line()["projects"]["app"]["gates"], ["overlap:5-x"], "no duplicates")
+        with mock.patch.object(b, "resume_blocker", return_value=None):
+            self.assertEqual(self.tick_line()["projects"]["app"]["gates"], [])
+
+    def test_tick_gate_error(self):
+        b = self.serve.board
+        with mock.patch.object(b, "ram_room", side_effect=RuntimeError("ps")), mock.patch("sys.stderr", new=io.StringIO()):
+            line = self.tick_line()
+        self.assertIsNone(line["gates"])
+        self.assertEqual(line["sessions"], 0)
+        (self.base / "lib" / "scrum" / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "001-dep", "stage": "done"}, {"id": "002-wait", "stage": "waiting", "depends_on": ["001-dep"]}]}))
+        with mock.patch.object(b, "resume_blocker", side_effect=RuntimeError("boom")), \
+                mock.patch("sys.stderr", new=io.StringIO()):
+            line = self.tick_line()
+        self.assertIsNone(line["projects"]["lib"]["gates"])
+        self.assertEqual(line["projects"]["app"]["gates"], [], "app has no waiting job: unaffected")
+        self.assertEqual(line["projects"]["lib"]["waiting"], 1)
 
     def test_tick_records_auto_continue(self):
         (self.base / "app" / "scrum" / "project.md").write_text("# Project\n- Auto continue: 1\n")
