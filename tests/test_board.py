@@ -6822,6 +6822,16 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertEqual(out, {"spawn": ["security", "ux", "ui", "code"], "since": None})
         self.assertEqual(self.files(1), [])
 
+    def test_real_review_rejects_drifted_stub(self):
+        p = self.rdir(1) / "review-ux.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("VERDICT: PASS\nCarried forward from round 1: nothing blocking, text drifted.\n")
+        self.assertFalse(board._real_review(p))
+        p.write_text("VERDICT: PASS\nSkipped by orchestrator: some new reason.\n")
+        self.assertFalse(board._real_review(p))
+        p.write_text("VERDICT: PASS\nSkipped by orchestrator: x.\n## Findings\n- a\n")
+        self.assertTrue(board._real_review(p))
+
     def test_review_plan_rerun_removes_stale_deletion_skip(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 100})
         self.commit("web/page.html", "<p>new</p>\n")
