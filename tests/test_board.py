@@ -3535,13 +3535,52 @@ class BoardTest(unittest.TestCase):
         ], since=s)
         self.assertEqual(text, "# Pulse: digest 002\n\n"
                                "Window: 2023-11-14T22:13+00:00 to 2023-11-14T22:17+00:00 · ticks: 5\n"
-                               "Idle with claimable work: 3 min (longest stretch 2 min)\n"
-                               "Idle held by Auto continue off or cool down: 1 min\n"
+                               "Idle with claimable work: 2 min (longest stretch 2 min)\n"
+                               "Held by machine guard: 1 min\n"
+                               "Idle held by Auto continue off or cool down: 0 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
+
+    def pulse_ticks(self, *ticks):
+        """pulse_digest over (t, sessions, extra) ticks, app claimable with Auto continue on; returns the pulse.md text."""
+        app = {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}
+        return self.pulse_digest([{"t": 1_700_000_000 + t, "sessions": n, "cooldown": False, "focus": "app",
+                                   "projects": {"app": app}, **x} for t, n, x in ticks])[0]
+
+    def test_pulse_idle_uses_elapsed_time(self):
+        text = self.pulse_ticks(*((t, 0, {}) for t in (0, 20, 40, 60, 80)))
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nHeld by machine guard: 0 min\n", text)
+
+    def test_pulse_idle_gap_capped(self):
+        text = self.pulse_ticks((0, 0, {}), (600, 0, {}))
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
+        self.tearDown(); self.setUp()
+        text = self.pulse_ticks((0, 0, {}), (600, 0, {}), (1200, 1, {}))  # two capped gaps, then a session
+        self.assertIn("Idle with claimable work: 4 min (longest stretch 4 min)\n", text)
+
+    def test_pulse_hot_tick_held_by_guard(self):
+        text = self.pulse_ticks(
+            (0, 0, {"cpu_load": 150, "swap": 25}),  # at the limits: idle
+            (60, 0, {"cpu_load": 151}),  # hot: held, ends the stretch
+            (120, 0, {"swap": 26}),  # swapping: held
+            (180, 0, {"cpu_load": "x", "swap": None}),  # not numeric: idle
+            (240, 0, {}),  # idle
+            (300, 2, {"cpu_load": 900, "swap": 90}),  # a session runs: neither, even hot
+            (360, 0, {"cpu_load": 900, "cooldown": True}),  # cool down: neither idle nor guard
+            (420, 0, {}))
+        self.assertIn("Idle with claimable work: 3 min (longest stretch 2 min)\n"
+                      "Held by machine guard: 2 min\n"
+                      "Idle held by Auto continue off or cool down: 1 min\n", text)
+
+    def test_pulse_idle_never_exceeds_window(self):
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nHeld by machine guard: 0 min\n",
+                      self.pulse_ticks((0, 0, {})))
+        self.tearDown(); self.setUp()
+        text = self.pulse_ticks((0, 0, {}), (50, 0, {"cpu_load": 900}), (100, 0, {}), (130, 0, {}))  # 130 s window
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nHeld by machine guard: 1 min\n", text)
 
     def test_pulse_null_top_baseline(self):
         s = 1_700_000_000
@@ -3566,7 +3605,7 @@ class BoardTest(unittest.TestCase):
             tick(s + 180, 1, False, pr(2, False), pr(0, True)),  # a session runs: neither
             tick(s + 240, 0, False, pr(0, True), pr(0, False)),  # nothing claimable: neither
         ])
-        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\n"
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nHeld by machine guard: 0 min\n"
                       "Idle held by Auto continue off or cool down: 3 min\n", text)
 
     def test_pulse_cool_down_skips_hand_claims(self):

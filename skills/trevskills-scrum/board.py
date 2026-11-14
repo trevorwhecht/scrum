@@ -1414,11 +1414,16 @@ def _hand_started(cache, name, n):
                if (m := re.match(r"(\d+)-", str(j.get("id")))) and int(m.group(1)) == n)
 
 
+PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
+
+
 def write_pulse(root, digest_id):
-    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since), one line = one minute. Idle with
-    claimable work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line
-    without it is off) or waiting work), idle held (no session, some claimable or waiting work, not idle: Auto continue
-    off or cool-down), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
+    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). A line lasts the seconds to the
+    next line, capped at PULSE_TICK_CAP_S (the last line 0 s); totals are rounded whole minutes. Idle with claimable
+    work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line without it is
+    off) or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT / MAX_SWAP_PCT), held by machine guard
+    (would be idle but over either limit; ends an idle stretch), idle held (no session, some claimable or waiting work,
+    not idle: Auto continue off or cool-down), peaks, claims (each job number in a rise of a project's top job number) during cool-down, less
     jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
     while another project was busy."""
     since = _pulse_since(root, digest_id)
@@ -1431,19 +1436,26 @@ def write_pulse(root, digest_id):
         projs = lambda l: {k: v for k, v in (l.get("projects") if isinstance(l.get("projects"), dict) else {}).items()
                            if isinstance(v, dict)}
         pos = lambda v: is_num(v) and v > 0
-        idle = held = streak = longest = nonfocus = 0
-        for l in lines:
+        over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
+        idle = held = guard = streak = longest = nonfocus = 0
+        for l, nxt in zip(lines, lines[1:] + [None]):
+            dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else 0
             ps = projs(l)
             if l.get("sessions") == 0 and not l.get("cooldown") and any(
                     (pos(p.get("claimable")) and p.get("auto") is True) or pos(p.get("waiting")) for p in ps.values()):
-                idle, streak = idle + 1, streak + 1
-                longest = max(longest, streak)
+                if over(l, "cpu_load", MAX_CPU_LOAD_PCT) or over(l, "swap", MAX_SWAP_PCT):
+                    guard, streak = guard + dt, 0
+                else:
+                    idle, streak = idle + dt, streak + dt
+                    longest = max(longest, streak)
             else:
                 streak = 0
-                held += l.get("sessions") == 0 and any(pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values())
+                if l.get("sessions") == 0 and any(pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values()):
+                    held += dt
             f = l.get("focus") if isinstance(l.get("focus"), str) else None
             if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
-                nonfocus += 1
+                nonfocus += dt
+        idle, held, guard, longest, nonfocus = (round(x / 60) for x in (idle, held, guard, longest, nonfocus))
         cool, hot, claimed, boards = 0, 0, {}, {}
         for a, b in zip(lines, lines[1:]):
             pa, pb = projs(a), projs(b)
@@ -1468,6 +1480,7 @@ def write_pulse(root, digest_id):
         focus = next((l["focus"] for l in reversed(lines) if isinstance(l.get("focus"), str)), "none")
         out += [f"Window: {iso(lines[0]['t'])} to {iso(lines[-1]['t'])} · ticks: {len(lines)}",
                 f"Idle with claimable work: {idle} min (longest stretch {longest} min)",
+                f"Held by machine guard: {guard} min",
                 f"Idle held by Auto continue off or cool down: {held} min",
                 f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
                 f"Peak CPU load: {c['cpu_load']:.0f}% at {iso(c['t'])}" if c else "Peak CPU load: unknown",
