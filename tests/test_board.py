@@ -1916,6 +1916,19 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):
             self.assertEqual(board.cooldown_path(), Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
+    def test_cooldown_park_no_park_keeps_play_queue(self):
+        queued = {"action": "start", "prompt": "p", "stage": "spec"}
+        for name, edits in (("not cooling", None), ("paused", {"paused": True}), ("stalled", {"stalled": True}),
+                            ("round", {"round": 1}), ("stage", {"stage": "review"}), ("lilguy", {"lane": "lilguy"}),
+                            ("cloud", {"lane": "cloud"})):
+            job_id = board.cmd_new(self.root, name)
+            with board.locked_board(self.root) as b:
+                board.find(b, job_id).update({"stage": "spec", "play_queued": 5.0, "queued_launch": queued, **(edits or {})})
+            with (self.cooling() if edits else mock.patch.dict(os.environ)):
+                self.assertEqual(board.cmd_cooldown_park(self.root, job_id), {"parked": False}, name)
+            job = board.find(board.read_board(self.root), job_id)
+            self.assertEqual((job["play_queued"], job["queued_launch"]), (5.0, queued), name)
+
     def test_ready_cooling_down_claims_nothing(self):
         parent, (a, b) = self.runall(2)
         for i, k in enumerate((a, b)):

@@ -5488,6 +5488,8 @@ def cmd_cooldown_park(root, job_id) -> dict:
                     and not job.get("paused") and not job.get("stalled") and job.get("lane") not in ("lilguy", "cloud")):
                 raise _Gone
             job.update(stalled=True, reason=f"{STALL}{COOLDOWN_PARK}", updatedAt=now())
+            job.pop("play_queued", None)  # a parked job must not be launched by play_queue_tick
+            job.pop("queued_launch", None)
     except _Gone:
         return {"parked": False}
     return {"parked": True}
