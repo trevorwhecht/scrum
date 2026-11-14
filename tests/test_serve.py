@@ -962,14 +962,30 @@ class ServeTest(unittest.TestCase):
     def test_spawn_queue_records_ram_gate(self):
         job_id = self.gate_job("RAM gate")
         self.assertIsNone(self.gate_spawn(job_id, ram=0))
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\n")
         # job 825: with the project's runs live, the token names each one
         named = self.gate_job("RAM gate named")
         proc = mock.Mock(); proc.poll.return_value = None
         run = {"action": "start", "started": time.time(), "proc": proc, "log": "x"}
         runs = {"repo/901-live": run, "repo/900-live": run, "other/902-elsewhere": run}
         self.assertIsNone(self.gate_spawn(named, ram=0, runs=runs))
-        self.assertEqual(self.gates_file(named).read_text(), "ram_room:900-live\nram_room:901-live\n")
+        self.assertEqual(self.gates_file(named).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\nram_room:900-live\nram_room:901-live\n")
+
+    def test_spawn_light_job_ram_gate(self):
+        """Digest 088: a fast or lilguy job asks ram_room for a light share; a standard one does not."""
+        b = self.serve.board
+        for lane, light in (("fast", True), ("standard", False)):
+            job_id = self.gate_job(f"Light {lane}")
+            with b.locked_board(self.root) as data:
+                b.find(data, job_id)["lane"] = lane
+            with mock.patch.dict(self.serve.RUNS, {}, clear=True), \
+                    mock.patch.object(b, "ram_room", return_value=0) as room, \
+                    mock.patch.object(b, "spawn", side_effect=AssertionError("launched past the gate")):
+                self.assertIsNone(self.serve.spawn("repo", self.root, job_id, "approve", f"/trevskills-scrum approve {job_id}"))
+            room.assert_called_once_with(floor=0, light=light)
+            est = "3%" if light else "5%"
+            self.assertEqual(self.gates_file(job_id).read_text(),
+                             f"ram_room(free=100%,est={est},min=20%,young=0/2,sessions=0/14)\n")
 
     def test_spawn_idle_skips_ram_gate_only(self):
         # job 825: idle=True launches past a full ram_room; the CPU gate still queues it and keeps the queue fields
@@ -985,7 +1001,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["play_queued"], first)
         self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {held}",
                                                 "stage": "needs-human"})
-        self.assertEqual(self.gates_file(held).read_text(), "ram_room\ncpu_load\n")
+        self.assertEqual(self.gates_file(held).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
 
     def test_spawn_queue_records_cpu_gate(self):
         job_id = self.gate_job("CPU gate")
@@ -994,13 +1010,14 @@ class ServeTest(unittest.TestCase):
 
     def test_spawn_queue_gate_dedup(self):
         job_id = self.gate_job("Gate dedup")
-        for _ in range(2):
+        self.assertIsNone(self.gate_spawn(job_id, ram=0))
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="18"):  # a second hold at another reading: the first one stays
             self.assertIsNone(self.gate_spawn(job_id, ram=0))
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\n")
         self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\ncpu_load\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
         self.assertEqual(self.gate_spawn(job_id), f"runs/{job_id}-approve.log")
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room\ncpu_load\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
         other = self.gate_job("Gate never queued")
         self.assertEqual(self.gate_spawn(other), f"runs/{other}-approve.log")
         self.assertFalse(self.gates_file(other).exists())
@@ -9566,7 +9583,7 @@ class IdleClaimTest(unittest.TestCase):
         with mock.patch.object(self.board, "projects", return_value={"ic": self.repo}), \
                 mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
                 mock.patch.object(self.board, "machine_ok", return_value=None), \
-                mock.patch.object(self.board, "ram_room", side_effect=lambda floor=1: 0 if floor == 0 else 1), \
+                mock.patch.object(self.board, "ram_room", side_effect=lambda floor=1, light=False: 0 if floor == 0 else 1), \
                 mock.patch.object(self.board, "cpu_load_pct", return_value=10.0), \
                 mock.patch.object(self.board, "live_sessions", return_value=0), \
                 mock.patch.object(self.board, "spawn", return_value=(proc, "runs/x.log")) as board_spawn, \

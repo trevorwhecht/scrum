@@ -2042,6 +2042,53 @@ class BoardTest(unittest.TestCase):
         with mock.patch.object(board, "free_ram_pct", return_value=None):
             self.assertEqual(board.ram_room(), 1, "unknown RAM: one claim per call")
 
+    def test_ram_room_light_share(self):
+        """Digest 088: a fast or lilguy job sizes at LIGHT_SESSION_RAM_PCT, so it fits where a standard one waits."""
+        self.assertEqual(board.LIGHT_SESSION_RAM_PCT, 3)
+        with self.machine("24", "1000"):
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (0, 1))
+            self.assertEqual(board.ram_room_reason(), "ram_room(free=24%,est=5%,min=20%,young=0/2,sessions=0/14)")
+            self.assertEqual(board.ram_room_reason(True), "ram_room(free=24%,est=3%,min=20%,young=0/2,sessions=0/14)")
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" + "   09:00 claude -p /trevskills-scrum start 2-b\n" * 2)
+        with self.machine("40", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
+            # standard: 20 // 5 - 1 young = 3; light: (20 - 5 for the young one) // 3 = 5, capped at 2 - 1 young
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (1, 1))
+            with mock.patch.object(board, "MAX_YOUNG_SESSIONS", board.MAX_SESSIONS):
+                self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (3, 5))
+            self.assertEqual(board.ram_room_reason(True), "ram_room(free=40%,est=3%,min=20%,young=1/2,sessions=3/14)")
+        with self.machine("66", "1000"), self.sessions(13):
+            self.assertEqual(board.ram_room(floor=0, light=True), 1, "MAX_SESSIONS still caps a light job")
+        with mock.patch.dict(os.environ, SCRUM_SESSION_RSS_PCT="2.4"), self.machine("24", "1000"):
+            self.assertEqual(board.ram_room(floor=0, light=True), 1, "a measured share under 3 stays the share")
+            self.assertEqual(board.ram_room_reason(True), "ram_room(free=24%,est=2.4%,min=20%,young=0/2,sessions=0/14)")
+        with mock.patch.object(board, "free_ram_pct", return_value=None):
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (1, 1))
+            self.assertEqual(board.ram_room_reason(True), "ram_room(free=unknown,est=3%,min=20%,young=0/2,sessions=0/14)")
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n")
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="15", SCRUM_PS=str(ps)):
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (0, 0), "swap pressing")
+
+    def test_light_job(self):
+        """The board lane decides; with none, feature.md's Lane: header, then spec.md's. Anything missing is not light."""
+        d = self.root / "jobs" / "5-x"
+        d.mkdir(parents=True)
+        self.assertTrue(board.light_job(self.root, {"id": "5-x", "lane": "fast"}))
+        self.assertTrue(board.light_job(self.root, {"id": "5-x", "lane": "lilguy"}))
+        for lane in ("standard", "debug", "bigboy"):
+            self.assertFalse(board.light_job(self.root, {"id": "5-x", "lane": lane}), lane)
+        self.assertFalse(board.light_job(self.root, {"id": "5-x"}), "no feature.md or spec.md")
+        self.assertFalse(board.light_job(self.root, {}), "no id")
+        self.assertFalse(board.light_job(self.root, {"id": "9-missing"}), "no job folder")
+        (d / "spec.md").write_text("# T\nLane: fast\n\n## Problem\n")
+        self.assertTrue(board.light_job(self.root, {"id": "5-x"}), "spec.md header")
+        (d / "feature.md").write_text("Lane: lilguy\nDo it.\n")
+        self.assertTrue(board.light_job(self.root, {"id": "5-x"}), "feature.md header")
+        (d / "feature.md").write_text("Lane: standard\nDo it.\n")
+        self.assertFalse(board.light_job(self.root, {"id": "5-x"}), "feature.md's lane wins over spec.md's")
+        (d / "spec.md").write_text("# T\nLane: fast\n")
+        self.assertFalse(board.light_job(self.root, {"id": "5-x", "lane": "standard"}), "the board lane wins")
+
     def test_machine_ok_high_swap(self):
         """2026-10-24: 19 sessions ran at "32% free" with 9 GB of a 16 GB Mac swapped. memory_pressure's free %
         counts inactive pages as free; swap in use, as a share of physical RAM, is the honest signal."""
@@ -3678,6 +3725,23 @@ class BoardTest(unittest.TestCase):
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
+
+    def test_pulse_idle_minutes_capped_at_window(self):
+        """Digest 088 read 240 idle minutes in a 79-minute window: idle, its stretch and non-focus never pass the window."""
+        lib = {"claimable": 0, "waiting": 0, "busy": True, "top": 1, "auto": True}
+        ticks = lambda ts: self.pulse_ticks(*((t, 0, {"projects": {
+            "app": {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}, "lib": lib}}) for t in ts))
+        text = ticks(range(0, 50, 5))  # ten idle lines inside one wall-clock minute
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\n", text)
+        self.assertIn("Non-focus work while focus had claimable work: 1 min (focus: app)\n", text)
+        self.tearDown(); self.setUp()
+        text = ticks(t * 7.5 for t in range(81))  # 81 idle lines over 600 s, 8 a minute
+        idle, longest = map(int, re.search(r"Idle with claimable work: (\d+) min \(longest stretch (\d+) min\)", text).groups())
+        nonfocus = int(re.search(r"Non-focus work while focus had claimable work: (\d+) min", text)[1])
+        self.assertEqual((idle, longest, nonfocus), (10, 10, 10), text)
+        self.tearDown(); self.setUp()
+        text = ticks([600, 0, 300, 60, 120, 180, 240, 360, 420, 480, 540])  # two writers' lines out of order
+        self.assertIn("Idle with claimable work: 10 min (longest stretch 10 min)\n", text)
 
     def pulse_ticks(self, *ticks):
         """pulse_digest over (t, sessions, extra) ticks, app claimable with Auto continue on; returns the pulse.md text."""

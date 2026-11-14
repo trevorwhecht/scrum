@@ -1419,8 +1419,9 @@ PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this m
 
 
 def write_pulse(root, digest_id):
-    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). A line lasts the seconds to the
-    next line, capped at PULSE_TICK_CAP_S (the last line 0 s); totals are rounded whole minutes. Idle with claimable
+    """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). Lines sort by time; a line lasts
+    the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line 0 s), so no total passes the window, however
+    many lines a minute holds; totals are rounded whole minutes. Idle with claimable
     work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line without it is
     off) or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT / MAX_SWAP_PCT), held by machine guard
     (would be idle but over either limit; ends an idle stretch), gated (would be idle, within both limits, but the
@@ -1431,7 +1432,8 @@ def write_pulse(root, digest_id):
     jobs started_by hand (_hand_started), or at CPU load over 500%, and minutes the focus project had claimable work
     while another project was busy."""
     since = _pulse_since(root, digest_id)
-    lines = [l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)]
+    lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
+                   key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
     out = [f"# Pulse: digest {digest_id}", ""]
     if not lines:
         out.append("No pulse lines since the last digest.")
@@ -3967,6 +3969,8 @@ CPU_SAMPLE_SECS = 300  # ... from the last this many seconds (about 3 watchdog t
 SWAP_FREE_RAM_PCT = 35  # ... but swap alone is stale (macOS keeps it until pressure returns): it blocks only below this free RAM
 SWAP_GROWTH_SECS = 600  # ... or when swap grew within this window (2026-10-25: idle machine, 71% free, blocked for an hour)
 SESSION_RAM_PCT = 5  # ram_room: share of RAM one new headless session takes when session_rss_pct is unknown; tune here
+LIGHT_SESSION_RAM_PCT = 3  # ram_room(light=True): a fast or lilguy job's share (no E2E, related tests only), never above
+#                           the standard share; a guess, tune here
 MIN_SESSION_RAM_PCT = 2  # ram_room: the measured share (session_rss_pct) never counts below this (claude only, not its children)
 MAX_SESSIONS = 14  # machine_ok: headless sessions may hold 70% of RAM in all (SESSION_RAM_PCT each); the rest is macOS and
 #                   apps. Derived from the RAM share, not the fixed 8 job 279 removed; 19 sessions crashed the Mac (2026-10-24).
@@ -4153,22 +4157,56 @@ def machine_ok(path, manual=False, claim=False):
     return None
 
 
-def ram_room(floor=1):
+LIGHT_LANES = ("fast", "lilguy")  # light_job: lanes that run no E2E, so ram_room sizes them at LIGHT_SESSION_RAM_PCT
+
+
+def light_job(root, job: dict) -> bool:
+    """True when the job's board `lane` is in LIGHT_LANES; with no board lane, when feature.md's header `Lane:` is, or,
+    with no such line there, spec.md's. A job with no id or no folder is not light."""
+    lane = job.get("lane")
+    if not lane and job.get("id"):
+        d = Path(root) / "jobs" / str(job["id"])
+        lane = header_value(d / "feature.md", "Lane", LANES) or header_value(d / "spec.md", "Lane", LANES)
+    return lane in LIGHT_LANES
+
+
+def ram_share(light=False):
+    """The RAM % ram_room counts per new session: the measured session_rss_pct (SESSION_RAM_PCT when unknown, never
+    below MIN_SESSION_RAM_PCT), or for a light job that capped at LIGHT_SESSION_RAM_PCT."""
+    share = max(session_rss_pct() or SESSION_RAM_PCT, MIN_SESSION_RAM_PCT)
+    return min(share, LIGHT_SESSION_RAM_PCT) if light else share
+
+
+def ram_room_reason(light=False):
+    """The queue-gates.txt token for a RAM hold, no whitespace: ram_room(free=<x>%,est=<share>%,min=<MIN_FREE_RAM_PCT>%,
+    young=<n>/<MAX_YOUNG_SESSIONS>,sessions=<n>/<MAX_SESSIONS>); free=unknown when free_ram_pct is None."""
+    free, ages = free_ram_pct(), session_ages()
+    young = sum(a < SESSION_RAMP_SECS for a in ages)
+    return (f"ram_room(free={'unknown' if free is None else f'{free:.0f}%'},est={round(ram_share(light), 1):g}%,"
+            f"min={MIN_FREE_RAM_PCT}%,young={young}/{MAX_YOUNG_SESSIONS},sessions={len(ages)}/{MAX_SESSIONS})")
+
+
+def ram_room(floor=1, light=False):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into shares of the measured session_rss_pct (SESSION_RAM_PCT when unknown, never below MIN_SESSION_RAM_PCT),
     minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
     for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
-    while no session is younger than SESSION_RAMP_SECS."""
+    while no session is younger than SESSION_RAMP_SECS. light (serve.py, light_job): the free RAM left after the young
+    sessions' standard shares, split into ram_share(light=True) shares; the swap, unknown and ceiling cases are the same."""
     ram = free_ram_pct()
     swap = swap_used_pct()
     if ram is None or swap_pressing(ram, swap, MAX_SWAP_PCT / 2):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
     young = sum(a < SESSION_RAMP_SECS for a in ages)
-    share = max(session_rss_pct() or SESSION_RAM_PCT, MIN_SESSION_RAM_PCT)
-    room = min(int((ram - MIN_FREE_RAM_PCT) // share) - young, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
+    share = ram_share()
+    if light:
+        fit = int((ram - MIN_FREE_RAM_PCT - young * share) // ram_share(True))
+    else:
+        fit = int((ram - MIN_FREE_RAM_PCT) // share) - young
+    room = min(fit, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
     return max(floor, room) if floor else room
 
 
