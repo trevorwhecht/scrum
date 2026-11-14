@@ -9832,7 +9832,7 @@ class TestDbUp(unittest.TestCase):
             r = run_board("db-up", "--env", str(env))
         self.assertEqual(r.returncode, 1)
         self.assertEqual(json.loads(r.stdout), {"up": False, "started": True})
-        start.assert_called_once_with()
+        start.assert_called_once_with(cwd=env.parent)
 
     def test_skips_remote_and_missing_url(self):
         start = mock.Mock()
@@ -9874,6 +9874,25 @@ class TestDbUp(unittest.TestCase):
                               probe=lambda host, port: False, sleep=lambda s: None)
         self.assertEqual((out["up"], out["started"]), (False, True))
         self.assertIn("no compose file", out["error"])
+
+    def test_default_starter_uses_env_file_folder(self):
+        # the compose file sits beside the env file, not in the process cwd (job 827)
+        (self.dir / "docker-compose.yml").write_text("services: {}\n")
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        cwd = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, cwd)
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append((argv, kw.get("cwd")))
+            return subprocess.CompletedProcess(argv, 0, "Name Status\nredis none\n" if argv[0] == "brew" else "", "")
+        with mock.patch.object(board.subprocess, "run", side_effect=fake_run):
+            out = board.db_up(self.env("DATABASE_URL=postgresql://u@localhost/db"), wait=5,
+                              probe=lambda host, port: False, sleep=lambda s: None)
+        self.assertNotIn("error", out)
+        self.assertIn((["docker", "compose", "up", "-d"], self.dir), seen)
 
     def test_compose_starter_waits_for_docker(self):
         (self.dir / "docker-compose.yml").write_text("services: {}\n")
