@@ -1432,10 +1432,10 @@ def write_pulse(root, digest_id):
     counted as overlap; a missing or null `gates` is ungated), idle held (no session, some claimable or waiting work,
     not idle: Auto continue off or cool-down), idle held by the machine guard (would be idle with claimable work, but
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
-    as before), peaks, claims (each job number in a rise of a project's numeric top job number between two lines at most
-    PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it rises nothing) during
-    cool-down or at CPU load over 500%, only jobs on the board (_board_job) not started_by hand, minutes the focus project had claimable work
-    while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
+    as before), peaks, claims (each job number in a rise of a project's numeric top job number between two lines at
+    most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it rises nothing) during
+    cool-down or at CPU load over 500%, only jobs on the board (_board_job) not started_by hand, minutes the focus
+    project had claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
     (none: the first account; job not on the board: unknown), in accounts() order."""
     since = _pulse_since(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
