@@ -3543,6 +3543,25 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(out["jobs"], ["100-origin", "200-bug"])
         self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code, ui\n")
 
+    def test_digest_start_escapes_skips_stub_reviewers(self):
+        commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+                   ({"app.py": "a\nB\nc\n"}, "Fix b\n\nJob files: scrum/jobs/200-bug/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", "code": "PASS", "ui": "PASS"}]},
+                {"id": "200-bug", "lane": "debug"}]
+        stub = "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n"
+        self.round_file("100-origin", 1, "review-code.md", "VERDICT: PASS\nreal\n")
+        self.round_file("100-origin", 1, "review-ui.md", stub)
+        text, _, _ = self.escape_digest(jobs, commits)
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code\n")
+
+    def test_digest_start_escapes_all_stub_reviewers_none(self):
+        commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+                   ({"app.py": "a\nB\nc\n"}, "Fix b\n\nJob files: scrum/jobs/200-bug/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", "ui": "PASS"}]}, {"id": "200-bug", "lane": "debug"}]
+        self.round_file("100-origin", 1, "review-ui.md", "VERDICT: PASS\nSkipped by orchestrator: no UI files in diff.\n")
+        text, _, _ = self.escape_digest(jobs, commits)
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: none\n")
+
     def test_digest_start_escapes_unknown_origin(self):
         text, _, _ = self.escape_digest(
             [{"id": "100-origin"}, {"id": "300-nocommit", "lane": "debug"}, {"id": "400-tests", "lane": "debug"},
@@ -8256,6 +8275,26 @@ class ProcessHealthTest(unittest.TestCase):
         got = json.loads(out.getvalue())
         self.assertEqual(json.loads((self.root / "digests" / n / "health.json").read_text()), got)
         return got
+
+    def waste_for(self, spec, paths, calls=None):
+        """test_waste_jobs for one reviewed standard-lane job with `spec`, `_fit_diff` mocked to give `paths`."""
+        self.board(("101-alpha", "done", "standard", "", "merged"))
+        self.digest("001", "101-alpha")
+        self.put("jobs/101-alpha/spec.md", spec)
+        self.put("jobs/101-alpha/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
+        diff = (None,) * 4 if paths is None else (1, 0, len(paths), ([], paths))
+        with mock.patch.object(board, "_fit_diff", return_value=diff) as fit:
+            got = self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"]
+        if calls is not None:
+            self.assertEqual(fit.call_count, calls)
+        return got
+
+    def test_waste_empty_likely_uses_real_diff(self):
+        ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
+        self.assertEqual(self.waste_for("# s\n", [other, ui], 1), [])
+        self.assertEqual(self.waste_for("# s\n", [other], 1), ["101-alpha"])
+        self.assertEqual(self.waste_for("# s\n", None, 1), [])
+        self.assertEqual(self.waste_for(f"# s\n## Likely files\n- `{other}`\n", [ui], 0), ["101-alpha"])
 
     def test_metrics_from_fixture_jobs(self):
         self.board(("101-alpha", "done", "standard", "", "merged"),
