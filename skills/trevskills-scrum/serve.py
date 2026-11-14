@@ -2641,7 +2641,8 @@ def latest_windows(root):
     resets_at (as an int) that is a JSON object, trimmed to the fields the Usage dialog shows. Junk files are skipped."""
     out = dict.fromkeys(("five_hour", "seven_day"))
     w = Path(root) / "windows"
-    names = [p.name for p in w.iterdir() if board.WINDOW_FILE_RE.fullmatch(p.name)] if w.is_dir() else []
+    names = [p.name for p in w.iterdir() if board.WINDOW_FILE_RE.fullmatch(p.name) and p.name.count("-") == 1] \
+        if w.is_dir() else []  # a second account's card has an `-<account>` suffix; the dialog shows main only
     for name in sorted(names, key=lambda n: int(n[n.index("-") + 1:-5]), reverse=True):
         key = name.split("-", 1)[0]
         if out[key] is not None:
