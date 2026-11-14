@@ -3651,7 +3651,8 @@ def reserve_hit(acc, usage, now):
 
 def pick_account(now, live=0, prefer=None):
     """(name, allowance) of the first account with room, `prefer` first when listed, else (None, Allowance(0,
-    reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above 0, and no
+    reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
+    count (`live` an int or a list), and no
     reserve window reached (reserve_hit)."""
     accs = accounts()
     why = []
@@ -3661,7 +3662,7 @@ def pick_account(now, live=0, prefer=None):
             continue
         usage = read_usage(acc.name)
         allow = usage_allowance(usage, now, live)
-        if allow is not None and allow <= 0:
+        if allow is not None and allow <= (live if isinstance(live, int) else len(live)):  # no slot left
             why.append(f"{acc.name} {allow.reason}")
             continue
         if held := reserve_hit(acc, usage, now):
