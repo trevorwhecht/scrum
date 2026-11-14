@@ -3943,7 +3943,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         dev = self.section(text, "## Dev migrate (Check gate)", "## Resuming the builder")
         self.assertIn("never writes `migrated.md`", dev)
         self.assertIn("dev-migrated.md", dev)
-        self.assertIn("only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`", dev)
+        self.assertIn("Only Migrate step 3, after Step 8 succeeded on prod, writes `migrated.md`", dev)
 
 
 if __name__ == "__main__":
