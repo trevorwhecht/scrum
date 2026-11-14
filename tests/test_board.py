@@ -1227,6 +1227,38 @@ class BoardTest(unittest.TestCase):
         self.assertIsNone(board.slot_conflict({"id": "j1", "parallel": True}, [batch], files))
         self.assertIsNotNone(board.slot_conflict({"id": "j2", "parallel": True}, [batch], files))
 
+    def test_ready_releases_overlap_once_holder_passed_review(self):
+        for stage, claimed in (("review", []), ("approve", None), ("merging", None), ("deploying", None)):
+            parent, (c1, c2, c3) = self.three()
+            self.spec(c1, "src/a.py")
+            self.spec(c2, "src/a.py")
+            board.cmd_set(self.root, c1, [f"stage={stage}"])
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2] if claimed is None else claimed, stage)
+            for c in (c1, c2, c3):
+                board.cmd_set(self.root, c, ["stage=done"])
+
+    def test_slot_conflict_ignores_holder_past_review(self):
+        files = {"k": {"src/a.py"}, "h": {"src/a.py"}}
+        slot = lambda stage: board.slot_conflict({"id": "k", "parallel": True},
+                                                 [{"id": "h", "parallel": True, "stage": stage}], files)
+        self.assertEqual(slot("review"), ("sibling h shares src/a.py", ["h"]))
+        self.assertIsNone(slot("approve"))
+        self.assertIsNone(slot("merging"))
+        self.assertIsNone(slot("deploying"))
+
+    def test_slot_conflict_ignores_shared_test_files(self):
+        shared = ["tests/test_x.py", "a/__tests__/b.ts", "pkg/test_y.py", "pkg/y_test.py", "ui/a.test.tsx", "ui/a.spec.ts"]
+        for p in shared:
+            files = {"k": {p}, "h": {p}}
+            self.assertIsNone(board.slot_conflict({"id": "k", "parallel": True}, [{"id": "h", "parallel": True}], files), p)
+        self.assertTrue(board.is_test_path("tests/"))
+        self.assertFalse(board.is_test_path("src/contest.py"))
+
+    def test_slot_conflict_names_non_test_shared_file(self):
+        files = {"k": {"tests/test_x.py", "src/a.py"}, "h": {"tests/test_x.py", "src/a.py"}}
+        self.assertEqual(board.slot_conflict({"id": "k", "parallel": True}, [{"id": "h", "parallel": True}], files),
+                         ("sibling h shares src/a.py", ["h"]))
+
     def test_slot_conflict_big_file_allows_two(self):
         B, S, D = "skills/trevskills-scrum/board.py", "skills/trevskills-scrum/serve.py", "skills/trevskills-scrum/dashboard.html"
         job = lambda i: {"id": i, "parallel": True}

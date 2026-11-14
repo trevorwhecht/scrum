@@ -4493,18 +4493,31 @@ BIG_SHARED_FILES = {"skills/trevskills-scrum/board.py", "skills/trevskills-scrum
 SHARED_BIG_LIMIT = 2
 
 
+def is_test_path(p):
+    """True for a test file: under tests/ or __tests__/, or named test_*.py, *_test.py, *.test.* or *.spec.*."""
+    parts = p.split("/")
+    return bool({"tests", "__tests__"} & set(parts[:-1] if not p.endswith("/") else parts)) or bool(
+        re.fullmatch(r"test_.*\.py|.*_test\.py|.*\.(test|spec)\..*", parts[-1]))
+
+
+# A holder past review (only approve, merge and deploy remain) no longer holds a slot.
+PAST_REVIEW = {"approve", "merging", "deploying"}
+
+
 def slot_conflict(k, busy, files):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
-    (shared_files: a folder shares every file under it), except BIG_SHARED_FILES, which clash only once 2 siblings name one."""
-    busy = [o for o in busy if o["id"] != k["id"]]
+    (shared_files: a folder shares every file under it), except BIG_SHARED_FILES, which clash only once 2 siblings name one.
+    Siblings in PAST_REVIEW stages never hold, and shared test files (is_test_path) never clash."""
+    busy = [o for o in busy if o["id"] != k["id"] and o.get("stage") not in PAST_REVIEW]
     if not busy:
         return None
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
-    shared = {o["id"]: set() if alone(o) else shared_files(files[k["id"]], files[o["id"]]) for o in busy}
+    shared = {o["id"]: set() if alone(o) else
+              {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in busy}
     held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in shared.values()) >= SHARED_BIG_LIMIT
     clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
              for o in busy if alone(o) or any(held(p) for p in shared[o["id"]])]
