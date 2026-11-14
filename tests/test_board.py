@@ -1033,7 +1033,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
         board.cmd_set(self.root, c1, ["stage=build"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
-        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+        self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
         self.assertNotIn("overlap_hold", self.child(c1))
         self.assertNotIn("overlap_hold", self.child(c3))  # held on depends_on: the stale hold is dropped
         board.cmd_set(self.root, c1, ["stage=done"])
@@ -1046,7 +1046,94 @@ class BoardTest(unittest.TestCase):
         d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
         self.spec(d1, "src/x.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d1])
-        self.assertEqual(self.child(d2)["overlap_hold"], {"ids": [d1], "text": "this job runs alone"})
+        self.assertEqual(self.overlap_of(d2), {"ids": [d1], "text": "this job runs alone"})
+
+    def overlap_of(self, job_id):
+        """The child's overlap_hold without its `since` (a wall-clock time)."""
+        return {k: v for k, v in self.child(job_id)["overlap_hold"].items() if k != "since"}
+
+    def held_pair(self, out_stage="build"):
+        """An outside job in `out_stage` sharing src/a.py with the first child of a two-child plan."""
+        (self.root.parent / "src").mkdir(exist_ok=True)
+        out = board.cmd_new(self.root, "Outside")
+        with board.locked_board(self.root) as b:  # cmd_set refuses needs-human
+            board.find(b, out)["stage"] = out_stage
+        self.spec(out, "src/a.py")
+        parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+        c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(c1, "src/a.py")
+        return parent, c1, out
+
+    def test_ready_paused_stalled_needs_human_outside_does_not_hold(self):
+        for stage, extra in (("build", {"paused": True}), ("needs-human", {}), ("build", {"stalled": True})):
+            with self.subTest(stage=stage, extra=extra):
+                self.tearDown(); self.setUp()
+                parent, c1, out = self.held_pair(stage)
+                with board.locked_board(self.root) as b:
+                    board.find(b, out).update(extra)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+                self.assertEqual(self.child(c1)["stage"], "spec")
+
+    def test_ready_live_outside_still_holds(self):
+        # slot_conflict's PAST_REVIEW never lets a merging holder hold (unchanged), so merging is not asserted as held
+        for stage in ("spec", "build", "check", "review"):
+            with self.subTest(stage=stage):
+                self.tearDown(); self.setUp()
+                parent, c1, out = self.held_pair(stage)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.tearDown(); self.setUp()
+        parent, c1, out = self.held_pair("needs-human")
+        self.assertEqual(board.cmd_ready(self.root, parent, live=[out])["ready"], [])
+
+    def test_ready_overlap_hold_keeps_since(self):
+        parent, c1, out = self.held_pair()
+        board.cmd_ready(self.root, parent)
+        since = self.child(c1)["overlap_hold"]["since"]
+        self.assertTrue(since)
+        with board.locked_board(self.root) as b:
+            board.find(b, c1)["overlap_hold"]["since"] = "2999-01-01T00:00:00+00:00"
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(c1)["overlap_hold"]["since"], "2999-01-01T00:00:00+00:00")
+
+    def test_ready_releases_overlap_hold_older_than_2h(self):
+        ago = lambda h: (datetime.now(timezone.utc) - timedelta(hours=h)).isoformat(timespec="seconds")
+        for hours, ready in ((1, False), (3, True)):
+            with self.subTest(hours=hours):
+                self.tearDown(); self.setUp()
+                parent, c1, out = self.held_pair()
+                with board.locked_board(self.root) as b:
+                    board.find(b, c1)["overlap_hold"] = {"ids": [out], "text": "x", "since": ago(hours)}
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1] if ready else [])
+                self.assertEqual("overlap_hold" in self.child(c1), not ready)
+        # a "runs alone" hold expires the same way
+        self.tearDown(); self.setUp()
+        parent = self.plan(self.ticket(1), self.ticket(2, parallel="no"), self.ticket(3, deps="T1, T2", exposure="yes"))
+        d1, d2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(d1, "src/x.py")
+        board.cmd_set(self.root, d1, ["stage=build"])
+        board.cmd_ready(self.root, parent)
+        self.assertEqual(self.child(d2)["overlap_hold"]["text"], "this job runs alone")
+        with board.locked_board(self.root) as b:
+            board.find(b, d2)["overlap_hold"]["since"] = ago(3)
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
+        self.assertNotIn("overlap_hold", self.child(d2))
+
+    def test_ready_big_file_limit_counts_both_pools(self):
+        big = "skills/trevskills-scrum/board.py"
+        for with_outside, ready in ((True, False), (False, True)):
+            with self.subTest(with_outside=with_outside):
+                self.tearDown(); self.setUp()
+                (self.root.parent / "skills/trevskills-scrum").mkdir(parents=True, exist_ok=True)
+                parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+                c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                for c in (c1, c2):
+                    self.spec(c, big)
+                board.cmd_set(self.root, c1, ["stage=build"])
+                if with_outside:
+                    out = board.cmd_new(self.root, "Outside")
+                    board.cmd_set(self.root, out, ["stage=build"])
+                    self.spec(out, big)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2] if ready else [])
 
     def branch(self, commits):
         """A git worktree whose HEAD sits `commits` commits past its base. Returns (worktree, base sha)."""
@@ -1107,18 +1194,18 @@ class BoardTest(unittest.TestCase):
         parent, (d1, d2, _) = self.critical_pair("Fix the queue")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         self.assertEqual(self.child(d2)["stage"], "waiting")
-        self.assertEqual(self.child(d2)["overlap_hold"], {"ids": [d1], "text": f"sibling {d1} shares src/a.py"})
+        self.assertEqual(self.overlap_of(d2), {"ids": [d1], "text": f"sibling {d1} shares src/a.py"})
 
     def test_ready_critical_waits_for_built_holder(self):
         parent, (c1, c2, _) = self.critical_pair("Critical: fix the queue")
         board.cmd_set(self.root, c1, ["stage=build"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
-        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+        self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
         board.cmd_set(self.root, c1, ["stage=spec"])
         self.set_branch(c1, 1)
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         self.assertEqual(self.child(c2)["stage"], "waiting")
-        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
+        self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} shares src/a.py"})
 
     def fast_pair(self, lane="fast", holder_files=("src/a.py",), kid_files=()):
         """A parent with holder 002 (stage spec), fast kid 003 and standard kid 004, all waiting but 002 claimed."""
@@ -1198,11 +1285,11 @@ class BoardTest(unittest.TestCase):
         self.spec(c2, "src/b.py")
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
         self.assertNotIn("overlap_hold", self.child(c1))
-        self.assertEqual(self.child(c2)["overlap_hold"], {"ids": [out], "text": f"sibling {out} shares src/b.py"})
+        self.assertEqual(self.overlap_of(c2), {"ids": [out], "text": f"sibling {out} shares src/b.py"})
         board.cmd_set(self.root, c1, ["stage=waiting"])
         self.set_branch(out, 1)  # built: it holds the Critical kid too
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
-        self.assertEqual(self.child(c1)["overlap_hold"], {"ids": [out], "text": f"sibling {out} shares src/a.py"})
+        self.assertEqual(self.overlap_of(c1), {"ids": [out], "text": f"sibling {out} shares src/a.py"})
 
     def test_ready_critical_first_for_room(self):
         parent = self.plan(self.ticket(1), self.ticket(2, title="Critical: fix the queue"),
