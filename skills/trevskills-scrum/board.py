@@ -4781,8 +4781,9 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         if new != (parent["stage"], parent.get("reason")):
             if (new[1] or "").startswith(MACHINE_WAIT) and not (new[1].startswith(OVERLAP_WAIT)
                                                                 or reason.startswith(MACHINE_WAIT)):  # once per hold
-                # a CPU-load wait clears on its own while the parent keeps running: no stop for Trevor
-                log_stop(root, parent["id"], "machine", new[1], auto=new[1].startswith(MACHINE_WAIT + "CPU load"))
+                # every machine wait (RAM, swap, CPU, cooling down, usage) clears on its own while the parent keeps
+                # running: no stop for Trevor
+                log_stop(root, parent["id"], "machine", new[1], auto=True)
             elif (new[1] or "").startswith(BLOCKED):
                 log_stop(root, parent["id"], "bigboy", new[1])
             parent.update(stage=new[0], reason=new[1], updatedAt=now())
@@ -4950,7 +4951,7 @@ def questions_log(root, entry):
 
 def log_stop(root, job_id, kind, reason, auto=False):
     """Append one stop line (kind: stall, machine, bigboy or refused) to questions.log. Caller holds the board lock.
-    `auto`: the scrum clears it on its own (a stall auto_resume retries, a CPU-load wait); the line carries
+    `auto`: the scrum clears it on its own (a stall auto_resume retries, any machine wait); the line carries
     "auto": true and process-health counts it for no metric."""
     questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id, "kind": kind,
                          "reason": reason, **({"auto": True} if auto else {})})
