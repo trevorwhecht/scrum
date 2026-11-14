@@ -4514,6 +4514,7 @@ def live_sessions():
 # Files nearly every job names; two jobs may share one, the third waits (git merges edits to different parts).
 BIG_SHARED_FILES = {"skills/trevskills-scrum/board.py", "skills/trevskills-scrum/serve.py"}
 SHARED_BIG_LIMIT = 2
+OVERLAP_HOLD_MAX_S = 2 * 3600  # a waiting child held on an overlap longer than this is claimed anyway
 
 
 def is_test_path(p):
@@ -4527,21 +4528,25 @@ def is_test_path(p):
 PAST_REVIEW = {"approve", "merging", "deploying"}
 
 
-def slot_conflict(k, busy, files):
+def slot_conflict(k, busy, files, extra=()):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
     (shared_files: a folder shares every file under it), except BIG_SHARED_FILES, which clash only once 2 siblings name one.
-    Siblings in PAST_REVIEW stages never hold, and shared test files (is_test_path) never clash."""
+    Siblings in PAST_REVIEW stages never hold, and shared test files (is_test_path) never clash. `extra` is the
+    other pool's holders (cmd_ready's outside jobs or in-tree slots): they count toward the BIG_SHARED_FILES limit only."""
     busy = [o for o in busy if o["id"] != k["id"] and o.get("stage") not in PAST_REVIEW]
     if not busy:
         return None
+    extra = [o for o in extra if o["id"] != k["id"] and o.get("stage") not in PAST_REVIEW]
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
     shared = {o["id"]: set() if alone(o) else
               {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in busy}
-    held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in shared.values()) >= SHARED_BIG_LIMIT
+    extra_shared = [set() if alone(o) or not files.get(o["id"]) else
+                    {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in extra]
+    held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in [*shared.values(), *extra_shared]) >= SHARED_BIG_LIMIT
     clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
              for o in busy if alone(o) or any(held(p) for p in shared[o["id"]])]
     return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
@@ -4640,12 +4645,12 @@ def note_queue_gate(root, job_id, gate):
 def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). Paused and stalled siblings keep their
-    overlap slot, and every live, paused or stalled leaf job of another tree is an outside holder: a child clashes with
+    overlap slot, and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no.
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
     BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
-    all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text} (the card's
-    "Waiting on" line); a claim or a depends_on wait drops it.
+    all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text, since} (the card's
+    "Waiting on" line; `since` is set once and a hold past OVERLAP_HOLD_MAX_S is released); a claim or a depends_on wait drops it.
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
     siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
     machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
@@ -4690,7 +4695,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         slots += [k for k in kids if k not in busy and parked(k)]  # a paused or stalled sibling resumes on its files
         outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
                    and j["id"] != parent["id"] and not j.get("children")
-                   and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live or parked(j))]
+                   and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live)]
         if only:  # the idle claim: only jobs with a live session hold it
             alive = session_alive_fn() if any(j.get("stage") in WATCHED for j in slots + outside) else None
             has_session = lambda j: j["id"] in live or (not idle(j) and j.get("stage") in WATCHED and alive(j))
@@ -4728,13 +4733,18 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                 skipped = [o["id"] for o in k_slots + k_outside
                            if o.get("stage") == "spec" and not shared_files(files[k["id"]], files[o["id"]])]
                 k_slots, k_outside = ([o for o in pool if o["id"] not in skipped] for pool in (k_slots, k_outside))
-            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files)  # only: never runs alone
-            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files)
-            if out_hit:
-                overlap += out_hit[1]
-            if hit or out_hit:
+            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files, k_outside)  # only: never runs alone
+            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files, k_slots)
+            since = (k.get("overlap_hold") or {}).get("since")
+            try:  # a hold older than OVERLAP_HOLD_MAX_S is released: the Merge Conflicts step handles any clash
+                expired = bool(since) and time.time() - datetime.fromisoformat(since).timestamp() > OVERLAP_HOLD_MAX_S
+            except (TypeError, ValueError):
+                expired = False
+            if (hit or out_hit) and not expired:
+                if out_hit and not hit:
+                    overlap += out_hit[1]
                 hit = hit or out_hit
-                k["overlap_hold"] = {"ids": list(hit[1]), "text": hit[0]}  # serve.py's waitingOn for the card
+                k["overlap_hold"] = {"ids": list(hit[1]), "text": hit[0], "since": since or now()}  # serve.py's waitingOn for the card
                 for g in [f"runs_alone:{i}" for i in hit[1]] if hit[0] == "this job runs alone" \
                         else [f"overlap:{i}" for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
