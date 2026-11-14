@@ -1423,12 +1423,13 @@ def _hand_started(cache, name, n):
 
 
 PULSE_TICK_CAP_S = 120  # write_pulse: a pulse.log line counts as at most this many seconds (a gap means no ticks)
+PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 
 
 def write_pulse(root, digest_id):
     """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). Lines sort by time; a line lasts
-    the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line 0 s), so no total passes the window, however
-    many lines a minute holds; totals are rounded whole minutes. Idle with claimable
+    the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line PULSE_LAST_S), so no total passes the window plus one
+    tick, however many lines a minute holds; totals are rounded whole minutes. Idle with claimable
     work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line without it is
     off) or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT / MAX_SWAP_PCT), held by machine guard
     (would be idle but over either limit; ends an idle stretch), gated (would be idle, within both limits, but the
@@ -1457,7 +1458,7 @@ def write_pulse(root, digest_id):
         idle = held = guard = streak = longest = nonfocus = gated = guarded = 0
         by_gate = {}
         for l, nxt in zip(lines, lines[1:] + [None]):
-            dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else 0
+            dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else PULSE_LAST_S
             ps = projs(l)
             claim = lambda p: pos(p.get("claimable")) and p.get("auto") is True
             if l.get("sessions") == 0 and not l.get("cooldown") and any(
@@ -1662,9 +1663,23 @@ def _bumped_lane(folder) -> bool:
     return False
 
 
+def _fit_excluded(folder, lane: str, paths) -> bool:
+    """True when a job could never have run on a cheaper lane: a diff name matches SENSITIVE_RE (Fast lane would
+    promote it), spec.md's `Hard stops:` is not `none`, feature.md starts with `Critical:` or has a
+    LILGUY_HARD_STOP_RE word, or a debug job has assessment.md."""
+    if paths and any(SENSITIVE_RE.search(n) for n in paths[1]):
+        return True
+    read = lambda f: f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+    hard = re.search(r"^\s*Hard stops:(.*)$", read(folder / "spec.md"), re.M)
+    feature = read(folder / "feature.md")
+    return bool(hard and hard[1].strip().lower() != "none" or feature.startswith("Critical:")
+                or LILGUY_HARD_STOP_RE.search(feature) or lane == "debug" and (folder / "assessment.md").is_file())
+
+
 def _fit_job(root, job_id: str, job: dict, globs) -> dict:
     """One pipeline-fit row for job_id (its board entry `job`, {} when gone): lane, agents spawned, diff size,
-    verdicts per round, fix rounds, over_routed and the cheapest lane that would have done."""
+    verdicts per round, fix rounds, over_routed and the cheapest lane that would have done; `excluded`
+    (_fit_excluded) is never over_routed."""
     folder = Path(root) / "jobs" / job_id
     lane = job.get("lane") or "standard"
     rounds = sorted(int(p.name[6:]) for p in folder.glob("round-*")
@@ -1678,14 +1693,15 @@ def _fit_job(root, job_id: str, job: dict, globs) -> dict:
     added, deleted, files, paths = _fit_diff(root, job)
     size = None if added is None else added + deleted
     sensitive = _bumped_lane(folder) or bool(paths and any(FIT_PATH_RE.search(n) for n in paths[1]))
-    over = (not sensitive and lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
+    excluded = _fit_excluded(folder, lane, paths)
+    over = (not sensitive and not excluded and lane in ("standard", "debug") and "1" in verdicts and set(verdicts["1"].values()) == {"PASS"}
             and size is not None and size <= FAST_MAX_LINES and files <= FAST_MAX_FILES
             and paths is not None and _promote_trigger(*paths) is None
             and not (globs and any(glob_match(n, globs) for n in paths[1])))
     fit = ("lilguy" if size <= LILGUY_MAX_LINES and files <= LILGUY_MAX_FILES else "fast") if over else lane
     return {"id": job_id, "lane": lane, "agents": agents, "added": added, "deleted": deleted, "files": files,
             "verdicts": verdicts, "fix_rounds": max(max(rounds, default=1) - 1, 0), "over_routed": over, "fit": fit,
-            "sensitive": sensitive}
+            "sensitive": sensitive, "excluded": excluded}
 
 
 def cmd_pipeline_fit(root, digest_id: str) -> dict:
@@ -1973,7 +1989,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
             continue
-        if e.get("over_routed") is True and not e.get("sensitive"):  # the pipeline-fit row's own verdict; no second heuristic here
+        if e.get("over_routed") is True and not e.get("sensitive") and e.get("excluded") is not True:  # the pipeline-fit row's own verdict; no second heuristic here
             hits["cheaper_lane_jobs"].append(e["id"])
     globs, seconds = ui_globs(root), 0
     for job_id in listed:
@@ -1992,7 +2008,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         else:
             unknown = False
         no_ui = not unknown and (not globs or not any(glob_match(p, globs) for p in likely))
-        if reviewed and (lane in ("lilguy", "fast") or no_ui):
+        if reviewed and (lane == "lilguy" or no_ui):
             hits["test_waste_jobs"].append(job_id)
             seconds += sum(r["duration_s"] for r in routed if is_num(r.get("duration_s"))
                            and any(t in str(r.get("role") or "") for t in HEALTH_TEST_ROLES))
@@ -2015,7 +2031,9 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if not isinstance(b, dict):
             continue
         name, reset = f"{card.get('window')}-{card.get('resets_at')}", card.get("resets_at")
-        if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT:
+        tokens = card.get("tokens") if isinstance(card.get("tokens"), dict) else {}
+        burned = b.get("used_pct") == 0 and is_num(tokens.get("total")) and tokens["total"] > 0  # stale 0% sample
+        if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT and not burned:
             hits["unused_windows"].append(name)
         if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
                 or is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SECS):
@@ -2504,7 +2522,7 @@ def cmd_window_report(root, now=None) -> list[dict]:
                     "idle_secs": 0, "last_tick": None, **({} if acc is accs[0] else {"account": acc.name})})
                 used = w.get("used_percentage")
                 if is_num(used):
-                    e["used_pct"] = used
+                    e["used_pct"] = max(used, e["used_pct"]) if is_num(e.get("used_pct")) else used  # the peak
                     if used >= HIT_PCT and e.get("hit_90_at") is None:
                         e["hit_90_at"] = at
                     if 100 - used < USAGE_STOP_PCT and e.get("hit_cap_at") is None:
