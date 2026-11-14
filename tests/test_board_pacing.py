@@ -478,6 +478,15 @@ class SpawnAccountTest(AccountEnv):
         env = self.spawn("run-all")  # not on the board: still starts
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.owa))
 
+    def test_spawn_accepts_str_root(self):
+        (self.root / "project.md").write_text("- Orchestrator model: sonnet\n")
+        with mock.patch.object(board.subprocess, "Popen") as popen:
+            _, log = board.spawn(str(self.root), self.job, "resume")
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertRegex(log, r"^runs/[0-9]{8}-[0-9]{6}-resume-" + self.job + r"\.log$")
+        self.assertTrue((self.root / log).exists())
+
     def test_main_spawn_drops_inherited_config_dir(self):
         env = self.spawn(environ={"CLAUDE_CONFIG_DIR": str(self.owa)})
         self.assertIsNone(env.get("CLAUDE_CONFIG_DIR"))  # never assertNotIn: it would print the whole env
