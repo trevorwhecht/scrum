@@ -843,7 +843,7 @@ class ServeTest(unittest.TestCase):
         ids = [self.gate_job(f"Swap gate {i}") for i in range(3)]
         start = self.gate_job("Other project start", root=other, project="other", stage="spec")
         ps, fake = self.launch_ps()
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="66", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps)), \
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps)), \
                 mock.patch.object(b, "spawn", side_effect=fake) as spawn:
             out = [s.spawn("repo", self.root, i, "approve", f"/trevskills-scrum approve {i}") for i in ids]
             out.append(s.spawn("other", other, start, "start", f"/trevskills-scrum start {start}"))
