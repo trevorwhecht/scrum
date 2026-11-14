@@ -8858,6 +8858,7 @@ class ProcessHealthTest(unittest.TestCase):
         self.digest("001", "101-alpha")
         self.put("jobs/101-alpha/spec.md", spec)
         self.put("jobs/101-alpha/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
+        self.lines("jobs/101-alpha/routing.log", [{"role": "review-ui", "duration_s": 60}])
         diff = (None,) * 4 if paths is None else (1, 0, len(paths), ([], paths))
         with mock.patch.object(board, "_fit_diff", return_value=diff) as fit:
             got = self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"]
@@ -8873,6 +8874,26 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "1188-b", "lane": "standard", "added": 95, "deleted": 16, "files": 4, "over_routed": False, "fit": "standard"},
             {"id": "1189-c", "lane": "standard", "added": 18, "deleted": 14, "files": 2, "over_routed": False, "fit": "standard"}]}))
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["value"], 0)
+
+    def test_cheaper_lane_needs_over_routed(self):
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "standard", "", "merged"),
+                   ("103-c", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": "101-a", "lane": "fast", "added": 5, "files": 1, "over_routed": False, "fit": "fast"},
+            {"id": "102-b", "lane": "standard", "added": 5, "files": 1, "over_routed": True, "fit": "fast"},
+            {"id": "103-c", "lane": "fast", "added": 5, "files": 1}]}))
+        self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["jobs"], ["102-b"])
+
+    def test_waste_needs_minutes(self):
+        self.board(("101-a", "done", "lilguy", "", "merged"), ("102-b", "done", "lilguy", "", "merged"),
+                   ("103-c", "done", "lilguy", "", "merged"))
+        self.digest("001", "101-a", "102-b", "103-c")
+        for j in ("101-a", "102-b", "103-c"):
+            self.put(f"jobs/{j}/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
+        self.lines("jobs/101-a/routing.log", [{"role": "review-ui", "duration_s": 0}])
+        self.lines("jobs/103-c/routing.log", [{"role": "review-ui", "duration_s": 20}])
+        self.assertEqual(self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"], ["103-c"])
 
     def test_cheaper_lane_jobs_skips_sensitive(self):
         self.board(("101-a", "done", "standard", "", "merged"), ("102-b", "done", "standard", "", "merged"),
@@ -8911,6 +8932,7 @@ class ProcessHealthTest(unittest.TestCase):
         for job, path in (("101-a", ui), ("102-b", other), ("103-c", ui)):
             self.put(f"jobs/{job}/spec.md", f"# s\n## Likely files\n- `{path}`\n")
             self.put(f"jobs/{job}/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
+            self.lines(f"jobs/{job}/routing.log", [{"role": "review-ui", "duration_s": 60}])
         self.assertEqual(self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"], ["102-b", "103-c"])
 
     def test_unused_windows_zero_with_tokens(self):
