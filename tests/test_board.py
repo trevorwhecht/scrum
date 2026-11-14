@@ -9132,7 +9132,7 @@ class ReadyUsageTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], [])
         p = self.parent_job()
         self.assertEqual((p["stage"], p["reason"]),
-                         ("running", f"waiting: usage 5h 96% used, resets {at:%H:%M} (allowance 1, 1 live)"))
+                         ("running", f"waiting: no account has room: main usage 5h 96% used, resets {at:%H:%M} (allowance 1, 1 live)"))
         self.write_usage(50)
         self.assertEqual(board.cmd_ready(self.root, self.parent)["ready"], self.kids[:board.MAX_YOUNG_SESSIONS])
         p = self.parent_job()
