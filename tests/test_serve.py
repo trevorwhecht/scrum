@@ -8296,6 +8296,18 @@ class WatchdogIdleParentTest(unittest.TestCase):
         appr.assert_called_once()
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("needs-human", "waiting"))
 
+    def test_wake_waiting_cool_down_wake_job_still_needs_ram(self):
+        self.queue_board({"id": "001-first", "stage": "done"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
+        flag = self.repo / "cooldown"
+        flag.write_text("")
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14", SCRUM_COOLDOWN=str(flag)), \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.serve, "approve_job") as appr:
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        appr.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+
     def test_wake_waiting_holds_child_while_sibling_blocks(self):
         self.queue_board({"id": "001-first", "stage": "done"},
                          {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "wake": "approve 002-second"})
