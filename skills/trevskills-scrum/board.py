@@ -4585,15 +4585,19 @@ def is_test_path(p):
 
 # A holder past review (only approve, merge and deploy remain) no longer holds a slot.
 PAST_REVIEW = {"approve", "merging", "deploying"}
+# A holder that has finished building holds no overlap slot in cmd_ready or resume_blocker (job 865); back in build it holds again.
+POST_BUILD = ("check", "review", "approve", "merging", "deploying")
 
 
-def slot_conflict(k, busy, files, extra=()):
+def slot_conflict(k, busy, files, extra=(), fast=False):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
     (shared_files: a folder shares every file under it), except BIG_SHARED_FILES, which clash only once 2 siblings name one.
     Siblings in PAST_REVIEW stages never hold, and shared test files (is_test_path) never clash. `extra` is the
-    other pool's holders (cmd_ready's outside jobs or in-tree slots): they count toward the BIG_SHARED_FILES limit only."""
+    other pool's holders (cmd_ready's outside jobs or in-tree slots): they count toward the BIG_SHARED_FILES limit only.
+    `fast` (a Lane: fast kid) with readable Likely files of its own is held only by a sharing or parallel=no holder:
+    one with unreadable Likely files no longer clashes."""
     busy = [o for o in busy if o["id"] != k["id"] and o.get("stage") not in PAST_REVIEW]
     if not busy:
         return None
@@ -4601,13 +4605,14 @@ def slot_conflict(k, busy, files, extra=()):
     alone = lambda j: not j.get("parallel") or not files.get(j["id"])  # unknown Likely files = may touch anything
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
-    shared = {o["id"]: set() if alone(o) else
-              {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in busy}
-    extra_shared = [set() if alone(o) or not files.get(o["id"]) else
+    lone = (lambda o: not o.get("parallel")) if fast else alone  # k has files here, so a fast k skips unknown-file holders
+    shared = {o["id"]: set() if lone(o) else
+              {p for p in shared_files(files[k["id"]], files.get(o["id"], set())) if not is_test_path(p)} for o in busy}
+    extra_shared = [set() if lone(o) or not files.get(o["id"]) else
                     {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in extra]
     held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in [*shared.values(), *extra_shared]) >= SHARED_BIG_LIMIT
-    clash = [(o["id"], "runs alone" if alone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
-             for o in busy if alone(o) or any(held(p) for p in shared[o["id"]])]
+    clash = [(o["id"], "runs alone" if lone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
+             for o in busy if lone(o) or any(held(p) for p in shared[o["id"]])]
     return ("; ".join(f"sibling {i} {why}" for i, why in clash), [i for i, _ in clash]) if clash else None
 
 
@@ -4652,7 +4657,8 @@ def parked_bigboy(k, by_id, live, root) -> bool:
 def resume_blocker(root, job_id, live=()):
     """Why a stalled child may not resume now (a Blocker), or None. Applies `ready`'s overlap rules
     (slot_conflict) against its in-progress siblings: the ids in `live` (serve.py's running sessions, which still
-    read needs-human until they write the board) and the non-idle ones with a live session (see below). Reads the board without writing anything."""
+    read needs-human until they write the board) and the non-idle ones with a live session (see below); a sibling in
+    POST_BUILD never blocks, live or not. Reads the board without writing anything."""
     jobs_dir = Path(root) / "jobs"
     jobs = {j["id"]: j for j in read_board(root)["jobs"]}
     job = jobs.get(job_id)
@@ -4668,7 +4674,7 @@ def resume_blocker(root, job_id, live=()):
     maybe = [k for k in kids if k["id"] not in live and k["id"] != job_id and not idle(k) and not k.get("limitResetAt")
              and not parked_bigboy(k, jobs, live, root)]
     alive = session_alive_fn() if any(k.get("stage") in WATCHED for k in maybe) else None  # ps only when needed
-    busy = [k for k in kids if k["id"] != job_id and (k["id"] in live or (
+    busy = [k for k in kids if k["id"] != job_id and k.get("stage") not in POST_BUILD and (k["id"] in live or (
         k in maybe and (alive(k) if k.get("stage") in WATCHED else True)))]
     if not busy:
         return None
@@ -4711,7 +4717,9 @@ def note_queue_gate(root, job_id, gate):
 
 def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
-    `live` ids count as in progress whatever their stage (see resume_blocker). Paused and stalled siblings keep their
+    `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
+    holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
+    slot_conflict's `fast`. Paused and stalled siblings keep their
     overlap slot, and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no; one
     with no spec.md uses holder_files and holds nothing when that is empty. An overlap gate names the file (overlap_gate).
@@ -4761,8 +4769,9 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         slots = [k for k in slots if not parked_bigboy(k, by_id, live, root)]  # a parked BigBoy child runs no session
         parked = lambda j: (j.get("paused") or stalled(j)) and j["stage"] not in ("done", "aborted")
         slots += [k for k in kids if k not in busy and parked(k)]  # a paused or stalled sibling resumes on its files
+        slots = [k for k in slots if k["stage"] not in POST_BUILD]  # built: holds no slot, still counts in busy
         outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
-                   and j["id"] != parent["id"] and not j.get("children")
+                   and j["id"] != parent["id"] and not j.get("children") and j["stage"] not in POST_BUILD
                    and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live)]
         if only:  # the idle claim: only jobs with a live session hold it
             alive = session_alive_fn() if any(j.get("stage") in WATCHED for j in slots + outside) else None
@@ -4804,8 +4813,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                 skipped = [o["id"] for o in k_slots + k_outside
                            if o.get("stage") == "spec" and not shared_files(files[k["id"]], files[o["id"]])]
                 k_slots, k_outside = ([o for o in pool if o["id"] not in skipped] for pool in (k_slots, k_outside))
-            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files, k_outside)  # only: never runs alone
-            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files, k_slots)
+            fast = (header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
+                    or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) == "fast"
+            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files, k_outside, fast)  # only: never runs alone
+            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files, k_slots, fast)
             since = (k.get("overlap_hold") or {}).get("since")
             try:  # a hold older than OVERLAP_HOLD_MAX_S is released: the Merge Conflicts step handles any clash
                 expired = bool(since) and time.time() - datetime.fromisoformat(since).timestamp() > OVERLAP_HOLD_MAX_S

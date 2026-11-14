@@ -1075,8 +1075,8 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual(self.child(c1)["stage"], "spec")
 
     def test_ready_live_outside_still_holds(self):
-        # slot_conflict's PAST_REVIEW never lets a merging holder hold (unchanged), so merging is not asserted as held
-        for stage in ("spec", "build", "check", "review"):
+        # a holder in POST_BUILD holds nothing (job 865, test_ready_releases_holder_past_build)
+        for stage in ("spec", "build"):
             with self.subTest(stage=stage):
                 self.tearDown(); self.setUp()
                 parent, c1, out = self.held_pair(stage)
@@ -1303,6 +1303,107 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         self.assertEqual(self.child(c2)["overlap_hold"]["ids"], [c1])
 
+    def test_ready_releases_holder_past_build(self):
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
+            if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
+        # outside holder sharing src/a.py: held in spec and build, released in every POST_BUILD stage
+        for stage in ("spec", "build", "check", "review", "approve", "merging", "deploying"):
+            with self.subTest(outside=stage):
+                self.tearDown(); self.setUp()
+                parent, c1, out = self.held_pair("build")
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+                self.assertEqual(gates(c1), [f"overlap:{out}:src/a.py"])
+                with board.locked_board(self.root) as b:
+                    board.find(b, out)["stage"] = stage
+                held = stage in ("spec", "build")
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [] if held else [c1])
+                self.assertEqual(gates(c1), [f"overlap:{out}:src/a.py"])  # no new overlap line
+                self.assertEqual("overlap_hold" in self.child(c1), held)
+        # rework: the holder sent back from review to build holds new claims again; c1 keeps its stage
+        board.cmd_set(self.root, out, ["stage=build"])
+        c2 = self.child(parent)["children"][1]
+        with board.locked_board(self.root) as b:
+            board.find(b, c2)["depends_on"] = []  # c2 shares src/b.py with the holder only, never with c1
+        self.spec(c2, "src/b.py")
+        self.spec(out, "src/a.py", "src/b.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.overlap_of(c2), {"ids": [out], "text": f"sibling {out} shares src/b.py"})
+        self.assertEqual(self.child(c1)["stage"], "spec")
+        # sibling: one in review that shares a file holds no child, yet in_progress still counts it
+        self.tearDown(); self.setUp()
+        parent, (a, b2, c) = self.runall(3)
+        for k in (a, b2, c):
+            self.spec(k, "src/shared.py")
+        board.cmd_set(self.root, a, ["stage=build"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        board.cmd_set(self.root, a, ["stage=review"])
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual(out["ready"], [b2])  # c shares with b2, now in spec
+        self.assertEqual(out["in_progress"], 2)
+        # resume_blocker: a stalled child whose only clashing sibling is in review is free to resume
+        board.cmd_set(self.root, b2, self.STALLED, internal=True)
+        board.cmd_set(self.root, c, ["stage=done"])
+        with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True)):
+            self.assertIsNone(board.resume_blocker(self.root, b2))
+            self.assertIsNone(board.resume_blocker(self.root, b2, live={a}))
+            board.cmd_set(self.root, a, ["stage=build"])
+            self.assertEqual(board.resume_blocker(self.root, b2), f"sibling {a} shares src/shared.py")
+
+    def lane_spec(self, job_id, lane, *paths, name="spec.md"):
+        self.write(f"{job_id}/{name}", f"# x\nLane: {lane}\n## Likely files\n" + "".join(f"- `{p}`: why\n" for p in paths)
+                   + "## Assumptions\n- none\n")
+
+    def test_ready_fast_child_skips_unknown_file_holder(self):
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
+            if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
+        def setup(lane, out_files=(), name="spec.md", kid_files=("src/a.py",)):
+            self.tearDown(); self.setUp()
+            (self.root.parent / "src").mkdir(exist_ok=True)
+            out = board.cmd_new(self.root, "Outside")
+            board.cmd_set(self.root, out, ["stage=build"])
+            self.spec(out, *out_files)  # no paths: unreadable Likely files
+            parent = self.plan(self.ticket(1), self.ticket(2, deps="T1", exposure="yes"))
+            c1, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            self.lane_spec(c1, lane, *kid_files, name=name)
+            return parent, c1, out
+        for lane, name, claimed in (("fast", "spec.md", True), ("standard", "spec.md", False),
+                                    ("lilguy", "spec.md", False), ("fast", "feature.md", True)):
+            with self.subTest(outside=lane, file=name):
+                parent, c1, out = setup(lane, name=name)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1] if claimed else [])
+                if not claimed:
+                    self.assertTrue(self.child(c1)["overlap_hold"]["text"].endswith("runs alone"))
+        with self.subTest("a: shares a file"):
+            parent, c1, out = setup("fast", out_files=("src/a.py",))
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+            self.assertEqual(gates(c1), [f"overlap:{out}:src/a.py"])
+        with self.subTest("b: fast child with no readable Likely files"):
+            parent, c1, out = setup("fast", kid_files=())
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+            self.assertEqual(gates(c1), [f"runs_alone:{out}"])
+        # a parallel sibling with no readable Likely files in build
+        for lane, claimed in (("fast", True), ("standard", False)):
+            with self.subTest(sibling=lane):
+                self.tearDown(); self.setUp()
+                parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+                c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+                self.spec(c1)
+                board.cmd_set(self.root, c1, ["stage=build"])
+                self.lane_spec(c2, lane, "src/a.py")
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2] if claimed else [])
+                if not claimed:
+                    self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} runs alone"})
+        with self.subTest("c: parallel=no sibling still holds a fast child"):
+            self.tearDown(); self.setUp()
+            parent = self.plan(self.ticket(1, parallel="no — big"), self.ticket(2),
+                               self.ticket(3, deps="T1, T2", exposure="yes"))
+            c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            self.spec(c1, "src/d.py")
+            board.cmd_set(self.root, c1, ["stage=build"])
+            self.lane_spec(c2, "fast", "src/a.py")
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+            self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} runs alone"})
+
     def test_ready_critical_skips_unbuilt_outside_holder(self):
         (self.root.parent / "src").mkdir(exist_ok=True)  # an in-repo folder, so src/ paths are not foreign
         out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
@@ -1412,7 +1513,8 @@ class BoardTest(unittest.TestCase):
         self.assertIsNotNone(board.slot_conflict({"id": "j2", "parallel": True}, [batch], files))
 
     def test_ready_releases_overlap_once_holder_passed_review(self):
-        for stage, claimed in (("review", []), ("approve", None), ("merging", None), ("deploying", None)):
+        for stage, claimed in (("build", []), ("check", None), ("review", None), ("approve", None), ("merging", None),
+                               ("deploying", None)):
             parent, (c1, c2, c3) = self.three()
             self.spec(c1, "src/a.py")
             self.spec(c2, "src/a.py")
@@ -4898,14 +5000,14 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, b, ["stage=build"])
         self.assertIsNone(board.resume_blocker(self.root, a))
         # (a) shared Likely file.
-        board.cmd_set(self.root, c, ["stage=review"])
+        board.cmd_set(self.root, c, ["stage=build"])
         text = board.resume_blocker(self.root, a)
         self.assertEqual(text, f"sibling {c} shares src/shared.py")
         self.assertEqual(text.ids, [c])
         board.cmd_set(self.root, c, ["stage=done"])
         self.assertIsNone(board.resume_blocker(self.root, a))
         # (b) an in-progress sibling with parallel=no runs alone.
-        board.cmd_set(self.root, d, ["stage=check"])
+        board.cmd_set(self.root, d, ["stage=build"])
         text = board.resume_blocker(self.root, a)
         self.assertEqual((text, text.ids), (f"sibling {d} runs alone", [d]))
         board.cmd_set(self.root, d, ["stage=done"])
@@ -5002,7 +5104,7 @@ class BoardTest(unittest.TestCase):
 
     def test_resume_blocker_alive_watched_sibling_blocks(self):
         a, b = self.shared_kids(2)
-        board.cmd_set(self.root, b, ["stage=review"])
+        board.cmd_set(self.root, b, ["stage=build"])
         with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: job["id"] == b)):
             self.assertEqual(board.resume_blocker(self.root, a), f"sibling {b} shares src/shared.py")
         with mock.patch.object(board, "session_alive_fn", lambda: (lambda job: False)):
