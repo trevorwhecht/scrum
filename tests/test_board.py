@@ -1227,6 +1227,25 @@ class BoardTest(unittest.TestCase):
         self.assertIsNone(board.slot_conflict({"id": "j1", "parallel": True}, [batch], files))
         self.assertIsNotNone(board.slot_conflict({"id": "j2", "parallel": True}, [batch], files))
 
+    def test_slot_conflict_big_file_allows_two(self):
+        B, S, D = "skills/trevskills-scrum/board.py", "skills/trevskills-scrum/serve.py", "skills/trevskills-scrum/dashboard.html"
+        job = lambda i: {"id": i, "parallel": True}
+        files = {"k": {B, S}, "b1": {B, S}, "b2": {B, S}, "d": {D, B}, "kd": {D}, "none": set()}
+        slot = lambda k, *busy: board.slot_conflict(job(k), [job(b) for b in busy], files)
+        self.assertIsNone(slot("k", "b1"))
+        self.assertEqual(slot("k", "b1", "b2"),
+                         (f"sibling b1 shares {B}; sibling b2 shares {B}", ["b1", "b2"]))
+        files["k"], files["b1"], files["b2"] = {S}, {S}, {S}
+        self.assertIsNone(slot("k", "b1"))
+        self.assertEqual(slot("k", "b1", "b2")[1], ["b1", "b2"])
+        self.assertIn(f"shares {S}", slot("k", "b1", "b2")[0])
+        files["k"] = {D, B}
+        self.assertEqual(slot("k", "d"), (f"sibling d shares {D}", ["d"]))  # non-big still clashes alone
+        files["d"], files["b1"], files["b2"] = {D}, {B}, {B}
+        self.assertEqual(slot("k", "d", "b1")[1], ["d"])  # d's non-big clash holds; b1's big share is free
+        self.assertEqual(slot("k", "none", "b1")[1], ["none"])  # runs alone still blocks
+        self.assertEqual(board.slot_conflict({"id": "k", "parallel": False}, [job("b1")], files)[0], "this job runs alone")
+
     def test_chain_lock_acquire_wait_reenter_stale(self):
         parent, _ = self.three()
         lock = self.root / "jobs" / parent / ".chain.lock"
