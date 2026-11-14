@@ -3905,7 +3905,7 @@ SKILL_NAME_RE = re.compile(r"[a-z0-9-]+")
 
 
 def valid_proposal(p):
-    """The proposal with its status, kind and any stored reason (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
+    """The proposal with its status, kind and any stored reason or companion test path (other keys are ignored), or None when a key is missing, a value isn't a string, it changes nothing,
     or a "skill" (a new SKILL.md) isn't an empty old plus frontmatter of at most SKILL_MAX_LINES lines."""
     if isinstance(p, dict) and p.get("kind") == "backlog":  # one queued backlog line: no file, so no target, old or new
         if not isinstance(p.get("backlog"), str) or not p["backlog"].strip():
@@ -3921,9 +3921,10 @@ def valid_proposal(p):
     if kind not in ("edit", "skill", "backlog") or kind == "skill" and (
             p["old"] or not p["new"].startswith("---\n") or len(p["new"].splitlines()) > SKILL_MAX_LINES):
         return None
-    reason = p.get("reason")
+    reason, companion = p.get("reason"), p.get("companion")
     return ({k: p[k] for k in PROPOSAL_KEYS} | {"status": p.get("status", "pending"), "kind": kind}
-            | ({"backlog": p["backlog"]} if kind == "backlog" else {}) | ({"reason": reason} if isinstance(reason, str) else {}))
+            | ({"backlog": p["backlog"]} if kind == "backlog" else {}) | ({"reason": reason} if isinstance(reason, str) else {})
+            | ({"companion": companion} if isinstance(companion, str) else {}))
 
 
 def read_proposals(path):
@@ -4103,8 +4104,8 @@ def digest_write_global(prop: dict) -> str | None:
 
 
 def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str, str | None]],
-                        from_status: str = "pending") -> None:
-    """Set each id's status (and reason, when given) while it is still from_status, then trim the digest once nothing
+                        from_status: str = "pending", companions: dict[str, str] | None = None) -> None:
+    """Set each id's status (and reason, when given, and companion test path, when companions has one) while it is still from_status, then trim the digest once nothing
     is pending. The caller holds DIGEST_LOCK."""
     d = root / "digests" / digest_id
     data, raw = read_proposals(d / "proposals.json")
@@ -4113,6 +4114,8 @@ def digest_set_statuses(root: Path, digest_id: str, updates: dict[str, tuple[str
             entry["status"], reason = updates[v["id"]]
             if reason is not None:
                 entry["reason"] = reason
+            if companions and v["id"] in companions:
+                entry["companion"] = companions[v["id"]]
     tmp = d / "proposals.json.tmp"
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, d / "proposals.json")
@@ -4186,10 +4189,11 @@ def digest_failing_test(repo):
     return m.group(1) if m else None
 
 
-def digest_mark_applied(root, digest_id, pids, from_status="pending"):
-    """Set these still-from_status proposals to applied; once nothing is pending the digest is trimmed."""
+def digest_mark_applied(root, digest_id, pids, from_status="pending", companions=None):
+    """Set these still-from_status proposals to applied (with the companion test path of each in companions, in the same
+    write); once nothing is pending the digest is trimmed."""
     with DIGEST_LOCK:
-        digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids}, from_status=from_status)
+        digest_set_statuses(root, digest_id, {pid: ("applied", None) for pid in pids}, from_status=from_status, companions=companions)
 
 
 def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | None = None, feature: str | None = None,
@@ -4202,9 +4206,13 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
     as applied, with the job done as `merged, not live: <why>`. title (the job and commit subject) and feature
     (feature.md) default to the Apply digest wording; mark_applied=False leaves statuses alone; from_status is the status
     the applied proposals are flipped from. When the contract tests fail after an edit, the same old to new swap is tried
-    in the one tests/*.py file holding the old text once, and lands in the same commit if the tests then pass."""
+    in the one tests/*.py file holding the old text once, and lands in the same commit if the tests then pass; each
+    applied entry carries that file as `companion`. A proposal carrying a `companion` (a revert) swaps old to new in that
+    tests/*.py file first, which must hold the old text once, whether or not the tests would fail without it."""
     repo = repo_of(props[0]["target"])[0]
-    entry = lambda p, why=None: {k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
+    comp = {}  # proposal id -> repo-relative companion test file
+    entry = lambda p, why=None: ({k: p[k] for k in ("id", "target", "why")} | ({"reason": why} if why else {})
+                                 | ({"companion": comp[p["id"]]} if not why and p["id"] in comp else {}))
     first = lambda r: next((l.strip() for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()), f"git exited {r.returncode}")
     if why := digest_apply_ready(repo):
         return [], [entry(p, why) for p in props], None
@@ -4235,13 +4243,36 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
             if (n := text.count(p["old"])) != 1:
                 queued.append(entry(p, f"old text found {n} times"))
                 continue
+            extra = None
+            if isinstance(c := p.get("companion"), str):  # stored in untrusted proposals.json: tests/*.py directly under wt only
+                tf = (wt_real / c).resolve()
+                if Path(c).parent != Path("tests") or not c.endswith(".py") or tf.parent != wt_real / "tests":
+                    queued.append(entry(p, f"companion {c} is not a tests/*.py file"))
+                    continue
+                try:
+                    tf_orig = tf.read_bytes()
+                    n = tf_orig.decode().count(p["old"])
+                except (OSError, UnicodeDecodeError):
+                    n = 0
+                if n != 1:
+                    queued.append(entry(p, f"companion {c}: old text found {n} times"))
+                    continue
+                extra = tf
             try:
                 target.write_bytes(text.replace(p["old"], p["new"], 1).encode())
+                if extra:
+                    extra.write_bytes(tf_orig.decode().replace(p["old"], p["new"], 1).encode())
             except OSError as e:
+                target.write_bytes(orig)
                 queued.append(entry(p, f"write failed: {e}"))
                 continue
-            extra = None
             if not digest_contract_ok(wt):
+                if extra:  # an explicit companion: no search, the swap is already in
+                    name = digest_failing_test(wt)
+                    target.write_bytes(orig)
+                    extra.write_bytes(tf_orig)
+                    queued.append(entry(p, f"contract tests failed: {name}" if name else "contract tests failed"))
+                    continue
                 holders = []
                 for tf in sorted((wt_real / "tests").glob("*.py")):
                     tf = tf.resolve()  # same symlink guard as target
@@ -4269,7 +4300,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
                     continue
             done.append((p, rel))
             if extra is not None:
-                done.append((p, str(extra.relative_to(wt_real))))
+                done.append((p, comp.setdefault(p["id"], str(extra.relative_to(wt_real)))))
         order = {p["id"]: i for i, p in enumerate(props)}
         if not done:
             return [], queued, None
@@ -4306,7 +4337,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
         elif git_run(repo, "merge", "-q", "--ff-only", f"origin/{branch}").returncode:
             not_live = "fast-forward failed"
         if mark_applied:
-            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done}, from_status)
+            digest_mark_applied(root, digest_id, {p["id"] for p, _ in done}, from_status, comp)
         board.cmd_set(scrum, job_id, ["stage=done"] + ([f"reason=merged, not live: {not_live}"] if not_live else []))
         return [entry(p) for p in {p["id"]: p for p, _ in done}.values()], queued, job_id
     finally:
@@ -4316,7 +4347,7 @@ def digest_apply(root: Path, digest_id: str, props: list[dict], title: str | Non
 
 def digest_revert(root: Path, digest_id: str, pid: str) -> tuple[int, dict]:
     """Undo one applied edit proposal through the path that applied it: a repo file by digest_apply (its own lilguy job
-    and commit), any other file by digest_write_global (after a backup). Any failure is a 409 and leaves it applied."""
+    and commit, which also swaps back the stored companion test file), any other file by digest_write_global (after a backup). Any failure is a 409 and leaves it applied."""
     entry = None
     with DIGEST_LOCK:
         if board.DIGEST_RE.fullmatch(digest_id):
