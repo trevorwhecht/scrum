@@ -7964,11 +7964,10 @@ class ResumeFirstTest(unittest.TestCase):
         self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"])
         self.assertEqual(self.parent(root), ("running", None))
         root = self.tree(bigboy, [("002-w", "waiting", ["src/z/y.py"], {}), ("003-w", "waiting", ["src/q.py"], {})])
-        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"], "the stalled 010-st holds only 002-w")
-        self.assertEqual(self.job(root, "002-w")["stage"], "waiting")
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w", "003-w"], "a stalled outside job holds nothing")
         root = self.tree(bigboy, [("002-w", "waiting", ["src/x.py"], {}), ("003-w", "waiting", ["src/z/y.py"], {})])
-        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
-        self.assertEqual(self.parent(root), ("running", "waiting: files overlap 009-bk, 010-st"))
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"], "only the live 009-bk holds")
+        self.assertEqual(self.parent(root), ("running", None))
 
     def test_outside_holder_unknown_files_holds_all(self):
         root = self.tree([("007-solo", "build", [], {})], [("002-w", "waiting", ["src/a.py"], {})])  # a spec, no Likely files
