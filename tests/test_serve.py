@@ -843,7 +843,10 @@ class ServeTest(unittest.TestCase):
         ids = [self.gate_job(f"Swap gate {i}") for i in range(3)]
         start = self.gate_job("Other project start", root=other, project="other", stage="spec")
         ps, fake = self.launch_ps()
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps)), \
+        swap_log = Path(self.tmp.name) / "swap-gate.json"
+        swap_log.write_text(json.dumps([[time.time() - 100, 10.0]]))  # an old low reading: swap 20 is growth
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="20", SCRUM_PS=str(ps),
+                             SCRUM_SWAP_LOG=str(swap_log)), \
                 mock.patch.object(b, "spawn", side_effect=fake) as spawn:
             out = [s.spawn("repo", self.root, i, "approve", f"/trevskills-scrum approve {i}") for i in ids]
             out.append(s.spawn("other", other, start, "start", f"/trevskills-scrum start {start}"))
