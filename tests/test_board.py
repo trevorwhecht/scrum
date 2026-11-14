@@ -3745,7 +3745,29 @@ class BoardTest(unittest.TestCase):
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
                                "Claims while CPU load over 500%: 3\n"
-                               "Non-focus work while focus had claimable work: 2 min (focus: app)\n")
+                               "Non-focus work while focus had claimable work: 2 min (focus: app)\n"
+                               "Claims by account: unknown 4\n")
+
+    def test_pulse_claims_by_account(self):
+        """Job 850: every claim in the window by its board job's account, whatever the cool-down or load."""
+        s, accs = 1_700_000_000, Path(self.tmp.name) / "accs"
+        (accs / "owa").mkdir(parents=True)
+        pr = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}
+        tick = lambda t, app, lib, **x: {"t": t, "sessions": 1, "cooldown": False, "cpu_load": 100,
+                                         "projects": {"app": pr(app), "lib": pr(lib)}, **x}
+        env = {"SCRUM_ACCOUNTS": json.dumps([["main", str(accs / "main"), None], ["owa", str(accs / "owa"), None]])}
+        with mock.patch.dict(os.environ, env):
+            text, _ = self.pulse_digest([
+                tick(s, 10, 3), tick(s + 60, 13, 3),  # app 11 12 13: plain claims, no cool-down, no load
+                tick(s + 120, 14, 5, cooldown=True, cpu_load=600)], boards={  # app 14, lib 4 5
+                    "app": [{"id": "011-a", "account": "owa"}, {"id": "012-b"}, {"id": "013-c", "account": "main"},
+                            {"id": "014-d", "account": "owa", "started_by": "hand"}],
+                    "lib": [{"id": "004-e", "account": "owa", "started_by": "runall"}]})  # lib 5 not on the board
+        self.assertTrue(text.endswith("\nClaims by account: main 2, owa 2, unknown 1\n"), text)
+        with mock.patch.dict(os.environ, env):
+            self.tearDown(); self.setUp()
+            text = self.pulse_digest([tick(s, 10, 3), tick(s + 60, 10, 3)])[0]
+        self.assertTrue(text.endswith("\nClaims by account: none\n"), text)
 
     def test_pulse_idle_splits_machine_guard(self):
         """Job 848: an idle minute whose pulse line names a `guard` gets its own line and breaks the idle stretch."""
