@@ -2675,7 +2675,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(len(commands), (2, 3), span)
             for command in commands:
                 self.assertTrue(board.ASK_COMMAND_RE.fullmatch(command), f"{command!r} in {span}")
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
             self.assertEqual(span.count("--recommend"), 1, span)
         text = self.rules()
         self.assertIn("**Every stop is a closed question.** A job goes needs-human only through `B ask`", text)
@@ -2713,7 +2713,7 @@ class ContractTest(unittest.TestCase):
             key = words[words.index("--title") + 1]
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
-            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot')$")
+            self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
         self.assertEqual(len(board.STOP_TITLES), 15)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
@@ -3381,6 +3381,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                       "request. Run brew install gh, then gh auth login, then press Try again.\" --a \"Try again=approve $ID\"",
                       merge)
         self.assertLess(merge.index("brew install gh"), merge.index("gh auth login"))
+
+    def test_merge_ci_billing_refusal_stalls_on_second_refusal(self):
+        text = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        step4 = self.section(text, "4. **Checks.**", "\n5. **Conflicts.**")
+        refusal = next(l for l in step4.splitlines() if "failed account payments or a spending limit" in l)
+        self.assertIn("B ask $ID \"GitHub refused to start the checks because of failed account payments or a spending "
+                      "limit; the job waits until CI runs again.\" --a \"Carry on=resume $ID\" --b \"Remove this job=abort "
+                      "$ID --cascade\" --title CHECKS_FAILING --recommend a 'it is not a code failure; the board resumes it "
+                      "when CI runs again'", refusal)
+        ask = refusal[refusal.index("`B ask"):]
+        self.assertNotIn("--kind", ask[:ask.index("`", 1)], "no unblocker kind on the billing ask")
+        self.assertNotIn("continue as for no checks reported, since the Check gate", text)
 
 
     def test_child_start_silences_notifier(self):
