@@ -1,4 +1,5 @@
-import json, os, sys, tempfile, unittest
+import io, json, os, sys, tempfile, unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,10 +11,11 @@ class RegistryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name).resolve()
-        os.environ["SCRUM_REGISTRY"] = str(self.base / "registry" / "projects.json")
+        env = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "registry" / "projects.json"))
+        env.start()
+        self.addCleanup(env.stop)  # puts back the SCRUM_REGISTRY other test modules set at import (job 903)
 
     def tearDown(self):
-        os.environ.pop("SCRUM_REGISTRY", None)
         self.tmp.cleanup()
 
     def repo(self, *parts):
@@ -107,6 +109,17 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(board.migrate_focus(), [])
         self.assertEqual(self.stamp(), before, "second call writes nothing")
         self.assertEqual(list(board.projects()), ["c", "a", "b"])
+
+
+class RegistryEnvTest(unittest.TestCase):
+    def test_teardown_restores_registry_env(self):
+        """Job 903: RegistryTest put back the SCRUM_REGISTRY a later module set at import, so its watchdog ticks never
+        wrote the real ~/.claude/trevskills-scrum/pulse.log."""
+        with mock.patch.dict(os.environ, SCRUM_REGISTRY="/sentinel/projects.json"):
+            result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(
+                RegistryTest("test_register_is_idempotent_and_names_by_folder"))
+            self.assertTrue(result.wasSuccessful())
+            self.assertEqual(os.environ.get("SCRUM_REGISTRY"), "/sentinel/projects.json")
 
 
 if __name__ == "__main__":

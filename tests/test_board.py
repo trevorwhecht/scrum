@@ -4314,11 +4314,34 @@ class BoardTest(unittest.TestCase):
             (reg / "projects.json").write_text(json.dumps([str(reg / n) for n in boards]))
         if lines is not None:
             (reg / "pulse.log").write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
-        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json")}):
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(reg / "projects.json"), "SCRUM_PULSE": str(reg / "pulse.log")}):
             out = run_board("--dir", str(self.root), "digest-start")
         self.assertEqual(out.returncode, 0, out.stderr)
         d = json.loads(out.stdout)["id"]
         return (self.root / "digests" / d / "pulse.md").read_text(), out.stderr
+
+    def test_pulse_path_env_override(self):
+        """Job 903: SCRUM_PULSE moves pulse.log; unset or empty keeps it beside projects.json."""
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": "/r/projects.json", "SCRUM_PULSE": "/t/p.log"}):
+            self.assertEqual(board.pulse_path(), Path("/t/p.log"))
+            os.environ["SCRUM_PULSE"] = ""
+            self.assertEqual(board.pulse_path(), Path("/r/pulse.log"))
+            del os.environ["SCRUM_PULSE"]
+            self.assertEqual(board.pulse_path(), Path("/r/pulse.log"))
+
+    def test_pulse_ignores_unregistered_projects(self):
+        """Job 903: a test run's fixture project lines (not in projects.json) add no idle minutes and no claims."""
+        s = 1_700_000_000
+        p = lambda top: {"claimable": 1, "waiting": 0, "busy": False, "top": top, "auto": True}
+        text, _ = self.pulse_digest([
+            {"t": s, "sessions": 0, "cooldown": False, "focus": "app", "projects": {"app": p(1), "a": p(1)}},
+            {"t": s + 60, "sessions": 0, "cooldown": False, "focus": "app", "projects": {"app": p(1), "a": p(3)}},
+            {"t": s + 120, "sessions": 0, "cooldown": False, "focus": "a", "projects": {"a": p(5)}},
+            {"t": s + 180, "sessions": 0, "cooldown": False, "focus": "a", "projects": {"a": p(7)}},
+        ], since=s, boards={"app": []})
+        self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\n", text)
+        self.assertIn("Idle paused: Auto continue off: 0 min\n", text)
+        self.assertIn("Claims by account: none\n", text)
 
     def test_digest_start_writes_pulse(self):
         s = 1_700_000_000

@@ -1391,8 +1391,9 @@ PULSE_KEEP_SECS = 14 * 86400  # serve.py pulse_tick keeps this much of pulse.log
 
 
 def pulse_path():
-    """The serve.py watchdog's pulse log (one JSON line a tick), beside projects.json (SCRUM_REGISTRY moves both)."""
-    return registry_path().parent / "pulse.log"
+    """The serve.py watchdog's pulse log (one JSON line a tick): $SCRUM_PULSE when set and non-empty, else beside
+    projects.json (SCRUM_REGISTRY moves both)."""
+    return Path(os.environ.get("SCRUM_PULSE") or registry_path().parent / "pulse.log")
 
 
 def _pulse_since(root, digest_id):
@@ -1443,7 +1444,9 @@ def write_pulse(root, digest_id):
     jobs at a line whose cpu_load is over 500 that no `started` entry names: hand, unregistered (project not in
     projects()) or other; a registered project's job off the board is skipped), minutes the focus project had
     claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board
-    job's `account` (none: the first account; job not on the board: unknown), in accounts() order."""
+    job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
+    readings count only for projects in projects() (test fixtures never inflate a total; Other starts still names an
+    unregistered one); no filter when it is empty."""
     since = _pulse_since(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
@@ -1452,8 +1455,10 @@ def write_pulse(root, digest_id):
         out.append("No pulse lines since the last digest.")
     else:
         iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="minutes")
-        projs = lambda l: {k: v for k, v in (l.get("projects") if isinstance(l.get("projects"), dict) else {}).items()
-                           if isinstance(v, dict)}
+        known = set(projects())
+        raw = lambda l: {k: v for k, v in (l.get("projects") if isinstance(l.get("projects"), dict) else {}).items()
+                         if isinstance(v, dict)}
+        projs = lambda l: {k: v for k, v in raw(l).items() if not known or k in known}  # test fixtures count nothing
         pos = lambda v: is_num(v) and v > 0
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
         gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
@@ -1501,11 +1506,11 @@ def write_pulse(root, digest_id):
                         hot.setdefault(e["project"], []).append(num(e["job"]))
         claimed, handed, boards, by_acc = {}, {}, {}, {}
         others = {"hand": {}, "unregistered": {}, "other": {}}
-        names, reg = [a.name for a in accounts()], projects()
+        names = [a.name for a in accounts()]
         for a, b in zip(lines, lines[1:]):
             if b["t"] - a["t"] > PULSE_TICK_CAP_S:
                 continue  # a gap: the rise may span a reset or pruned board, so it counts no claim
-            pa, pb = projs(a), projs(b)
+            pa, pb = raw(a), raw(b)  # unfiltered, so Other starts can name an unregistered project
             for name, p in pb.items():
                 was, top = pa.get(name, {}).get("top"), p.get("top")
                 if name in pa and was is None:
@@ -1516,9 +1521,11 @@ def write_pulse(root, digest_id):
                     job = _board_job(boards, name, n)
                     hand = (job or {}).get("started_by") == "hand"
                     if is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started:
-                        group = "unregistered" if name not in reg else None if job is None else "hand" if hand else "other"
+                        group = "unregistered" if name not in known else None if job is None else "hand" if hand else "other"
                         if group:  # a registered project's job off the board: pruned or reset, no start to name
                             others[group].setdefault(name, []).append(str(n))
+                    if known and name not in known:
+                        continue  # an unregistered project's rise is no claim
                     if job is not None and b.get("cooldown") is True:
                         (handed if hand else claimed).setdefault(name, []).append(str(n))
                     if hand:
