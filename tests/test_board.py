@@ -7357,6 +7357,23 @@ class RenderPathsTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             board.render_paths(self.repo, "-x", self.pfile)
 
+    def test_render_paths_expands_layout_prefix(self):
+        self.assertEqual(self.commit("src/app/admin/page.tsx", "src/app/admin/users/page.tsx",
+                                     "src/app/admin/[id]/page.tsx", "src/app/admin/(g)/@slot/page.tsx",
+                                     "src/app/administer/page.tsx")["paths"], ["/admin", "/admin/users", "/administer"])
+        self.git("branch", "-f", "main", "HEAD")
+        self.assertEqual(self.commit("src/app/admin/layout.tsx"),
+                         {"paths": ["/admin", "/admin/users"], "skipped": ["/admin/[id]: dynamic route"]})
+        self.git("branch", "-f", "main", "HEAD")
+        self.assertEqual(self.commit("src/app/empty/layout.tsx"), {"paths": ["/empty"], "skipped": []})
+        self.git("branch", "-f", "main", "HEAD")
+        self.commit(*[f"src/app/admin/p{i}/page.tsx" for i in range(1, 8)])
+        self.git("branch", "-f", "main", "HEAD")
+        out = self.commit("src/app/admin/layout.tsx")
+        self.assertEqual(out["paths"], ["/admin", "/admin/p1", "/admin/p2", "/admin/p3", "/admin/p4", "/admin/p5",
+                                        "/admin/p6", "/admin/p7"])
+        self.assertEqual(out["skipped"], ["/admin/[id]: dynamic route", "/admin/users: over the 8-page cap"])
+
     def test_render_paths_falls_back_to_root(self):
         self.assertEqual(self.commit("src/components/Orphan.tsx"), {"paths": ["/"], "skipped": []})
         self.assertEqual(self.commit("src/app/order/[id]/page.tsx"),
@@ -7451,6 +7468,15 @@ class UiSweepTargetsTest(unittest.TestCase):
              "why": "changed src/app/admin/views/Grid.tsx"},
             {"path": "/pricing", "jobs": ["011-price", "013-grid"], "marked": False,
              "why": "changed src/components/Price.tsx, src/app/admin/views/Grid.tsx"}]})
+
+    def test_layout_prefix_expands(self):
+        self.commit("pages", "src/app/admin/page.tsx", "src/app/admin/users/page.tsx", "src/app/admin/@modal/page.tsx")
+        since = self.commit("start")
+        self.commit("Admin shell (#11)", "src/app/admin/layout.tsx")
+        self.assertEqual(board.ui_sweep_targets(self.repo, self.root, since, "HEAD")["targets"], [
+            {"path": "/admin", "jobs": ["011-price"], "marked": False, "why": "changed src/app/admin/layout.tsx"},
+            {"path": "/admin/users", "jobs": ["011-price"], "marked": False,
+             "why": "changed src/app/admin/layout.tsx"}])
 
     def test_docs_only_and_dash(self):
         since = self.commit("start")

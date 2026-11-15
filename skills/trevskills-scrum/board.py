@@ -2924,6 +2924,24 @@ def cmd_e2e_specs(root, job_id) -> dict:
     return e2e_specs(job["worktree"], job["base"], Path(root) / "project.md")
 
 
+def _page_routes(wt) -> set[str]:
+    """The routes (_route_of) of wt's tracked app/ page.* files."""
+    try:
+        tracked = _git(Path(wt), "ls-files").decode(errors="replace").splitlines()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return set()
+    return {_route_of(f)[0] for f in tracked if "app" in f.split("/")[:-1] and f.rsplit("/", 1)[-1].split(".")[0] ==
+            "page" and SOURCE_RE.search(f) and "node_modules/" not in f}
+
+
+def concrete_routes(route, prefix, pages) -> set[str]:
+    """The page routes a (route, prefix) pair covers: for a prefix (a layout), every route in pages at or below it;
+    else, or when no page lies there, the route itself."""
+    if not prefix:
+        return {route}
+    return {r for r in pages if r == route or r.startswith(route.rstrip("/") + "/")} or {route}
+
+
 RENDER_CAP = 8  # pages per shared review render (lanes/review.md step 2); the rest fall back to the reviewers
 
 
@@ -2943,7 +2961,8 @@ def render_paths(wt, base: str, project_file) -> dict:
     ui = sorted(f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs))
     if not ui:
         return {"paths": [], "skipped": []}
-    routes = sorted({r for pairs in changed_routes(wt, ui).values() for r, _ in pairs})
+    pages = _page_routes(wt)
+    routes = sorted({c for pairs in changed_routes(wt, ui).values() for r in pairs for c in concrete_routes(*r, pages)})
     skipped = [f"{r}: dynamic route" for r in routes if "[" in r]
     static = [r for r in routes if "[" not in r]
     skipped += [f"{r}: over the {RENDER_CAP}-page cap" for r in static[RENDER_CAP:]]
@@ -3008,10 +3027,11 @@ def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
         if ui:
             changed.append((label, ui))
     routes = changed_routes(repo, sorted({f for _, ui in changed for f in ui})) if changed else {}
+    pages = _page_routes(repo) if changed else set()
     plain = {}
     for label, ui in changed:
         for f in ui:
-            for path in sorted({r for r, _ in routes.get(f) or ()}) or ["/"]:
+            for path in sorted({c for r in routes.get(f) or () for c in concrete_routes(*r, pages)}) or ["/"]:
                 t = marked.get(path) or plain.setdefault(path, {"path": path, "jobs": [], "marked": False, "files": []})
                 t["jobs"] += [label] if label not in t["jobs"] else []
                 if not t["marked"] and f not in t["files"]:
