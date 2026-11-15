@@ -1,5 +1,5 @@
 """render.py: the shared review render (job 652). Headless Chrome over a stdlib CDP websocket client."""
-import io, json, os, sys, tempfile, threading, unittest
+import io, json, os, sys, tempfile, threading, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,15 +11,30 @@ import render  # noqa: E402
 
 PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')</script>"
 SENTINEL = "s3ntinel-cookie-value-652"
+FETCH_PAGE = b"<!doctype html><title>f</title><script>fetch('/slow').then(() => console.error('fetched'))</script>"
+HUNG_PAGE = b"<!doctype html><title>h</title><script>fetch('/hang')</script>"
+REDIRECTS = {"/q?view=leads": "/q?view=orders", "/a": "/other", "/t/": "/t"}
 
 
 class Page(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.cookies.append(self.headers.get("Cookie", ""))
+        if self.path in REDIRECTS:
+            self.send_response(302)
+            self.send_header("Location", REDIRECTS[self.path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/slow":
+            time.sleep(2)
+        elif self.path == "/hang":
+            self.server.release.wait(30)  # held open until the test ends
+            return
+        body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE}.get(self.path, PAGE)
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
-        self.wfile.write(PAGE)
+        self.wfile.write(body)
 
     def log_message(self, *a):
         pass
@@ -84,9 +99,11 @@ class RenderChromeTest(unittest.TestCase):
         self.out = Path(self.tmp.name) / "render"
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Page)
         self.srv.cookies = []
+        self.srv.release = threading.Event()
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
+        self.addCleanup(self.srv.release.set)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
     def test_renders_local_page(self):
@@ -123,6 +140,42 @@ class RenderChromeTest(unittest.TestCase):
         for blob in [out, err] + [p.read_bytes().decode("latin-1") for p in self.out.iterdir()]:
             self.assertNotIn(SENTINEL, blob)
             self.assertNotIn("session-652", blob)
+
+    def test_waits_for_network_idle(self):
+        code, _, err = run_main([self.url, str(self.out), "/fetch"])
+        self.assertEqual(code, 0, err)
+        lines = (self.out / "console.log").read_text().splitlines()
+        self.assertIn("/fetch 390 error: fetched", lines)
+        self.assertIn("/fetch 1440 error: fetched", lines)
+
+    def test_settle_cap_bounds_hung_request(self):
+        load, took = render._load, []
+
+        def timed(*a):
+            t0 = time.monotonic()
+            try:
+                return load(*a)
+            finally:
+                took.append(time.monotonic() - t0)
+
+        with mock.patch.object(render, "SETTLE_CAP", 2), mock.patch.object(render, "_load", timed):
+            code, _, err = run_main([self.url, str(self.out), "/hung"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(took), 2)
+        for t in took:  # each width stops at the 2 s cap, well before the 10 s default
+            self.assertGreaterEqual(t, 2)
+            self.assertLess(t, 8)
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual((page["status"], page["shots"]), ("ok", ["hung-390.png", "hung-1440.png"]))
+
+    def test_redirect_compares_path_and_query(self):
+        paths = ["/p?view=leads", "/q?view=leads", "/a", "/t/"]
+        code, _, err = run_main([self.url, str(self.out), *paths])
+        self.assertEqual(code, 0, err)
+        pages = json.loads((self.out / "manifest.json").read_text())["pages"]
+        self.assertEqual([(p["path"], p["status"]) for p in pages],
+                         [("/p?view=leads", "ok"), ("/q?view=leads", "redirected"), ("/a", "redirected"),
+                          ("/t/", "ok")])
 
 
 if __name__ == "__main__":

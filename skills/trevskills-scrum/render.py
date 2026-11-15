@@ -22,6 +22,8 @@ WIDTHS = ((390, True), (1440, False))
 HEIGHT = 900
 LOAD_CAP = 60  # seconds per page load
 BUDGET = 240  # seconds for the whole run, under lanes/review.md's 300 s Bash timeout
+QUIET = 1  # seconds with no request in flight, started or finished, before a loaded page is shot
+SETTLE_CAP = 10  # seconds after the load event at most, so a request that never ends cannot stall the run
 OUR_FILES = ("manifest.json", "console.log")
 COOKIE_KEYS = ("name", "value", "url", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
 
@@ -234,13 +236,20 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
     nav = cdp.call("Page.navigate", {"url": url})
     frame, res = nav.get("frameId"), {"status": "ok", "http_status": None, "final_url": None, "errors": 0}
     end, loaded = min(time.monotonic() + LOAD_CAP, deadline), None
+    inflight, last = set(), time.monotonic()  # requestIds in flight; time of the last network change
 
     def handle(ev):
-        nonlocal loaded
+        nonlocal loaded, last
         m, p = ev.get("method"), ev.get("params", {})
         line = None
         if m == "Page.loadEventFired" and loaded is None:
-            loaded = time.monotonic()
+            loaded = last = time.monotonic()
+        elif m == "Network.requestWillBeSent":
+            inflight.add(p.get("requestId"))
+            last = time.monotonic()
+        elif m in ("Network.loadingFinished", "Network.loadingFailed"):
+            inflight.discard(p.get("requestId"))
+            last = time.monotonic()
         elif m == "Network.responseReceived" and p.get("type") == "Document" and p.get("frameId") == frame:
             res["http_status"] = p.get("response", {}).get("status")
         elif m == "Runtime.consoleAPICalled" and p.get("type") in ("error", "warning"):
@@ -256,7 +265,8 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
 
     while True:
         now = time.monotonic()
-        stop = loaded + 1 if loaded is not None else end
+        stop = end if loaded is None else min(loaded + SETTLE_CAP, deadline,
+                                              loaded + SETTLE_CAP if inflight else last + QUIET)
         if now >= stop:
             break
         if (ev := cdp.event(stop - now)) is not None:
@@ -268,9 +278,15 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
                                 timeout=10).get("result", {}).get("value")
     if res["http_status"] is not None and res["http_status"] >= 400:
         res["status"] = "http_error"
-    elif (urlparse(res["final_url"] or "").path.rstrip("/") or "/") != (path.rstrip("/") or "/"):
+    elif _route(res["final_url"] or "") != _route(path):
         res["status"] = "redirected"
     return res
+
+
+def _route(url: str) -> tuple[str, str]:
+    """(path without a trailing /, query) of url; the fragment is ignored."""
+    u = urlparse(url)
+    return u.path.rstrip("/") or "/", u.query
 
 
 RANK = {"ok": 0, "redirected": 1, "http_error": 2, "timeout": 3}

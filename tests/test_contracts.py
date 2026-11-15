@@ -2531,7 +2531,8 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, para, phrase)
         lane = (SKILL_DIR / "lanes" / "uisweep.md").read_text()
         for phrase in ("SWEEP_DIR=", "- Unrendered: <path>", "B ui-sweep-record", "RENDER_CAP", "--cookies",
-                       "**Shared dev server**", "never 8765 or 3001", "on every outcome"):
+                       "**Shared dev server**", "never 8765 or 3001", "on every outcome",
+                       "- Unrendered: <path> — needs customer session"):
             self.assertIn(phrase, lane, phrase)
         self.assertLess(lane.index("render.py"), lane.index("Spawn `scrum-review-ui`"))
         self.assertLess(lane.index("Spawn `scrum-review-ui`"), lane.index("Run `B ui-sweep-record"))
