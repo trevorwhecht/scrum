@@ -1936,7 +1936,6 @@ HEALTH_LIMITS = {"stops_per_job": 0.5, "resume_abort_stops": 0, "waiting_on_job_
                  "overburned_windows": 0, "not_shipped": 0}
 HEALTH_UNUSED_PCT = 15  # a window left more than this % unused at reset
 HEALTH_EARLY_90_SECS = 3600  # a window that reached 90% more than this long before reset burned too early
-HEALTH_MACHINE_LOAD_RE = re.compile(r"waiting: (?:CPU |swap |usage |no account has room)")  # machine_ok / Allowance.reason waits that clear alone
 HEALTH_WAITING_RE = re.compile(r"(?i)blocked on sibling|waiting (?:on|for) (?:job |another job|\d{3})")
 HEALTH_UNREADABLE_RE = re.compile(r"[\w.-]*/[\w.-]+\.[A-Za-z]{1,5}\b|\brule \d+\b", re.I)
 HEALTH_STOP_KINDS = ("ask", "stall", "machine", "refused", "bigboy")
@@ -1979,17 +1978,21 @@ def cmd_process_health(root, digest_id: str) -> dict:
         raise SystemExit(f"no digest {digest_id!r}")
     listed = [l.strip() for l in (d / "jobs.txt").read_text().splitlines() if ID_RE.match(l.strip())]
     claimed = set(listed)
-    board = {j["id"]: j for j in read_board(root)["jobs"] if isinstance(j, dict) and str(j.get("id")) in claimed}
+    every = {j["id"]: j for j in read_board(root)["jobs"] if isinstance(j, dict) and "id" in j}
+    board = {i: j for i, j in every.items() if str(i) in claimed}
     hits = {name: [] for name in HEALTH_LIMITS}  # one entry per counted line, job or window
+    last = {}  # job -> kind of its last counted stop line: a stall right after a stall is the same episode
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
         if q.get("auto") is True:  # cleared without Trevor (log_stop auto): never a stop
             continue
         if str(job) not in claimed or not (kind in HEALTH_STOP_KINDS or "question" in q and kind is None):
             continue
-        if kind == "machine" and HEALTH_MACHINE_LOAD_RE.match(str(q.get("reason") or "")):
-            continue  # clears on its own, like an auto line
-        hits["stops_per_job"].append(job)
+        if kind == "machine":
+            continue  # every machine wait clears on its own (serve.py, cmd_ready), like an auto line
+        if not (kind == "stall" == last.get(job)):
+            hits["stops_per_job"].append(job)
+        last[job] = kind
         if HEALTH_WAITING_RE.search(str(q.get("reason") or q.get("question") or "")):
             hits["waiting_on_job_stops"].append(job)
         if kind not in (None, "ask"):
@@ -2009,6 +2012,9 @@ def cmd_process_health(root, digest_id: str) -> dict:
                 and e.get("excluded") is not True:  # the pipeline-fit row's own fit; no second heuristic here
             if e.get("lane") == "fast" and _lilguy_refuses(root / "jobs" / str(e["id"])):
                 continue  # lilguy-fit would have refused it, so fast was the cheapest lane it could get
+            parent = board.get(e["id"], {}).get("parent")
+            if parent and every.get(parent, {}).get("lane") != "runall":
+                continue  # a fix child of a non-runall (or unknown) parent never reaches Lilguy
             hits["cheaper_lane_jobs"].append(e["id"])
     globs, seconds = ui_globs(root), 0
     for job_id in listed:
