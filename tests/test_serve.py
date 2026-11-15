@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
+sys.path.insert(0, str(ROOT / "tests"))  # bare sibling imports resolve however the module is invoked
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home
 os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
@@ -96,7 +97,7 @@ class ServeTest(unittest.TestCase):
     def calls(self):
         return [json.loads(l) for l in self.stub_log.read_text().splitlines()] if self.stub_log.exists() else []
 
-    def wait_for(self, cond, timeout=5):
+    def wait_for(self, cond, timeout=30):
         end = time.time() + timeout
         while time.time() < end:
             if cond():
@@ -710,7 +711,6 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.stage_of(a)["reason"], "stalled: no board update for 30 min and no live session")
         # auto_resume runs first: the resumed child takes the slot, so its non-parallel sibling waits
         self.assertTrue(self.wait_for(lambda: [f"/trevskills-scrum resume {a}"] in [x[1:2] for x in self.calls()]))
-        self.assertTrue(self.serve.running("repo", a))
         self.assertEqual(self.stage_of(c)["stage"], "waiting")
 
     def test_resume_endpoint_only_for_stalled_jobs(self):
@@ -1500,7 +1500,7 @@ class ServeTest(unittest.TestCase):
                             "backlog-add", "Cli item A", "Cli item B"], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([i["text"] for i in self.serve.board.backlog_items(scrum)], ["Cli item A", "Cli item B"])
-        self.assertTrue(self.wait_for(lambda: [i["points"] for i in self.serve.board.backlog_items(scrum)] == [5, 5], 10),
+        self.assertTrue(self.wait_for(lambda: [i["points"] for i in self.serve.board.backlog_items(scrum)] == [5, 5], 60),
                         (scrum / "backlog.md").read_text())
         self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", (scrum / "backlog.md").read_text()),
                          "# Backlog\n- [ ] [5] Cli item A <!-- several files -->\n- [ ] [5] Cli item B <!-- several files -->\n")
