@@ -2138,12 +2138,16 @@ def watchdog_tick():
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
     5. Weekly digest: weekly_tick, late in the 7d window while Fable has room.
     6. Pulse: pulse_tick appends this tick's machine and scheduling readings to board.pulse_path(), in its own guard.
-    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard."""
+    Every tick first records one CPU sample (board.record_cpu_sample) for the machine guard, then runs e2e_lock_reap."""
     global RESUME_ROOM, E2E_RESUMED
     try:
         board.record_cpu_sample()  # cpu_busy_pct's reading; first, so this tick's machine_ok sees it
     except (Exception, SystemExit) as e:
         print(f"watchdog: cpu sample: {e}", file=sys.stderr, flush=True)
+    try:
+        e2e_lock_reap(time.time())  # frees e2e.lock from a dead or out-of-check holder once a waiter has waited 2 h
+    except Exception as e:
+        print(f"watchdog: e2e lock reap: {e}", file=sys.stderr, flush=True)
     busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
     pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
@@ -3447,6 +3451,119 @@ def build_lock_waiting(worktree):
     return False
 
 
+E2E_WAIT_RECORD_SECS = 7200  # an E2E waiter older than this shows its wait on the card and lets e2e_lock_reap run
+
+
+def e2e_waiters(now):
+    """[(cwd realpath, seconds waited)] for each live waiter on e2e.lock: its `.waiting/<pid>` marker, aged by mtime."""
+    out = []
+    try:
+        markers = list(buildlock.waiting_dir(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock").iterdir())
+    except OSError:
+        return out
+    for m in markers:
+        try:
+            cwd = os.path.realpath(m.read_text().partition("\n")[0].strip())  # line 2 is buildlock's rank
+            age = now - m.stat().st_mtime
+            try:
+                os.kill(int(m.name), 0)
+            except PermissionError:
+                pass  # alive, owned by another user
+        except (OSError, ValueError):
+            continue
+        out.append((cwd, age))
+    return out
+
+
+def in_tree(path, worktree):
+    """True when path is worktree or sits inside it (both resolved)."""
+    wt, p = os.path.realpath(worktree), os.path.realpath(path)
+    return p == wt or p.startswith(wt + os.sep)
+
+
+def read_holder(slot):
+    """(pid, cwd, start epoch) from buildlock's `<slot>.holder` file; None when it is missing or malformed."""
+    try:
+        pid, cwd, start = buildlock.holder_path(slot).read_text().split("\n")
+        return int(pid), cwd, int(start)
+    except (OSError, ValueError):
+        return None
+
+
+def job_for_cwd(cwd):
+    """The job on any registered board whose worktree holds cwd; None when none does."""
+    for repo in board.projects().values():
+        try:
+            jobs = cached_board(repo / "scrum").get("jobs", [])
+        except (OSError, ValueError):
+            continue
+        for j in jobs:
+            if j.get("worktree") and in_tree(cwd, j["worktree"]):
+                return j
+    return None
+
+
+def e2e_wait_info(job, now):
+    """{"waitSecs", "holder": {"job", "pid", "ageSecs"} or None} when a live e2e.lock waiter in job's worktree has
+    waited over E2E_WAIT_RECORD_SECS, else None. The holder job is the short id of the job whose worktree holds the
+    holder's cwd, else that cwd's basename."""
+    waits = [age for cwd, age in e2e_waiters(now) if in_tree(cwd, job["worktree"])]
+    if not waits or max(waits) <= E2E_WAIT_RECORD_SECS:
+        return None
+    holder = None
+    for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
+        if h := read_holder(slot):
+            owner = job_for_cwd(h[1])
+            m = owner and re.match(r"\d+", str(owner.get("id")))
+            name = m[0] if m else str(owner.get("id")) if owner else os.path.basename(h[1].rstrip(os.sep))
+            holder = {"job": name, "pid": h[0], "ageSecs": max(0, int(now - h[2]))}
+            break
+    return {"waitSecs": int(max(waits)), "holder": holder}
+
+
+def e2e_lock_reap(now):
+    """While some e2e.lock waiter has waited over E2E_WAIT_RECORD_SECS, free each slot whose holder file names a dead
+    wrapper pid (a grandchild kept the inherited fd) or a cwd in a job no longer in `check`: SIGTERM every pid
+    `lsof -t` lists for the slot file, then remove the holder file. A live holder in a `check` job, a holder whose
+    cwd matches no job, a missing or malformed holder file, an lsof failure, and a holder file that changed since
+    it was first read (a new holder took the slot) are left alone. Never raises on a missing lsof."""
+    if not any(age > E2E_WAIT_RECORD_SECS for _, age in e2e_waiters(now)):
+        return
+    for slot in buildlock.slot_paths(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock"):
+        h = read_holder(slot)
+        if not h:
+            continue
+        try:
+            os.kill(h[0], 0)
+            dead = False
+        except ProcessLookupError:
+            dead = True
+        except OSError:
+            dead = False  # alive, owned by another user
+        if not dead:
+            owner = job_for_cwd(h[1])
+            if not owner or owner.get("stage") == "check":
+                continue
+        if read_holder(slot) != h:
+            continue  # re-read after the board check: a new holder took the slot
+        try:
+            r = subprocess.run([shutil.which("lsof") or "/usr/sbin/lsof", "-t", "--", str(slot)],
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode not in (0, 1):  # 1: nobody has it open
+            continue
+        for pid in {int(x) for x in r.stdout.split() if x.isdigit()} - {os.getpid()}:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        if read_holder(slot) == h:
+            buildlock.holder_path(slot).unlink(missing_ok=True)
+        print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'a job out of check'} {h[0]} ({h[1]})",
+              file=sys.stderr, flush=True)
+
+
 BOARD_CACHE = {}  # str(scrum root) -> ((st_ino, st_mtime_ns, st_size), parsed board.json); final jobs carry `routed`
 BOARD_CACHE_LOCK = threading.Lock()
 
@@ -3539,7 +3656,8 @@ def board_with_activity(root, project):
     waiting job with a dependency not yet done or aborted ("not merged yet"), else one cmd_ready held on an overlap
     (its `overlap_hold`, live holders only). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
-    `nextRetryAt` (epoch seconds, or None). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
+    `nextRetryAt` (epoch seconds, or None). A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
+    (e2e_wait_info). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None) and `e2eFull` (the full-E2E record's at, head, result, failed, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
@@ -3573,6 +3691,8 @@ def board_with_activity(root, project):
             job["waitingOn"] = waiting_on(board.Blocker(hold.get("text") or "", ids))  # cmd_ready held it on an overlap
         if job.get("stage") == "check" and job.get("worktree") and build_lock_waiting(job["worktree"]):
             job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
+        if job.get("stage") == "check" and job.get("worktree") and (wait := e2e_wait_info(job, time.time())):
+            job["e2eWait"] = wait  # the dashboard's "Waiting for the E2E queue" line
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
