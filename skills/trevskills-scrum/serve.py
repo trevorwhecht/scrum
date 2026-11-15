@@ -230,7 +230,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
-    project (live_ids)."""
+    project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
+    to PULSE_STARTS for pulse_tick."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -280,6 +281,9 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 live.pop("ram_hold", None)
         if proc is None:
             return None
+        if action == "start" and not manual:  # a serve.py start, with the CPU reading its gate passed, for pulse_tick
+            with PULSE_STARTS_LOCK:
+                PULSE_STARTS.append({"project": project, "job": job_id, "cpu": cpu})
     account = None  # a board job's account is picked and recorded by board.spawn
     if not on_board:
         try:
@@ -2310,6 +2314,8 @@ def weekly_tick():
 
 PULSE_GATES = (("free RAM", "ram"), ("swap used", "swap"), ("free disk", "disk"), ("CPU busy", "cpu_busy"),
                ("CPU load", "cpu_load"), ("sessions running", "sessions"))  # pulse_tick: machine_ok reason -> gate token
+PULSE_STARTS: list[dict] = []  # spawn's non-manual board starts since the last pulse_tick: {project, job, cpu}
+PULSE_STARTS_LOCK = threading.Lock()
 
 
 def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
@@ -2320,7 +2326,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     unrecognised) for the first project's machine_ok(claim=True) refusal other than COOLING. A gates list that raised
     is null. guard: the first project's machine_ok(claim=False) refusal, else the allowance reason when
     board.pick_account has no account or the live count reaches its allowance (the 5h pace included), else null.
-    A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
+    started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when
+    serve.py started nothing). A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
     to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
     now = time.time() if now is None else now
@@ -2370,6 +2377,8 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
             "free_ram": board.free_ram_pct(), "swap": board.swap_used_pct(), "cooldown": board.cooling_down(),
             "u5h": usage["5h"], "u7d": usage["weekly"], "focus": next(iter(names), None), "projects": projects,
             "gates": gates, "guard": guard}
+    with PULSE_STARTS_LOCK:
+        line["started"], PULSE_STARTS[:] = list(PULSE_STARTS), []
     path = board.pulse_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:

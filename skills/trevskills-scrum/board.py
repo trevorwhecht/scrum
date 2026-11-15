@@ -1423,20 +1423,25 @@ PULSE_LAST_S = 60  # write_pulse: the last line counts one tick
 def write_pulse(root, digest_id):
     """digests/<NNN>/pulse.md: pulse.log totals since the last digest (_pulse_since). Lines sort by time; a line lasts
     the seconds to the next line, capped at PULSE_TICK_CAP_S (the last line PULSE_LAST_S), so no total passes the window plus one
-    tick, however many lines a minute holds; totals are rounded whole minutes. Idle with claimable
-    work (no session, no cool-down, some project with claimable work and Auto continue on (`auto`; a line without it is
-    off) or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT / MAX_SWAP_PCT), held by machine guard
-    (would be idle but over either limit; ends an idle stretch), gated (would be idle, within both limits, but the
-    line's top-level `gates` (serve.py pulse_tick) is non-empty, or no project has claimable work with Auto continue on
-    and every project with waiting work has non-empty `gates`; ends an idle stretch; minutes per token, overlap:<id>
-    counted as overlap; a missing or null `gates` is ungated), idle held (no session, some claimable or waiting work,
-    not idle: Auto continue off or cool-down), idle held by the machine guard (would be idle with claimable work, but
+    tick, however many lines a minute holds; totals are rounded whole minutes. Only projects with Auto continue on
+    (`auto` True; a line without it is off) count toward idle. Idle with claimable work (no session, no cool-down,
+    some auto-on project with claimable or waiting work, and the line's cpu_load and swap within MAX_CPU_LOAD_PCT /
+    MAX_SWAP_PCT), held by machine guard (would be idle but over either limit; ends an idle stretch), gated (would be
+    idle, within both limits, but the line's top-level `gates` (serve.py pulse_tick) is non-empty, or no auto-on
+    project has claimable work and every auto-on project with waiting work has non-empty `gates`; ends an idle
+    stretch; minutes per token, overlap:<id> counted as overlap; a missing or null `gates` is ungated), idle held by
+    cool down (no session, cool-down, some claimable or waiting work), idle paused (no session, no cool-down, work
+    only in projects with Auto continue off), idle held by the machine guard (would be idle with claimable work, but
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
-    as before), peaks, claims (each job number in a rise of a project's numeric top job number between two lines at
-    most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it rises nothing) during
-    cool-down or at CPU load over 500%, only jobs on the board (_board_job) not started_by hand, minutes the focus
-    project had claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board job's `account`
-    (none: the first account; job not on the board: unknown), in accounts() order."""
+    as before), peaks, claims during cool-down (each job number in a rise of a project's numeric top job number
+    between two lines at most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it
+    rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started), claims while
+    CPU load over 500% (only the lines' `started` entries, serve.py's own non-manual starts, whose launch-time `cpu`
+    is a number over 500; a missing or malformed `started` adds nothing), other starts while CPU load over 500% (rise
+    jobs at a line whose cpu_load is over 500 that no `started` entry names: hand, unregistered (project not in
+    projects()) or other; a registered project's job off the board is skipped), minutes the focus project had
+    claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board
+    job's `account` (none: the first account; job not on the board: unknown), in accounts() order."""
     since = _pulse_since(root, digest_id)
     lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
@@ -1450,17 +1455,17 @@ def write_pulse(root, digest_id):
         pos = lambda v: is_num(v) and v > 0
         over = lambda l, key, cap: is_num(l.get(key)) and l[key] > cap
         gates = lambda v: [g for g in v if isinstance(g, str)] if isinstance(v, list) else []
-        idle = held = guard = streak = longest = nonfocus = gated = guarded = 0
+        idle = cooled = paused = guard = streak = longest = nonfocus = gated = guarded = 0
         by_gate = {}
         for l, nxt in zip(lines, lines[1:] + [None]):
             dt = min(nxt["t"] - l["t"], PULSE_TICK_CAP_S) if nxt else PULSE_LAST_S
             ps = projs(l)
-            claim = lambda p: pos(p.get("claimable")) and p.get("auto") is True
-            if l.get("sessions") == 0 and not l.get("cooldown") and any(
-                    claim(p) or pos(p.get("waiting")) for p in ps.values()):
-                waits = [gates(p.get("gates")) for p in ps.values() if pos(p.get("waiting"))]
+            on = [p for p in ps.values() if p.get("auto") is True]  # Auto continue off never counts as idle
+            work = lambda p: pos(p.get("claimable")) or pos(p.get("waiting"))
+            if l.get("sessions") == 0 and not l.get("cooldown") and any(work(p) for p in on):
+                waits = [gates(p.get("gates")) for p in on if pos(p.get("waiting"))]
                 why = gates(l.get("gates")) or (
-                    sum(waits, []) if not any(claim(p) for p in ps.values()) and all(waits) else [])
+                    sum(waits, []) if not any(pos(p.get("claimable")) for p in on) and all(waits) else [])
                 if over(l, "cpu_load", MAX_CPU_LOAD_PCT) or over(l, "swap", MAX_SWAP_PCT):
                     guard, streak = guard + dt, 0
                 elif why:
@@ -1474,15 +1479,27 @@ def write_pulse(root, digest_id):
                     longest = max(longest, streak)
             else:
                 streak = 0
-                if l.get("sessions") == 0 and any(pos(p.get("claimable")) or pos(p.get("waiting")) for p in ps.values()):
-                    held += dt
+                if l.get("sessions") == 0 and any(work(p) for p in ps.values()):
+                    if l.get("cooldown"):
+                        cooled += dt
+                    else:
+                        paused += dt  # work only in projects with Auto continue off
             f = l.get("focus") if isinstance(l.get("focus"), str) else None
             if pos(ps.get(f, {}).get("claimable")) and any(p.get("busy") is True for k, p in ps.items() if k != f):
                 nonfocus += dt
-        idle, held, guard, longest, nonfocus, gated, guarded = (
-            round(x / 60) for x in (idle, held, guard, longest, nonfocus, gated, guarded))
-        cool, hot, claimed, boards, by_acc = 0, 0, {}, {}, {}
-        names = [a.name for a in accounts()]
+        idle, cooled, paused, guard, longest, nonfocus, gated, guarded = (
+            round(x / 60) for x in (idle, cooled, paused, guard, longest, nonfocus, gated, guarded))
+        num = lambda j: str(int(m[1])) if (m := re.match(r"(\d+)-", j)) else j
+        hot, started = {}, set()
+        for l in lines:
+            for e in l.get("started") if isinstance(l.get("started"), list) else []:
+                if isinstance(e, dict) and isinstance(e.get("project"), str) and isinstance(e.get("job"), str):
+                    started.add((e["project"], num(e["job"])))
+                    if is_num(e.get("cpu")) and e["cpu"] > 500:
+                        hot.setdefault(e["project"], []).append(num(e["job"]))
+        claimed, handed, boards, by_acc = {}, {}, {}, {}
+        others = {"hand": {}, "unregistered": {}, "other": {}}
+        names, reg = [a.name for a in accounts()], projects()
         for a, b in zip(lines, lines[1:]):
             if b["t"] - a["t"] > PULSE_TICK_CAP_S:
                 continue  # a gap: the rise may span a reset or pruned board, so it counts no claim
@@ -1495,17 +1512,20 @@ def write_pulse(root, digest_id):
                     continue
                 for n in range(int(was) + 1, int(top) + 1):
                     job = _board_job(boards, name, n)
-                    if (job or {}).get("started_by") == "hand":
+                    hand = (job or {}).get("started_by") == "hand"
+                    if is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started:
+                        group = "unregistered" if name not in reg else None if job is None else "hand" if hand else "other"
+                        if group:  # a registered project's job off the board: pruned or reset, no start to name
+                            others[group].setdefault(name, []).append(str(n))
+                    if job is not None and b.get("cooldown") is True:
+                        (handed if hand else claimed).setdefault(name, []).append(str(n))
+                    if hand:
                         continue
                     acc = "unknown" if job is None else job.get("account") or names[0]  # no account: the first
                     by_acc[acc] = by_acc.get(acc, 0) + 1
-                    if job is None:  # off the board: no cool-down or hot claim
-                        continue
-                    if b.get("cooldown") is True:
-                        cool += 1
-                        claimed.setdefault(name, []).append(str(n))
-                    if is_num(b.get("cpu_load")) and b["cpu_load"] > 500:
-                        hot += 1
+        jobs = lambda d: ", ".join(f"{n} {' '.join(v)}" for n, v in d.items())
+        count = lambda d: f"{sum(map(len, d.values()))}" + (" — " + jobs(d) if d else "")
+        groups = [f"{g} {jobs(d)}" for g, d in others.items() if d]
 
         def peak(key):
             nums = [l for l in lines if is_num(l.get(key))]
@@ -1517,13 +1537,16 @@ def write_pulse(root, digest_id):
                 f"Gated with claimable work: {gated} min"
                 + (" (" + ", ".join(f"{g} {round(v / 60)}" for g, v in by_gate.items()) + ")" if gated else ""),
                 f"Held by machine guard: {guard} min",
-                f"Idle held by Auto continue off or cool down: {held} min",
+                f"Idle held by cool down: {cooled} min",
+                f"Idle paused: Auto continue off: {paused} min",
                 f"Idle held by the machine guard: {guarded} min",
                 f"Peak sessions: {s['sessions']} at {iso(s['t'])}" if s else "Peak sessions: unknown",
                 f"Peak CPU load: {c['cpu_load']:.0f}% at {iso(c['t'])}" if c else "Peak CPU load: unknown",
-                f"Claims during cool down: {cool}"
-                + (" — " + ", ".join(f"{n} {' '.join(v)}" for n, v in claimed.items()) if claimed else ""),
-                f"Claims while CPU load over 500%: {hot}",
+                f"Claims during cool down: {count(claimed)}",
+                f"Hand-started during cool down: {count(handed)}",
+                f"Claims while CPU load over 500%: {count(hot)}",
+                f"Other starts while CPU load over 500%: {sum(len(v) for d in others.values() for v in d.values())}"
+                + (" — " + "; ".join(groups) if groups else ""),
                 f"Non-focus work while focus had claimable work: {nonfocus} min (focus: {focus})",
                 "Claims by account: " + (", ".join(f"{k} {by_acc[k]}" for k in sorted(by_acc, key=lambda k: (
                     k == "unknown", names.index(k) if k in names else len(names)))) or "none")]
