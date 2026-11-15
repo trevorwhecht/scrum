@@ -2482,7 +2482,7 @@ def _scorecard(root, e, t, board, questions, acc=None):
     findings = 0
     for p in root.glob("jobs/*/round-*/review-*.md"):
         try:
-            if not within(p.stat().st_mtime) or not _real_review(p):
+            if p.parts[-3] not in jobs or not within(p.stat().st_mtime) or not _real_review(p):
                 continue
             body = md_section(p.read_text(encoding="utf-8"), "Findings") or ""
         except (OSError, ValueError):
@@ -2490,7 +2490,8 @@ def _scorecard(root, e, t, board, questions, acc=None):
         findings += len(re.findall(r"^\d+\. \[", body, re.M))
     review_tokens = rows and sum(tok(r) for r in rows if str(r["agent"]).startswith("scrum-review"))
     # local routing
-    routed = [d for p in root.glob("jobs/*/routing.log") for d in _json_lines(p) if within(_epoch(d.get("ts")))]
+    routed = [d for p in root.glob("jobs/*/routing.log")
+              if p.parent.name in jobs for d in _json_lines(p) if within(_epoch(d.get("ts")))]
     # escapes: merged-with-gaps bigboy parents, and done jobs a later debug-lane job names
     escaped, escapes = set(), 0
     for i in done:  # one per parent from board.json; step 7 files the gaps, so no questions.log line
@@ -2516,7 +2517,7 @@ def _scorecard(root, e, t, board, questions, acc=None):
     # note leaves the job waiting, so it ends no span
     needs_human = 0
     for n, q in enumerate(questions):
-        if "options" not in q or q["_ts"] is None:
+        if "options" not in q or q["_ts"] is None or q.get("job") not in jobs:
             continue
         nxt = next((x["_ts"] for x in questions[n + 1:] if x.get("job") == q.get("job") and x["_ts"] is not None
                     and not (x.get("kind") == "note" and x.get("action") == "discuss")), None)
