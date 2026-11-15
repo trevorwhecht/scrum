@@ -412,7 +412,7 @@ class ContractTest(unittest.TestCase):
         text = self.lane("merge")
         step = self.section(text, "**Prod check**", "**Mark done, only now**")
         for phrase in ("stage=deploying", "deployments?sha=", "## Prod runs", "prod.md", "--title PROD_CHECK_FAILED",
-                       "Try again=resume $ID", "prod run command not allowed", "package.json", "no deploy, no prod runs",
+                       "Try again=resume $ID", '--c "File the fix as a follow-up=followup $ID \\"<the fix, one sentence, no double quotes>\\""', "prod run command not allowed", "package.json", "no deploy, no prod runs",
                        "https://", "whether or not a Deploy URL is set", "nothing pending",
                        "prod dry run still reports pending work", "prod run changes the schema", "db:push",
                        "migrate", "prisma migrate", "prisma db push",
@@ -2806,6 +2806,8 @@ class ContractTest(unittest.TestCase):
                     self.assertEqual(label, "Put back on the backlog", span)
                 if command.startswith("rework ") and "--title MD_CONTRADICTION" not in span:
                     self.assertEqual(label, "Send back with a note", span)
+                if command.startswith("followup "):
+                    self.assertEqual(label, "File the fix as a follow-up", span)
 
     def test_ask_questions_plain_english(self):
         """After its machine prefix, every in-scope ask question meets the stops.md bar."""

@@ -8,7 +8,7 @@
                                    clears the pause
   board.py ask <id> "<q>" --a "Label=command" --b "Label=command" [--c ...] --title TITLE [--recommend KEY WHY]  park
                                    the job at needs-human with a closed question (command: approve|resume|abort <id>
-                                   [--requeue|--cascade], rework <id> "<text>", shell: <cmd>), log it to questions.log;
+                                   [--requeue|--cascade], rework <id> "<text>", followup <id> "<fix>", shell: <cmd>), log it to questions.log;
                                    --title (a STOP_TITLES key) is stored as stopTitle; --recommend stores {"key","why"},
                                    the option the agent advises; both are cleared with the question. With [--kind K]
                                    (K in UNBLOCK_KINDS, under 2 unblocks, not yet unblocked for K) the job is not parked: it keeps its stage, the unblock is logged and
@@ -22,6 +22,8 @@
   board.py unblock-log <id>        read jobs/<id>/unblock-<unblocks>.md, log its verdict line to questions.log, print
                                    {"verdict","blocker","kind","n"} (verdict INVALID when missing or unreadable)
   board.py answer <id> <a|b|c>     log the pick on the job's open question to questions.log, print that option as JSON
+  board.py followup <id> "<fix>"   a Prod check stop's follow-up answer: add "<fix> (from <id>)" to the backlog (once),
+                                   then set the job stage=done
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
                                    no {setup: …} Human setup as a new job, print {"id","feature"}
@@ -214,7 +216,7 @@ STOP_TITLES = {
 }
 
 # The scrum commands a needs-human question's option may run (shape only: the id need not be the asked job's).
-ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume|lilguy|apply) {id}|abort {id}(?: --requeue| --cascade)?|rework {id} "[^"]+"'
+ASK_COMMAND_RE = re.compile(r'(?:(?:approve|resume|lilguy|apply) {id}|abort {id}(?: --requeue| --cascade)?|(?:rework|followup) {id} "[^"]+"'
                             r'|shell: \S.*)'
                             .format(id=ID_RE.pattern[1:-1]))
 LINE_RE = re.compile(r"^(?:VERDICT|STATUS|CHECK|DECISION)?\s*:?\s*([A-Z-]+)\b", re.I)
@@ -5158,7 +5160,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             raise SystemExit(f"bad option {raw!r}; expected label=command")
         if not ASK_COMMAND_RE.fullmatch(command):
             raise SystemExit(f"bad option command {command!r}; allowed: approve <id>, rework <id> \"<text>\", "
-                             "abort <id> [--requeue|--cascade], resume <id>, lilguy <id>, apply <id>, shell: <command>")
+                             "followup <id> \"<fix>\", abort <id> [--requeue|--cascade], resume <id>, lilguy <id>, apply <id>, shell: <command>")
         parsed.append({"key": key, "label": label, "command": command})
     if recommend is not None:
         rkey, why = recommend[0].strip(), clean(recommend[1])
@@ -5318,6 +5320,24 @@ def cmd_answer(root, job_id, key, note=None):
             entry["note"] = note
         questions_log(root, entry)
     return option
+
+
+FOLLOWUP_REASON = "prod check failed; fix filed on the backlog"
+
+
+def cmd_followup(root, job_id, fix):
+    """A `followup <id> "<fix>"` answer: add "<fix> (from <id>)" to the backlog, then set the job stage=done with
+    FOLLOWUP_REASON. Each write takes its own lock; unless_open skips the item when it is still open, so a re-run after
+    a failed done write adds no second copy. The PR merged before the Prod check, so merge_refusal passes."""
+    fix = clean(fix or "", ITEM_MAX + 1)
+    item = f"{fix} (from {check_id(job_id)})"
+    if not fix:
+        raise SystemExit("followup needs the fix text")
+    if len(item) > ITEM_MAX:
+        raise SystemExit(f"followup fix text is too long; the backlog item must fit {ITEM_MAX} characters")
+    live(read_board(root), job_id)  # an unknown or aborted job files nothing
+    cmd_backlog_add(root, [item], unless_open=item)
+    cmd_set(root, job_id, ["stage=done", f"reason={FOLLOWUP_REASON}"])
 
 
 def log_note(root, job_id, action, text):
@@ -6536,6 +6556,9 @@ def main(argv=None):
     an = sub.add_parser("answer")
     an.add_argument("id")
     an.add_argument("key", choices=("a", "b", "c"))
+    fu = sub.add_parser("followup")
+    fu.add_argument("id")
+    fu.add_argument("fix")
     sub.add_parser("next").add_argument("--index", type=int)
     sub.add_parser("cloud-claim").add_argument("n", type=int)
     ba = sub.add_parser("backlog-add")
@@ -6674,6 +6697,8 @@ def main(argv=None):
         print(json.dumps(cmd_unblock_log(a.dir, a.id)))
     elif a.cmd == "answer":
         print(json.dumps(cmd_answer(a.dir, a.id, a.key)))
+    elif a.cmd == "followup":
+        cmd_followup(a.dir, a.id, a.fix)
     elif a.cmd == "next":
         print(json.dumps(cmd_next(a.dir, a.index)))
     elif a.cmd == "cloud-claim":

@@ -376,6 +376,42 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((job["stage"], job["question"]), ("needs-human", "prod check: the deploy failed."))
         self.assertEqual(job["stopTitle"], "PROD_CHECK_FAILED")
 
+    def test_ask_followup_option(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.main(["--dir", str(self.root), "ask", job_id, "prod check: the run failed.",
+                    "--a", f"Try again=resume {job_id}", "--b", f"Stop tracking this job=abort {job_id}",
+                    "--c", 'File a follow-up=followup 005-x "pass --apply to the prod run"',
+                    "--title", "PROD_CHECK_FAILED", "--recommend", "c", "the prod script needs a fix"])
+        self.assertEqual(self.jobs()[0]["options"][2],
+                         {"key": "c", "label": "File a follow-up", "command": 'followup 005-x "pass --apply to the prod run"'})
+        other = board.cmd_new(self.root, "y")
+        for cmd in ("followup 005-x", 'followup 005-x ""', "followup 005-x fix it", 'followup 5 "fix it"'):
+            with self.subTest(cmd=cmd), self.assertRaises(SystemExit) as e:
+                board.cmd_ask(self.root, other, "Q?", [f"Go={cmd}", f"Stop=abort {other}"], title="PROD_CHECK_FAILED")
+            self.assertIn('followup <id> "<fix>"', str(e.exception.code))
+
+    def test_followup_files_item_then_done(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"Go=resume {job_id}", f'Fix=followup {job_id} "fix it"'],
+                      title="PROD_CHECK_FAILED")
+        board.main(["--dir", str(self.root), "followup", job_id, "fix it"])
+        self.assertEqual([(i["text"], i["done"]) for i in board.read_backlog(self.root)[1]],
+                         [(f"fix it (from {job_id})", False)])
+        job = self.jobs()[0]
+        self.assertEqual((job["stage"], job["reason"]), ("done", "prod check failed; fix filed on the backlog"))
+
+    def test_followup_no_duplicate_item(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, "Q?", [f"Go=resume {job_id}", f'Fix=followup {job_id} "fix it"'],
+                      title="PROD_CHECK_FAILED")
+        with mock.patch.object(board, "merge_refusal", return_value="not done: gh timed out"), \
+                self.assertRaises(SystemExit):
+            board.cmd_followup(self.root, job_id, "fix it")
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+        board.cmd_followup(self.root, job_id, "fix it")
+        self.assertEqual([i["text"] for i in board.read_backlog(self.root)[1]], [f"fix it (from {job_id})"])
+        self.assertEqual(self.jobs()[0]["stage"], "done")
+
     def test_ask_splits_on_first_equals(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_ask(self.root, job_id, "Q?", [f' Rework =  rework {job_id} "a=b" ', f"Abort=abort {job_id}"], title="MERGE_CONFLICT")
@@ -403,7 +439,7 @@ class BoardTest(unittest.TestCase):
             "empty question": (job_id, "  ", [f"A=approve {job_id}", ok]),
             "aborted job": (gone, "Q?", [f"A=approve {gone}", f"B=abort {gone}"]),
         }
-        allowed = ('allowed: approve <id>, rework <id> "<text>", abort <id> [--requeue|--cascade], resume <id>, '
+        allowed = ('allowed: approve <id>, rework <id> "<text>", followup <id> "<fix>", abort <id> [--requeue|--cascade], resume <id>, '
                    "lilguy <id>, apply <id>, shell: <command>")
         cases["lilguy extra word"] = (job_id, "Q?", [f"Go=lilguy {job_id} now", ok])
         cases["cascade and requeue"] = (job_id, "Q?", [f"Go=abort {job_id} --cascade --requeue", ok])
@@ -9815,6 +9851,17 @@ class ProcessHealthTest(unittest.TestCase):
             {"job": "102-beta", "kind": "stall", "reason": "stalled: no board update"}])
         m = self.run_health("001")["metrics"]
         self.assertEqual((m["stops_per_job"]["value"], m["stops_per_job"]["jobs"]), (0.5, ["102-beta"]))
+
+    def test_followup_option_not_resume_abort_stop(self):
+        self.board(("101-alpha", "done", "standard", None, "merged"))
+        self.digest("001", "101-alpha")
+        self.lines("questions.log", [
+            {"job": "101-alpha", "kind": "ask", "question": "prod check: the run failed.",
+             "options": [{"command": "resume 101-alpha"}, {"command": "abort 101-alpha"},
+                         {"command": 'followup 101-alpha "pass --apply to the prod run"'}]}])
+        m = self.run_health("001")["metrics"]
+        self.assertEqual((m["resume_abort_stops"]["value"], m["resume_abort_stops"]["jobs"]), (0, []))
+        self.assertEqual(m["stops_per_job"]["jobs"], ["101-alpha"])  # the stop is read, just not counted as resume/abort
 
     def test_previous_and_flags(self):
         self.board(("101-alpha", "done", "standard", None, "merged"))
