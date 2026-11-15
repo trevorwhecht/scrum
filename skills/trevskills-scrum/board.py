@@ -2030,7 +2030,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if reviewed and (lane == "lilguy" or no_ui):
             spent = sum(r["duration_s"] for r in routed if is_num(r.get("duration_s"))
                         and any(t in str(r.get("role") or "") for t in HEALTH_TEST_ROLES))
-            if spent > 0:  # a 0-second test run wasted nothing
+            if round(spent / 60) > 0:  # under 30 s shows as 0 minutes: wasted nothing
                 hits["test_waste_jobs"].append(job_id)
                 seconds += spent
         simple = not job_complex(root, job_id)

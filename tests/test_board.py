@@ -9405,15 +9405,20 @@ class ProcessHealthTest(unittest.TestCase):
             {"job": "102-b", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)"}])
         self.assertEqual(self.run_health("001")["metrics"]["stops_per_job"]["jobs"], ["102-b"])
 
-    def test_waste_needs_minutes(self):
-        self.board(("101-a", "done", "lilguy", "", "merged"), ("102-b", "done", "lilguy", "", "merged"),
-                   ("103-c", "done", "lilguy", "", "merged"))
-        self.digest("001", "101-a", "102-b", "103-c")
-        for j in ("101-a", "102-b", "103-c"):
+    def test_waste_zero_minutes_not_counted(self):
+        ids = ("101-a", "102-b", "103-c", "104-d", "105-e")
+        self.board(*((i, "done", "fast", "", "merged") for i in ids))
+        self.digest("001", *ids)
+        for j in ids:
+            self.put(f"jobs/{j}/spec.md", "# s\n## Likely files\n- `skills/trevskills-scrum/board.py`\n")
             self.put(f"jobs/{j}/round-1/review-ui.md", "VERDICT: PASS\nreal review\n")
         self.lines("jobs/101-a/routing.log", [{"role": "review-ui", "duration_s": 0}])
+        self.lines("jobs/102-b/routing.log", [{"role": "review-ui"}, {"role": "review-ui", "duration_s": "x"}])
         self.lines("jobs/103-c/routing.log", [{"role": "review-ui", "duration_s": 20}])
-        self.assertEqual(self.run_health("001")["metrics"]["test_waste_jobs"]["jobs"], ["103-c"])
+        self.lines("jobs/104-d/routing.log", [{"role": "review-ui", "duration_s": 120}])
+        self.lines("jobs/105-e/routing.log", [{"role": "builder", "duration_s": 600}])
+        m = self.run_health("001")["metrics"]["test_waste_jobs"]
+        self.assertEqual((m["value"], m["jobs"], m["minutes"]), (1, ["104-d"], 2))
 
     def test_cheaper_lane_jobs_skips_sensitive(self):
         self.board(("101-a", "done", "standard", "", "merged"), ("102-b", "done", "standard", "", "merged"),
