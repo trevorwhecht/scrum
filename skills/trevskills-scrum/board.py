@@ -4705,7 +4705,9 @@ def resume_blocker(root, job_id, live=()):
         k in maybe and (alive(k) if k.get("stage") in WATCHED else True)))]
     if not busy:
         return None
-    hit = slot_conflict(job, busy, files)
+    fast = (header_value(jobs_dir / job_id / "spec.md", "Lane", LANES)
+            or header_value(jobs_dir / job_id / "feature.md", "Lane", LANES)) == "fast"  # as cmd_ready
+    hit = slot_conflict(job, busy, files, fast=fast)
     return Blocker(*hit) if hit else None
 
 

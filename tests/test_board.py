@@ -5024,6 +5024,39 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.get(here)["stage"], "build")
 
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
+    def test_resume_blocker_fast_child_skips_unknown_file_holder(self):
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        def setup(lane, out_files=(), name="spec.md", kid_files=("src/a.py",), out_parallel=""):
+            self.tearDown(); self.setUp()
+            (self.root.parent / "src").mkdir(exist_ok=True)
+            parent = self.plan(self.ticket(1), self.ticket(2, parallel=out_parallel) if out_parallel else self.ticket(2),
+                               self.ticket(3, deps="T1, T2", exposure="yes"))
+            c1, out, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            self.spec(out, *out_files)  # no paths: unreadable Likely files
+            board.cmd_set(self.root, out, ["stage=build"])
+            self.lane_spec(c1, lane, *kid_files, name=name)
+            board.cmd_set(self.root, c1, stalled, internal=True)
+            return c1, out
+        for lane, name, free in (("fast", "spec.md", True), ("fast", "feature.md", True),
+                                 ("standard", "spec.md", False), ("lilguy", "spec.md", False)):
+            with self.subTest(lane=lane, file=name):
+                c1, out = setup(lane, name=name)
+                got = board.resume_blocker(self.root, c1)
+                if free:
+                    self.assertIsNone(got)
+                else:
+                    self.assertEqual(got, f"sibling {out} runs alone")
+        with self.subTest("shares a file"):
+            c1, out = setup("fast", out_files=("src/a.py",))
+            self.assertEqual(board.resume_blocker(self.root, c1), f"sibling {out} shares src/a.py")
+        with self.subTest("parallel=no sibling"):
+            c1, out = setup("fast", out_files=("src/d.py",), out_parallel="no — big")
+            self.assertEqual(board.resume_blocker(self.root, c1), f"sibling {out} runs alone")
+        with self.subTest("no readable Likely files of its own"):
+            c1, out = setup("fast", kid_files=())
+            self.assertEqual(board.resume_blocker(self.root, c1), "this job runs alone")
+
+    @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
         # No parent: never blocked.
