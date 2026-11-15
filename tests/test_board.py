@@ -9461,7 +9461,43 @@ class ProcessHealthTest(unittest.TestCase):
             {"job": "101-a", "kind": "machine", "reason": "waiting: swap used 80% of RAM (> 50%)"},
             {"job": "101-a", "kind": "machine", "reason": "waiting: usage 5h 90% used, resets 14:00"},
             {"job": "102-b", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)"}])
-        self.assertEqual(self.run_health("001")["metrics"]["stops_per_job"]["jobs"], ["102-b"])
+        self.assertEqual(self.run_health("001")["metrics"]["stops_per_job"]["jobs"], [])
+
+    def test_process_health_machine_lines_never_stop(self):
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b")
+        self.lines("questions.log", [
+            {"job": "101-a", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)"},
+            {"job": "101-a", "kind": "machine", "reason": "waiting: cooling down"},
+            {"job": "102-b", "kind": "machine", "reason": "waiting: disk 95% full"}])
+        m = self.run_health("001")["metrics"]["stops_per_job"]
+        self.assertEqual((m["value"], m["jobs"]), (0, []))
+
+    def test_process_health_stall_once_per_episode(self):
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b")
+        self.lines("questions.log", [
+            {"job": "101-a", "kind": "stall", "reason": "stalled: no board update"},
+            {"job": "102-b", "kind": "stall", "reason": "stalled: no board update"},
+            {"job": "101-a", "kind": "stall", "reason": "stalled: no board update"},
+            {"job": "101-a", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)"},
+            {"job": "101-a", "kind": "stall", "reason": "stalled: no board update"},
+            {"job": "102-b", "kind": "ask", "question": "Go on?", "options": [{"command": "approve 102-b"}]},
+            {"job": "102-b", "kind": "stall", "reason": "stalled: no board update"}])
+        m = self.run_health("001")["metrics"]["stops_per_job"]
+        self.assertEqual((m["value"], m["jobs"]), (2, ["101-a", "102-b"]))  # 101-a: 1 episode; 102-b: stall, ask, stall
+
+    def test_process_health_cheaper_skips_non_runall_child(self):
+        ids = ("101-a", "102-b", "103-c", "104-d")
+        jobs = [{"id": i, "stage": "done", "lane": "fast", "reason": "merged"} for i in ids]
+        jobs[0]["parent"], jobs[1]["parent"], jobs[2]["parent"] = "201-big", "202-all", "299-gone"
+        jobs += [{"id": "201-big", "stage": "done", "lane": "bigboy"}, {"id": "202-all", "stage": "done", "lane": "runall"}]
+        self.put("board.json", json.dumps({"jobs": jobs}))
+        self.digest("001", *ids)
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": i, "lane": "fast", "fit": "lilguy"} for i in ids]}))
+        m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
+        self.assertEqual((m["value"], m["jobs"]), (2, ["102-b", "104-d"]))
 
     def test_waste_zero_minutes_not_counted(self):
         ids = ("101-a", "102-b", "103-c", "104-d", "105-e")
@@ -9597,7 +9633,7 @@ class ProcessHealthTest(unittest.TestCase):
         m = got["metrics"]
         self.assertEqual(list(m), self.NAMES)
         want = {
-            "stops_per_job": (1.5, 0.5, ["101-alpha", "102-beta", "103-gamma"]),
+            "stops_per_job": (1.25, 0.5, ["101-alpha", "102-beta", "103-gamma"]),  # 103-gamma's machine line: no stop
             "resume_abort_stops": (2, 0, ["101-alpha", "102-beta"]),
             "waiting_on_job_stops": (2, 0, ["101-alpha", "102-beta"]),
             "unreadable_asks": (2, 0, ["102-beta", "103-gamma"]),
