@@ -4183,7 +4183,39 @@ class BoardTest(unittest.TestCase):
             [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
              ({"app.py": "a\nB\nc\n", "tests/test_app.py": "x\n"}, "Fix b\n\nJob files: scrum/jobs/200-bug/")])
         self.assertEqual(out["jobs"], ["100-origin", "200-bug"])
-        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code, ui\n")
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code\n")
+
+    def escape_pair(self, files, passes, feature=None):
+        """escapes.md text for bug 200-bug fixing every file of `files` (name -> (old, new)) of origin 100-origin."""
+        if feature is not None:
+            self.write("200-bug/feature.md", feature)
+        commits = [({n: o for n, (o, _) in files.items()}, "Add\n\nJob files: scrum/jobs/100-origin/"),
+                   ({n: w for n, (_, w) in files.items()}, "Fix\n\nJob files: scrum/jobs/200-bug/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", **{k: "PASS" for k in passes}}]},
+                {"id": "200-bug", "lane": "debug"}]
+        return self.escape_digest(jobs, commits)[0]
+
+    def test_digest_start_escapes_ui_scope(self):
+        text = self.escape_pair({"a.py": ("a\nb\n", "a\nB\n"), "b.ts": ("a\nb\n", "a\nB\n")}, ["code", "ui"])
+        self.assertEqual(text, "- 200-bug ← 100-origin · 2 lines in a.py, b.ts · passed by: code\n")
+
+    def test_digest_start_escapes_ui_scope_ui_file_keeps_ui(self):
+        text = self.escape_pair({"a.py": ("a\nb\n", "a\nB\n"), "b.scss": ("a\nb\n", "a\nB\n")}, ["code", "ui"])
+        self.assertEqual(text, "- 200-bug ← 100-origin · 2 lines in a.py, b.scss · passed by: code, ui\n")
+
+    def test_digest_start_escapes_ui_scope_none(self):
+        text = self.escape_pair({"a.py": ("a\nb\n", "a\nB\n")}, ["ui"])
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in a.py · passed by: none\n")
+
+    def test_digest_start_escapes_security_scope(self):
+        files = {"a.py": ("a\nb\n", "a\nB\n")}
+        self.assertEqual(self.escape_pair(files, ["code", "security"], "Re-render loses the draft\n"),
+                         "- 200-bug ← 100-origin · 1 lines in a.py · passed by: code\n")
+
+    def test_digest_start_escapes_security_scope_keyword(self):
+        files = {"a.py": ("a\nb\n", "a\nB\n")}
+        self.assertEqual(self.escape_pair(files, ["code", "security"], "Password reset skips the check\n"),
+                         "- 200-bug ← 100-origin · 1 lines in a.py · passed by: code, security\n")
 
     def test_digest_start_escapes_skips_stub_reviewers(self):
         commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),

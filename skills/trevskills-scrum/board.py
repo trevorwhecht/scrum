@@ -2332,12 +2332,15 @@ ESCAPE_SKIP_RE = re.compile(r"(^|/)(__tests__|e2e|tests?)/|(^|/)test_[^/]*\.py$|
 ESCAPE_JOB_RE = re.compile(r"scrum/jobs/([^/\s]+)/")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ", re.M)
 BLAME_SHA_RE = re.compile(r"^([0-9a-f]{40,64}) \d+ \d+", re.M)
+ESCAPE_UI_RE = re.compile(r"\.(tsx|jsx|css|scss|html)$", re.I)
+ESCAPE_SECURITY_RE = re.compile(r"auth|injection|secret|token|password|session|permission|xss|data exposure", re.I)
 
 
 def _escape_lines(repo, bug, board, root=None):
     """The escapes.md lines for debug job `bug`: its newest HEAD commit naming scrum/jobs/<bug>/, each non-test file's
     -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes
-    (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is a skip stub is left out)."""
+    (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is a skip stub is left out; `ui` is left out
+    unless a blamed file matches ESCAPE_UI_RE, `security` unless the bug's feature.md matches ESCAPE_SECURITY_RE)."""
     shas = _git(repo, "log", "HEAD", "-F", f"--grep=scrum/jobs/{bug}/", "--format=%H").decode().split()
     if not shas:
         return [f"- {bug} ← origin unknown: no merge commit"]
@@ -2366,13 +2369,19 @@ def _escape_lines(repo, bug, board, root=None):
                 files[f] = files.get(f, 0) + 1
     if not origins:
         return [f"- {bug} ← origin unknown: no scrum job in blame"]
+    try:
+        secure = bool(ESCAPE_SECURITY_RE.search((Path(root) / "jobs" / bug / "feature.md").read_text(errors="replace")))
+    except (OSError, TypeError):
+        secure = False
     out = []
     for origin, files in origins.items():
+        ui = any(ESCAPE_UI_RE.search(f) for f in files)
         rounds = board[origin].get("rounds") or [{}]
         folder = Path(root) / "jobs" / origin / f"round-{len(board[origin].get('rounds') or [])}" if root else None
         passed = sorted(k for k, v in rounds[-1].items() if v == "PASS" and k != "check"
                         and not (folder and (folder / f"review-{k}.md").is_file()
-                                 and not _real_review(folder / f"review-{k}.md"))) or ["none"]
+                                 and not _real_review(folder / f"review-{k}.md"))
+                        and not (k == "ui" and not ui) and not (k == "security" and not secure)) or ["none"]
         out.append(f"- {bug} ← {origin} · {sum(files.values())} lines in {', '.join(files)} · passed by: {', '.join(passed)}")
     return out
 
