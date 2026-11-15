@@ -596,6 +596,38 @@ class BoardTest(unittest.TestCase):
                                  ("needs-human", q, q, [f"resume {job_id}", f"abort {job_id}"]))
                 self.assertNotIn("stalled", job)
 
+    def test_ask_ci_billing_refusal_is_stalled(self):
+        opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
+        want = "stalled: waiting on GitHub billing to run CI"
+        for q, stage in (
+                ("GitHub refused to start the checks because of failed account payments or a spending limit; "
+                 "the job waits until CI runs again.", "merging"),
+                ("The Spending Limit was reached", "check"),
+                ("CI refused: GitHub billing. Try again?", "merging")):
+            with self.subTest(q=q, stage=stage):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, [f"stage={stage}"])
+                before = len(self.log_lines())
+                with mock.patch.object(board, "play") as play:
+                    self.assertEqual(board.cmd_ask(self.root, job_id, q, opts(job_id), title="CHECKS_FAILING"),
+                                     {"stalled": True})
+                play.assert_not_called()
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertEqual((job["stage"], job["reason"], job["stalled"]), (stage, want, True))
+                for k in ("question", "options", "recommend"):
+                    self.assertNotIn(k, job)
+                lines = self.log_lines()[before:]
+                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "stall", want)])
+        q = "GitHub refused to start the checks because of failed account payments or a spending limit."
+        with self.subTest(stage="needs-human"):
+            job_id = board.cmd_new(self.root, "x")
+            with mock.patch.object(board, "play"):
+                board.cmd_ask(self.root, job_id, "Pick a layout?", opts(job_id), title="MERGE_CONFLICT")
+                board.cmd_ask(self.root, job_id, q, opts(job_id), title="CHECKS_FAILING")
+            job = next(j for j in self.jobs() if j["id"] == job_id)
+            self.assertEqual((job["stage"], job["reason"], job["question"]), ("needs-human", q, q))
+            self.assertNotIn("stalled", job)
+
     # --- ask --kind (scrum-unblocker) ---
     def ask_cli(self, job_id, kind, question="Stuck?"):
         buf = io.StringIO()

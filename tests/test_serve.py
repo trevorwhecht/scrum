@@ -7598,6 +7598,52 @@ class AutoResumeTest(unittest.TestCase):
             self.assertEqual(self.sweep(), ["q0"], "lock free: one job per tick, even a child")
             self.assertEqual(self.sweep(), ["q0"], "again next tick, not once per stage")
 
+    BILLING = "stalled: waiting on GitHub billing to run CI"
+
+    def test_auto_resume_ci_billing_first_retry_after_60s(self):
+        s = self.serve
+        s.CI_BILLING.clear()
+        self.jobs = [{"id": "ci", "stage": "merging", "stalled": True, "parent": "bb", "reason": self.BILLING}]
+        t0 = 1_900_000_000.0
+        with mock.patch.object(s.time, "time", return_value=t0):
+            self.assertEqual(self.sweep(), [], "first seen: wait")
+        with mock.patch.object(s.time, "time", return_value=t0 + 59):
+            self.assertEqual(self.sweep(), [], "59 s: still waiting")
+        with mock.patch.object(s.time, "time", return_value=t0 + 61):
+            self.assertEqual(self.sweep(), ["ci"], "after 60 s: one resume, even a child of a stopped parent")
+        self.assertNotIn("p/ci", s.AUTO_RESUME, "no try spent")
+
+    def test_auto_resume_ci_billing_waits_for_banner_to_clear(self):
+        s = self.serve
+        s.CI_BILLING.clear()
+        repo = str(self.root.parent)
+        self.addCleanup(s.ACTIONS_ALERT.pop, repo, None)
+        self.jobs = [{"id": "ci", "stage": "merging", "stalled": True, "reason": self.BILLING}]
+        s.AUTO_RESUME["p/ci"] = [3, 0.0]
+        t0 = 1_900_000_000.0
+        with mock.patch.object(s.time, "time", return_value=t0):
+            self.sweep()
+        with mock.patch.object(s.time, "time", return_value=t0 + 61):
+            self.assertEqual(self.sweep(), ["ci"])
+        refused = (t0 + 120, "x: GitHub Actions refused to start runs because account payments failed or the spending "
+                             "limit was reached. Fix it under Billing & plans on GitHub.")
+        s.ACTIONS_ALERT[repo] = refused
+        for i in range(s.AUTO_RESUME_MAX + 2):  # stalled again on every resume: never resumed while the banner is up
+            with mock.patch.object(s.time, "time", return_value=t0 + 200 + i * 3600):
+                self.assertEqual(self.sweep(), [], "banner up: wait")
+        s.ACTIONS_ALERT[repo] = (t0 + 50_000, None)
+        resumed = []
+        for i in range(s.AUTO_RESUME_MAX + 2):  # the banner clears; each billing stall after it resumes on a fresh check
+            s.ACTIONS_ALERT[repo] = (t0 + 50_000 + i * 600, None)
+            with mock.patch.object(s.time, "time", return_value=t0 + 50_001 + i * 600):
+                resumed += self.sweep()
+        self.assertEqual(resumed, ["ci"] * (s.AUTO_RESUME_MAX + 2))
+        self.assertEqual(s.AUTO_RESUME["p/ci"], [3, 0.0], "no AUTO_RESUME_MAX try spent, never parked as spent")
+        job = self.jobs[0]
+        self.assertEqual((job["stage"], job["reason"]), ("merging", self.BILLING))
+        with mock.patch.object(s.time, "time", return_value=t0 + 50_001 + 100 * 600):
+            self.assertEqual(self.sweep(), [], "no alert check since the last resume: wait for a fresh one")
+
     def test_auto_resume_check_queue_stall_resumes_when_slot_free(self):
         s = self.serve
         self.jobs = [{"id": f"c{i}", "stage": "check", "stalled": True, "parent": "bb",

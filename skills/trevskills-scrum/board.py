@@ -5138,9 +5138,11 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
             return {"unblock": True, "n": n}
         was = job["stage"]
         # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
-        # auto_resume retries it; not a human stop, so no question and no sound
-        if was in WATCHED and AGENT_TYPES_RE.search(question):
-            reason = f"{STALL}{question}"
+        # auto_resume retries it; not a human stop, so no question and no sound. A GitHub billing CI refusal stalls
+        # the same way: its answer is always Try again, which auto_resume gives
+        billing = was in WATCHED and CI_BILLING_RE.search(question)
+        if billing or (was in WATCHED and AGENT_TYPES_RE.search(question)):
+            reason = f"{STALL}{CI_BILLING_WAIT if billing else question}"
             if job.get("reason") != reason:
                 job.pop("outcome", None)
             for k in ("question", "options", "recommend", "stopTitle"):
@@ -5823,6 +5825,8 @@ IDLE_HOURS = 2  # a live session with no board or job-dir change this long is fl
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the (?:E2E|Check) queue", re.I)
+CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
+CI_BILLING_WAIT = "waiting on GitHub billing to run CI"  # serve.py auto_resume retries it after 60 s, then when the banner clears
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
 RESUMABLE = (STALLED, STALL, "bigboy off track", "bigboy review: main not updated", BLOCKED, "Base branch ")
 # Pause keeps the job in its stage with board `paused` true and the watchdog's stalled reason, so Play is the

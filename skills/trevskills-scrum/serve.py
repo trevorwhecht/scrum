@@ -701,6 +701,7 @@ SESSION_WINDOW = 5 * 3600  # a session limit resets at most this far ahead; a ho
 STALL_RESUMED: set[str] = set()  # "project/job id/stage": a Run-all/BigBoy child's or standalone job's non-limit resumes per stage (STALL_RESUMES)
 BUILD_CHECK_STOP = "Build check could not"  # a needs-human stop the scrum answers with its resume option once
 BUILD_CHECK_RETRIED: set[str] = set()  # "project/job id" already retried this way
+CI_BILLING: dict[str, tuple[bool, float]] = {}  # "project/job id" -> (True, first retry at) | (False, last resumed at)
 STALL_RESUMES = {"check": 2}  # resumes allowed per stage (default 1); re-running the check gate costs no builder work
 def stall_spent(key, stage):
     return sum(f"{key}/{stage}{n}" in STALL_RESUMED for n in ("", "#2")) >= STALL_RESUMES.get(stage, 1)
@@ -1059,7 +1060,9 @@ def auto_resume(project, root, jobs):
     its parent, with no per-stage limit. A job parked on the Check queue (CHECK_WAIT) is resumed the same way, one
     per call, once a check.lock slot is free and nobody waits on it. A spec stall with no spec.md (a claim whose
     launch never started) is resumed whatever its parent, with no per-stage limit, once board.ram_room(floor=0) >= 1;
-    it waits, spending no try and not busy, until then."""
+    it waits, spending no try and not busy, until then. A GitHub billing stall (board.CI_BILLING_WAIT) is resumed
+    60 s after it is first seen, then each time an ACTIONS_ALERT check newer than its last resume shows no refusal;
+    it spends no try, is never parked as spent and is not busy while it waits."""
     global E2E_RESUMED
     now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
 
@@ -1097,6 +1100,15 @@ def auto_resume(project, root, jobs):
         if not board.stalled(job) or board.lilguy_in_checkout(job) or running(project, job["id"]):
             continue
         key = f"{project}/{job['id']}"
+        if str(job.get("reason") or "").startswith(board.STALL + board.CI_BILLING_WAIT):  # no try spent, never spent
+            first, at = CI_BILLING.setdefault(key, (True, now + 60))
+            hit = ACTIONS_ALERT.get(str(Path(root).parent))  # the watchdog refreshes it every ACTIONS_ALERT_EVERY
+            if (now >= at if first else bool(hit) and hit[0] > at and "refused to start runs" not in (hit[1] or "")) \
+                    and resume_refusal(project, root, job) is None and take_room():
+                busy = True
+                CI_BILLING[key] = (False, now)
+                resume_job(project, root, job, jobs)
+            continue
         tries, due = AUTO_RESUME.get(key, [0, 0.0])
         if tries >= AUTO_RESUME_MAX:
             park_spent(root, job, board.stall_stage(job), AUTO_RESUME_MAX)
