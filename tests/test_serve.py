@@ -1663,6 +1663,30 @@ class ServeTest(unittest.TestCase):
         run.assert_not_called()
         popen.assert_not_called()
 
+    def test_option_command_followup(self):
+        self.assertEqual(self.serve.option_command('followup 5 "fix it"'), ("followup", "fix it"))
+        for bad in ("followup 5", 'followup 5 ""', 'followup 5 "  "', "followup 5 fix it", 'followup "fix it"'):
+            with self.subTest(bad):
+                self.assertIsNone(self.serve.option_command(bad))
+
+    def test_answer_dispatch_followup(self):
+        job_id = self.asked("resume 77", "abort 77")
+        b = self.serve.board
+        data = json.loads((self.root / "board.json").read_text())  # the real command names this job's own id
+        next(j for j in data["jobs"] if j["id"] == job_id)["options"].append(
+            {"key": "c", "label": "File the fix as a follow-up", "command": f'followup {job_id} "fix it"'})
+        (self.root / "board.json").write_text(json.dumps(data))
+        with mock.patch.object(b, "merge_refusal", return_value=None), mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.serve, "resume_job") as resume:
+            code, out = self.raw_post(f"/api/p/repo/jobs/{job_id}/answer", {"key": "c"})
+        self.assertEqual((code, out), (200, {"id": job_id, "action": "answer", "command": "followup", "stage": "done"}))
+        self.assertEqual([(i["text"], i["done"]) for i in b.backlog_items(self.root) if "fix it" in i["text"]],
+                         [(f"fix it (from {job_id})", False)])
+        job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+        self.assertEqual((job["stage"], job["reason"]), ("done", "prod check failed; fix filed on the backlog"))
+        spawn.assert_not_called()
+        resume.assert_not_called()
+
     def test_option_command_lilguy(self):
         self.assertEqual(self.serve.option_command("lilguy 012"), ("lilguy", None))
         self.assertIsNone(self.serve.option_command("lilguy 012 x"))

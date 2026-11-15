@@ -618,7 +618,7 @@ def abort_job(project, root, job_id, requeue, cascade=False):
 
 def option_command(command):
     """(verb, arg) for a closed-question option's command (board.py ask), or None when it is none of
-    approve/rework/abort/resume/lilguy/apply/shell:. arg is the rework text, the abort flag ("requeue", "cascade" or None) or the shell
+    approve/rework/followup/abort/resume/lilguy/apply/shell:. arg is the rework or followup text, the abort flag ("requeue", "cascade" or None) or the shell
     command."""
     if not isinstance(command, str):
         return None
@@ -631,8 +631,8 @@ def option_command(command):
         return None
     if len(words) == 2 and words[0] in ("approve", "resume", "lilguy", "apply"):
         return words[0], None
-    if len(words) == 3 and words[0] == "rework" and board.clean(words[2]):
-        return "rework", words[2]
+    if len(words) == 3 and words[0] in ("rework", "followup") and board.clean(words[2]):
+        return words[0], words[2]
     if len(words) in (2, 3) and words[0] == "abort" and words[2:] in ([], ["--requeue"], ["--cascade"]):
         return "abort", words[2][2:] if words[2:] else None
     return None
@@ -687,6 +687,9 @@ def answer_job(project, root, job, jobs, key, note=None, raise_window=False):
                                              f"/trevskills-scrum lilguy {job_id}", raise_window=raise_window), "Opened in a Terminal window.")])
     if verb == "abort":
         return abort_job(project, root, job_id, arg == "requeue", cascade=arg == "cascade")
+    if verb == "followup":  # files the fix on the backlog and marks the job done; no session
+        board.cmd_followup(root, job_id, arg)
+        return 200, {"id": job_id, "action": "answer", "command": "followup", "stage": "done"}
     if verb == "approve":
         started = approve_job(project, root, job_id)
     elif verb == "rework":
