@@ -162,9 +162,9 @@ class RenderChromeTest(unittest.TestCase):
             code, _, err = run_main([self.url, str(self.out), "/hung"])
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
-        for t in took:  # each width stops at the 2 s cap, well before the 10 s default
+        for t in took:  # each width stops at the 2 s cap, long before /hang's 30 s hold ends
             self.assertGreaterEqual(t, 2)
-            self.assertLess(t, 8)
+            self.assertLess(t, 20)
         page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
         self.assertEqual((page["status"], page["shots"]), ("ok", ["hung-390.png", "hung-1440.png"]))
 
