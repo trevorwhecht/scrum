@@ -5190,8 +5190,6 @@ def cmd_wait_on(root, job_id, blocker, then=None) -> dict:
             if i not in seen:
                 seen.add(i)
                 todo += next((j.get("depends_on") or [] for j in board["jobs"] if j["id"] == i), [])
-        if job.get("parent") and dep["id"] not in (find(board, job["parent"]).get("children") or []):
-            raise SystemExit(f"job {job_id} is a child of {job['parent']}; it may only wait on a sibling")
         job.update(stage="waiting", depends_on=[dep["id"]], reason=f"waiting on {dep['id']}", updatedAt=now(),
                    **({"wake": then} if then else {"worktree": None}))
     try:  # timing.md: _timing_row moves this wait from Spec to Queue
