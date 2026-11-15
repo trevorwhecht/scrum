@@ -10061,6 +10061,51 @@ class WindowReportTest(unittest.TestCase):
         self.assertEqual(by["main"]["tokens"]["total"], 11)
         self.assertEqual(by["owa"]["tokens"]["total"], 222)
 
+    def test_window_report_yield_by_account(self):
+        self.two_accounts()
+        self.board(("101-a", "build", None, {"account": "owa"}), ("102-b", "build", None), ("103-c", "build", None))
+        two = "VERDICT: CHANGES\n## Findings\n1. [blocking] a\n2. [minor] b\n"
+        self.put("101-a/round-1/review-code.md", two, mtime=self.R - 100)
+        self.put("102-b/round-1/review-code.md", two + "3. [minor] c\n4. [minor] d\n", mtime=self.R - 100)
+        self.put("103-c/round-1/review-ux.md", "VERDICT: CHANGES\n## Findings\n1. [blocking] x\n", mtime=self.R - 100)
+        self.transcript("p/s/subagents/agent-1.jsonl", [reply(self.R - 100, "m1", cwd=str(self.repo), input_tokens=1000)],
+                        agent="scrum-review-code")
+        p = self.base / "owa" / "projects" / "p" / "s" / "subagents" / "agent-2.jsonl"
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps(reply(self.R - 50, "m2", cwd=str(self.repo), input_tokens=1000)) + "\n")
+        p.with_name("agent-2.meta.json").write_text(json.dumps({"agentType": "scrum-review-code"}))
+        self.five(used=40)
+        by = {c["account"]: c for c in board.cmd_window_report(self.root, self.R + 200)}
+        self.assertEqual(by["owa"]["reviewer_yield"], 2.0)
+        self.assertEqual(by["main"]["reviewer_yield"], 5.0)
+
+    def test_window_report_routing_by_account(self):
+        self.two_accounts()
+        self.board(("101-a", "build", None, {"account": "owa"}), ("102-b", "build", None, {"account": "main"}),
+                   ("103-c", "build", None))
+        rl = lambda outcome: json.dumps({"ts": self.at(self.R - 100), "runner": "local", "outcome": outcome}) + "\n"
+        self.put("101-a/routing.log", rl("ok"))
+        self.put("102-b/routing.log", rl("fail"))
+        self.put("103-c/routing.log", rl("fail"))
+        self.five(used=40)
+        by = {c["account"]: c for c in board.cmd_window_report(self.root, self.R + 200)}
+        self.assertEqual(by["owa"]["local_routing"], 1.0)
+        self.assertEqual(by["main"]["local_routing"], 0.0)
+
+    def test_window_report_needs_human_by_account(self):
+        self.two_accounts()
+        self.board(("101-a", "needs-human", None, {"account": "owa"}), ("102-b", "needs-human", None),
+                   ("103-c", "needs-human", None, {"account": "main"}))
+        ask = [{"key": "a", "label": "Resume", "command": "resume x"}]
+        self.questions(
+            {"date": self.at(self.R - 600), "job": "101-a", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(self.R - 300), "job": "102-b", "kind": "ask", "options": ask, "reason": "q"},
+            {"date": self.at(self.R - 100), "job": "103-c", "kind": "ask", "options": ask, "reason": "q"})
+        self.five(used=40)
+        by = {c["account"]: c for c in board.cmd_window_report(self.root, self.R + 200)}
+        self.assertEqual(by["owa"]["idle"]["needs_human_secs"], 700)  # owa's window ends R + 100
+        self.assertEqual(by["main"]["idle"]["needs_human_secs"], 400)
+
     def test_window_report_skips_account_without_usage(self):
         self.two_accounts(owa_five=None)
         self.five(used=40)
