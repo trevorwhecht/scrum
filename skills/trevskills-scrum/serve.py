@@ -2336,7 +2336,10 @@ def pulse_tick(busy: dict[str, bool], now: float | None = None) -> None:
     started: spawn's PULSE_STARTS since the last tick (copied and cleared in one step under PULSE_STARTS_LOCK; [] when
     serve.py started nothing). A project whose board.json is unreadable is left out. Unknown readings are null. When the first line is
     older than board.PULSE_KEEP_SECS plus a day (or unreadable), the file is first rewritten (tmp + os.replace)
-    to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock."""
+    to the last PULSE_KEEP_SECS. The watchdog is the one writer, so no lock. Under unittest the real default
+    ~/.claude/trevskills-scrum/pulse.log is never written (a silent return)."""
+    if "unittest" in sys.modules and board.pulse_path() == Path.home() / ".claude" / "trevskills-scrum" / "pulse.log":
+        return  # a test tick would add fixture projects to the live log the weekly digest reads
     now = time.time() if now is None else now
     names, usage, projects = board.projects(), claude_usage(now), {}
     for project, repo in names.items():

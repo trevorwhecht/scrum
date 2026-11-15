@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "tests"))  # bare sibling imports resolve however 
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home
 os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
+os.environ["SCRUM_PULSE"] = os.path.join(tempfile.mkdtemp(), "pulse.log")  # never the real pulse.log (job 903)
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
@@ -11521,7 +11522,8 @@ class PulseTest(unittest.TestCase):
         self.log = self.base / "pulse.log"
         usage = {"rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": self.NOW + 3600},
                                  "seven_day": {"used_percentage": 60, "resets_at": self.NOW + 86400}}, "written_at": self.NOW}
-        for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PS=str(self.base / "ps.txt"),
+        for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PULSE=str(self.log),
+                                  SCRUM_PS=str(self.base / "ps.txt"),
                                   SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="250",
                                   SCRUM_COOLDOWN=str(self.base / "cooldown")),
                   mock.patch.object(serve.board, "read_usage", lambda: usage)):
@@ -11530,6 +11532,27 @@ class PulseTest(unittest.TestCase):
 
     def lines(self):
         return [json.loads(l) for l in self.log.read_text().splitlines()]
+
+    def test_pulse_refuses_real_path_under_unittest(self):
+        """Job 903: under unittest a tick never writes the real default ~/.claude/trevskills-scrum/pulse.log."""
+        home = self.base / "home"
+        with mock.patch.dict(os.environ, HOME=str(home)), contextlib.redirect_stderr(io.StringIO()) as err:
+            os.environ.pop("SCRUM_PULSE"), os.environ.pop("SCRUM_REGISTRY")
+            self.serve.pulse_tick({}, now=self.NOW)
+        self.assertFalse((home / ".claude" / "trevskills-scrum" / "pulse.log").exists())
+        self.assertFalse((home / ".claude" / "trevskills-scrum").exists())  # no mkdir either
+        self.assertEqual(err.getvalue(), "")
+
+    def test_test_run_leaves_real_pulse_log_unchanged(self):
+        """Job 903: registry tests then a watchdog tick with fixture projects (the order that leaked) in a fresh process
+        with no SCRUM_REGISTRY or SCRUM_PULSE never create the real pulse.log."""
+        home = self.base / "home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("SCRUM_REGISTRY", "SCRUM_PULSE")}
+        out = subprocess.run([sys.executable, "-m", "unittest", "test_registry", "test_serve_sweep_repro"],
+                             cwd=ROOT / "tests", env={**env, "HOME": str(home)}, capture_output=True, text=True, timeout=300)
+        self.assertEqual(out.returncode, 0, out.stderr[-3000:])
+        self.assertFalse((home / ".claude" / "trevskills-scrum" / "pulse.log").exists())
 
     def test_tick_appends_one_line(self):
         s = self.serve
