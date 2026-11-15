@@ -3060,7 +3060,7 @@ def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
 
 SWEEP_BLOCKING_RE = re.compile(r"^- \[blocking\] (.+?) — (.+) — (.+?)\s*$")
 SWEEP_UNRENDERED_RE = re.compile(r"^- Unrendered: (.+?)(?: — (.*?))?\s*$")
-SWEEP_OK_RE = re.compile(r"^- ok (.+?)\s*$")
+SWEEP_OK_RE = re.compile(r"^- ok (\S+)")  # path is the first token; a trailing note is ignored
 
 
 def _ui_sweep_live(root, d):

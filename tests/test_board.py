@@ -7655,6 +7655,11 @@ class UiSweepRecordTest(unittest.TestCase):
         self.assertEqual(self.items(), [])
         self.assertEqual((self.record()["result"], self.record()["findings"]), ("pass", 0))
 
+    def test_ok_line_note_after_path_is_ignored(self):
+        f = self.review("VERDICT: PASS\n- ok /leads\n- ok / (viewport shots only)\n- ok /admin/views\n- ok /pricing\n")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
+
     def test_stale_or_missing_changes_nothing(self):
         f = self.review("VERDICT: CHANGES\n- [blocking] /leads — tall — /s/a.png\n")
         (self.root / "ui-sweep.json").write_text(json.dumps({**self.rec, "dir": str(self.root / "ui-sweep" / "other")}))
