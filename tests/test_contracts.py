@@ -2020,7 +2020,8 @@ class ContractTest(unittest.TestCase):
     def test_approver_documents_restart_line(self):
         text = (ROOT / "agents" / "scrum-approver.md").read_text()
         for phrase in ("Restart:", "Restart: none", "Below line 1", "grep -F", "on port <N>", "on port 8765",
-                       "curl -sfL localhost:<N>/", "curl -sfL localhost:8765/"):
+                       "curl -sfL localhost:<N>/", "curl -sfL localhost:8765/",
+                       "name the project's `Dev command:` here, not how the running process was launched"):
             self.assertIn(phrase, text, phrase)
         self.assertNotIn("curl -sf localhost", text)
 
@@ -2141,6 +2142,19 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("curl -sf localhost", cleanup)
         self.assertNotIn("used as given", cleanup)
         self.assertIn("`restart command not allowed`", cleanup[cleanup.index("merged, not live: <why>"):])
+
+    def test_restart_passes_port_to_dev_command(self):
+        """Job 907: a project dev server comes back on the Restart line's port, not the default 3000."""
+        text = skill_text()
+        cleanup = self.section(text, "7. **Clean up:**", "## Resuming the builder")
+        restart = cleanup[cleanup.index("**Restart.**"):cleanup.index("3. **Verify:**")]
+        other = next(l for l in restart.splitlines() if l.strip().startswith("- anything else:"))
+        self.assertIn('`nohup env PORT=<port> <Dev command> >> "$F/dev.log" 2>&1 &`', other)
+        self.assertIn("plain integer", other)
+        self.assertIn("3001", other)
+        self.assertIn("never from the `Restart:` line", other)
+        serve = next(l for l in restart.splitlines() if l.strip().startswith("- serve.py:"))
+        self.assertNotIn("PORT=", serve)
 
     def test_restart_has_behavioural_fallback(self):
         text = skill_text()
