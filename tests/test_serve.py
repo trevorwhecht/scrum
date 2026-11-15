@@ -11516,7 +11516,8 @@ class PulseTest(unittest.TestCase):
             "u5h": 30, "u7d": 60, "focus": "app",
             "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False, "gates": []},
                          "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False, "gates": []}},
-            "gates": ["ram_room"], "guard": "CPU load 250% of " + f"{os.cpu_count()} cores (> 150%)"}])  # 2 young sessions
+            "gates": ["ram_room"], "guard": "CPU load 250% of " + f"{os.cpu_count()} cores (> 150%)",
+            "started": []}])  # 2 young sessions
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
                 mock.patch.object(s.board, "swap_used_pct", return_value=None), \
@@ -11557,6 +11558,28 @@ class PulseTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.HEALTHY), mock.patch.object(s.board, "read_usage", lambda *a: None):
             s.pulse_tick({}, now=self.NOW + 2)
         self.assertIsNone(self.lines()[-1]["guard"])
+
+    def test_pulse_records_serve_starts(self):
+        """Job 906: a launched non-manual start of a board job is logged with its gate's CPU reading as the next tick's
+        `started`; manual, non-start and queued launches are not."""
+        s, root = self.serve, self.base / "app" / "scrum"
+        self.addCleanup(lambda: [s.RUNS.pop(f"app/{i}", None) for i in ("006-dep", "007-wait")])
+        self.addCleanup(s.PULSE_STARTS.clear)
+        cpu = iter([320.0, 100.0, 100.0, 9999.0])  # start, resume, approve, queued start: manual reads none
+        with mock.patch.object(s.board, "spawn", return_value=(object(), "runs/x.log")), \
+                mock.patch.object(s.board, "ram_room", return_value=5), \
+                mock.patch.object(s.board, "cooling_down", return_value=False), \
+                mock.patch.object(s.board, "cpu_load_pct", side_effect=lambda: next(cpu)):
+            s.spawn("app", root, "006-dep", "start", "x")  # gate reads 320: launched, recorded
+            s.spawn("app", root, "006-dep", "start", "x", manual=True)  # Trevor's click: no read, not recorded
+            s.spawn("app", root, "006-dep", "resume", "x")  # not a start
+            s.spawn("app", root, "006-dep", "approve", "x")
+            self.assertIsNone(s.spawn("app", root, "007-wait", "start", "x"))  # gate reads 9999: queued
+        self.assertEqual(s.PULSE_STARTS, [{"project": "app", "job": "006-dep", "cpu": 320.0}])
+        s.pulse_tick({}, now=self.NOW)
+        s.pulse_tick({}, now=self.NOW + 60)
+        self.assertEqual([l["started"] for l in self.lines()], [[{"project": "app", "job": "006-dep", "cpu": 320.0}], []])
+        self.assertEqual(s.PULSE_STARTS, [])
 
     def tick_line(self, **env):
         self.log.unlink(missing_ok=True)

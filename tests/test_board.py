@@ -4306,12 +4306,15 @@ class BoardTest(unittest.TestCase):
                                "Idle with claimable work: 2 min (longest stretch 2 min)\n"
                                "Gated with claimable work: 0 min\n"
                                "Held by machine guard: 1 min\n"
-                               "Idle held by Auto continue off or cool down: 1 min\n"
+                               "Idle held by cool down: 1 min\n"
+                               "Idle paused: Auto continue off: 0 min\n"
                                "Idle held by the machine guard: 0 min\n"
                                "Peak sessions: 3 at 2023-11-14T22:15+00:00\n"
                                "Peak CPU load: 600% at 2023-11-14T22:15+00:00\n"
                                "Claims during cool down: 3 — app 11 12, lib 5\n"
-                               "Claims while CPU load over 500%: 3\n"
+                               "Hand-started during cool down: 0\n"
+                               "Claims while CPU load over 500%: 0\n"
+                               "Other starts while CPU load over 500%: 3 — other app 11 12, lib 4\n"
                                "Non-focus work while focus had claimable work: 2 min (focus: app)\n"
                                "Claims by account: x 4\n")
 
@@ -4346,17 +4349,46 @@ class BoardTest(unittest.TestCase):
             (420, 2, {"guard": "pace 5h 90% used"}),  # a session runs: neither
             (480, 0, {}))  # the last line weighs one tick
         self.assertIn("Idle with claimable work: 6 min (longest stretch 3 min)\n", text)
-        self.assertIn("Idle held by Auto continue off or cool down: 0 min\n"
+        self.assertIn("Idle held by cool down: 0 min\nIdle paused: Auto continue off: 0 min\n"
                       "Idle held by the machine guard: 2 min\nPeak sessions:", text)
 
-    def test_pulse_hot_claims_skip_hand(self):
-        line = lambda t, top: {"t": t, "sessions": 0, "cooldown": False, "cpu_load": 600, "projects": {
-            "app": {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}}}
-        text, _ = self.pulse_digest([line(1_700_000_000, 10), line(1_700_000_060, 13)], since=1_700_000_000, boards={
-            "app": [{"id": "011-a", "stage": "spec", "started_by": "hand"},
-                    {"id": "012-b", "stage": "spec", "started_by": "runall"},
-                    {"id": "013-c", "stage": "spec", "started_by": "serve"}]})
-        self.assertIn("Claims while CPU load over 500%: 2\n", text)
+    def test_pulse_hot_claims_only_serve_starts(self):
+        """Job 906: a hot claim is a serve.py start (`started`) whose launch-time cpu is over 500; every other rise at a
+        hot line is listed apart as hand, unregistered or other."""
+        s = 1_700_000_000
+        line = lambda t, top, started=None, **more: {
+            "t": t, "sessions": 0, "cooldown": False, "cpu_load": 600, "projects": {
+                "app": {"claimable": 0, "waiting": 0, "busy": False, "top": top, "auto": True}, **more},
+            **({} if started is None else {"started": started})}
+        boards = {"app": [{"id": "011-a", "stage": "spec", "started_by": "hand"},
+                          {"id": "012-b", "stage": "spec", "started_by": "runall"},
+                          {"id": "013-c", "stage": "spec", "started_by": "serve"}]}
+        text, _ = self.pulse_digest([line(s, 10), line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 400}])],
+                                    since=s, boards=boards)
+        self.assertIn("Claims while CPU load over 500%: 0\n"
+                      "Other starts while CPU load over 500%: 2 — hand app 11; other app 12\n", text)
+        self.tearDown(); self.setUp()
+        ghost = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top}
+        text, _ = self.pulse_digest([line(s, 10, ghost=ghost(3)),
+                                     line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 520}], ghost=ghost(5))],
+                                    since=s, boards=boards)
+        self.assertIn("Claims while CPU load over 500%: 1 — app 13\n"
+                      "Other starts while CPU load over 500%: 4 — hand app 11; unregistered ghost 4 5; other app 12\n",
+                      text)
+
+    def test_pulse_hot_claims_malformed_started(self):
+        """Job 906: old lines without `started`, a non-list one, or entries that are not dicts or have a non-numeric cpu
+        add no hot claim and never raise."""
+        s = 1_700_000_000
+        line = lambda t, **x: {"t": t, "sessions": 1, "cooldown": False, "cpu_load": 100, "projects": {
+            "app": {"claimable": 0, "waiting": 0, "busy": False, "top": 1, "auto": True}}, **x}
+        text, _ = self.pulse_digest([
+            line(s), line(s + 10, started="x"), line(s + 20, started={"project": "app"}),
+            line(s + 30, started=["x", 5, None, {"project": "app", "job": "001-a", "cpu": "900"},
+                                  {"project": "app", "job": "001-a", "cpu": None}, {"project": 3, "job": "001-a", "cpu": 900},
+                                  {"project": "app", "job": "001-a", "cpu": True}])],
+            since=s, boards={"app": [{"id": "001-a", "started_by": "serve"}]})
+        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 0\n", text)
 
     def test_pulse_idle_minutes_capped_at_window(self):
         """Digest 088 read 240 idle minutes in a 79-minute window: idle, its stretch and non-focus never pass the window
@@ -4432,7 +4464,8 @@ class BoardTest(unittest.TestCase):
         self.assertIn("Idle with claimable work: 4 min (longest stretch 2 min)\n"
                       "Gated with claimable work: 0 min\n"
                       "Held by machine guard: 2 min\n"
-                      "Idle held by Auto continue off or cool down: 1 min\n", text)
+                      "Idle held by cool down: 1 min\n"
+                      "Idle paused: Auto continue off: 0 min\n", text)
 
     def test_pulse_idle_never_exceeds_window(self):
         self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n",
@@ -4451,7 +4484,7 @@ class BoardTest(unittest.TestCase):
             boards={"app": [{"id": "001-a", "started_by": "serve"}, {"id": "002-b", "started_by": "runall"}],
                     "new": [{"id": f"00{n}-n", "started_by": "serve"} for n in range(1, 6)]})
         self.assertIn("Claims during cool down: 2 — app 1 2\n", text)
-        self.assertIn("Claims while CPU load over 500%: 2\n", text)
+        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 2 — other app 1 2\n", text)
 
     def claim_pulse(self, gap, boards, cpu=100):
         """pulse_digest over two cool-down lines `gap` s apart, app's top 10 then 13; returns the pulse.md text."""
@@ -4465,34 +4498,57 @@ class BoardTest(unittest.TestCase):
                                              {"id": "013-c", "started_by": "runall"}]})
         self.assertIn("Claims during cool down: 2 — app 12 13\n", text)
 
+    def test_pulse_lists_hand_started_in_cool_down(self):
+        """Job 906: a hand-started job in a cool-down rise is listed on its own line, apart from scheduler claims."""
+        text = self.claim_pulse(60, {"app": [{"id": "011-a", "started_by": "hand"}, {"id": "012-b", "started_by": "runall"},
+                                             {"id": "013-c", "started_by": "serve"}]})
+        self.assertIn("Claims during cool down: 2 — app 12 13\nHand-started during cool down: 1 — app 11\n", text)
+        self.tearDown(); self.setUp()
+        text = self.claim_pulse(60, {"app": [{"id": f"01{n}-x", "started_by": "runall"} for n in (1, 2, 3)]})
+        self.assertIn("Claims during cool down: 3 — app 11 12 13\nHand-started during cool down: 0\n", text)
+
     def test_pulse_claims_skip_jobs_off_board(self):
         """Digest pulse.md read 118 claims in 56 min: a rise whose jobs are not on the board is no cool-down or hot claim."""
         text = self.claim_pulse(60, {"app": [{"id": "010-old", "started_by": "runall"}]}, cpu=600)
-        self.assertIn("Claims during cool down: 0\nClaims while CPU load over 500%: 0\n", text)
+        self.assertIn("Claims during cool down: 0\nHand-started during cool down: 0\n"
+                      "Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 0\n", text)
 
     def test_pulse_claims_skip_gap(self):
         boards = {"app": [{"id": f"01{n}-x", "started_by": "runall"} for n in (1, 2, 3)]}
         text = self.claim_pulse(121, boards, cpu=600)
-        self.assertIn("Claims during cool down: 0\nClaims while CPU load over 500%: 0\n", text)
+        self.assertIn("Claims during cool down: 0\nHand-started during cool down: 0\n"
+                      "Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 0\n", text)
         self.assertTrue(text.endswith("\nClaims by account: none\n"), text)
         self.tearDown(); self.setUp()
         self.assertIn("Claims during cool down: 3 — app 11 12 13\n", self.claim_pulse(120, boards))
 
     def test_pulse_idle_skips_auto_continue_off(self):
         s = 1_700_000_000
-        pr = lambda claimable, auto=None: {"claimable": claimable, "waiting": 0, "busy": False, "top": 1,
-                                           **({} if auto is None else {"auto": auto})}
+        pr = lambda claimable, auto=None, waiting=0: {"claimable": claimable, "waiting": waiting, "busy": False, "top": 1,
+                                                      **({} if auto is None else {"auto": auto})}
         tick = lambda t, sessions, cooldown, app, lib: {"t": t, "sessions": sessions, "cooldown": cooldown,
                                                          "focus": "app", "projects": {"app": app, "lib": lib}}
         text, _ = self.pulse_digest([
-            tick(s, 0, False, pr(2, False), pr(0, True)),  # only claimable project has Auto continue off: held
-            tick(s + 60, 0, False, pr(2), pr(0, True)),  # no auto key (an old line): off, held
-            tick(s + 120, 0, True, pr(0, True), pr(1, True)),  # cool down: held
-            tick(s + 180, 1, False, pr(2, False), pr(0, True)),  # a session runs: neither
-            tick(s + 240, 0, False, pr(0, True), pr(0, False)),  # nothing claimable: neither
+            tick(s, 0, False, pr(2, False), pr(0, True)),  # only claimable project has Auto continue off: paused
+            tick(s + 60, 0, False, pr(2), pr(0, True)),  # no auto key (an old line): off, paused
+            tick(s + 120, 0, False, pr(0, False, 1), pr(0, True)),  # only waiting work, Auto continue off: paused
+            tick(s + 180, 0, True, pr(0, True), pr(1, True)),  # cool down: held by cool down
+            tick(s + 240, 0, True, pr(0, False, 1), pr(0)),  # cool down, auto off: still held by cool down
+            tick(s + 300, 1, False, pr(2, False), pr(0, True)),  # a session runs: neither
+            tick(s + 360, 0, False, pr(0, True), pr(0, False)),  # nothing claimable: neither
+            tick(s + 420, 0, False, pr(0, True, 1), pr(3, False)),  # one auto-on project with work: idle
         ])
-        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n"
-                      "Idle held by Auto continue off or cool down: 3 min\n", text)
+        self.assertIn("Idle with claimable work: 1 min (longest stretch 1 min)\nGated with claimable work: 0 min\n"
+                      "Held by machine guard: 0 min\n"
+                      "Idle held by cool down: 2 min\nIdle paused: Auto continue off: 3 min\n", text)
+
+    def test_pulse_paused_waits_not_gating(self):
+        """Job 906: an auto-off project's ungated waiting work never makes an otherwise all-gated line idle."""
+        text = self.pulse_ticks((0, 0, {"projects": {
+            "app": {"claimable": 0, "waiting": 1, "auto": True, "gates": ["runs_alone"]},
+            "lib": {"claimable": 0, "waiting": 2, "auto": False, "gates": []}}}))
+        self.assertIn("Idle with claimable work: 0 min (longest stretch 0 min)\n"
+                      "Gated with claimable work: 1 min (runs_alone 1)\n", text)
 
     def test_pulse_cool_down_skips_hand_claims(self):
         s = 1_700_000_000
