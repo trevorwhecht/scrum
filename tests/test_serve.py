@@ -11895,6 +11895,164 @@ class ProdErrorsTest(unittest.TestCase):
         self.assertIn("prod_errors_tick", self.serve.watchdog_tick.__doc__)
 
 
+class E2eWaitRecordTest(unittest.TestCase):
+    """Job 910: an E2E waiter over 2 h shows its wait and holder on the card, and the watchdog frees a stuck holder."""
+    HOLD = ("import fcntl, sys, time\n"
+            "f = open(sys.argv[1], 'a')\n"
+            "fcntl.flock(f, fcntl.LOCK_EX)\n"
+            "print('locked', flush=True)\n"
+            "time.sleep(60)\n")
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(os.path.realpath(self.tmp.name))
+        self.dir = base / "home" / ".claude" / "trevskills-scrum"
+        self.dir.mkdir(parents=True)
+        self.slot = self.dir / "e2e.lock"
+        self.holder = self.dir / "e2e.lock.holder"
+        self.root = base / "proj" / "scrum"
+        self.root.mkdir(parents=True)
+        self.wt = {i: base / "wt" / i for i in ("1229", "1225")}
+        for w in self.wt.values():
+            w.mkdir(parents=True)
+        (base / "projects.json").write_text(json.dumps([str(base / "proj")]))
+        p = mock.patch.dict(os.environ, HOME=str(base / "home"), SCRUM_REGISTRY=str(base / "projects.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        self.now = time.time()
+        self.board("check")
+
+    def board(self, holder_stage):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1229-waits", "stage": "check", "worktree": str(self.wt["1229"])},
+            {"id": "1225-holds", "stage": holder_stage, "worktree": str(self.wt["1225"])}]}))
+
+    def waiter(self, age, cwd=None):
+        d = self.dir / "e2e.lock.waiting"
+        d.mkdir(exist_ok=True)
+        m = d / str(os.getpid())  # this test process: a live waiter pid
+        m.write_text(f"{cwd or self.wt['1229'] / 'sub'}\n0")
+        os.utime(m, (self.now - age, self.now - age))
+
+    def write_holder(self, pid, start=None, cwd=None):
+        self.holder.write_text(f"{pid}\n{cwd or self.wt['1225']}\n{int(self.now - 11100) if start is None else start}")
+
+    def flock_child(self):
+        p = subprocess.Popen([sys.executable, "-c", self.HOLD, str(self.slot)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait(), p.stdout.close()))
+        self.assertEqual(p.stdout.readline(), "locked\n")
+        return p
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def card(self, job_id="1229-waits"):
+        jobs = self.serve.board_with_activity(self.root, "proj")["jobs"]
+        return next(j for j in jobs if j["id"] == job_id)
+
+    def reap(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            self.serve.e2e_lock_reap(self.now)
+
+    def gone(self, p):
+        try:
+            return p.wait(timeout=2) is not None  # SIGTERM lands at once; 2 s keeps the "still alive" cases short
+        except subprocess.TimeoutExpired:
+            return False
+
+    def test_over_two_hours(self):
+        self.waiter(7810)
+        self.write_holder(4242)
+        wait = self.card()["e2eWait"]
+        self.assertAlmostEqual(wait.pop("waitSecs"), 7810, delta=2)
+        self.assertEqual(wait["holder"]["job"], "1225")
+        self.assertEqual(wait["holder"]["pid"], 4242)
+        self.assertAlmostEqual(wait["holder"]["ageSecs"], 11100, delta=2)
+        self.assertNotIn("e2eWait", self.card("1225-holds"), "its worktree has no waiter")
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1229-waits", "stage": "review", "worktree": str(self.wt["1229"])}]}))
+        self.assertNotIn("e2eWait", self.card(), "not in check")
+
+    def test_holder_cwd_without_job_shows_basename(self):
+        self.waiter(7810)
+        self.write_holder(4242, cwd="/repos/onewitharts")
+        self.assertEqual(self.card()["e2eWait"]["holder"]["job"], "onewitharts")
+
+    def test_under_two_hours_none(self):
+        self.waiter(7000)
+        self.write_holder(4242)
+        self.assertNotIn("e2eWait", self.card())
+
+    def test_no_holder_file(self):
+        self.waiter(7810)
+        self.assertIsNone(self.card()["e2eWait"]["holder"])
+
+    def test_reap_dead_holder(self):
+        self.waiter(7810)
+        child = self.flock_child()  # a grandchild that kept the inherited fd
+        self.write_holder(self.dead_pid())
+        self.reap()
+        self.assertTrue(self.gone(child))
+        self.assertFalse(self.holder.exists())
+
+    def test_reap_job_left_check(self):
+        self.waiter(7810)
+        child = self.flock_child()
+        self.write_holder(child.pid)
+        self.board("review")
+        self.reap()
+        self.assertTrue(self.gone(child))
+        self.assertFalse(self.holder.exists())
+
+    def test_no_reap_live_check_holder(self):
+        self.waiter(7810)
+        child = self.flock_child()
+        self.write_holder(child.pid)
+        self.reap()
+        self.assertFalse(self.gone(child))
+        self.assertTrue(self.holder.exists())
+
+    def test_no_reap_young_wait(self):
+        self.waiter(7000)
+        child = self.flock_child()
+        self.write_holder(self.dead_pid())
+        self.reap()
+        self.assertFalse(self.gone(child))
+        self.assertTrue(self.holder.exists())
+
+    def test_malformed_holder_file(self):
+        self.waiter(7810)
+        child = self.flock_child()
+        for text in ("garbage", f"{self.dead_pid()}\n/x"):
+            self.holder.write_text(text)
+            self.reap()
+            self.assertFalse(self.gone(child))
+            self.assertEqual(self.holder.read_text(), text)
+        self.holder.unlink()
+        self.reap()  # missing: nothing to do
+        self.assertFalse(self.gone(child))
+
+    def test_reap_skips_replaced_holder(self):
+        self.waiter(7810)
+        child = self.flock_child()
+        self.write_holder(child.pid)
+        self.board("review")
+        real = self.serve.job_for_cwd
+
+        def swap(cwd):  # a new holder takes the slot while the board is read
+            self.write_holder(child.pid, start=int(self.now))
+            return real(cwd)
+        with mock.patch.object(self.serve, "job_for_cwd", side_effect=swap):
+            self.reap()
+        self.assertFalse(self.gone(child))
+        self.assertEqual(self.holder.read_text().split("\n")[2], str(int(self.now)))
+
+
 if __name__ == "__main__":
     unittest.main()
 

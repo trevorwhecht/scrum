@@ -56,6 +56,11 @@ def waiting_dir(lock: Path) -> Path:
     return lock.with_name(lock.name + ".waiting")
 
 
+def holder_path(slot: Path) -> Path:
+    """Where the holder of `slot` leaves `<pid>\n<cwd>\n<epoch start>`; serve.py reads it to show and reap the holder."""
+    return slot.with_name(slot.name + ".holder")
+
+
 def prune_dead_waiters(lock: Path) -> None:
     """Unlink every waiting marker whose pid is dead (a SIGKILLed waiter never ran its `finally`). Never raises."""
     try:
@@ -180,13 +185,24 @@ def main(argv: list[str]) -> int:
             except OSError:
                 pass  # the marker is only a hint; never let cleanup replace the build's exit code
     cmd = ["sh", "-c", argv[0]] if len(argv) == 1 else argv
+    holder = holder_path(Path(f.name))
     with f:
+        try:
+            holder.write_text(f"{os.getpid()}\n{os.getcwd()}\n{time.time():.0f}")
+        except OSError:
+            pass  # the holder file is only a hint; never fail the build over it
         try:
             # the child inherits the lock fd, so the lock outlives a SIGKILLed wrapper until the build exits
             # ponytail: a build that daemonizes a long-lived grandchild keeps the lock until that grandchild exits
+            # (serve.py e2e_lock_reap frees e2e.lock from one once a waiter has waited 2 h)
             return subprocess.call(cmd, pass_fds=(f.fileno(),))
         except (FileNotFoundError, PermissionError):
             return 127
+        finally:
+            try:
+                holder.unlink(missing_ok=True)
+            except OSError:
+                pass  # never let cleanup replace the build's exit code
 
 
 if __name__ == "__main__":

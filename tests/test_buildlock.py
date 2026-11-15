@@ -425,6 +425,27 @@ class BuildLockTest(unittest.TestCase):
             os.environ["SCRUM_CHECK_LOCK_SLOTS"] = "3"
             self.assertEqual(mod.slots(Path("/a/check.lock")), 3)
 
+    def test_holder_file_written_and_removed(self):
+        holder = self.dir / "sub" / "build.lock.holder"
+        out, start = self.dir / "seen", time.time()
+        copy = f"import shutil; shutil.copy({str(holder)!r}, {str(out)!r}); raise SystemExit(3)"
+        p = subprocess.Popen([sys.executable, str(SCRIPT), sys.executable, "-c", copy], env=self.env,
+                             cwd=self.dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.procs.append(p)
+        self.assertEqual(p.wait(timeout=30), 3)
+        pid, cwd, at = out.read_text().split("\n")
+        self.assertEqual(int(pid), p.pid)
+        self.assertEqual(os.path.realpath(cwd), os.path.realpath(self.dir))
+        self.assertLessEqual(abs(int(at) - start), 5)
+        self.assertFalse(holder.exists())
+        self.hold()  # a waiter that times out never leaves a holder file
+        self.assertEqual(self.run_wrap(sys.executable, "-c", "pass", SCRUM_BUILD_LOCK_TIMEOUT="1").returncode, 124)
+        self.assertFalse(holder.exists())
+
+    def test_holder_write_failure_keeps_exit_code(self):
+        (self.dir / "sub" / "build.lock.holder").mkdir(parents=True)  # a directory: write and unlink both fail
+        self.assertEqual(self.run_wrap(sys.executable, "-c", "raise SystemExit(7)").returncode, 7)
+
 
 if __name__ == "__main__":
     unittest.main()
