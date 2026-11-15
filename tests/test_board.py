@@ -978,6 +978,19 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, out, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
 
+    def test_wait_on_outside_blocker_child_starts_when_blocker_done(self):
+        parent, (c1, c2, c3) = self.three()
+        out = board.cmd_new(self.root, "Outside")
+        self.spec(out, "src/outside.py")
+        self.spec(c1, "src/c1.py")
+        self.spec(c2, "src/c2.py")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        self.assertEqual(board.cmd_wait_on(self.root, c1, out), {"id": c1, "waiting_on": out})
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+        self.assertEqual(self.child(c1)["stage"], "waiting")
+        board.cmd_set(self.root, out, ["stage=done"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+
     def test_ready_child_outside_dep_missing_still_blocked(self):
         parent, (c1, c2, c3) = self.three()
         self.outside(parent, c1, "999-gone")
@@ -5744,16 +5757,26 @@ class BoardTest(unittest.TestCase):
                 self.assertIsInstance(e.exception.code, str)
                 self.assertEqual((self.root / "board.json").read_text(), before)
 
-    def test_wait_on_refuses_child_with_outside_blocker(self):
+    def test_wait_on_child_may_wait_on_outside_blocker(self):
         self.wait_board({"id": "001-outside", "stage": "review"},
                         {"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a", "004-b"]},
                         {"id": "003-a", "stage": "review", "parent": "002-parent"},
                         {"id": "004-b", "stage": "build", "parent": "002-parent"})
+        self.assertEqual(board.cmd_wait_on(self.root, "004-b", "001-outside"),
+                         {"id": "004-b", "waiting_on": "001-outside"})
+        job = self.jobs()[3]
+        self.assertEqual((job["stage"], job["depends_on"]), ("waiting", ["001-outside"]))
+
+    def test_wait_on_outside_blocker_cycle_refused(self):
+        self.wait_board({"id": "001-outside", "stage": "waiting", "depends_on": ["004-b"]},
+                        {"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a", "004-b"]},
+                        {"id": "003-a", "stage": "review", "parent": "002-parent"},
+                        {"id": "004-b", "stage": "build", "parent": "002-parent"})
         before = (self.root / "board.json").read_text()
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as e:
             board.cmd_wait_on(self.root, "004-b", "001-outside")
+        self.assertEqual(e.exception.code, "blocker 001-outside already waits on 004-b")
         self.assertEqual((self.root / "board.json").read_text(), before)
-        self.assertEqual(board.cmd_wait_on(self.root, "004-b", "003"), {"id": "004-b", "waiting_on": "003-a"})
 
     def test_wait_on_cli_prints_json(self):
         self.wait_board({"id": "001-first", "stage": "review"}, {"id": "002-second", "stage": "build"})
