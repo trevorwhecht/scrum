@@ -66,5 +66,15 @@ class E2eFull(unittest.TestCase):
                          "<span>UI sweep running abcdefg</span>")
 
 
+    def test_mobile_full_row_rule_only_in_media_block(self):
+        text = DASHBOARD.read_text()
+        rule = "#e2eFull{order:1;flex-basis:100%}"
+        self.assertEqual(text.count(rule), 1)
+        start = text.index("@media (max-width:640px)")
+        self.assertIn("#autoOff{order:1;flex-basis:100%}" + rule, text[start:text.index(".facts dt{line-height:1.45}}", start)])
+        self.assertNotIn("#e2eFull{order", text[:start])
+        self.assertNotIn("#e2eFull{flex-basis", text)
+
+
 if __name__ == "__main__":
     unittest.main()
