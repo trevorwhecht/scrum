@@ -1432,6 +1432,35 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][-1], "/trevskills-scrum run-all", off)
         self.assertEqual((self.root / "backlog.md").read_text(), before)
 
+    def test_run_all_match(self):
+        path = self.root / "backlog.md"
+        before = path.read_text()
+        self.addCleanup(path.write_text, before)
+        path.write_text("# Backlog\n- [ ] Lead item one\n- [ ] Other thing\n")
+        env = ["env", "CLAUDE_NOTIFIER_DISABLE=1", "FORCE_COLOR=2", "COLORTERM=", self.serve.CLAUDE]
+        code, out, run = self.run_all(body={"match": "lead"})
+        self.assertEqual((code, out), (200, {"message": "Run all opened in a new Terminal window."}))
+        self.assertEqual(run.call_args.args[0][4:], env + ["/trevskills-scrum run-all match lead"])
+        code, out, run = self.run_all(body={"askme": 2, "match": " Lead  item "})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(run.call_args.args[0][4:], env + ["/trevskills-scrum run-all askme 2 match Lead item"])
+        for blank in ("", "   ", None):  # a blank field posts as plain Run all
+            code, out, run = self.run_all(body={"match": blank})
+            self.assertEqual(code, 200, blank)
+            self.assertEqual(run.call_args.args[0][-1], "/trevskills-scrum run-all", blank)
+        error = "match must be at most 80 letters, digits, spaces, -, _ or #, not starting with -"
+        for bad in (3, ["lead"], True, "x" * 81, "lead;rm", "lead'", "lead\nx", "-lead", " --help"):
+            code, out, run = self.run_all(body={"match": bad})
+            self.assertEqual((code, out), (400, {"error": error}), bad)
+            run.assert_not_called()
+        code, out, run = self.run_all(body={"match": "x" * 80})
+        self.assertEqual((code, out), (409, {"error": "no open item matches"}))
+        run.assert_not_called()
+        code, out, run = self.run_all(body={"match": "lead #a-b_c"})
+        self.assertEqual((code, out), (409, {"error": "no open item matches"}))
+        run.assert_not_called()
+        self.assertEqual(path.read_text(), "# Backlog\n- [ ] Lead item one\n- [ ] Other thing\n")
+
     def test_backlog_run_all_rejects_bad_askme(self):
         path = self.root / "backlog.md"
         before = path.read_text()
