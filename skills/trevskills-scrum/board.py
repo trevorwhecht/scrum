@@ -5254,6 +5254,8 @@ def cmd_wait_on(root, job_id, blocker, then=None) -> dict:
         dep = find(board, hits[0])
         if dep["id"] == job_id:
             raise SystemExit(f"job {job_id} cannot wait on itself")
+        if dep["id"] == job.get("parent"):
+            raise SystemExit(f"job {job_id} cannot wait on its parent {dep['id']}; the parent waits on its children")
         if dep["stage"] in ("done", "aborted"):
             raise SystemExit(f"blocker {dep['id']} is {dep['stage']}; there is nothing to wait for")
         seen, todo = set(), [dep["id"]]
