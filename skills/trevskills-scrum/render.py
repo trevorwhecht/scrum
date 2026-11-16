@@ -228,7 +228,9 @@ def _text(params: dict) -> str:
     return " ".join(out)
 
 
-BUSY_JS = """!!document.querySelector('[role=status], [aria-busy=true]') || [...document.querySelectorAll('body *')].some(
+BUSY_JS = """!!document.querySelector('[aria-busy=true]') || [...document.querySelectorAll('[role=status]')].some(
+  e => /^(loading(\\.\\.\\.)?)?$/i.test(e.textContent.trim()) && e.getClientRects().length > 0
+) || [...document.querySelectorAll('body *')].some(
   e => /^loading(\\.\\.\\.)?$/i.test([...e.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('').trim())
        && e.getClientRects().length > 0)"""
 
@@ -288,6 +290,8 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
             stop = min(now + 0.25, end)  # poll again in about 250 ms
         if (ev := cdp.event(stop - now)) is not None:
             handle(ev)
+    while cdp.events:  # events queued during the last _busy call, e.g. the console line logged as it cleared
+        handle(cdp.events.popleft())
     if loaded is None:
         res["status"] = "timeout"
         return res
