@@ -2042,8 +2042,11 @@ def cmd_process_health(root, digest_id: str) -> dict:
         lane, fit = FIT_RANK.get(e.get("lane")), FIT_RANK.get(e.get("fit"))
         if lane is not None and fit is not None and fit < lane and not e.get("sensitive") \
                 and e.get("excluded") is not True:  # the pipeline-fit row's own fit; no second heuristic here
-            if e.get("lane") == "fast" and _lilguy_refuses(root / "jobs" / str(e["id"])):
-                continue  # lilguy-fit would have refused it, so fast was the cheapest lane it could get
+            if e.get("lane") == "fast":
+                folder = root / "jobs" / str(e["id"])
+                recorded = _health_file(folder / "lilguy-fit.json", dict).get("fit")
+                if recorded is False or (recorded is not True and _lilguy_refuses(folder)):
+                    continue  # lilguy-fit refused it (recorded, else re-checked), so fast was the cheapest lane it could get
             parent = board.get(e["id"], {}).get("parent")
             if parent and every.get(parent, {}).get("lane") != "runall":
                 continue  # a fix child of a non-runall (or unknown) parent never reaches Lilguy
@@ -3405,6 +3408,15 @@ def job_complex(root: Path, job_id: str) -> bool:
 
 
 def cmd_lilguy_fit(root, job_id: str) -> dict:
+    """The _lilguy_verdict, also written to jobs/<id>/lilguy-fit.json when that folder exists (process-health reads it)."""
+    verdict = _lilguy_verdict(root, job_id)
+    folder = Path(root) / "jobs" / job_id
+    if folder.is_dir():
+        _write_json(folder / "lilguy-fit.json", verdict)
+    return verdict
+
+
+def _lilguy_verdict(root, job_id: str) -> dict:
     """{"fit", "why"}: a job already on another lane never fits, nor one whose feature.md or spec.md names a
     repo-relative `.claude/` path (CLAUDE_DIR_RE); then a feature.md header `Lane:` line decides (lilguy
     fits, any other lane doesn't); then a LILGUY_HARD_STOP_RE word in feature.md, or a lilguy_estimate over

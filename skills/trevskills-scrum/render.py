@@ -22,7 +22,7 @@ WIDTHS = ((390, True), (1440, False))
 HEIGHT = 900
 LOAD_CAP = 60  # seconds per page load
 BUDGET = 240  # seconds for the whole run, under lanes/review.md's 300 s Bash timeout
-QUIET = 1  # seconds with no request in flight, started or finished, before a loaded page is shot
+QUIET = 0.5  # seconds with no request in flight, started or finished, before a loaded page is shot
 SETTLE_CAP = 10  # seconds after the load event at most, so a request that never ends cannot stall the run
 OUR_FILES = ("manifest.json", "console.log")
 COOKIE_KEYS = ("name", "value", "url", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
@@ -228,6 +228,20 @@ def _text(params: dict) -> str:
     return " ".join(out)
 
 
+BUSY_JS = """!!document.querySelector('[role=status], [aria-busy=true]') || [...document.querySelectorAll('body *')].some(
+  e => /^loading(\\.\\.\\.)?$/i.test([...e.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('').trim())
+       && e.getClientRects().length > 0)"""
+
+
+def _busy(cdp: CDP) -> bool:
+    """True while the page shows a loading indicator; False when it cannot be read."""
+    try:
+        r = cdp.call("Runtime.evaluate", {"expression": BUSY_JS, "returnByValue": True}, timeout=5)
+    except (RuntimeError, TimeoutError):
+        return False
+    return r.get("result", {}).get("value") is True
+
+
 def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: float, log) -> dict:
     """Load url at width; {"status", "http_status", "final_url", "errors"}. Console lines go to log."""
     cdp.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": HEIGHT, "deviceScaleFactor": 1,
@@ -268,7 +282,10 @@ def _load(cdp: CDP, url: str, path: str, width: int, mobile: bool, deadline: flo
         stop = end if loaded is None else min(loaded + SETTLE_CAP, deadline,
                                               loaded + SETTLE_CAP if inflight else last + QUIET)
         if now >= stop:
-            break
+            # ponytail: an indicator at LOAD_CAP is shot anyway (status ok)
+            if loaded is None or now >= end or not _busy(cdp):
+                break
+            stop = min(now + 0.25, end)  # poll again in about 250 ms
         if (ev := cdp.event(stop - now)) is not None:
             handle(ev)
     if loaded is None:
