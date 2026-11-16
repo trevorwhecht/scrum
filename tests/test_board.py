@@ -8610,6 +8610,38 @@ class LilguyFitTest(unittest.TestCase):
                 (self.jd / "feature.md").write_text(text + "\n")
                 self.assertIs(self.fit()["fit"], False)
 
+    def test_lilguy_fit_hard_stop_word_leaves_verdict_file(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the Payment total on the receipt\n")
+        self.fit()
+        saved = json.loads((self.jd / "lilguy-fit.json").read_text())
+        self.assertIs(saved["fit"], False)
+        self.assertEqual(saved["why"], "hard-stop word 'Payment' in feature.md")
+
+    def test_lilguy_fit_from_suffix_ignored(self):
+        self.points(2)
+        (self.jd / "feature.md").write_text("Fix mergeLeads in src/services/leadService.ts (from 1287-fix-login-schema)\n")
+        got = self.fit()
+        self.assertIs(got["fit"], True)
+        self.assertEqual(got["why"], "names 1 file(s), estimate about 10 added lines")
+        (self.jd / "feature.md").write_text("Fix the login in src/a.ts (from 1287-fix-things)\n")
+        got = self.fit()
+        self.assertIs(got["fit"], False)
+        self.assertIn("login", got["why"])
+
+    def test_lilguy_refuses_ignores_from_suffix(self):
+        (self.jd / "feature.md").write_text("Fix mergeLeads in src/a.ts (from 1287-fix-login-schema)\n")
+        self.assertIs(board._lilguy_refuses(self.jd), False)
+        self.assertIs(board._fit_excluded(self.jd, "fast", None), False)
+        (self.jd / "feature.md").write_text("Fix login in src/a.ts (from 1287-fix-things)\n")
+        self.assertIs(board._lilguy_refuses(self.jd), True)
+        self.assertIs(board._fit_excluded(self.jd, "fast", None), True)
+
+    def test_lilguy_fit_delete_cascade_description_passes(self):
+        self.points(2)
+        (self.jd / "feature.md").write_text("mergeLeads in src/services/leadService.ts deletes rows by cascade\n")
+        self.assertIs(self.fit()["fit"], True)
+
     def test_lilguy_fit_claude_path_fails(self):
         self.points(1)
         for text in ("Edit `.claude/skills/scrum-code-map/SKILL.md`", ".claude/settings.json gets a line"):
