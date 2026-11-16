@@ -9602,6 +9602,9 @@ class ProcessHealthTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
         (self.root / "project.md").write_text("- UI globs: skills/trevskills-scrum/dashboard.html\n")
+        p = mock.patch.dict(os.environ, SCRUM_PULSE=str(Path(self.tmp.name) / "pulse.log"))  # never the real pulse.log
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -9804,6 +9807,37 @@ class ProcessHealthTest(unittest.TestCase):
             card(1, {"total": 385000000, "by_job": {}}), card(2, None), card(3, {"total": 0, "by_job": {}})]))
         m = self.run_health("001")["metrics"]["unused_windows"]
         self.assertEqual(m["jobs"], ["five_hour-2", "five_hour-3"])
+
+    def unused_with_pulse(self, cards, rows):
+        """unused_windows' jobs for windows.json `cards` with pulse.log rows (t, {project: auto})."""
+        self.board()
+        self.digest("001")
+        self.put("digests/001/windows.json", json.dumps(cards))
+        self.put("../pulse.log", "".join(json.dumps({"t": t, "projects": {p: {"auto": a} for p, a in ps.items()}}) + "\n"
+                                         for t, ps in rows))
+        return self.run_health("001")["metrics"]["unused_windows"]["jobs"]
+
+    @staticmethod
+    def unused_card(window, reset):
+        return {"window": window, "resets_at": reset, "budget": {"used_pct": 10, "left_at_reset_pct": 90}}
+
+    def test_unused_windows_skipped_when_auto_off(self):
+        card = self.unused_card("five_hour", 100000)
+        off = {"a": False, "b": False}
+        self.assertEqual(self.unused_with_pulse([card], [(82000, off), (90000, off), (100000, off)]), [])
+
+    def test_unused_windows_counts_when_auto_on_or_no_pulse(self):
+        card = self.unused_card("five_hour", 100000)
+        off = {"a": False, "b": False}
+        self.assertEqual(self.unused_with_pulse([card], [(82000, off), (90000, {"a": False, "b": True})]),
+                         ["five_hour-100000"])
+        self.assertEqual(self.unused_with_pulse([card], []), ["five_hour-100000"], "no pulse lines: unknown")
+        self.assertEqual(self.unused_with_pulse([card], [(81000, off), (100001, off)]), ["five_hour-100000"],
+                         "lines only outside the 5 h window")
+        week = self.unused_card("seven_day", 1000000)
+        self.assertEqual(self.unused_with_pulse([week], [(400000, off), (900000, off)]), [], "7-day span")
+        self.assertEqual(self.unused_with_pulse([week], [(300000, {"a": True}), (900000, off)]), [])
+        self.assertEqual(self.unused_with_pulse([week], [(500000, {"a": True}), (900000, off)]), ["seven_day-1000000"])
 
     def test_waste_empty_likely_uses_real_diff(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"

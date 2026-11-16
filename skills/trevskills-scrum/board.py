@@ -1396,6 +1396,18 @@ def pulse_path():
     return Path(os.environ.get("SCRUM_PULSE") or registry_path().parent / "pulse.log")
 
 
+def pulse_auto(lines, project=None):
+    """[(t, auto)] for each pulse.log line (board._json_lines) with a numeric t, in file order: auto is True when the
+    line's projects.<project>.auto is True (any project's, when project is None)."""
+    out = []
+    for l in lines:
+        ps = l.get("projects") if isinstance(l.get("projects"), dict) else {}
+        if is_num(l.get("t")):
+            vals = [ps.get(project)] if project is not None else list(ps.values())
+            out.append((l["t"], any(isinstance(v, dict) and v.get("auto") is True for v in vals)))
+    return out
+
+
 def _pulse_since(root, digest_id):
     """The jobs.txt mtime of the newest digest before digest_id with no error.md, or None (every pulse line counts)."""
     d = Path(root) / "digests"
@@ -2002,7 +2014,8 @@ FIT_RANK = {"lilguy": 0, "fast": 1, "standard": 2, "debug": 2}  # cheaper_lane_j
 def cmd_process_health(root, digest_id: str) -> dict:
     """{"digest", "previous", "metrics"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
     questions.log, each job's routing.log, fable.log and round reviews, the digest's pipeline-fit.json and windows.json,
-    and board.json; each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
+    pulse.log (unused_windows skips a window whose pulse lines all have Auto continue off in every project) and
+    board.json; each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
     broken input counts 0. Writes digests/<NNN>/health.json."""
     root = Path(root)
     d = root / "digests" / str(digest_id)
@@ -2088,6 +2101,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
                                           or job.get("lane") not in ("lilguy", "runall", "bigboy") and not job.get("pr")):
             hits["not_shipped"].append(job_id)
+    pulse = pulse_auto(_json_lines(pulse_path()))
     for card in _health_file(d / "windows.json", list):
         b = card.get("budget") if isinstance(card, dict) else None
         if not isinstance(b, dict):
@@ -2095,7 +2109,10 @@ def cmd_process_health(root, digest_id: str) -> dict:
         name, reset = f"{card.get('window')}-{card.get('resets_at')}", card.get("resets_at")
         tokens = card.get("tokens") if isinstance(card.get("tokens"), dict) else {}
         burned = b.get("used_pct") == 0 and is_num(tokens.get("total")) and tokens["total"] > 0  # stale 0% sample
-        if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT and not burned:
+        span = WINDOW_SECS.get(card.get("window"))
+        inside = [a for t, a in pulse if span and is_num(reset) and reset - span <= t <= reset]
+        paused = bool(inside) and not any(inside)  # Auto continue off in every project all window: a deliberate pause
+        if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT and not burned and not paused:
             hits["unused_windows"].append(name)
         if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
                 or is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SECS):

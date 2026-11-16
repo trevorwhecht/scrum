@@ -12185,3 +12185,57 @@ class SpawnCooldownTest(unittest.TestCase):
         out, bspawn, _ = self.start(unparked)
         self.assertEqual(out, f"runs/{unparked}-start.log")
         bspawn.assert_called_once()
+
+
+class AutoOffTest(unittest.TestCase):
+    """serve.py auto_off: board.autoOff names a project with claimable work idle since Auto continue went off (job 917)."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.root = base / "repo" / "scrum"
+        self.root.mkdir(parents=True)
+        (self.root / "project.md").write_text("# Project\n")
+        (self.root / "board.json").write_text('{"jobs": []}')
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] one\n- [ ] two\n- [ ] three\n- [x] done\n")
+        self.log = base / "pulse.log"
+        p = mock.patch.dict(os.environ, SCRUM_PULSE=str(self.log))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def pulse(self, *rows):
+        self.log.write_text("".join(json.dumps({"t": t, "projects": {"repo": {"auto": a}, "other": {"auto": True}}}) + "\n"
+                                    for t, a in rows))
+
+    def got(self):
+        return self.serve.board_with_activity(self.root, "repo")["autoOff"]
+
+    def test_board_auto_off(self):
+        self.pulse((1000, True), (1060, True), (1120, False), (1180, False))
+        self.assertEqual(self.got(), {"since": 1120, "claimable": 3})
+        self.pulse((1000, True), (1060, False), (1120, True), (1180, False), (1240, False))
+        self.assertEqual(self.got(), {"since": 1180, "claimable": 3}, "the last on stretch counts")
+        (self.root / "project.md").write_text("# Project\n- Auto continue: 1\n")
+        self.assertIsNone(self.got(), "Auto continue is on")
+        (self.root / "project.md").write_text("# Project\n")
+        self.pulse((1000, False), (1060, False))
+        self.assertIsNone(self.got(), "never had Auto continue on")
+        self.pulse((1000, True), (1060, False))
+        (self.root / "backlog.md").write_text("# Backlog\n- [x] done\n")
+        self.assertIsNone(self.got(), "nothing claimable")
+
+    def test_board_auto_off_reuses_pulse_read(self):
+        self.pulse((1000, True), (1060, False))
+        self.got()  # warm the cache for this file
+        with mock.patch.object(self.serve.board, "_json_lines", wraps=self.serve.board._json_lines) as read:
+            self.assertEqual(self.got(), {"since": 1060, "claimable": 3})
+            self.assertEqual(self.got(), {"since": 1060, "claimable": 3})
+            self.assertEqual(read.call_count, 0, "pulse.log unchanged: no re-read")
+            with open(self.log, "a") as f:
+                f.write(json.dumps({"t": 1120, "projects": {"repo": {"auto": True}}}) + "\n")
+            self.assertIsNone(self.got())
+            self.assertIsNone(self.got())
+            self.assertEqual(read.call_count, 1, "pulse.log changed: read once")
