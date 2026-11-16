@@ -10468,6 +10468,7 @@ class UsageAllowanceTest(unittest.TestCase):
             self.assertEqual(self.allow(usage(five=(used, 1))), want, used)
         self.assertEqual(self.allow(usage(five=(96, 1201))), 1, "just past 20 min: no relax")
 
+    @mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # the ladder alone: 91 % at 57 % elapsed would pace-hold
     def test_tighten_far_reset(self):
         for used, want in ((91, 1), (96, 0), (99, 0)):
             self.assertEqual(self.allow(usage(seven=(used, 10801))), want, used)
@@ -10528,13 +10529,36 @@ class UsageAllowanceTest(unittest.TestCase):
         a = board.usage_allowance(usage(five=(20, 5 * 3600 + 600)), USAGE_NOW, 0)  # reset past a full window: 0 % elapsed
         self.assertEqual((int(a), a.reason[:8]), (0, "pace 5h "))
 
+    def test_pace_lead_holds_seven_day(self):
+        a = board.usage_allowance(usage(seven=(90, 78 * 3600)), USAGE_NOW, 0)
+        self.assertEqual(int(a), 0)
+        self.assertTrue(a.reason.startswith("pace 7d "), a.reason)
+
+    def test_pace_seven_day_under_lead_passes(self):
+        span = 7 * 86400
+        left = span * 0.8  # 20 % elapsed
+        a = board.usage_allowance(usage(seven=(35, left)), USAGE_NOW, 0)
+        self.assertEqual((int(a), a.reason[:8]), (0, "pace 7d "), "lead exactly 15")
+        self.assertIsNone(board.usage_allowance(usage(five=(10, 3600), seven=(34.9, left)), USAGE_NOW, 0), "lead 14.9")
+
+    def test_pace_seven_day_expired_or_missing_passes(self):
+        for after in (0, -60):
+            self.assertIsNone(board.usage_allowance(usage(seven=(90, after)), USAGE_NOW, 0), after)
+        self.assertIsNone(board.usage_allowance(usage(), USAGE_NOW, 0), "missing")
+        bad = usage(seven=(90, 78 * 3600))
+        bad["rate_limits"]["seven_day"]["used_percentage"] = "90"
+        self.assertIsNone(board.usage_allowance(bad, USAGE_NOW, 0), "malformed")
+
+    def test_pace_both_windows_five_hour_reason(self):
+        a = board.usage_allowance(usage(five=(90, 2 * 3600), seven=(90, 78 * 3600)), USAGE_NOW, 0)
+        self.assertEqual((int(a), a.reason[:8]), (0, "pace 5h "))
+
     def test_pace_under_lead_passes(self):
         self.assertIsNone(board.usage_allowance(usage(five=(40, 3 * 3600)), USAGE_NOW, 0), "40 % at 2 h: lead 0")
         self.assertIsNone(board.usage_allowance(usage(five=(34.9, 4 * 3600)), USAGE_NOW, 0), "lead 14.9")
         a = board.usage_allowance(usage(five=(96, 1300)), USAGE_NOW, 0)  # lead about 3: the ladder's rung 2
         self.assertEqual((int(a), a.reason[:9]), (1, "usage 5h "))
-        a = board.usage_allowance(usage(seven=(90, 6 * 86400)), USAGE_NOW, 0)  # the 7d window never paces
-        self.assertIsNone(a)
+        self.assertIsNone(board.usage_allowance(usage(seven=(90, 86400)), USAGE_NOW, 0), "7d at 86 % elapsed: lead 4")
 
     def test_pace_stale_or_reset_never_holds(self):
         hot = usage(five=(90, 5 * 3600 - 92 * 60))

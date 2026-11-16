@@ -3914,7 +3914,7 @@ USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the 
 USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
 USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
 USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
-PACE_LEAD_PCT = 15  # the 5h window's used % this many points ahead of its elapsed % holds automated claims (allowance 0)
+PACE_LEAD_PCT = 15  # a 5h or 7d window's used % this many points ahead of its elapsed % holds automated claims (allowance 0)
 
 
 class Allowance(int):
@@ -3930,20 +3930,21 @@ def usage_allowance(usage, now, live):
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
-    only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour window whose used % runs
-    PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ...") before the ladder."""
+    only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour or seven_day window whose used % runs
+    PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
         return None
     at = usage.get("written_at")
     if not is_num(at) or now - at > USAGE_STALE_SECS:
         return None
-    w = usage["rate_limits"].get("five_hour")
-    if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now:
-        span = WINDOW_SECS["five_hour"]
-        elapsed = min(100, max(0, (span - (w["resets_at"] - now)) / span * 100))
-        if w["used_percentage"] - elapsed >= PACE_LEAD_PCT:
-            return Allowance(0, f"pace 5h {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, resets "
-                                f"{datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
+    for key, label in WINDOWS:  # five_hour first, so its reason wins when both are over the lead
+        w = usage["rate_limits"].get(key)
+        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now:
+            span = WINDOW_SECS[key]
+            elapsed = min(100, max(0, (span - (w["resets_at"] - now)) / span * 100))
+            if w["used_percentage"] - elapsed >= PACE_LEAD_PCT:
+                return Allowance(0, f"pace {label} {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, "
+                                    f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
     rungs = (None,) + USAGE_STEPS
     best = None
     for key, label in WINDOWS:

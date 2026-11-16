@@ -8792,10 +8792,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["003-third"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "spec"))
 
-    def high_usage(self):  # 7d 92% used, 5h low, reset days away
+    def high_usage(self):  # 7d 92% used, 5h low, reset a day away (86% elapsed: no pace hold)
         now = time.time()
         return {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 10, "resets_at": now + 3600},
-                                                   "seven_day": {"used_percentage": 92, "resets_at": now + 4 * 86400}}}
+                                                   "seven_day": {"used_percentage": 92, "resets_at": now + 86400}}}
 
     def wake_at_high_usage(self, *jobs, room=1):
         self.queue_board({"id": "001-first", "stage": "done"}, *jobs)
@@ -10156,11 +10156,11 @@ class HighUsageStartsTest(unittest.TestCase):
             p = mock.patch.object(serve, name, return_value=value)
             setattr(self, name, p.start()); self.addCleanup(p.stop)
 
-    def high(self):  # 7d 92% used, 5h low, reset days away
+    def high(self):  # 7d 92% used, 5h low, reset a day away (86% elapsed: no pace hold)
         now = time.time()
         self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 10, "resets_at": now + 3600},
-            "seven_day": {"used_percentage": 92, "resets_at": now + 4 * 86400}}}))
+            "seven_day": {"used_percentage": 92, "resets_at": now + 86400}}}))
 
     def put(self, *jobs):
         (self.root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j} for j in jobs]}))
