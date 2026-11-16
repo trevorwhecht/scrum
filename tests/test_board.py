@@ -635,11 +635,11 @@ class BoardTest(unittest.TestCase):
     def test_ask_ci_billing_refusal_is_stalled(self):
         opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
         want = "stalled: waiting on GitHub billing to run CI"
-        for q, stage in (
+        for q, stage, plays in (
                 ("GitHub refused to start the checks because of failed account payments or a spending limit; "
-                 "the job waits until CI runs again.", "merging"),
-                ("The Spending Limit was reached", "check"),
-                ("CI refused: GitHub billing. Try again?", "merging")):
+                 "the job waits until CI runs again.", "merging", 1),  # the first refusal alerts; later ones do not
+                ("The Spending Limit was reached", "check", 0),
+                ("CI refused: GitHub billing. Try again?", "merging", 0)):
             with self.subTest(q=q, stage=stage):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, [f"stage={stage}"])
@@ -647,7 +647,7 @@ class BoardTest(unittest.TestCase):
                 with mock.patch.object(board, "play") as play:
                     self.assertEqual(board.cmd_ask(self.root, job_id, q, opts(job_id), title="CHECKS_FAILING"),
                                      {"stalled": True})
-                play.assert_not_called()
+                self.assertEqual(play.call_count, plays)
                 job = next(j for j in self.jobs() if j["id"] == job_id)
                 self.assertEqual((job["stage"], job["reason"], job["stalled"]), (stage, want, True))
                 for k in ("question", "options", "recommend"):
@@ -663,6 +663,50 @@ class BoardTest(unittest.TestCase):
             job = next(j for j in self.jobs() if j["id"] == job_id)
             self.assertEqual((job["stage"], job["reason"], job["question"]), ("needs-human", q, q))
             self.assertNotIn("stalled", job)
+
+    BILLING_Q = "GitHub refused to start the checks because of failed account payments or a spending limit."
+
+    def billing_ask(self, job_id):
+        return board.cmd_ask(self.root, job_id, self.BILLING_Q, [f"R=resume {job_id}", f"A=abort {job_id}"],
+                             title="CHECKS_FAILING")
+
+    def staged(self, stage):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, [f"stage={stage}"])
+        return job_id
+
+    def test_ask_ci_billing_refusal_parks_all_merging_jobs(self):
+        a, b, c = self.staged("merging"), self.staged("merging"), self.staged("build")
+        with mock.patch.object(board, "play"):
+            self.assertEqual(self.billing_ask(a), {"stalled": True})
+        jobs = {j["id"]: j for j in self.jobs()}
+        for job_id in (a, b):
+            self.assertEqual((jobs[job_id]["stage"], jobs[job_id]["reason"], jobs[job_id]["stalled"]),
+                             ("merging", "stalled: waiting on GitHub billing to run CI", True))
+        self.assertEqual(jobs[c]["stage"], "build")
+        self.assertNotIn("stalled", jobs[c])
+        self.assertIsNone(jobs[c]["reason"])
+
+    def test_ask_ci_billing_refusal_skips_paused_and_other_stalls(self):
+        a, paused, other = self.staged("merging"), self.staged("merging"), self.staged("merging")
+        with board.locked_board(self.root) as b:
+            board.find(b, paused).update(paused=True)
+            board.find(b, other).update(stalled=True, reason="stalled: waiting on the Check queue")
+        before = {j["id"]: dict(j) for j in self.jobs()}
+        with mock.patch.object(board, "play"):
+            self.billing_ask(a)
+        after = {j["id"]: j for j in self.jobs()}
+        self.assertEqual(after[paused], before[paused])
+        self.assertEqual(after[other], before[other])
+        self.assertEqual(after[a]["reason"], "stalled: waiting on GitHub billing to run CI")
+
+    def test_ask_ci_billing_refusal_alerts_once(self):
+        a, b = self.staged("merging"), self.staged("merging")
+        with mock.patch.object(board, "play") as play:
+            self.billing_ask(a)
+            self.assertEqual(play.call_count, 1)
+            self.billing_ask(b)
+            self.assertEqual(play.call_count, 1)
 
     # --- ask --kind (scrum-unblocker) ---
     def ask_cli(self, job_id, kind, question="Stuck?"):

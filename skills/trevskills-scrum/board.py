@@ -5223,13 +5223,21 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         billing = was in WATCHED and CI_BILLING_RE.search(question)
         if billing or (was in WATCHED and AGENT_TYPES_RE.search(question)):
             reason = f"{STALL}{CI_BILLING_WAIT if billing else question}"
-            if job.get("reason") != reason:
-                job.pop("outcome", None)
-            for k in ("question", "options", "recommend", "stopTitle"):
-                job.pop(k, None)
-            job.update(stalled=True, reason=reason, updatedAt=now())
-            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                                 "question": question, "reason": reason, "kind": "stall"})
+            hit = [job]
+            if billing:  # one refusal parks every job waiting on CI, and alerts Trevor once (the first time only)
+                alert = not any(j.get("reason") == reason for j in board["jobs"] if j["stage"] not in ("done", "aborted"))
+                hit += [j for j in board["jobs"] if j is not job and j["stage"] == "merging"
+                        and not j.get("paused") and not j.get("stalled")]
+            for j in hit:
+                if j.get("reason") != reason:
+                    j.pop("outcome", None)
+                for k in ("question", "options", "recommend", "stopTitle"):
+                    j.pop(k, None)
+                j.update(stalled=True, reason=reason, updatedAt=now())
+                questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": j["id"],
+                                     "question": question, "reason": reason, "kind": "stall"})
+            if billing and alert:
+                play(sound("needs-human"))
             return {"stalled": True}
         park(root, job, question, parsed, title, recommend)
     if was != "needs-human":
