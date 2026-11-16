@@ -1,4 +1,4 @@
-import fcntl, importlib.util, io, os, re, signal, subprocess, sys, tempfile, threading, time, unittest
+import fcntl, importlib.util, io, os, re, select, signal, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -116,9 +116,15 @@ class BuildLockTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         holder = self.hold()
         waiter = self.start_wrap(sys.executable, "-c", "print('built')", SCRUM_BUILD_LOCK_TIMEOUT="20")
-        time.sleep(1.2)
+        deadline = time.monotonic() + 20
+        if not select.select([waiter.stderr], [], [], max(0, deadline - time.monotonic()))[0]:
+            holder.kill()
+            waiter.kill()
+            self.fail("waiter never printed the waiting line within 20 s")
+        first = waiter.stderr.readline()
         holder.kill()
-        out, err = waiter.communicate(timeout=10)
+        out, rest = waiter.communicate(timeout=10)
+        err = first + rest
         self.assertEqual(waiter.returncode, 0)
         self.assertEqual(out, "built\n")
         self.assertEqual(err, f"buildlock: waiting for the build lock ({self.lock})\n")
