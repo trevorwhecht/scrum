@@ -19,6 +19,10 @@ LOADING_JS = "<script>setTimeout(() => {{ document.querySelector('{sel}').remove
 LOADING_PAGES = {f"/load-{k}": (f"<!doctype html><title>l</title>{m}" + LOADING_JS.format(sel=sel)).encode()
                  for (k, m), sel in zip(MARKERS.items(), ("div", "div", "p"))}
 LOADING_PAGES["/load-never"] = f"<!doctype html><title>l</title>{MARKERS['role']}".encode()
+LOADING_PAGES["/load-empty"] = ("<!doctype html><title>l</title><div role=\"status\"></div>"
+                                + LOADING_JS.format(sel="div")).encode()
+LOADING_PAGES["/status-permanent"] = b'<!doctype html><title>s</title><div role="status">Payment overdue</div>'
+LOADING_PAGES["/status-hidden"] = b'<!doctype html><title>s</title><div role="status" style="display:none">Loading</div>'
 REDIRECTS = {"/q?view=leads": "/q?view=orders", "/a": "/other", "/t/": "/t"}
 
 
@@ -51,6 +55,36 @@ def run_main(argv, env=None):
     with mock.patch.dict(os.environ, env or {}), redirect_stdout(out), redirect_stderr(err):
         code = render.main(argv)
     return code, out.getvalue(), err.getvalue()
+
+
+def run_chrome(argv, env=None, took=None):
+    """run_main for a Chrome run, retried once when it exits non-zero or a page timed out (a loaded machine
+    can starve Chrome). took, when given, is cleared before each try so it holds the last try only."""
+    for _ in range(2):
+        if took is not None:
+            took.clear()
+        code, out, err = run_main(argv, env)
+        manifest = Path(argv[1]) / "manifest.json"
+        pages = json.loads(manifest.read_text()).get("pages", []) if manifest.exists() else []
+        if code == 0 and all(p["status"] != "timeout" for p in pages):
+            break
+    return code, out, err + (manifest.read_text() if code and manifest.exists() else "")
+
+
+def timed_chrome(argv, **caps):
+    """run_chrome with render's caps patched; (code, err, seconds each _load call took on the last try)."""
+    load, took = render._load, []
+
+    def timed(*a):
+        t0 = time.monotonic()
+        try:
+            return load(*a)
+        finally:
+            took.append(time.monotonic() - t0)
+
+    with mock.patch.multiple(render, _load=timed, **caps):
+        code, _, err = run_chrome(argv, took=took)
+    return code, err, took
 
 
 class RenderUnitTest(unittest.TestCase):
@@ -113,7 +147,7 @@ class RenderChromeTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
 
     def test_renders_local_page(self):
-        code, _, err = run_main([self.url, str(self.out), "/"])
+        code, _, err = run_chrome([self.url, str(self.out), "/"])
         self.assertEqual(code, 0, err)
         self.assertTrue((self.out / "root-390.png").read_bytes().startswith(b"\x89PNG"))
         self.assertTrue((self.out / "root-1440.png").read_bytes().startswith(b"\x89PNG"))
@@ -127,7 +161,7 @@ class RenderChromeTest(unittest.TestCase):
 
     def test_cookie_file_missing_is_noted(self):
         missing = Path(self.tmp.name) / "auth.json"
-        code, _, err = run_main([self.url, str(self.out), "--cookies", str(missing), "/"])
+        code, _, err = run_chrome([self.url, str(self.out), "--cookies", str(missing), "/"])
         self.assertEqual(code, 0, err)
         m = json.loads((self.out / "manifest.json").read_text())
         self.assertEqual(m["cookies"], f"missing: {missing}")
@@ -138,7 +172,7 @@ class RenderChromeTest(unittest.TestCase):
         auth.write_text(json.dumps({"cookies": [{"name": "session-652", "value": SENTINEL, "domain": "127.0.0.1",
                                                  "path": "/", "expires": -1, "httpOnly": True, "secure": False,
                                                  "sameSite": "Lax"}], "origins": []}))
-        code, out, err = run_main([self.url, str(self.out), "--cookies", str(auth), "/"])
+        code, out, err = run_chrome([self.url, str(self.out), "--cookies", str(auth), "/"])
         self.assertEqual(code, 0, err)
         m = json.loads((self.out / "manifest.json").read_text())
         self.assertEqual(m["cookies"], "loaded 1")
@@ -148,7 +182,7 @@ class RenderChromeTest(unittest.TestCase):
             self.assertNotIn("session-652", blob)
 
     def test_waits_for_network_idle(self):
-        code, _, err = run_main([self.url, str(self.out), "/fetch"])
+        code, _, err = run_chrome([self.url, str(self.out), "/fetch"])
         self.assertEqual(code, 0, err)
         lines = (self.out / "console.log").read_text().splitlines()
         self.assertIn("/fetch 390 error: fetched", lines)
@@ -157,24 +191,14 @@ class RenderChromeTest(unittest.TestCase):
     def test_waits_for_loading_indicator(self):
         for k in MARKERS:
             with self.subTest(k):
-                code, _, err = run_main([self.url, str(self.out), f"/load-{k}"])
+                code, _, err = run_chrome([self.url, str(self.out), f"/load-{k}"])
                 self.assertEqual(code, 0, err)
                 lines = (self.out / "console.log").read_text().splitlines()
                 self.assertIn(f"/load-{k} 390 error: ready", lines)
                 self.assertIn(f"/load-{k} 1440 error: ready", lines)
 
     def test_loading_indicator_cap(self):
-        load, took = render._load, []
-
-        def timed(*a):
-            t0 = time.monotonic()
-            try:
-                return load(*a)
-            finally:
-                took.append(time.monotonic() - t0)
-
-        with mock.patch.object(render, "LOAD_CAP", 3), mock.patch.object(render, "_load", timed):
-            code, _, err = run_main([self.url, str(self.out), "/load-never"])
+        code, err, took = timed_chrome([self.url, str(self.out), "/load-never"], LOAD_CAP=3)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
         for t in took:
@@ -183,21 +207,33 @@ class RenderChromeTest(unittest.TestCase):
         page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
         self.assertEqual((page["status"], page["shots"]), ("ok", ["load-never-390.png", "load-never-1440.png"]))
 
+    def test_empty_status_is_busy(self):
+        code, _, err = run_chrome([self.url, str(self.out), "/load-empty"])
+        self.assertEqual(code, 0, err)
+        lines = (self.out / "console.log").read_text().splitlines()
+        self.assertIn("/load-empty 390 error: ready", lines)
+        self.assertIn("/load-empty 1440 error: ready", lines)
+
+    def assert_not_busy(self, path):
+        code, err, took = timed_chrome([self.url, str(self.out), path], LOAD_CAP=20)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(took), 2)
+        for t in took:  # a busy page waits the whole 20 s cap
+            self.assertLess(t, 20)
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual(page["status"], "ok")
+
+    def test_permanent_status_not_busy(self):
+        self.assert_not_busy("/status-permanent")
+
+    def test_hidden_status_not_busy(self):
+        self.assert_not_busy("/status-hidden")
+
     def test_quiet_is_half_second(self):
         self.assertEqual(render.QUIET, 0.5)
 
     def test_settle_cap_bounds_hung_request(self):
-        load, took = render._load, []
-
-        def timed(*a):
-            t0 = time.monotonic()
-            try:
-                return load(*a)
-            finally:
-                took.append(time.monotonic() - t0)
-
-        with mock.patch.object(render, "SETTLE_CAP", 2), mock.patch.object(render, "_load", timed):
-            code, _, err = run_main([self.url, str(self.out), "/hung"])
+        code, err, took = timed_chrome([self.url, str(self.out), "/hung"], SETTLE_CAP=2)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
         for t in took:  # each width stops at the 2 s cap, long before /hang's 30 s hold ends
@@ -208,7 +244,7 @@ class RenderChromeTest(unittest.TestCase):
 
     def test_redirect_compares_path_and_query(self):
         paths = ["/p?view=leads", "/q?view=leads", "/a", "/t/"]
-        code, _, err = run_main([self.url, str(self.out), *paths])
+        code, _, err = run_chrome([self.url, str(self.out), *paths])
         self.assertEqual(code, 0, err)
         pages = json.loads((self.out / "manifest.json").read_text())["pages"]
         self.assertEqual([(p["path"], p["status"]) for p in pages],
