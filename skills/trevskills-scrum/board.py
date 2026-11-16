@@ -133,6 +133,8 @@
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
                                    (id null = nothing to claim); `ready <id>` then schedules them
+  board.py runall-start --match <words>  the same for only the open items whose text holds every word (case-insensitive);
+                                   the rest stay open, and so does a matching item that needs one of them
   board.py chain-lock <id> <holder> [--wait S]  take the bigboy parent's jobs/<id>/.chain.lock (poll 2 s, up to S,
                                    default 540; stale after 1800 s), print {"acquired","holder"}
   board.py chain-unlock <id> <holder>  remove that lock if holder holds it, print {"released"}
@@ -4305,16 +4307,24 @@ def cmd_plan_apply(root, parent_id, fix=False):
         return {"children": new}
 
 
-def cmd_runall_start(root):
+def match_words(text, match):
+    """True when text holds every whitespace-separated word of match, case-insensitive; a blank match matches nothing."""
+    words = match.lower().split()
+    return bool(words) and all(w in text.lower() for w in words)
+
+
+def cmd_runall_start(root, match=None):
     """One Run-all parent whose waiting children are every open backlog item, claimed in priority order (priority_key) under the lock.
     An item that waits, directly or through its prerequisites, on a job claimed outside this run stays open. A child
     whose item needs another item claimed here depends_on that sibling's child. An item waiting on Human setup stays
-    open, and so does every item that needs it. Cool-down refuses it (COOLING_CLAIM)."""
+    open, and so does every item that needs it. With match only items match_words accepts are claimed: the rest are held,
+    so a matching item that needs one stays open too. Cool-down refuses it (COOLING_CLAIM)."""
     if cooling_down():
         raise SystemExit(COOLING_CLAIM)
     with locked_board(root) as board:
         lines, items = read_backlog(root)
-        held = {i["index"] for i in items if not i["done"] and i["setup"]}  # indexes of open items left open
+        held = {i["index"] for i in items if not i["done"]  # indexes of open items left open
+                and (i["setup"] or match is not None and not match_words(i["text"], match))}
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)
@@ -6676,7 +6686,7 @@ def main(argv=None):
     pa.add_argument("id")
     pa.add_argument("--fix", action="store_true")
     sub.add_parser("ready").add_argument("id")
-    sub.add_parser("runall-start")
+    sub.add_parser("runall-start").add_argument("--match")
     sub.add_parser("watchdog")
     sub.add_parser("cloud-sync")
     cl = sub.add_parser("chain-lock")
@@ -6815,7 +6825,7 @@ def main(argv=None):
     elif a.cmd == "ready":
         print(json.dumps(cmd_ready(a.dir, a.id)))
     elif a.cmd == "runall-start":
-        print(json.dumps(cmd_runall_start(a.dir)))
+        print(json.dumps(cmd_runall_start(a.dir, a.match)))
     elif a.cmd == "watchdog":
         print(json.dumps({"flagged": cmd_watchdog(a.dir)}))
     elif a.cmd == "cloud-sync":

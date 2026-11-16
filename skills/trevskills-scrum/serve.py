@@ -5395,10 +5395,18 @@ class Handler(BaseHTTPRequestHandler):
             spawn(project, root, out["id"], "start", f"/trevskills-scrum start {out['id']}")
             return 202, out
         if rest == "/backlog/run-all":  # interactive, like askme: triage, then every open item as a job
-            if all(i["done"] for i in board.backlog_items(root)):
+            match = body.get("match")  # Run all matching: unquoted at the end of the command line, so a fixed charset
+            if match is not None and (not isinstance(match, str) or not re.fullmatch(r"[A-Za-z0-9 _#-]{0,80}", match)
+                                      or match.strip().startswith("-")):  # runall-start --match would read it as a flag
+                raise SystemExit("match must be at most 80 letters, digits, spaces, -, _ or #, not starting with -")
+            match = " ".join((match or "").split())  # blank is plain Run all
+            items = [i for i in board.backlog_items(root) if not i["done"]]
+            if not items:
                 return 409, {"error": "backlog is empty"}
+            if match and not any(board.match_words(i["text"], match) for i in items):
+                return 409, {"error": "no open item matches"}
             # ponytail: Terminal.app only, like discuss and askme. With askme the session asks for every child before any starts.
-            cmd = "/trevskills-scrum run-all" + (f" askme {askme}" if askme else "")
+            cmd = "/trevskills-scrum run-all" + (f" askme {askme}" if askme else "") + (f" match {match}" if match else "")
             return run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE, cmd),
                                   "Run all opened in a new Terminal window.")])
         if rest == "/digest":

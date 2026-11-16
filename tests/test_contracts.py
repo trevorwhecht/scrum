@@ -1911,6 +1911,25 @@ class ContractTest(unittest.TestCase):
         self.assertLess(run_all.index("B runall-start"), askme)
         self.assertLess(askme, run_all.index("**BigBoy lane** step 2"))
 
+    def test_run_all_match_lane(self):
+        run_all, commands = self.lane("runall"), self.lane("commands")
+        for phrase in ("`run-all match <words>`", "`run-all askme <n> match <words>`", "skip steps 1-3",
+                       "B runall-start --match '<words>'"):
+            self.assertIn(phrase, run_all, phrase)
+        line = next(l for l in commands.splitlines() if l.startswith("- **`/trevskills-scrum run-all [askme <1-3>] match <words>`**"))
+        for phrase in ("skips the triage", "`runall-start --match`", "Run all matching"):
+            self.assertIn(phrase, line, phrase)
+
+    def test_dashboard_run_all_match_field(self):
+        text = DASHBOARD.read_text()
+        label = re.search(r'<label id="blRunAllMatchLabel"[^>]*>Run all matching <input id="blRunAllMatch" [^>]*></label>', text)
+        self.assertIsNotNone(label)
+        self.assertIn('maxlength="80"', label.group(0))
+        self.assertRegex(text, r"#blRunAllMatch\{[^}]*min-height:44px")
+        self.assertIn('const match = $("blRunAllMatch").value.trim()', text)
+        disarm = text[text.index("function disarmRunAll()"):text.index("async function showProjectBacklog()")]
+        self.assertIn('$("blRunAllMatch").value = ""', disarm)
+
     def test_skill_run_all_triager_on_sonnet(self):
         text = skill_text()
         run_all = self.lane("runall")
@@ -1992,7 +2011,7 @@ class ContractTest(unittest.TestCase):
                          [("", "Off"), ("1", "1"), ("2", "2"), ("3", "3")])
         self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-height:44px")
         self.assertRegex(text, r"#blRunAllAskme button\{[^}]*min-width:44px")
-        self.assertIn("post(`${url}/run-all`, askme ? {askme} : {})", text)
+        self.assertIn("post(`${url}/run-all`, {...(askme ? {askme} : {}), ...(match ? {match} : {})})", text)
         self.assertIn('b.textContent = "Cancel"', text)
         self.assertNotIn("Run all?", text)
 

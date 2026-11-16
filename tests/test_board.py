@@ -3100,6 +3100,18 @@ class BoardTest(unittest.TestCase):
         out = run("runall-start")
         self.assertEqual(json.loads(out.stdout), {"id": "001-run-all", "children": ["002-dark-mode"]})
 
+    def test_runall_start_match_cli(self):
+        run = lambda *a: run_board("--dir", str(self.root), *a)
+        self.assertIn("runall-start --match", board.__doc__)
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "backlog.md").write_text("- [ ] Lead item\n- [ ] Dark mode\n")
+        out = run("runall-start", "--match", "lead")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {"id": "001-run-all", "children": ["002-lead-item"]})
+        self.assertEqual((self.root / "backlog.md").read_text(), "- [x] Lead item → 002-lead-item\n- [ ] Dark mode\n")
+        out = run("runall-start")
+        self.assertEqual(json.loads(out.stdout), {"id": "003-run-all", "children": ["004-dark-mode"]})
+
     def test_diverged_reads_plan_md(self):
         parent, _ = self.three()
         board.cmd_set(self.root, parent, ["stage=running"])

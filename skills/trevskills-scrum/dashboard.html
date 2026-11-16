@@ -135,6 +135,7 @@ textarea{flex:1 1 320px;min-height:64px;resize:vertical}
 @keyframes spin{to{transform:rotate(360deg)}}
 #blRunAll,#blRunAllAskme button{font:inherit;font-size:13px;min-height:44px;min-width:44px}  /* .btn look; .tabs button would make it mono */
 #blRunAllAskme{display:flex;gap:4px}#blRunAllAskme[hidden]{display:none}
+#blRunAllMatchLabel{display:flex;align-items:center;gap:6px;font-size:13px}#blRunAllMatch{min-height:44px;width:11em;min-width:0;flex:1 1 auto}
 #blTriage summary{display:flex;align-items:center;min-height:44px;cursor:pointer;color:var(--muted);font-size:13px}
 #blTriageBody{font-size:13px;overflow-wrap:anywhere}
 #blAdd textarea,#blList li textarea{flex:1;min-width:0;min-height:44px;resize:none;field-sizing:content;line-height:20px;padding:11px 8px}  /* one line empty, grows with the text */
@@ -245,6 +246,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   .pcols{grid-auto-flow:row}.fan{display:none}#pipeBar{order:1;flex-basis:100%}#autoOff{order:1;flex-basis:100%}.facts{grid-template-columns:minmax(0,1fr)}.facts dt{line-height:1.45}}
 @media (max-width:640px){main{grid-template-columns:minmax(0,1fr)!important}#blList li{flex-wrap:wrap}#blList li textarea{flex-basis:100%;order:-1}#blList .grip{display:none}#blAdd textarea,#blList li textarea,#actions textarea{font-size:16px}#blList li .needs{flex-basis:100%;max-width:none;order:-1}#backlog .tabs select,#blAdd .pts,#blAdd .urg,#filter,#laneFilter{font-size:16px}
   #blProject{min-width:0;flex:1 1 0}#backlog .tabs .close{min-height:44px;min-width:44px}#blRunAllAskme{order:1;flex-basis:100%}
+  #blRunAllMatchLabel{order:1;flex-basis:100%}#blRunAllMatch{font-size:16px}
   #blAdd button[type=submit]{min-height:44px;min-width:44px}.pts{min-height:44px;font-size:16px}}
 </style>
 </head>
@@ -266,7 +268,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 <main id="board"><p class="empty">Loading…</p></main>
 <dialog id="viewer" aria-labelledby="viewerTitle"><div class="vhead"><h2 id="viewerTitle"></h2><p class="note" id="viewerStatus"></p><div class="tabs" id="tabs"></div></div><div id="diverged"></div><div id="batchEdits"></div><div id="actions"></div><article id="doc"></article></dialog>
 <dialog id="backlog" aria-label="Backlog">
-  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
+  <div class="tabs"><b>Backlog</b><select id="blProject" aria-label="Backlog project"></select><button class="btn" id="blRunAll" type="button" data-agent-hint="Opens /trevskills-scrum run-all in a new Terminal window: a triage first merges near-duplicates, retires items already done and estimates unpointed ones, then open items are scheduled as parallel jobs where their files don't overlap. Disabled when this project has no open items. Stop it by closing that window. The first click shows the Askme picker and turns this button into Cancel.">Run all</button><label id="blRunAllMatchLabel" data-agent-hint="Optional words: Run all then claims only the open items whose text holds every word (case-insensitive) and skips the triage; the rest stay open. Letters, digits, spaces, - _ and #. Empty runs every open item.">Run all matching <input id="blRunAllMatch" type="text" maxlength="80" autocomplete="off" placeholder="e.g. lead"></label><div id="blRunAllAskme" role="group" aria-label="Askme for this run" hidden data-agent-hint="Askme level for this Run all batch; picking one starts it. Off runs every item headless. 1 asks only what blocks the build, 2 a moderate number, 3 is thorough: the Run all Terminal session asks Trevor about every item the triage left open before any job starts, and saves each item&#39;s answers to its feature.md under ## Q&amp;A."><button type="button" data-askme="">Off</button><button type="button" data-askme="1">1</button><button type="button" data-askme="2">2</button><button type="button" data-askme="3">3</button></div><button class="close" type="button" aria-label="Close">✕</button></div>
   <article>
     <form id="blAdd"><select name="urgency" class="urg" aria-label="Urgency" data-agent-hint="Later (the default) adds the item at the bottom of the backlog, where its priority decides when it is claimed. Next adds it first with {p:5}, so the next claim (B next, Run all, auto continue) takes it before anything else; the newest Next wins. Now adds no backlog line: it starts the item as a job at once, like Run now, and closes this dialog; the points pick is ignored."><option value="later" selected>Later</option><option value="next">Next</option><option value="now">Now</option></select><select name="points" class="pts px" aria-label="Difficulty points"></select><textarea name="text" rows="1" maxlength="2000" required placeholder="Add a backlog item" aria-label="New backlog item" data-agent-hint="Enter adds the item. Drop or paste images here: each uploads to scrum/attachments/ and adds a [screenshot: path] token to the item text."></textarea><button class="btn primary icon" type="submit" aria-label="Add item">+</button></form>
     <p class="error" id="blError" role="alert"></p>
@@ -1322,6 +1324,7 @@ function pickProject(sel, key) {
 function disarmRunAll() {
   const b = $("blRunAll"), picker = $("blRunAllAskme");
   delete b.dataset.armed; b.textContent = "Run all";
+  $("blRunAllMatch").value = "";
   picker.hidden = true;
   picker.querySelectorAll("button").forEach(x => x.disabled = false);
 }
@@ -1352,9 +1355,10 @@ $("blRunAllAskme").addEventListener("click", e => {
   const pick = e.target.closest("button[data-askme]");
   if (!pick) return;
   const askme = pick.dataset.askme ? +pick.dataset.askme : null;
+  const match = $("blRunAllMatch").value.trim();
   $("blRunAll").disabled = true;
   $("blRunAllAskme").querySelectorAll("button").forEach(x => x.disabled = true);
-  backlogCall(url => post(`${url}/run-all`, askme ? {askme} : {}).then(() => $("backlog").close())).then(disarmRunAll);
+  backlogCall(url => post(`${url}/run-all`, {...(askme ? {askme} : {}), ...(match ? {match} : {})}).then(() => $("backlog").close())).then(disarmRunAll);
 });
 // The add form's points pick: "?" leaves the item to the estimator, a number skips it.
 const paintPts = sel => sel.className = `pts p${sel.value || "x"}`;

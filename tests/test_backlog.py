@@ -793,6 +793,42 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual(board.cmd_runall_start(self.root), {"id": None, "children": []})
         self.assertEqual(self.text(), "# Backlog\n- [ ] Parked {setup: Buy a number}\n")
 
+    def test_runall_start_match_leaves_nonmatching_open(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Lead item one\n- [ ] Other thing\n- [ ] LEAD two\n")
+        out = board.cmd_runall_start(self.root, match="lead")
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-lead-item-one", "003-lead-two"]})
+        self.assertEqual(self.text(), "# Backlog\n- [x] Lead item one → 002-lead-item-one\n- [ ] Other thing\n"
+                                      "- [x] LEAD two → 003-lead-two\n")
+        # two words: an item must contain both
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Lead item one\n- [ ] Lead two\n- [ ] Item three\n")
+        out = board.cmd_runall_start(self.root, match="  ITEM   lead ")
+        self.assertEqual(out, {"id": "004-run-all", "children": ["005-lead-item-one"]})
+        self.assertEqual(self.text(), "# Backlog\n- [x] Lead item one → 005-lead-item-one\n- [ ] Lead two\n"
+                                      "- [ ] Item three\n")
+
+    def test_runall_start_match_holds_dependents(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] Base other {#base}\n- [ ] Lead on base {needs #base}\n- [ ] Lead root {#root}\n"
+            "- [ ] Lead child {needs #root}\n- [ ] Other on root {needs #root}\n")
+        out = board.cmd_runall_start(self.root, match="lead")
+        self.assertEqual(out, {"id": "001-run-all", "children": ["002-lead-root", "003-lead-child"]})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] Base other {#base}\n- [ ] Lead on base {needs #base}\n"
+                                      "- [x] Lead root {#root} → 002-lead-root\n"
+                                      "- [x] Lead child {needs #root} → 003-lead-child\n"
+                                      "- [ ] Other on root {needs #root}\n")
+        jobs = {j["id"]: j for j in json.loads((self.root / "board.json").read_text())["jobs"]}
+        self.assertEqual(jobs["003-lead-child"]["depends_on"], ["002-lead-root"])
+
+    def test_runall_start_match_none(self):
+        board.cmd_new(self.root, "Something else")  # board.json exists
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Lead item one\n- [ ] Other thing\n")
+        before_backlog, before_board = self.text(), (self.root / "board.json").read_bytes()
+        for match in ("nomatch", "", "   "):
+            self.assertEqual(board.cmd_runall_start(self.root, match=match), {"id": None, "children": []}, match)
+            self.assertEqual(self.text(), before_backlog, match)
+            self.assertEqual((self.root / "board.json").read_bytes(), before_board, match)
+        self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), ["001-something-else"])
+
     def test_setup_done_op(self):
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] [?] Parked {#park} {setup: Buy a number; Set the key} <!-- why -->\n"
