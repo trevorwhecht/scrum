@@ -13,6 +13,12 @@ PAGE = b"<!doctype html><title>t</title><h1>hi</h1><script>console.error('boom')
 SENTINEL = "s3ntinel-cookie-value-652"
 FETCH_PAGE = b"<!doctype html><title>f</title><script>fetch('/slow').then(() => console.error('fetched'))</script>"
 HUNG_PAGE = b"<!doctype html><title>h</title><script>fetch('/hang')</script>"
+MARKERS = {"role": '<div role="status">Loading</div>', "busy": '<div aria-busy="true">x</div>',
+           "text": "<p>Loading...</p>"}
+LOADING_JS = "<script>setTimeout(() => {{ document.querySelector('{sel}').remove(); console.error('ready') }}, 2000)</script>"
+LOADING_PAGES = {f"/load-{k}": (f"<!doctype html><title>l</title>{m}" + LOADING_JS.format(sel=sel)).encode()
+                 for (k, m), sel in zip(MARKERS.items(), ("div", "div", "p"))}
+LOADING_PAGES["/load-never"] = f"<!doctype html><title>l</title>{MARKERS['role']}".encode()
 REDIRECTS = {"/q?view=leads": "/q?view=orders", "/a": "/other", "/t/": "/t"}
 
 
@@ -30,7 +36,7 @@ class Page(BaseHTTPRequestHandler):
         elif self.path == "/hang":
             self.server.release.wait(30)  # held open until the test ends
             return
-        body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE}.get(self.path, PAGE)
+        body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE, **LOADING_PAGES}.get(self.path, PAGE)
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
@@ -147,6 +153,38 @@ class RenderChromeTest(unittest.TestCase):
         lines = (self.out / "console.log").read_text().splitlines()
         self.assertIn("/fetch 390 error: fetched", lines)
         self.assertIn("/fetch 1440 error: fetched", lines)
+
+    def test_waits_for_loading_indicator(self):
+        for k in MARKERS:
+            with self.subTest(k):
+                code, _, err = run_main([self.url, str(self.out), f"/load-{k}"])
+                self.assertEqual(code, 0, err)
+                lines = (self.out / "console.log").read_text().splitlines()
+                self.assertIn(f"/load-{k} 390 error: ready", lines)
+                self.assertIn(f"/load-{k} 1440 error: ready", lines)
+
+    def test_loading_indicator_cap(self):
+        load, took = render._load, []
+
+        def timed(*a):
+            t0 = time.monotonic()
+            try:
+                return load(*a)
+            finally:
+                took.append(time.monotonic() - t0)
+
+        with mock.patch.object(render, "LOAD_CAP", 3), mock.patch.object(render, "_load", timed):
+            code, _, err = run_main([self.url, str(self.out), "/load-never"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(took), 2)
+        for t in took:
+            self.assertGreaterEqual(t, 3)
+            self.assertLess(t, 20)
+        page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
+        self.assertEqual((page["status"], page["shots"]), ("ok", ["load-never-390.png", "load-never-1440.png"]))
+
+    def test_quiet_is_half_second(self):
+        self.assertEqual(render.QUIET, 0.5)
 
     def test_settle_cap_bounds_hung_request(self):
         load, took = render._load, []
