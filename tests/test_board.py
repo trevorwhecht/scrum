@@ -9771,7 +9771,7 @@ class ProcessHealthTest(unittest.TestCase):
         ids = ("101-a", "102-b", "103-c", "104-d")
         self.board(*((i, "done", "fast", "", "merged") for i in ids))
         self.digest("001", *ids)
-        self.put("jobs/101-a/feature.md", "Fix the auth redirect\n")
+        self.put("jobs/101-a/feature.md", "Tweak the label\n")
         self.put("jobs/101-a/lilguy-fit.json", json.dumps({"fit": False, "why": "x"}))
         self.put("jobs/102-b/feature.md", "Edit `.claude/rules/x.md`\n")
         self.put("jobs/102-b/lilguy-fit.json", json.dumps({"fit": True, "why": "x"}))
