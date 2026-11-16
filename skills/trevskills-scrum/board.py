@@ -1448,7 +1448,8 @@ def write_pulse(root, digest_id):
     readings count only for projects in projects() (test fixtures never inflate a total; Other starts still names an
     unregistered one); no filter when it is empty."""
     since = _pulse_since(root, digest_id)
-    lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)),
+    lines = sorted((l for l in _json_lines(pulse_path()) if is_num(l.get("t")) and "orphan_killed" not in l
+                    and (since is None or l["t"] >= since)),  # serve.py stop_orphans' kill lines are no tick
                    key=lambda l: l["t"])  # in time order, so no total passes the window when two writers interleave
     out = [f"# Pulse: digest {digest_id}", ""]
     if not lines:

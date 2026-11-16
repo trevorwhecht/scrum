@@ -1935,6 +1935,52 @@ def stop_dev_servers(idle: dict[str, Path], listening: list[tuple[int, int, str]
     return killed
 
 
+def processes() -> list[tuple[int, int, str]]:
+    """(pid, ppid, command line) of every process, from one `ps -axo pid=,ppid=,command=`. ps missing, failing or
+    timing out (5 s) gives [], so nothing is killed."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    procs = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs.append((int(parts[0]), int(parts[1]), parts[2] if len(parts) > 2 else ""))
+    return procs
+
+
+def stop_orphans(idle: dict[str, Path], jobs_by_project: dict[str, list[dict]],
+                 procs: list[tuple[int, int, str]]) -> list[int]:
+    """SIGTERM each orphan (ppid 1, launchd adopted it) whose command line names <repo>/.claude/worktrees/scrum-<id>
+    of a done or aborted job of a project in idle, the path ending there or at a `/` or any character a job id never
+    holds (so scrum-12 never matches job 1). Never serve.py itself. One pulse.log line per kill. Returns the pids."""
+    paths = {}
+    for name, repo in idle.items():
+        for job in jobs_by_project.get(name) or []:
+            if isinstance(job, dict) and job.get("stage") in ("done", "aborted") and job.get("id"):
+                for base in (str(repo), os.path.realpath(repo)):
+                    paths[f"{base}/.claude/worktrees/scrum-{job['id']}"] = job["id"]
+    if not paths:
+        return []
+    found = re.compile("(" + "|".join(map(re.escape, paths)) + r")(?![\w.-])")
+    killed = []
+    for pid, ppid, cmd in procs:
+        m = found.search(cmd) if ppid == 1 and pid != os.getpid() else None
+        if not m:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        killed.append(pid)
+        path = board.pulse_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps({"t": int(time.time()), "orphan_killed": pid, "job": paths[m[1]]}) + "\n")
+    return killed
+
+
 def docker_projects() -> dict[str, Path]:
     """Registered projects whose scrum/project.md mentions docker (any case)."""
     found = {}
@@ -1991,13 +2037,22 @@ def docker_tick(idle: dict[str, Path], listening: list[tuple[int, int, str]], no
 
 def idle_cleanup(busy: dict[str, bool]) -> None:
     """Idle projects: in busy as False (a project missing from busy is never idle) with no live dashboard session.
-    Stop their leaked dev servers (stop_dev_servers), then let docker_tick quit Docker Desktop.
+    Stop their leaked dev servers (stop_dev_servers) and the orphans of their done or aborted jobs (stop_orphans), then
+    let docker_tick quit Docker Desktop.
     SCRUM_IDLE_CLEANUP=0 turns it off (the tests set it, so a test tick never signals a real process)."""
     if os.environ.get("SCRUM_IDLE_CLEANUP") == "0":
         return
     idle = {name: repo for name, repo in board.projects().items() if not busy.get(name, True) and not live_ids(name)}
     listening = listeners()
     killed = stop_dev_servers(idle, listening)
+    if idle:
+        jobs = {}
+        for name, repo in idle.items():
+            try:
+                jobs[name] = board.read_board(repo / "scrum").get("jobs") or []
+            except (OSError, SystemExit, AttributeError):  # an unreadable board reaps nothing
+                jobs[name] = []
+        stop_orphans(idle, jobs, processes())
     docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
 
 
