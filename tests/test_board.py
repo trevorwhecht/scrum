@@ -5955,6 +5955,15 @@ class BoardTest(unittest.TestCase):
         job = self.jobs()[3]
         self.assertEqual((job["stage"], job["depends_on"]), ("waiting", ["001-outside"]))
 
+    def test_wait_on_child_refuses_its_parent(self):
+        self.wait_board({"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a"]},
+                        {"id": "003-a", "stage": "build", "parent": "002-parent"})
+        before = (self.root / "board.json").read_text()
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_wait_on(self.root, "003-a", "002-parent")
+        self.assertEqual(e.exception.code, "job 003-a cannot wait on its parent 002-parent; the parent waits on its children")
+        self.assertEqual((self.root / "board.json").read_text(), before)
+
     def test_wait_on_outside_blocker_cycle_refused(self):
         self.wait_board({"id": "001-outside", "stage": "waiting", "depends_on": ["004-b"]},
                         {"id": "002-parent", "stage": "running", "lane": "bigboy", "children": ["003-a", "004-b"]},
