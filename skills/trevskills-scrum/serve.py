@@ -310,6 +310,35 @@ def setup_done(project, root, job_id):
     return 200, {"id": job_id, **start_ready(project, root, job["parent"], manual=True)}
 
 
+def held_gate(why):
+    """Whitespace-free queue-gate token for a machine_ok or allowance refusal `why`: cool_down, session_cap(<live>/<ceiling>)
+    (bare session_cap when unparsed), usage_pace (a 5h pace hold), the PULSE_GATES token, else other."""
+    if why == board.COOLING:
+        return "cool_down"
+    if m := re.search(r"(\d+) sessions running \(ceiling (\d+)\)", why):
+        return f"session_cap({m[1]}/{m[2]})"
+    if "sessions running" in why:
+        return "session_cap"
+    if "pace 5h" in why:
+        return "usage_pace"
+    return next((tok for pre, tok in PULSE_GATES if pre in why), "other")
+
+
+def note_held(root, reason, job_ids):
+    """note_queue_gate(root, id, reason) for each of `job_ids` (a ready waiting job the tick passed over)."""
+    for job_id in job_ids:
+        note_queue_gate(root, job_id, reason)
+
+
+def ready_waiting(root, parent_id=None):
+    """Ids of waiting jobs whose depends_on are all done: parked parentless ones, or `parent_id`'s waiting children."""
+    jobs = board.read_board(root)["jobs"]
+    done = {j["id"] for j in jobs if j["stage"] == "done"}
+    return [j["id"] for j in jobs if all(d in done for d in j.get("depends_on") or [])
+            and (j.get("parent") == parent_id and j["stage"] == "waiting" and not j.get("paused") if parent_id
+                 else board.parked_waiting(j))]
+
+
 def cpu_hot(manual=False):
     """True when, unless `manual` (Trevor's click), board.cpu_load_pct() read now is above MAX_LAUNCH_CPU_LOAD_PCT: the
     claim paths re-read it right before claiming, so no job is claimed only for spawn to queue it."""
@@ -321,6 +350,7 @@ def start_ready(project, root, parent_id, manual=False):
     """Claim the parent's startable children and start each one headless. Returns cmd_ready's output ({"ready": []}
     when CPU load holds it: cpu_hot claims nothing). Cool-down and CPU load hold the claims unless `manual`."""
     if cpu_hot(manual):
+        note_held(root, "cpu_load", ready_waiting(root, parent_id))
         return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     for child in out["ready"]:
@@ -342,15 +372,20 @@ def wake_waiting(project, root):
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
+        note_held(root, held_gate(why), ready_waiting(root))
         return
     room = board.ram_room(floor=0)  # spawn's own gate: a start it would queue stays waiting, never claimed
     if room < 1:
+        note_held(root, "ram_room", ready_waiting(root))
         return
     live = board.live_sessions()
     allow = board.pick_account(time.time(), live)[1]
     if allow is not None:
         room = min(room, max(0, allow - live))
+        if room < 1:
+            note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root))
     if cpu_hot():  # re-read right before the claim
+        note_held(root, "cpu_load", ready_waiting(root))
         return
     out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
         root, j["id"], live_ids(project)))

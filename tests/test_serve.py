@@ -8645,6 +8645,72 @@ class WatchdogIdleParentTest(unittest.TestCase):
         spawn.assert_not_called()
         self.assertEqual(self.job("002-second")["stage"], "waiting")
 
+    def gate_text(self, job_id):
+        f = self.root / "jobs" / job_id / "queue-gates.txt"
+        return f.read_text() if f.exists() else None
+
+    def waiting_pair(self):
+        self.queue_board({"id": "001-first", "stage": "done"}, {"id": "009-open", "stage": "running"},
+                         {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"]},
+                         {"id": "003-third", "stage": "waiting", "depends_on": ["009-open"]})
+        for i in ("002-second", "003-third"):
+            (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+
+    def test_wake_waiting_session_cap_notes_gate(self):
+        self.waiting_pair()
+        with mock.patch.object(self.serve, "spawn") as spawn, \
+                mock.patch.object(self.board, "machine_ok", return_value="14 sessions running (ceiling 14)"):
+            self.serve.wake_waiting("idle", self.root)
+        spawn.assert_not_called()
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+        self.assertEqual(self.gate_text("002-second"), "session_cap(14/14)\n")
+
+    def test_held_gate_tokens(self):
+        b = self.board
+        for why, token in ((b.COOLING, "cool_down"), ("14 sessions running (ceiling 14)", "session_cap(14/14)"),
+                           ("3 sessions running", "session_cap"),
+                           ("pace 5h 80% used at 20% elapsed, resets 14:00", "usage_pace"),
+                           ("no account has room: a pace 5h 80% used", "usage_pace"),
+                           ("free RAM 14% (< 20%)", "ram"), ("CPU load 600% of 8 cores (> 500%)", "cpu_load"),
+                           ("whatever", "other")):
+            self.assertEqual(self.serve.held_gate(why), token, why)
+
+    def test_wake_waiting_allowance_notes_gate(self):
+        self.waiting_pair()
+        allow = self.board.Allowance(0, "pace 5h 80% used at 20% elapsed, resets 14:00")
+        with mock.patch.object(self.serve, "spawn"), mock.patch.object(self.board, "machine_ok", return_value=None), \
+                mock.patch.object(self.board, "ram_room", return_value=2), \
+                mock.patch.object(self.board, "pick_account", return_value=(None, allow)):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual(self.gate_text("002-second"), "usage_pace\n")
+
+    def test_start_ready_cpu_hot_notes_gate(self):
+        self.queue_board({"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-kid", "003-kid"]},
+                         {"id": "002-kid", "parent": "001-par", "stage": "waiting"},
+                         {"id": "003-kid", "parent": "001-par", "stage": "waiting", "depends_on": ["002-kid"]})
+        for i in ("002-kid", "003-kid"):
+            (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+            self.assertEqual(self.serve.start_ready("idle", self.root, "001-par"), {"ready": []})
+        self.assertEqual((self.gate_text("002-kid"), self.gate_text("003-kid")), ("cpu_load\n", None))
+
+    def test_wake_waiting_gate_dedup_and_unready(self):
+        self.waiting_pair()
+        for _ in range(2):
+            with mock.patch.object(self.serve, "spawn"), \
+                    mock.patch.object(self.board, "machine_ok", return_value="14 sessions running (ceiling 14)"):
+                self.serve.wake_waiting("idle", self.root)
+        self.assertEqual(self.gate_text("002-second"), "session_cap(14/14)\n")
+        self.assertIsNone(self.gate_text("003-third"))
+
+    def test_wake_waiting_gate_write_error_ignored(self):
+        self.waiting_pair()
+        (self.root / "jobs" / "002-second" / "queue-gates.txt").mkdir()
+        with mock.patch.object(self.serve, "spawn"), \
+                mock.patch.object(self.board, "machine_ok", return_value="14 sessions running (ceiling 14)"):
+            self.serve.wake_waiting("idle", self.root)
+        self.assertEqual(self.job("002-second")["stage"], "waiting")
+
     def test_wake_waiting_spawns_approve_for_wake_job(self):
         wake = {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "worktree": "/w",
                 "reason": "waiting on 001-first", "wake": "approve 002-second"}
@@ -8726,10 +8792,10 @@ class WatchdogIdleParentTest(unittest.TestCase):
         self.assertEqual([c.args[2] for c in spawn.call_args_list], ["003-third"])
         self.assertEqual((self.job("002-second")["stage"], self.job("003-third")["stage"]), ("waiting", "spec"))
 
-    def high_usage(self):  # 7d 92% used, 5h low, reset days away
+    def high_usage(self):  # 7d 92% used, 5h low, reset a day away (86% elapsed: no pace hold)
         now = time.time()
         return {"written_at": now, "rate_limits": {"five_hour": {"used_percentage": 10, "resets_at": now + 3600},
-                                                   "seven_day": {"used_percentage": 92, "resets_at": now + 4 * 86400}}}
+                                                   "seven_day": {"used_percentage": 92, "resets_at": now + 86400}}}
 
     def wake_at_high_usage(self, *jobs, room=1):
         self.queue_board({"id": "001-first", "stage": "done"}, *jobs)
@@ -10090,11 +10156,11 @@ class HighUsageStartsTest(unittest.TestCase):
             p = mock.patch.object(serve, name, return_value=value)
             setattr(self, name, p.start()); self.addCleanup(p.stop)
 
-    def high(self):  # 7d 92% used, 5h low, reset days away
+    def high(self):  # 7d 92% used, 5h low, reset a day away (86% elapsed: no pace hold)
         now = time.time()
         self.usage.write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 10, "resets_at": now + 3600},
-            "seven_day": {"used_percentage": 92, "resets_at": now + 4 * 86400}}}))
+            "seven_day": {"used_percentage": 92, "resets_at": now + 86400}}}))
 
     def put(self, *jobs):
         (self.root / "board.json").write_text(json.dumps({"jobs": [{"updatedAt": self.board.now(), **j} for j in jobs]}))
