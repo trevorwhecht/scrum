@@ -3661,8 +3661,9 @@ PULSE_CACHE = (None, [])  # (file_key of pulse.log, board._json_lines of it); re
 
 def auto_off(project, root):
     """board.autoOff: {"since", "claimable"} when scrum/project.md has no Auto continue line, pulse.log once had
-    project's auto True and claimable_count(root) > 0, else None. since is the t of the first pulse line after the last
-    auto True one (None, not yet a line after it). pulse.log is re-read only when its file_key changes."""
+    project's auto True and claimable_count's test finds lines in cached_backlog_items(root), else None. since is the t
+    of the first pulse line after the last auto True one (None, not yet a line after it). pulse.log is re-read only
+    when its file_key changes."""
     global PULSE_CACHE
     if auto_continue(root) is not None:
         return None
@@ -3674,7 +3675,7 @@ def auto_off(project, root):
     last_on = max((i for i, (_, on) in enumerate(lines) if on), default=None)
     if last_on is None or last_on + 1 >= len(lines):
         return None
-    n = claimable_count(root)
+    n = sum(not i["done"] and not i["setup"] and not i["waits"] for i in cached_backlog_items(root))
     return {"since": lines[last_on + 1][0], "claimable": n} if n else None
 
 
