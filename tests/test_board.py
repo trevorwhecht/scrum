@@ -8434,6 +8434,22 @@ class LilguyFitTest(unittest.TestCase):
     def fit(self):
         return board.cmd_lilguy_fit(self.root, self.job)
 
+    def test_lilguy_fit_writes_and_overwrites_verdict_file(self):
+        self.points(1)
+        out = self.fit()
+        self.assertEqual(out, {"fit": True, "why": "backlog item is 1 point"})
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text()), out)
+        (self.jd / "feature.md").write_text("Lane: standard\n")
+        out = self.fit()
+        self.assertEqual(out, {"fit": False, "why": "feature.md Lane: standard"})
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text()), out)
+
+    def test_lilguy_fit_no_folder_writes_nothing(self):
+        shutil.rmtree(self.jd)
+        out = self.fit()
+        self.assertIs(out["fit"], False)
+        self.assertFalse(self.jd.exists())
+
     def test_lilguy_fit_points_1_passes(self):
         self.points(1)
         out = io.StringIO()
@@ -9750,6 +9766,23 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "105-e", "lane": "standard", "fit": "lilguy", "over_routed": True}]}))
         m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
         self.assertEqual((m["value"], m["jobs"]), (2, ["104-d", "105-e"]))
+
+    def test_process_health_cheaper_uses_recorded_lilguy_fit(self):
+        ids = ("101-a", "102-b", "103-c", "104-d")
+        self.board(*((i, "done", "fast", "", "merged") for i in ids))
+        self.digest("001", *ids)
+        self.put("jobs/101-a/feature.md", "Fix the auth redirect\n")
+        self.put("jobs/101-a/lilguy-fit.json", json.dumps({"fit": False, "why": "x"}))
+        self.put("jobs/102-b/feature.md", "Edit `.claude/rules/x.md`\n")
+        self.put("jobs/102-b/lilguy-fit.json", json.dumps({"fit": True, "why": "x"}))
+        self.put("jobs/103-c/feature.md", "Edit `.claude/rules/x.md`\n")
+        self.put("jobs/103-c/lilguy-fit.json", "[1]")
+        self.put("jobs/104-d/feature.md", "Tweak the label\n")
+        self.put("jobs/104-d/lilguy-fit.json", "not json")
+        self.put("digests/001/pipeline-fit.json", json.dumps({"digest": "001", "jobs": [
+            {"id": i, "lane": "fast", "fit": "lilguy"} for i in ids]}))
+        m = self.run_health("001")["metrics"]["cheaper_lane_jobs"]
+        self.assertEqual(m["jobs"], ["102-b", "104-d"])
 
     def test_test_waste_fast_ui(self):
         ui, other = "skills/trevskills-scrum/dashboard.html", "skills/trevskills-scrum/board.py"
