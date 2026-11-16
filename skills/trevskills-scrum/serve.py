@@ -3711,6 +3711,29 @@ def cached_backlog_items(root):
     return items
 
 
+PULSE_CACHE = (None, [])  # (file_key of pulse.log, board._json_lines of it); replaced whole, never mutated
+
+
+def auto_off(project, root):
+    """board.autoOff: {"since", "claimable"} when scrum/project.md has no Auto continue line, pulse.log once had
+    project's auto True and claimable_count's test finds lines in cached_backlog_items(root), else None. since is the t
+    of the first pulse line after the last auto True one (None, not yet a line after it). pulse.log is re-read only
+    when its file_key changes."""
+    global PULSE_CACHE
+    if auto_continue(root) is not None:
+        return None
+    path = board.pulse_path()
+    key = file_key(path)
+    if PULSE_CACHE[0] != key:
+        PULSE_CACHE = (key, board._json_lines(path) if key else [])
+    lines = board.pulse_auto(PULSE_CACHE[1], project)
+    last_on = max((i for i, (_, on) in enumerate(lines) if on), default=None)
+    if last_on is None or last_on + 1 >= len(lines):
+        return None
+    n = sum(not i["done"] and not i["setup"] and not i["waits"] for i in cached_backlog_items(root))
+    return {"since": lines[last_on + 1][0], "claimable": n} if n else None
+
+
 CHECKOUT_ALERT_EVERY = 60  # seconds between one repo's checkout_alert git checks
 CHECKOUT_ALERT: dict[str, tuple[float, str | None]] = {}  # str(repo) -> (checked at, ahead-alert or None)
 
@@ -3755,7 +3778,7 @@ def board_with_activity(root, project):
     `nextRetryAt` (epoch seconds, or None). A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
     (e2e_wait_info). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
-    None) and `e2eFull` (the full-E2E record's at, head, result, failed, or None). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    None), `e2eFull` (the full-E2E record's at, head, result, failed, or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -3797,6 +3820,7 @@ def board_with_activity(root, project):
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
     rec = ui_sweep_record(root)  # the same line's "UI sweep" part
     data["uiSweep"] = {k: rec.get(k) for k in ("at", "head", "result", "findings")} if rec else None
+    data["autoOff"] = auto_off(project, root)  # the dashboard's "Auto continue off since" header line
     return data
 
 
