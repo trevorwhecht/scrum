@@ -4495,6 +4495,14 @@ class BoardTest(unittest.TestCase):
         text = self.pulse_ticks(*((t, 0, {}) for t in (0, 20, 40, 60, 80)))  # 80 s + the last line's 60 s
         self.assertIn("Idle with claimable work: 2 min (longest stretch 2 min)\nGated with claimable work: 0 min\nHeld by machine guard: 0 min\n", text)
 
+    def test_pulse_skips_orphan_kill_lines(self):
+        """Job 919: serve.py's orphan-kill lines carry no tick fields, so they never count as a tick."""
+        app = {"claimable": 1, "waiting": 0, "busy": False, "top": 1, "auto": True}
+        tick = lambda t: {"t": 1_700_000_000 + t, "sessions": 0, "cooldown": False, "focus": "app", "projects": {"app": app}}
+        text = self.pulse_digest([tick(0), tick(20), {"t": 1_700_000_030, "orphan_killed": 5, "job": "1-x"},
+                                  tick(40), tick(60), tick(80)])[0]
+        self.assertIn(" · ticks: 5\nIdle with claimable work: 2 min (longest stretch 2 min)\n", text)
+
     def test_pulse_idle_gap_capped(self):
         text = self.pulse_ticks((0, 0, {}), (600, 0, {}))  # 120 s capped gap + the last line's 60 s
         self.assertIn("Idle with claimable work: 3 min (longest stretch 3 min)\n", text)

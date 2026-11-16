@@ -1368,6 +1368,13 @@ class ContractTest(unittest.TestCase):
         self.assertIn("runall", self.section(bigboy, "   3. If `all_merged`", "6. **After a child stops.**"))
         self.assertIn("B set $P stage=done reason=", self.section(bigboy, "5. **Chaining**", "6. **After a child stops.**"))
 
+    def test_agents_ban_background_load_generators(self):
+        """Job 919: a job's 8 `while :; do :; done` loops outlived it for 7h and held the CPU start gate shut."""
+        for name in ("builder", "debugger"):
+            text = (ROOT / "agents" / f"scrum-{name}.md").read_text()
+            line = next((l for l in text.splitlines() if "Never start a background load generator" in l), "")
+            self.assertIn('`trap "kill $P" EXIT` in the same shell', line, name)
+
     def test_debugger_contract(self):
         text = (ROOT / "agents" / "scrum-debugger.md").read_text()
         for phrase in ("ASSESSMENT: NO_REPRO", "ASSESSMENT: BLOCKED", "Repro:", "Repro test:", "## Allowed files",

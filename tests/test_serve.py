@@ -11068,11 +11068,88 @@ class IdleCleanupTest(unittest.TestCase):
                 mock.patch.object(s, "live_ids", side_effect=lambda p: {"009-x"} if p == "d" else set()), \
                 mock.patch.object(s, "listeners", return_value=listening) as ls, \
                 mock.patch.object(s, "stop_dev_servers", return_value=[7]) as stop, \
+                mock.patch.object(s, "processes", return_value=[]), mock.patch.object(s, "stop_orphans"), \
                 mock.patch.object(s, "docker_tick") as dock:
             s.idle_cleanup({"a": False, "b": True, "d": False})
         self.assertEqual(ls.call_count, 1)
         self.assertEqual([c.args for c in stop.call_args_list], [({"a": projects["a"]}, listening)])
         self.assertEqual([c.args for c in dock.call_args_list], [({"a": projects["a"]}, [])])
+
+    def orphans(self, idle, jobs, procs):
+        """stop_orphans with os.kill patched; returns (returned pids, kill call args)."""
+        with mock.patch.object(self.serve.os, "kill") as kill:
+            got = self.serve.stop_orphans(idle, jobs, procs)
+        return got, [c.args for c in kill.call_args_list]
+
+    def test_stop_orphans_kills_done_job_ppid1(self):
+        a = self.repo("a")
+        cmd = f"/bin/zsh -c cd {a}/.claude/worktrees/scrum-1270-load && while :; do :; done"
+        got, kills = self.orphans({"a": a}, {"a": [{"id": "1270-load", "stage": "done"}]}, [(4242, 1, cmd)])
+        self.assertEqual((got, kills), ([4242], [(4242, 15)]))
+        got, _ = self.orphans({"a": a}, {"a": [{"id": "7-x", "stage": "done"}]},
+                              [(5, 1, f"node {a}/.claude/worktrees/scrum-7-x/server.js"),
+                               (6, 1, f"sleep 9 {a}/.claude/worktrees/scrum-7-x")])
+        self.assertEqual(got, [5, 6], "followed by / or end of string")
+
+    def test_stop_orphans_spares_live_nonorphan_and_prefix_ids(self):
+        a = self.repo("a")
+        wt = lambda i: f"{a}/.claude/worktrees/scrum-{i}"
+        jobs = {"a": [{"id": "1", "stage": "done"}, {"id": "2", "stage": "build"}, {"id": "3", "stage": "review"}]}
+        procs = [(10, 1, f"zsh -c cd {wt(2)} && x"), (11, 1, f"zsh {wt(3)}/x"), (12, 777, f"zsh {wt(1)}/x"),
+                 (13, 1, "zsh -c while :; do :; done"), (14, 1, f"zsh {wt(12)}/x"), (15, 1, f"zsh {wt(12)}")]
+        self.assertEqual(self.orphans({"a": a}, jobs, procs), ([], []))
+        b = self.repo("b")
+        self.assertEqual(self.orphans({"a": a}, {"a": [], "b": [{"id": "1", "stage": "done"}]},
+                                      [(16, 1, f"zsh {b}/.claude/worktrees/scrum-1/x")]), ([], []),
+                         "a busy project (not in idle) is never reaped")
+
+    def test_stop_orphans_aborted_and_self(self):
+        a = self.repo("a")
+        jobs = {"a": [{"id": "5-y", "stage": "aborted"}]}
+        cmd = f"zsh {a}/.claude/worktrees/scrum-5-y/run"
+        got, kills = self.orphans({"a": a}, jobs, [(os.getpid(), 1, cmd), (61, 1, cmd)])
+        self.assertEqual((got, kills), ([61], [(61, 15)]))
+        with mock.patch.object(self.serve.os, "kill", side_effect=ProcessLookupError):
+            self.assertEqual(self.serve.stop_orphans({"a": a}, jobs, [(62, 1, cmd)]), [], "gone already: skipped")
+
+    def test_stop_orphans_logs_to_pulse(self):
+        a = self.repo("a")
+        log = self.base / "pulse.log"
+        jobs = {"a": [{"id": "8-z", "stage": "done"}]}
+        cmd = f"zsh {a}/.claude/worktrees/scrum-8-z/x"
+        with mock.patch.dict(os.environ, SCRUM_PULSE=str(log)), mock.patch.object(self.serve.time, "time",
+                                                                                 return_value=1_700_000_000.5):
+            self.orphans({"a": a}, jobs, [(71, 1, cmd), (72, 1, cmd)])
+        self.assertEqual([json.loads(l) for l in log.read_text().splitlines()],
+                         [{"t": 1_700_000_000, "orphan_killed": 71, "job": "8-z"},
+                          {"t": 1_700_000_000, "orphan_killed": 72, "job": "8-z"}])
+
+    def test_processes_parses_ps(self):
+        out = "    1     0 /sbin/launchd\n 4242     1 /bin/zsh -c while :; do :; done\n  77   1\nbad line\n"
+        with self.fake_run({"ps": subprocess.CompletedProcess([], 0, out, "")}):
+            self.assertEqual(self.serve.processes(),
+                             [(1, 0, "/sbin/launchd"), (4242, 1, "/bin/zsh -c while :; do :; done"), (77, 1, "")])
+        self.assertEqual(self.calls, [(["ps", "-axo", "pid=,ppid=,command="], 5)])
+        with self.fake_run({"ps": FileNotFoundError("ps")}):
+            self.assertEqual(self.serve.processes(), [])
+
+    def test_idle_cleanup_calls_stop_orphans_for_idle_only(self):
+        s = self.serve
+        projects = {n: self.repo(n) for n in ("a", "b")}
+        (projects["a"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [{"id": "1", "stage": "done"}]}))
+        (projects["b"] / "scrum" / "board.json").write_text(json.dumps({"jobs": [{"id": "2", "stage": "done"}]}))
+        procs = [(9, 1, "zsh")]
+        def clean(env):
+            with mock.patch.dict(os.environ, SCRUM_IDLE_CLEANUP=env), \
+                    mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.object(s, "live_ids", return_value=set()), \
+                    mock.patch.object(s, "listeners", return_value=[]), \
+                    mock.patch.object(s, "processes", return_value=procs), \
+                    mock.patch.object(s, "stop_orphans") as orphans, mock.patch.object(s, "docker_tick"):
+                s.idle_cleanup({"a": False, "b": True})
+            return [c.args for c in orphans.call_args_list]
+        self.assertEqual(clean("1"), [({"a": projects["a"]}, {"a": [{"id": "1", "stage": "done"}]}, procs)])
+        self.assertEqual(clean("0"), [])
 
     def docker(self, idle, listening, now, info=None, desktop=None, projects=None):
         answers = {("docker", "info"): info, ("docker", "ps"): subprocess.CompletedProcess([], 0, "c1\nc2\n", ""),

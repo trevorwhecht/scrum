@@ -48,6 +48,7 @@ If you cannot make a test fail for the reported reason, write `ASSESSMENT: NO_RE
 **Hard limits:**
 - Change files only inside `WORKTREE`, and commit only the repro test (or its removal). The one exception is `JOB_DIR/assessment.md`.
 - Never run `prisma migrate` or `prisma db push`. Never run `git merge`, `git reset`, `git rebase`, `git push` or any push, `git checkout main`, or any `gh` command.
+- Never start a background load generator or an infinite loop (`while :; do :; done`, `yes > /dev/null`) to fake CPU load; mock the load reading instead. Any background process you start gets `P=$!` and `trap "kill $P" EXIT` in the same shell, so it dies with that shell.
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.
 
 <!-- Debug rules adapted from obra/superpowers 6.4.1 (MIT): systematic-debugging, test-driven-development. -->
