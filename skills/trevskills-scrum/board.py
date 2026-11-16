@@ -1722,7 +1722,7 @@ def _fit_excluded(folder, lane: str, paths) -> bool:
     hard = re.search(r"^\s*Hard stops:(.*)$", read(folder / "spec.md"), re.M)
     feature = read(folder / "feature.md")
     return bool(hard and hard[1].strip().lower() != "none" or feature.startswith("Critical:")
-                or LILGUY_HARD_STOP_RE.search(feature) or lane == "debug" and (folder / "assessment.md").is_file())
+                or LILGUY_HARD_STOP_RE.search(_request_text(feature)) or lane == "debug" and (folder / "assessment.md").is_file())
 
 
 def _fit_job(root, job_id: str, job: dict, globs) -> dict:
@@ -3370,6 +3370,12 @@ LILGUY_PATH_RE = re.compile(r"[\w./~$-]+\.(?:py|md|html|js|ts|tsx|json|css|sh|ya
 CLAUDE_DIR_RE = re.compile(r"(?<![\w~/.$}])\.claude/(?!worktrees/)")
 
 
+def _request_text(feature_text: str) -> str:
+    """feature_text without a trailing ` (from <parent job id>)` suffix: that slug is copied from another ticket's
+    title, so it is not part of the request and never trips LILGUY_HARD_STOP_RE."""
+    return re.sub(r"[ \t]\(from \d+-[\w-]+\)\s*\Z", "", feature_text)
+
+
 def lilguy_estimate(text: str) -> tuple[int, int]:
     """(files, lines): the distinct file paths text names, and LILGUY_LINES_PER_FILE added lines per file."""
     files = len(set(LILGUY_PATH_RE.findall(text)))
@@ -3386,7 +3392,7 @@ def _lilguy_refuses(folder: Path) -> bool:
             return ""
     feature = read("feature.md")
     return bool(CLAUDE_DIR_RE.search(feature) or CLAUDE_DIR_RE.search(read("spec.md"))
-                or LILGUY_HARD_STOP_RE.search(feature))
+                or LILGUY_HARD_STOP_RE.search(_request_text(feature)))
 
 
 def _jev_model(folder: Path) -> dict | None:
@@ -3452,7 +3458,7 @@ def _lilguy_verdict(root, job_id: str) -> dict:
             return {"fit": False, "why": "names a .claude/ path"}
     if pinned := header_value(feature, "Lane", LANES):
         return {"fit": pinned == "lilguy", "why": f"feature.md Lane: {pinned}"}
-    text = feature.read_text(encoding="utf-8", errors="replace") if feature.is_file() else ""
+    text = _request_text(feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else ""
     if m := LILGUY_HARD_STOP_RE.search(text):
         return {"fit": False, "why": f"hard-stop word {m[0]!r} in feature.md"}
     files, lines = lilguy_estimate(text)
