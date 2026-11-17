@@ -1,9 +1,8 @@
 # gitguard
 
 The user-level PreToolUse hook that refuses a chat's Bash `git commit` on `main`/`master` in a registered repo's main
-checkout (job 607), ported from `board.py git-guard` to a stdlib-only Go binary (job 812). Same rules: scrum-launched
-sessions (`CLAUDE_NOTIFIER_DISABLE`) and sessions owning an ACTIVE job (pid, else tty) are exempt; any error means no
-output and exit 0.
+checkout (job 607), ported from `board.py git-guard` to a stdlib-only Go binary (job 812). Scrum-launched sessions are not
+exempt (job 957); any error means no output and exit 0.
 
 - Build: `./install.sh` runs `go build -o gitguard` here and registers `<path>/gitguard || true` in
   `~/.claude/settings.json` (rewriting an old `board.py ... git-guard` entry). No Go: the hook is a silent pass.

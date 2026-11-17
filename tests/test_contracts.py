@@ -3532,6 +3532,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             for phrase in phrases:
                 self.assertIn(phrase, path.read_text(), f"{name}: {phrase}")
 
+    def test_orchestrator_never_builds_outside_lilguy(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
+        head = text[:text.index("## Setup")]
+        for phrase in ("Outside the **Lilguy lane** it never edits or commits a repo file in the main checkout",
+                       "a `fast` job with a pre-written spec.md still runs **New job** steps 4 (Worktree) and 5 (spawn `scrum-builder`)",
+                       "`fit: false` from `B lilguy-fit` never means build it here"):
+            self.assertIn(phrase, head)
+        self.assertNotIn("It never writes code", head)
+
     def test_skill_md_within_body_budget(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         self.assertLessEqual(text.count("\n"), 500)  # skill best practices: under 500 lines
