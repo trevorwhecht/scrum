@@ -9991,18 +9991,13 @@ class IdleClaimTest(unittest.TestCase):
                 got, spawn = self.claim()
             self.assertEqual((got, spawn.call_args.args[2], spawn.call_args.kwargs["manual"]), (True, "005-q", True))
 
-    def test_idle_claim_cpu_exempt_pick(self):
-        """Job 927: over MAX_LAUNCH_CPU_LOAD_PCT a small fast or debug pick (cpu_exempt) is still claimed."""
-        with mock.patch.object(self.board, "machine_ok", return_value=None):
-            for lane, claimed in (("fast", True), ("standard", False)):
-                with self.subTest(lane):
-                    self.write()
-                    (self.root / "jobs" / "003-small" / "spec.md").write_text(
-                        f"# x\nLane: {lane}\n\n## Likely files\n- `src/c.py`\n")
-                    with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
-                        got, spawn = self.claim()
-                    self.assertEqual((got, self.started(spawn), self.stage("003-small")),
-                                     (True, [("003-small", "start", True)], "spec") if claimed else (False, [], "waiting"))
+    def test_idle_claim_small_fast_pick_refused_above_machine_ok_cpu_limit(self):
+        """Job 945: with the real machine_ok, a small fast pick gets no CPU exemption at SCRUM_CPU_LOAD_PCT=200."""
+        self.write()
+        (self.root / "jobs" / "003-small" / "spec.md").write_text("# x\nLane: fast\n\n## Likely files\n- `src/c.py`\n")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="200"):
+            got, spawn = self.claim()
+        self.assertEqual((got, spawn.call_args_list, self.stage("003-small")), (False, [], "waiting"))
 
     def test_no_claim_without_free_slot(self):
         s = self.serve

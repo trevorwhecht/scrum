@@ -188,8 +188,8 @@ def cpu_token():
 
 def cpu_exempt(root, job):
     """A fast or debug job (board.job_lane) whose Likely files (board.child_files) are all tests or exactly one file,
-    while board.live_sessions() is under MAX_SESSIONS: small enough that spawn's and idle_claim's CPU launch gate lets
-    it through. The RAM gate still holds it."""
+    while board.live_sessions() is under MAX_SESSIONS: small enough that spawn's CPU launch gate lets it through
+    (idle_claim's machine_ok gate does not). The RAM gate still holds it."""
     if board.job_lane(root, job) not in ("fast", "debug"):
         return False
     files = board.child_files(Path(root) / "jobs", job["id"])
@@ -603,7 +603,7 @@ def idle_claim(project, root, jobs) -> bool:
     live_ids run, or a WATCHED leaf job whose session is alive); a running job with unreadable files blocks all, and
     a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
     a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
-    limit (cpu_hot, re-read just before the claim; a manual queued launch or a cpu_exempt pick skips it) claims nothing
+    limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing
     and keeps the pick held. True when one started."""
     by_id = {j["id"]: j for j in jobs}
 
@@ -636,7 +636,7 @@ def idle_claim(project, root, jobs) -> bool:
     if not ok:
         return False
     pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
-    if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual") or cpu_exempt(root, pick))) \
+    if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual"))) \
             or not take_room():
         return False
     IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
