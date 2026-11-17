@@ -4123,17 +4123,25 @@ def reserve_hit(acc, usage, now):
 
 
 def pick_account(now, live=0, prefer=None):
-    """(name, allowance) of the first account with room, `prefer` first when listed, else (None, Allowance(0,
-    reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
+    """(name, allowance) of the first account with room, `prefer` first when listed, then the soonest seven_day reset
+    first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
     reserve window reached (reserve_hit)."""
     accs = accounts()
     why = []
-    for acc in sorted(accs, key=lambda a: a.name != prefer):
+    usages = {a.name: read_usage(a.name) for a in accs}
+
+    def order(acc):
+        limits = (usages[acc.name] or {}).get("rate_limits")
+        w = limits.get("seven_day") if isinstance(limits, dict) else None
+        at = w.get("resets_at") if isinstance(w, dict) else None
+        return acc.name != prefer, not (is_num(at) and at > now), at if is_num(at) and at > now else 0
+
+    for acc in sorted(accs, key=order):
         if until := limited_until(acc.name, now):
             why.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
             continue
-        usage = read_usage(acc.name)
+        usage = usages[acc.name]
         allow = usage_allowance(usage, now, live)
         if allow is not None and allow <= (live if isinstance(live, int) else len(live)):  # no slot left
             why.append(f"{acc.name} {allow.reason}")
