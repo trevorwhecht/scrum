@@ -205,6 +205,7 @@ STOP_TITLES = {
     "PROD_CHECK_FAILED": "the change merged, but the production deploy, a production data run or the production check "
                          "failed",
     "DATABASE_CHANGE": "the job changes the database structure, and the migrate needs an OK or it stopped",
+    "PROD_APPROVAL": "the database update needs Trevor's OK before it runs on production",
     "ROUND_LIMIT": "the approver asked for a second round of fixes, and a job only gets one",
     "BUILDER_BLOCKED": "the builder, debugger or approver could not go on (blocked:, debug: blocked, Hard stop: blocked)",
     "REVIEW_ESCALATED": "the approver escalated for another reason (Hard stop: render, any other decision line, or "
