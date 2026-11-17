@@ -4349,6 +4349,7 @@ class BoardTest(unittest.TestCase):
         return (path.read_text() if path.exists() else None), out, err.getvalue()
 
     def test_digest_start_writes_escapes(self):
+        self.round_file("100-origin", 2, "review-code.md", "VERDICT: PASS\nreal\n")
         text, out, _ = self.escape_digest(
             [{"id": "100-origin", "rounds": [{"check": "FAIL"}, {"check": "PASS", "code": "PASS", "ui": "PASS", "ux": "CHANGES"}]},
              {"id": "200-bug", "lane": "debug"}],
@@ -4363,6 +4364,8 @@ class BoardTest(unittest.TestCase):
             self.write("200-bug/feature.md", feature)
         commits = [({n: o for n, (o, _) in files.items()}, "Add\n\nJob files: scrum/jobs/100-origin/"),
                    ({n: w for n, (_, w) in files.items()}, "Fix\n\nJob files: scrum/jobs/200-bug/")]
+        for k in passes:
+            self.round_file("100-origin", 1, f"review-{k}.md", "VERDICT: PASS\nreal\n")
         jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", **{k: "PASS" for k in passes}}]},
                 {"id": "200-bug", "lane": "debug"}]
         return self.escape_digest(jobs, commits)[0]
@@ -4399,6 +4402,19 @@ class BoardTest(unittest.TestCase):
         self.round_file("100-origin", 1, "review-ui.md", stub)
         text, _, _ = self.escape_digest(jobs, commits)
         self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code\n")
+
+    def test_digest_start_escapes_missing_review_file_not_counted(self):
+        commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),
+                   ({"app.py": "a\nB\nc\n"}, "Fix b\n\nJob files: scrum/jobs/200-bug/")]
+        jobs = [{"id": "100-origin", "rounds": [{"check": "PASS", "code": "PASS", "security": "PASS"}]},
+                {"id": "200-bug", "lane": "debug"}]
+        self.round_file("100-origin", 1, "review-code.md", "VERDICT: PASS\nreal\n")
+        text, _, _ = self.escape_digest(jobs, commits)
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: code\n")
+        self.root.joinpath("jobs/100-origin/round-1/review-code.md").unlink()
+        shutil.rmtree(self.root / "digests")
+        text, _, _ = self.escape_digest(jobs, commits[:0])
+        self.assertEqual(text, "- 200-bug ← 100-origin · 1 lines in app.py · passed by: none\n")
 
     def test_digest_start_escapes_all_stub_reviewers_none(self):
         commits = [({"app.py": "a\nb\nc\n"}, "Add app\n\nJob files: scrum/jobs/100-origin/"),

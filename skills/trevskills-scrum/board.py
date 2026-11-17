@@ -2436,7 +2436,7 @@ ESCAPE_SECURITY_RE = re.compile(r"auth|injection|secret|token|password|session|p
 def _escape_lines(repo, bug, board, root=None):
     """The escapes.md lines for debug job `bug`: its newest HEAD commit naming scrum/jobs/<bug>/, each non-test file's
     -a,b hunks blamed on <sha>^, and every other board job named in a blamed commit's body, with its last-round PASSes
-    (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is a skip stub is left out; `ui` is left out
+    (a PASS whose jobs/<origin>/round-<last>/review-<name>.md under `root` is missing or a skip stub is left out; `ui` is left out
     unless a blamed file matches ESCAPE_UI_RE, `security` unless the bug's feature.md matches ESCAPE_SECURITY_RE)."""
     shas = _git(repo, "log", "HEAD", "-F", f"--grep=scrum/jobs/{bug}/", "--format=%H").decode().split()
     if not shas:
@@ -2476,8 +2476,7 @@ def _escape_lines(repo, bug, board, root=None):
         rounds = board[origin].get("rounds") or [{}]
         folder = Path(root) / "jobs" / origin / f"round-{len(board[origin].get('rounds') or [])}" if root else None
         passed = sorted(k for k, v in rounds[-1].items() if v == "PASS" and k != "check"
-                        and not (folder and (folder / f"review-{k}.md").is_file()
-                                 and not _real_review(folder / f"review-{k}.md"))
+                        and not (folder and not _real_review(folder / f"review-{k}.md"))
                         and not (k == "ui" and not ui) and not (k == "security" and not secure)) or ["none"]
         out.append(f"- {bug} ← {origin} · {sum(files.values())} lines in {', '.join(files)} · passed by: {', '.join(passed)}")
     return out
