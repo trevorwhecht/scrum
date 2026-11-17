@@ -4282,9 +4282,9 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |\n"
-                      "|---|---|---|---|---|---|---|---|---|---|\n", text)
-        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 2 (rounds 2,3) | 1 | ? |\n", text)
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |\n"
+                      "|---|---|---|---|---|---|---|---|---|---|---|\n", text)
+        self.assertIn(f"| {job} | 3h20m | 10m | 10m | - | 3 | 50m, 1h00m, 1h00m | 0m, 0m, 0m | 2 (rounds 2,3) | 1 | ? |\n", text)
         self.assertIn("Jobs: 1 · wall 3h20m · rounds 3 · no-change rounds 2 in 1 jobs · E2E lock waits 1 in 1 jobs"
                       " · stalls 1 (0m to resume)\n", text)
         self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{waiting}: 1h30m\n\n"
@@ -4298,7 +4298,7 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             self.assertEqual(self.cli("digest-start")["id"], "001")
         text = (self.root / "digests" / "001" / "timing.md").read_text()
-        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |\n", text)
+        self.assertIn("| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |\n", text)
         self.assertIn(f"## RAM holds\n- {held}: 2 holds, free RAM 8%-12%, sessions 13-14\n"
                       f"- {unknown}: 1 holds, free RAM unknown, sessions 3-3\n", text)
         self.assertNotIn(f"- {plain}:", text.split("## RAM holds")[1])
@@ -4825,7 +4825,55 @@ class BoardTest(unittest.TestCase):
         (self.root / "digests" / "001").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
             board.write_timing(self.root, "001", ["j"])
-        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0 | 0 | open, open |", (self.root / "digests" / "001" / "timing.md").read_text())
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0m | 0 | 0 | open, open |", (self.root / "digests" / "001" / "timing.md").read_text())
+
+    def human_log(self, t0, rows):
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        (self.root / "questions.log").write_text("".join(json.dumps({**d, "date": iso(at)}) + "\n" for at, d in rows))
+
+    def timing_two_hour(self, t0):
+        for at, rel in ((0, "spec.md"), (7200, "round-1/head.txt")):
+            p = self.write(f"j/{rel}", "x\n")
+            os.utime(p, (t0 + at, t0 + at))
+
+    def test_timing_subtracts_human_wait(self):
+        t0 = 1_700_000_000
+        self.timing_two_hour(t0)
+        cells = board._timing_row(self.root, "j", {}, {}, (), [(t0 + 1800, t0 + 7200)])[0]
+        self.assertEqual((cells[6], cells[7]), ("30m", "1h30m"))
+        cells = board._timing_row(self.root, "j", {}, {})[0]
+        self.assertEqual((cells[6], cells[7]), ("2h00m", "0m"))
+
+    def test_timing_human_spans(self):
+        t0 = 1_700_000_000
+        self.timing_two_hour(t0)
+        for job in ("a", "b", "c"):
+            self.write(f"{job}/spec.md", "s\n")
+        self.human_log(t0, [
+            (600, {"job": "a", "options": ["x"]}), (1200, {"job": "a", "kind": "note"}),
+            (1800, {"job": "j", "options": ["x"]}), (2400, {"job": "j", "kind": "note", "action": "discuss"}),
+            (3000, {"job": "c", "options": ["x"]})])
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}), \
+                mock.patch.object(board, "read_board", return_value={"jobs": [
+                    {"id": "j", "stage": "needs-human"}, {"id": "a", "stage": "build"}, {"id": "c", "stage": "build"}]}), \
+                mock.patch.object(board, "_timing_row", wraps=board._timing_row) as row:
+            board.write_timing(self.root, "001", ["a", "j", "c"])
+        got = {c.args[1]: c.args[5] for c in row.call_args_list}
+        self.assertEqual(got["a"], [(t0 + 600, t0 + 1200)])
+        self.assertEqual(len(got["j"]), 1)
+        self.assertEqual(got["j"][0][0], t0 + 1800)
+        self.assertGreater(got["j"][0][1], t0 + 2400)  # the discuss note ends nothing: runs to now
+        self.assertEqual(got["c"], [])
+
+    def test_timing_human_wait_overlap(self):
+        t0 = 1_700_000_000
+        self.timing_two_hour(t0)
+        # machine wait from 3600 runs to the next file mtime (7200); human span 1800-5400 overlaps it
+        cells = board._timing_row(self.root, "j", {}, {}, [t0 + 3600], [(t0 + 1800, t0 + 5400)])[0]
+        self.assertEqual((cells[6], cells[7]), ("30m", "30m"))
+        cells = board._timing_row(self.root, "j", {}, {}, [t0 + 3600], [(t0 - 900, t0 + 99999)])[0]
+        self.assertEqual((cells[6], cells[7]), ("0m", "1h00m"))
 
     def test_timing_moves_dependency_wait_to_queue(self):
         t0 = 1_700_000_000

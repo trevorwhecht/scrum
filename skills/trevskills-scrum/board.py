@@ -2257,9 +2257,11 @@ def _run_starts(root, job_id):
     return sorted(out)
 
 
-def _waited(prev, end, starts, mtimes):
-    """Secs of [prev, end] spent waiting: each start in the window runs to the next file mtime (else end); overlaps count once."""
-    spans = sorted((w, min(next((t for t in mtimes if t > w), end), end)) for w in starts if prev <= w < end)
+def _waited(prev, end, starts, mtimes, human=()):
+    """Secs of [prev, end] spent waiting: each start in the window runs to the next file mtime (else end), and each
+    `human` (start, end) span is clipped to the window; overlaps count once."""
+    spans = sorted([(w, min(next((t for t in mtimes if t > w), end), end)) for w in starts if prev <= w < end]
+                   + [(max(a, prev), min(b, end)) for a, b in human])
     total, upto = 0, prev
     for a, b in spans:
         a = max(a, upto)
@@ -2268,11 +2270,11 @@ def _waited(prev, end, starts, mtimes):
     return total
 
 
-def _timing_row(root, job_id, job, stalls, waits=()):
+def _timing_row(root, job_id, job, stalls, waits=(), human=()):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
-    (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs).
+    (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs) and the needs-human `human` (start, end) spans, shown in Human wait.
     Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
     spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
     epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None,
@@ -2287,12 +2289,15 @@ def _timing_row(root, job_id, job, stalls, waits=()):
         queue = start - spec_at
     else:
         start, queue = spec_at, 0 if spec_at else None
-    times, heads, prev = [], [], start or created
+    times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
     for n in rounds:
         rd = folder / f"round-{n}"
         end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
-        times.append(_mins(end - prev - _waited(prev, end, waits, mtimes) if end and prev else None))
+        machine = _waited(prev, end, waits, mtimes) if end and prev else 0
+        both = _waited(prev, end, waits, mtimes, human) if end and prev else 0
+        times.append(_mins(end - prev - both if end and prev else None))
+        hwaits.append(_mins(both - machine))
         prev = end or prev
         try:
             heads.append((rd / "head.txt").read_text(encoding="utf-8", errors="replace").strip())
@@ -2334,7 +2339,7 @@ def _timing_row(root, job_id, job, stalls, waits=()):
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
     cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), ", ".join(times) or "-",
-             f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
+             ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
     except OSError:
@@ -2354,18 +2359,29 @@ def write_timing(root, digest_id, jobs):
     totals, every job on every registered board (and this one) now stalled waiting on the E2E queue, and per claimed
     job its ram-holds.txt lines (serve.py note_ram_hold): hold count, free RAM range and session range."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
-    stalls, waits = {}, {}
-    for q in _json_lines(Path(root) / "questions.log"):
+    stalls, waits, human = {}, {}, {}
+    log, now = list(_json_lines(Path(root) / "questions.log")), time.time()
+    for n, q in enumerate(log):  # needs-human spans: as the usage-window "needs-human time" loop
+        at = _epoch(q.get("date"))
+        if "options" not in q or not at or not isinstance(q.get("job"), str):
+            continue
+        nxt = next((x_at for x in log[n + 1:] if x.get("job") == q["job"] and (x_at := _epoch(x.get("date")))
+                    and not (x.get("kind") == "note" and x.get("action") == "discuss")), None)
+        if nxt is None and board.get(q["job"], {}).get("stage") == "needs-human":
+            nxt = now
+        if nxt is not None:
+            human.setdefault(q["job"], []).append((at, nxt))
+    for q in log:
         at = _epoch(q.get("date"))
         if at and isinstance(q.get("job"), str) and (q.get("kind") == "machine" or (
                 q.get("kind") == "stall" and E2E_WAIT_REASON in str(q.get("reason") or ""))):
             waits.setdefault(q["job"], []).append(at)
         if q.get("kind") == "stall" and isinstance(q.get("job"), str):
             stalls.setdefault(q["job"], []).append(at)
-    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ())) for j in jobs]
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ())) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
-             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | No-change rounds | E2E lock waits | Stalls |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     lines += ["| " + " | ".join(r[0]) + " |" for r in rows]
     lines += ["", "## Totals",
               f"Jobs: {len(rows)} · wall {_mins(sum(r[1] for r in rows if r[1]))} · rounds {sum(r[2] for r in rows)}"
