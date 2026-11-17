@@ -860,6 +860,8 @@ E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
 E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+E2E_FULL_DETAIL_RE = re.compile(r"^\s*\d+\)\s+(.*)$")  # a failure-detail header: `  1) [chromium] › a.spec.ts:3:5`
+E2E_FULL_TIMEOUT_RE = re.compile(r"Test timeout of \d+ms exceeded")  # a test-level timeout, never an expect one
 
 
 def e2e_full_due(record, head, merges, now, settled=False) -> bool:
@@ -885,6 +887,20 @@ def e2e_full_failures(output, test_dir) -> list[dict]:
             out.append({"spec": f"{test_dir}/{m[1]}", "line": int(m[2]), "title": m[3]})
         else:
             inside = False
+    return out
+
+
+def e2e_full_timed_out(output, test_dir) -> set[tuple[str, int]]:
+    """(spec, line) of each failure-detail block whose text, up to the next detail header or the `N failed` summary,
+    holds Playwright's `Test timeout of Nms exceeded`."""
+    out, key = set(), None
+    for line in ANSI_RE.sub("", output).splitlines():
+        if (d := E2E_FULL_DETAIL_RE.match(line)) and (m := E2E_FULL_ENTRY_RE.match(d[1])):
+            key = (f"{test_dir}/{m[1]}", int(m[2]))
+        elif E2E_FULL_FAILED_RE.match(line):
+            key = None
+        elif key and E2E_FULL_TIMEOUT_RE.search(line):
+            out.add(key)
     return out
 
 
@@ -951,7 +967,8 @@ def e2e_full_tick(project, repo, root) -> None:
 
 def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
-    root/e2e-full.json and add one backlog item per failing spec not already on an open line. Exit 0 is pass; a
+    root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
+    for them all when every failure is a test timeout (e2e_full_timed_out). Exit 0 is pass; a
     non-zero exit with parsed failures is fail; any other non-zero exit (lock timeout 124, a dev-server error) is
     error and adds nothing."""
     try:
@@ -970,20 +987,24 @@ def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
             output = log.read_text(errors="replace")
         except OSError as e:
             code, output = -1, str(e)
-        failed = e2e_full_failures(output, board._e2e_dir(Path(repo))) if code else []
+        test_dir = board._e2e_dir(Path(repo))
+        failed = e2e_full_failures(output, test_dir) if code else []
         result = "pass" if code == 0 else "fail" if failed else "error"
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 else last_green}
         write_e2e_full(root, rec)
         if failed:
-            e2e_full_backlog(repo, root, failed, last_green, head)
+            timed_out = e2e_full_timed_out(output, test_dir)
+            e2e_full_backlog(repo, root, failed, last_green, head,
+                             timeouts_only=all((f["spec"], f["line"]) in timed_out for f in failed))
         return rec
     finally:
         E2E_FULL["running"] = None
 
 
-def e2e_full_backlog(repo, root, failed, last_green, head):
-    """One backlog item per failing spec, naming its tests and the commits merged since the last green run."""
+def e2e_full_backlog(repo, root, failed, last_green, head, timeouts_only=False):
+    """One backlog item per failing spec, naming its tests and the commits merged since the last green run. A
+    timeouts-only run files one combined `times out` item naming every new spec, so one job raises all their budgets."""
     if last_green:
         try:
             log = board._git(repo, "log", "--format=%h %s", f"{last_green}..{head}").decode(errors="replace")
@@ -993,11 +1014,12 @@ def e2e_full_backlog(repo, root, failed, last_green, head):
     else:
         merged = "no green run recorded"
     open_text = [i["text"] for i in board.read_backlog(root)[1] if not i["done"]]
-    for spec in dict.fromkeys(f["spec"] for f in failed):
-        if any(spec in t for t in open_text):
-            continue
-        tests = "; ".join(f"{Path(spec).name}:{f['line']} {f['title']}" for f in failed if f["spec"] == spec)
-        text = f"E2E full suite on main fails: {spec} — {tests}; {merged}"
+    named = [f"{spec} — " + "; ".join(f"{Path(spec).name}:{f['line']} {f['title']}"
+                                      for f in failed if f["spec"] == spec)
+             for spec in dict.fromkeys(f["spec"] for f in failed) if not any(spec in t for t in open_text)]
+    texts = ([f"E2E full suite on main times out: {'; '.join(named)}; {merged}"] if timeouts_only and named
+             else [f"E2E full suite on main fails: {n}; {merged}" for n in named])
+    for text in texts:
         if len(text) > board.ITEM_MAX:  # never cut silently: say how much of the merge list was left out
             text = text[:board.ITEM_MAX - 40].rsplit("; ", 1)[0] + "; … more in git log"
         board.cmd_backlog_add(root, [text])

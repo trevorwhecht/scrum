@@ -11321,6 +11321,21 @@ E2E_LIST_OUTPUT = """Running 5 tests using 1 worker
   2 passed (20.1s)
 """
 
+E2E_TIMEOUT_DETAIL = """  \x1b[31m1) [chromium] › pricing.spec.ts:12:5 › Pricing › shows price ───────────\x1b[39m
+
+    \x1b[31mTest timeout of 30000ms exceeded.\x1b[39m
+
+  2) [chromium] › admin/orders.spec.ts:8:3 › orders list ─────────────
+
+    {second}
+
+"""
+
+
+def e2e_timeout_output(second):
+    """E2E_LIST_OUTPUT with Playwright's failure-detail blocks above its summary; block 1 is a test timeout."""
+    return E2E_TIMEOUT_DETAIL.replace("{second}", second) + E2E_LIST_OUTPUT.split("\n", 2)[2]
+
 
 class RestartBlockersTest(unittest.TestCase):
     """Job 622: serve.restart_blockers() names the jobs (and full E2E runs) that keep a restart unsafe."""
@@ -11493,6 +11508,35 @@ class E2eFullTest(unittest.TestCase):
     def test_no_green_run_recorded(self):
         self.run_suite(E2E_LIST_OUTPUT, 1)
         self.assertTrue(self.open_items()[0].endswith("; no green run recorded"), self.open_items())
+
+    def test_timed_out_reads_detail_blocks(self):
+        out = e2e_timeout_output("Error: expect(locator).toBeVisible() failed")
+        self.assertEqual(self.serve.e2e_full_timed_out(out, "e2e"), {("e2e/pricing.spec.ts", 12)})
+        self.assertEqual(self.serve.e2e_full_timed_out(E2E_LIST_OUTPUT, "e2e"), set())
+
+    def test_timeouts_only_file_one_item(self):
+        for i in range(60):
+            self.merge(f"Merge number {i} with a fairly long subject line")
+        out = e2e_timeout_output("Test timeout of 45000ms exceeded while running \"beforeAll\" hook.")
+        self.run_suite(out, 1, last_green=self.base)
+        items = self.open_items()
+        self.assertEqual(len(items), 1, items)
+        text = items[0]
+        self.assertTrue(text.startswith("E2E full suite on main times out: e2e/pricing.spec.ts — "
+                                        "pricing.spec.ts:12 Pricing › shows price; e2e/admin/orders.spec.ts — "
+                                        "orders.spec.ts:8 orders list; merges since last green run "), text)
+        self.assertLessEqual(len(text), self.serve.board.ITEM_MAX)
+        self.assertTrue(text.endswith("; … more in git log"), text)
+        self.run_suite(out, 1, last_green=self.base)
+        self.assertEqual(len(self.open_items()), 1, "no duplicate on a second run")
+
+    def test_mixed_failures_file_per_spec(self):
+        self.run_suite(e2e_timeout_output("Error: expect(locator).toBeVisible() failed"), 1)
+        self.assertEqual(self.open_items(), [
+            "E2E full suite on main fails: e2e/pricing.spec.ts — pricing.spec.ts:12 Pricing › shows price; "
+            "no green run recorded",
+            "E2E full suite on main fails: e2e/admin/orders.spec.ts — orders.spec.ts:8 orders list; "
+            "no green run recorded"])
 
     def test_lock_timeout_is_error_with_no_backlog(self):
         rec = self.run_suite("buildlock: timed out\n", 124)
