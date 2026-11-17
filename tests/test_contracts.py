@@ -1025,7 +1025,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26720, "newjob.md")  # +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 27290, "newjob.md")  # +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
@@ -3652,12 +3652,27 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         rule = "E2E runs only for a job whose `lane` is `standard` (or unset), or whose `parent` on the board is a `bigboy` job."
         self.assertIn(rule, step2)
         self.assertIn("`E2E: skipped, <lane> lane`", step2)
+        self.assertIn("Any other job (`fast`, `debug`) runs no `B e2e-specs`, E2E command or spec file but the debug exception", step2)
         self.assertLess(step2.index(rule), step2.index("run `B e2e-specs $ID`"))
         fast = self.section(skill_text(), "## Fast lane", "## Check gate")
         self.assertIn("`scrum-review-e2e` when the Check gate's **E2E lanes** rule allows E2E", fast)
         review = self.section(skill_text(), "## Review (WAIT FOR ALL)", "## Approve")
         step3 = self.section(review, "3. Spawn **in ONE message**", "4. **WAIT FOR ALL.**")
         self.assertIn("also spawn `scrum-review-e2e` only when the **Check gate**'s **E2E lanes** rule lets the job run E2E", step3)
+
+    def test_debug_lane_runs_named_e2e_specs(self):
+        check = self.section(skill_text(), "## Check gate", "## Review (WAIT FOR ALL)")
+        step2 = self.section(check, "2. **Runtime files**", "3. Write `round-$N/check.md`")
+        rule = self.section(step2, "**Debug exception:**", "When **E2E lanes** allows it")
+        for phrase in ("a `debug` job (never `fast`)", "never `B e2e-specs $ID` or a full or scoped suite",
+                       "only the spec files the diff adds or changes under the E2E folder",
+                       "plus the E2E spec files named in `spec.md` acceptance criteria",
+                       "the `e2e.lock` `buildlock.py` wrapper as `npx playwright test --workers=1 <spec files>`",
+                       "a non-zero exit is `CHECK: FAIL`", "with neither, step 3 writes `E2E: skipped, debug lane`"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertNotIn("`E2E: skipped, fast lane`", rule)
+        step3 = self.section(check, "3. Write `round-$N/check.md`", "4. ")
+        self.assertIn("Whenever E2E ran, add the line `E2E specs: <spec files>|all`", step3)
 
     def test_lilguy_check_skips_tests_fast_runs_related(self):
         check = self.section(self.lane("lilguy"), "3. **Check.**", "4. **Route.**")
