@@ -2977,9 +2977,12 @@ class BoardTest(unittest.TestCase):
                     board.os.getloadavg = saved
 
     def test_machine_ok_cpu_load(self):
-        self.assertEqual(board.MAX_CPU_LOAD_PCT, 150)
-        reason = "CPU load 168% of 8 cores (> 150%)"
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168"), mock.patch.object(board.os, "cpu_count", return_value=8):
+        self.assertEqual(board.MAX_CPU_LOAD_PCT, 300)
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="208", SCRUM_CPU_BUSY_PCT="70"), \
+                mock.patch.object(board.os, "cpu_count", return_value=8):
+            self.assertIsNone(board.machine_ok(self.tmp.name, claim=True), "job 958: high load with idle CPU claims")
+        reason = "CPU load 350% of 8 cores (> 300%)"
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"), mock.patch.object(board.os, "cpu_count", return_value=8):
             self.assertEqual(board.machine_ok(self.tmp.name), reason)
             self.assertEqual(board.machine_ok(self.tmp.name, claim=True), reason)
             self.assertIsNone(board.machine_ok(self.tmp.name, manual=True), "Trevor's clicks skip the load check")
@@ -4720,8 +4723,8 @@ class BoardTest(unittest.TestCase):
 
     def test_pulse_hot_tick_held_by_guard(self):
         text = self.pulse_ticks(
-            (0, 0, {"cpu_load": 150, "swap": 25}),  # at the limits: idle
-            (60, 0, {"cpu_load": 151}),  # hot: held, ends the stretch
+            (0, 0, {"cpu_load": 300, "swap": 25}),  # at the limits: idle
+            (60, 0, {"cpu_load": 301}),  # hot: held, ends the stretch
             (120, 0, {"swap": 26}),  # swapping: held
             (180, 0, {"cpu_load": "x", "swap": None}),  # not numeric: idle
             (240, 0, {}),  # idle
