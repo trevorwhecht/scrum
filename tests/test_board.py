@@ -4933,7 +4933,7 @@ class BoardTest(unittest.TestCase):
                 self.write(f"{job}/round-{n}/head.txt", h + "\n")
         self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][8], "0")
         cells, _, _, count, _, _ = board._timing_row(self.root, "b", {}, {})
-        self.assertEqual((cells[7], count), ("1 (rounds 4)", 1))
+        self.assertEqual((cells[8], count), ("1 (rounds 4)", 1))
 
     def test_timing_row_queue_gate_cell(self):
         cell = lambda: board._timing_row(self.root, "j", {}, {})[0][4]
