@@ -1986,6 +1986,13 @@ HEALTH_UNUSED_PCT = 15  # a window left more than this % unused at reset
 HEALTH_EARLY_90_SECS = 3600  # a window that reached 90% more than this long before reset burned too early
 HEALTH_WAITING_RE = re.compile(r"(?i)blocked on sibling|waiting (?:on|for) (?:job |another job|\d{3})")
 HEALTH_UNREADABLE_RE = re.compile(r"[\w.-]*/[\w.-]+\.[A-Za-z]{1,5}\b|\brule \d+\b", re.I)
+
+
+def unreadable_question(question):
+    """True when an ask question is over 40 words or names a path or "rule N"."""
+    return len(question.split()) > 40 or bool(HEALTH_UNREADABLE_RE.search(question))
+
+
 HEALTH_STOP_KINDS = ("ask", "stall", "machine", "refused", "bigboy")
 HEALTH_TEST_ROLES = ("review-e2e", "review-ui", "review-ux")
 
@@ -2065,7 +2072,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
                         for o in opts):
             hits["resume_abort_stops"].append(job)
         question = str(q.get("question") or "")
-        if len(question.split()) > 40 or HEALTH_UNREADABLE_RE.search(question):
+        if unreadable_question(question):
             hits["unreadable_asks"].append(job)
     for e in _health_file(d / "pipeline-fit.json", dict).get("jobs") or []:
         if not isinstance(e, dict) or str(e.get("id")) not in claimed:
@@ -6871,6 +6878,9 @@ def main(argv=None):
     elif a.cmd == "sync":
         print(json.dumps(cmd_sync(a.dir, a.id)))
     elif a.cmd == "ask":
+        if unreadable_question(a.question):
+            raise SystemExit("ask refused: keep the question to 40 words or fewer, with no file path or "
+                             "\"rule N\"; move the detail into stop.md and ask again.")
         out = cmd_ask(a.dir, a.id, a.question, [o for o in (a.a, a.b, a.c) if o is not None], a.kind,
                       a.recommend, title=a.title)
         if a.kind is not None:
