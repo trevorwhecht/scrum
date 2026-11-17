@@ -27,6 +27,10 @@ class RunParallelTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("test_boom", r.stdout)
         self.assertIn("boom here", r.stdout)
+        rerun = r.stdout.split("===== re-run test_a.A.test_boom =====\n", 1)
+        self.assertEqual(len(rerun), 2, r.stdout)  # the serial re-run still failed and its output is printed
+        self.assertIn("boom here", rerun[1])
+        self.assertNotIn("flaky under load: test_a.A.test_boom", r.stdout)
         lines = self.shard_lines(r.stdout)
         self.assertEqual(len(lines), 4, r.stdout)
         self.assertEqual(sum("1 tests OK" in line for line in lines), 3, lines)
@@ -46,6 +50,19 @@ class RunParallelTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.shard_lines(r.stdout), [l for l in self.shard_lines(r.stdout) if " 1 tests OK " in l])
         self.assertEqual(len(self.shard_lines(r.stdout)), 2, r.stdout)
+        self.assertTrue(r.stdout.rstrip().splitlines()[-1].startswith("Ran 2 tests in "), r.stdout)
+        self.assertNotIn("flaky", r.stdout)
+
+    def test_flaky_test_passes_on_serial_rerun(self):
+        mods = {"test_f": "import unittest\nfrom pathlib import Path\nMARK = Path(__file__).with_name('ran-once')\n"
+                          "class F(unittest.TestCase):\n    def test_ok(self): pass\n"
+                          "    def test_flaky(self):\n        first = not MARK.exists()\n        MARK.touch()\n"
+                          "        self.assertFalse(first, 'first run fails')\n"}
+        r = self.run_on(mods, "-j", "2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("flaky under load: test_f.F.test_flaky\n", r.stdout)
+        self.assertNotIn("flaky under load: test_f.F.test_ok", r.stdout)
+        self.assertIn("first run fails", r.stdout)  # the shard output stays printed
         self.assertTrue(r.stdout.rstrip().splitlines()[-1].startswith("Ran 2 tests in "), r.stdout)
 
     def test_zero_workers_is_refused_before_running(self):

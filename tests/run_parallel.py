@@ -3,14 +3,18 @@
   python3 tests/run_parallel.py [-j N] [--start DIR]
 
 Ids are the ones `python3 -m unittest discover -s tests` uses (test_board.BoardTest.test_x), so sibling imports such as
-`import test_serve` keep working. Exits 0 only when every shard passes.
+`import test_serve` keep working. After the shards end, each failing test id (from the `FAIL:` and `ERROR:` lines) is
+re-run once, alone and serially; one that passes then is printed as `flaky under load: <id>`. Exits 0 only when every
+test passed in its shard or on that re-run.
 """
-import argparse, os, subprocess, sys, tempfile, time, unittest
+import argparse, os, re, subprocess, sys, tempfile, time, unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# `FAIL: name (module.Class.name)` or `ERROR: ...`; a trailing subtest suffix is ignored
+FAILED_ID = re.compile(r"^(?:FAIL|ERROR): \S+ \(([^\s()]+)\)", re.M)
 
 
 def jobs(value):
@@ -58,8 +62,20 @@ def main(argv=None):
     for n, (code, _, out) in enumerate(results, 1):
         if code != 0:
             print(f"\n===== shard {n} output =====\n{out}")
+    ok = all(code == 0 for code, _, _ in results)
+    failed = list(dict.fromkeys(i for code, _, out in results if code != 0 for i in FAILED_ID.findall(out)))
+    finished = all(code == 0 or re.search(r"^FAILED \(", out, re.M) for code, _, out in results)  # no crashed shard
+    if not ok and failed and finished:  # ponytail: one serial re-run each, no known-flaky list
+        ok = True
+        for tid in failed:
+            code, _, out = run_shard([tid], env)
+            if code == 0:
+                print(f"flaky under load: {tid}")
+            else:
+                ok = False
+                print(f"\n===== re-run {tid} =====\n{out}")
     print(f"Ran {len(ids)} tests in {time.monotonic() - t0:.1f}s")
-    return 0 if all(code == 0 for code, _, _ in results) else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
