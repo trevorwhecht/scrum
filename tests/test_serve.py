@@ -7987,6 +7987,77 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.serve.STALL_RESUMED, set())
 
 
+class QueueWaitResumeTest(unittest.TestCase):
+    """A check job board.cmd_ask holds on the E2E or Check queue (reason `waiting: ...`, not stalled) starts as soon as
+    that lock is free: no AUTO_RESUME try spent, never parked as spent, one E2E resume per tick."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.AUTO_RESUME.clear(); serve.STALL_RESUMED.clear()
+        self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        reg = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.root / "projects.json"))  # no real project's board
+        reg.start(); self.addCleanup(reg.stop)
+        self.jobs = [{"id": "q", "stage": "check", "parent": "bb", "reason": "waiting: E2E queue"}]
+        for j in ("q", "r"):
+            (self.root / "jobs" / j).mkdir(parents=True)
+
+    def sweep(self, free):
+        s = self.serve
+        with mock.patch.object(s, "resume_job") as resume, mock.patch.object(s, "running", return_value=False), \
+                mock.patch.object(s, "queue_free", return_value=free) as qf, mock.patch.object(s, "park_spent") as park:
+            busy = s.auto_resume("p", self.root, self.jobs)
+        park.assert_not_called()
+        self.lock = qf.call_args and qf.call_args.args[0]
+        return busy, [c.args[2]["id"] for c in resume.call_args_list]
+
+    def test_lock_free_resumes_without_spending_a_try(self):
+        s = self.serve
+        s.AUTO_RESUME["p/q"] = [s.AUTO_RESUME_MAX, 0.0]
+        self.assertEqual(self.sweep(True), (True, ["q"]))
+        self.assertEqual(self.lock, "e2e.lock")
+        self.assertEqual(s.AUTO_RESUME["p/q"], [s.AUTO_RESUME_MAX, 0.0], "no try spent")
+        self.assertEqual(self.sweep(True), (True, ["q"]), "again on the next tick, never parked")
+
+    def test_lock_busy_resumes_nothing(self):
+        self.assertEqual(self.sweep(False), (True, []))
+        self.assertEqual(self.jobs[0]["reason"], "waiting: E2E queue")
+        self.assertNotIn("p/q", self.serve.AUTO_RESUME)
+        self.assertEqual((self.root / "jobs" / "q" / "stall-holds.txt").read_text().split(), ["e2e_queue"])
+
+    def test_check_queue_wait_uses_check_lock(self):
+        self.jobs[0]["reason"] = "waiting: Check queue"
+        self.assertEqual(self.sweep(True), (True, ["q"]))
+        self.assertEqual(self.lock, "check.lock")
+
+    def test_job_in_check_here_or_in_another_project_does_not_hold_it(self):
+        orepo = Path(tempfile.mkdtemp()); (orepo / "scrum").mkdir()
+        self.addCleanup(shutil.rmtree, orepo, True)
+        (orepo / "scrum" / "board.json").write_text(json.dumps({"jobs": [{"id": "c", "stage": "check", "reason": None}]}))
+        (orepo / "scrum" / "project.md").write_text("- E2E: npx playwright test\n")
+        self.jobs.append({"id": "live", "stage": "check", "reason": None})
+        with mock.patch.object(self.serve.board, "projects", return_value={"p": self.root.parent, "o": orepo}):
+            self.assertEqual(self.sweep(True), (True, ["q"]))
+
+    def test_two_waiting_jobs_resume_one_per_tick(self):
+        s = self.serve
+        self.jobs.append({"id": "r", "stage": "check", "reason": "waiting: E2E queue"})
+        s.E2E_RESUMED = False
+        try:
+            self.assertEqual(self.sweep(True), (True, ["q"]))
+            self.assertEqual(self.sweep(True), (True, []), "the tick's one E2E resume is spent")
+        finally:
+            s.E2E_RESUMED = None
+        self.assertEqual((self.root / "jobs" / "r" / "stall-holds.txt").read_text().split(), ["e2e_queue"])
+
+    def test_waiting_job_lets_legacy_e2e_stall_resume(self):
+        self.jobs.append({"id": "old", "stage": "check", "stalled": True, "reason": "stalled: waiting on the E2E queue"})
+        self.jobs[0]["reason"] = "waiting: Check queue"
+        with mock.patch.object(self.serve, "e2e_queue_free", return_value=True):
+            self.assertEqual(self.sweep(True), (True, ["q", "old"]), "a waiting check job holds no lock")
+
+
 class MainFfTickTest(unittest.TestCase):
     """A BigBoy parent waiting on the main checkout's fast-forward is resumed once main is clean, on its default
     branch and `git pull --ff-only` succeeds; never otherwise, and once per updatedAt."""
@@ -8603,6 +8674,25 @@ class ExitedRunSweepTest(unittest.TestCase):
         self.assertEqual((self.root / "board.json").read_text(), before)
         spawn.assert_not_called()
         play.assert_not_called()
+
+
+    def test_queue_waiting_run_is_handled(self):
+        self.write([{"id": "par", "stage": "running", "lane": "runall", "children": ["qw"]},
+                    {"id": "qw", "parent": "par", "stage": "check", "reason": "waiting: E2E queue",
+                     "updatedAt": "2026-01-01T00:00:00+00:00", "worktree": "/tmp/wt-qw"}])
+        (self.root / "jobs" / "qw").mkdir()
+        (self.root / "jobs" / "qw" / "spec.md").write_text("# x\n")
+        self.run_entry("qw")
+        before = (self.root / "board.json").read_text()
+        with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False), \
+                mock.patch.object(self.serve, "resume_refusal", return_value=None), \
+                mock.patch.object(self.serve, "spawn") as spawn, mock.patch.object(self.board, "play"):
+            self.assertEqual(self.serve.respawn_exited("p", self.root), [])
+            kids = [j for j in json.loads(before)["jobs"] if j["id"] == "qw"]
+            self.assertFalse(self.serve.respawn_orphans("p", self.root, {"id": "par"}, kids, lambda: (lambda job: False)))
+        self.assertTrue(self.serve.RUNS["p/qw"]["handled"])
+        self.assertEqual((self.root / "board.json").read_text(), before, "never flagged stalled")
+        spawn.assert_not_called()
 
 
 class WatchdogIdleParentTest(unittest.TestCase):
