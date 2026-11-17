@@ -4864,7 +4864,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(len(got["j"]), 1)
         self.assertEqual(got["j"][0][0], t0 + 1800)
         self.assertGreater(got["j"][0][1], t0 + 2400)  # the discuss note ends nothing: runs to now
-        self.assertEqual(got["c"], [])
+        self.assertEqual(list(got["c"]), [])
 
     def test_timing_human_wait_overlap(self):
         t0 = 1_700_000_000
@@ -4931,7 +4931,7 @@ class BoardTest(unittest.TestCase):
         for job, heads in (("a", {1: "x", 2: "y", 3: "z"}), ("b", {1: "x", 2: "y", 4: "y"})):
             for n, h in heads.items():
                 self.write(f"{job}/round-{n}/head.txt", h + "\n")
-        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][7], "0")
+        self.assertEqual(board._timing_row(self.root, "a", {}, {})[0][8], "0")
         cells, _, _, count, _, _ = board._timing_row(self.root, "b", {}, {})
         self.assertEqual((cells[7], count), ("1 (rounds 4)", 1))
 
@@ -4956,7 +4956,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(row()[-1], "?")  # empty file
         holds.write_text("cpu_load(212%)\ne2e_queue\n")
         self.assertEqual(row()[-1], "? (held: cpu_load(212%), e2e_queue)")
-        self.assertEqual(len(row()), 10)  # one cell more would break the table header
+        self.assertEqual(len(row()), 11)  # one cell more would break the table header
 
     def test_timing_row_claim_clock(self):
         t0 = 1_700_000_000
