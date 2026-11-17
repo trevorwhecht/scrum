@@ -387,6 +387,12 @@ class BoardTest(unittest.TestCase):
         ask()
         self.assertEqual(self.jobs()[0]["stage"], "needs-human")
 
+    def test_ask_prod_approval_parks_when_behind_main(self):
+        _, ask = self.ask_db(self.behind_repo())
+        ask("PROD_APPROVAL")
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+        self.assertEqual(self.jobs()[0]["stopTitle"], "PROD_APPROVAL")
+
     def test_ask_other_title_not_refused(self):
         _, ask = self.ask_db(self.behind_repo())
         ask("MERGE_CONFLICT")

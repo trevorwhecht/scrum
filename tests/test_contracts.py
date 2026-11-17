@@ -2755,7 +2755,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(key, board.STOP_TITLES, span)
             self.assertEqual(words[words.index("--title") + 2], "--recommend", span)
             self.assertRegex(span, r"--recommend (<key> '<why>'|a '<why>'|a 'Trevor always runs these in a Terminal window'|a 'the browser tests only waited for the shared test slot'|a 'it is not a code failure; the board resumes it when CI runs again')$")
-        self.assertEqual(len(board.STOP_TITLES), 15)
+        self.assertEqual(len(board.STOP_TITLES), 16)
         stops = self.lane("stops")
         for key, meaning in board.STOP_TITLES.items():
             self.assertRegex(key, r"^[A-Z]+(_[A-Z]+)*$")
@@ -2787,6 +2787,12 @@ class ContractTest(unittest.TestCase):
         self.assertIn("`B ask $ID 'migrate stopped: the database update stopped; we should <what to change> because <why>.' "
                       "--a \"Try again=approve $ID\" "
                       "--b \"Remove this job=abort $ID --cascade\" --title DATABASE_CHANGE --recommend <key> '<why>'`", migrate)
+
+    def test_prod_approval_ask_has_own_title(self):
+        lane = self.lane("merge")
+        self.assertIn("\"Remove this job=abort $ID --cascade\" --title PROD_APPROVAL --recommend <key> '<why>'` and stop. If the stop names", lane)
+        self.assertIn("'migrate stopped: the database update stopped; we should <what to change> because <why>.' --a \"Try again=approve $ID\" "
+                      "--b \"Remove this job=abort $ID --cascade\" --title DATABASE_CHANGE --recommend <key> '<why>'", lane)
 
     def test_migrate_duplicate_column_auto_reworks(self):
         migrate = self.section(skill_text(), "## Migrate", "## Merge")
