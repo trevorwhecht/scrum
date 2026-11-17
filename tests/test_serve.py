@@ -2342,11 +2342,11 @@ class ServeTest(unittest.TestCase):
             with mock.patch.object(self.serve, "spawn") as spawn:
                 self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{parent}/resume", {"manual": True}),
                                  (202, {"id": parent, "action": "resume"}))
-            self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(kid, "resume", f"/trevskills-scrum resume {kid}")])
+            self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                             [(kid, "resume", f"/trevskills-scrum resume {kid}"), (wait, "start", f"/trevskills-scrum start {wait}")])
             # job 466: Play is Trevor's click, so cool-down no longer holds its claim; the paused sibling this test
-            # resumed (its session is mocked, so it still reads paused) holds the spec-less waiting kid (job 751)
-            self.assertEqual(self.stage_of(wait)["stage"], "waiting")
-            self.assertEqual(self.stage_of(parent)["reason"], f"waiting on you in: {kid}")
+            # resumed (its session is mocked, so it still reads paused) runs alone and holds nothing (job 951)
+            self.assertEqual(self.stage_of(wait)["stage"], "spec")
             asked = self.asked("resume 1")
             code, out, m = self.answer(asked, {"key": "a"}, {"key": "a", "label": "Go", "command": "resume 1"})
             self.assertEqual((code, out), (202, {"id": asked, "action": "answer", "command": "resume"}))
@@ -3225,18 +3225,11 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("POST", f"/api/p/repo/jobs/{parent}/resume", {})
         self.assertEqual(code, 202, out)
         self.assertNotIn("paused", self.stage_of(parent))
-        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(a, "resume", f"/trevskills-scrum resume {a}")])
-        # a's resume session has not written the board yet and r still reads paused: spec-less w runs alone, so the
-        # paused siblings hold it (job 751)
-        self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["reason"]),
-                         ("running", f"waiting on you in: {a}, {r}"))
-        self.assertEqual(self.stage_of(w)["stage"], "waiting")
-        for k in (a, r):
-            b.cmd_set(self.root, k, ["stage=done"], unpause=True)  # their sessions finish
-        with mock.patch.object(self.serve, "spawn") as spawn:
-            self.assertEqual(self.serve.start_ready("repo", self.root, parent)["ready"], [w])
-        self.assertEqual((self.stage_of(parent)["stage"], self.stage_of(parent)["reason"]), ("running", None))
-        self.assertEqual([c.args[2:] for c in spawn.call_args_list], [(w, "start", f"/trevskills-scrum start {w}")])
+        # a's resume session has not written the board yet and r still reads paused: the spec-less paused siblings run
+        # alone and hold nothing without a live session, so w starts (job 951)
+        self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                         [(a, "resume", f"/trevskills-scrum resume {a}"), (w, "start", f"/trevskills-scrum start {w}")])
+        self.assertEqual(self.stage_of(w)["stage"], "spec")
 
     def test_play_on_parent_paused_in_review_resumes_parent_session(self):
         b = self.serve.board
@@ -8236,12 +8229,13 @@ class ResumeFirstTest(unittest.TestCase):
         root = self.tree([], [("002-pz", "build", ["src/a.py"], paused), ("003-w", "waiting", ["src/b.py"], {})])
         self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"], "disjoint files: claimed")
         self.assertEqual(self.parent(root), ("running", None))
-        for files in (["src/a.py"], None):  # overlapping, or the paused sibling's files unknown
-            with self.subTest(files=files):
-                root = self.tree([], [("002-pz", "build", files, paused), ("003-w", "waiting", ["src/a.py"], {})])
-                self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
-                self.assertEqual(self.job(root, "003-w")["stage"], "waiting")
-                self.assertEqual(self.parent(root), ("running", "waiting on you in: 002-pz"))
+        root = self.tree([], [("002-pz", "build", ["src/a.py"], paused), ("003-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [])
+        self.assertEqual(self.job(root, "003-w")["stage"], "waiting")
+        self.assertEqual(self.parent(root), ("running", "waiting on you in: 002-pz"))
+        # job 951: a paused sibling whose files are unknown runs alone and holds nothing without a live session
+        root = self.tree([], [("002-pz", "build", None, paused), ("003-w", "waiting", ["src/a.py"], {})])
+        self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["003-w"])
         stalled = {"stalled": True, "reason": "stalled: no live session. Fix: click Resume."}
         root = self.tree([], [("002-st", "build", ["src/a.py"], stalled), ("003-w", "waiting", ["src/a.py"], {}),
                               ("004-w", "waiting", ["src/c.py"], {})])
@@ -9393,10 +9387,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
         data["jobs"][1].update(paused=True, updatedAt=old, reason="stalled in build: paused by Trevor. Fix: click Play.")
         (self.root / "board.json").write_text(json.dumps(data))
         spawn, _, _ = self.tick()
-        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [],
-                         "the paused child holds its spec-less sibling's claim (it runs alone)")
-        self.assertEqual((self.job("001-par")["stage"], self.job("001-par")["reason"]),
-                         ("running", "waiting on you in: 002-kid"))
+        self.assertEqual([c.args[2:4] for c in spawn.call_args_list], [("003-wait", "start")],
+                         "the paused spec-less child runs alone and holds nothing without a live session (job 951)")
         self.assertEqual((self.job("002-kid")["stage"], self.job("002-kid")["paused"]), ("build", True))
 
     def test_skips_no_waiting_child(self):
