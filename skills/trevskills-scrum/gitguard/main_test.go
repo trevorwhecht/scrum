@@ -116,7 +116,14 @@ func TestDeniesCommitOnMainInRegisteredCheckout(t *testing.T) {
 }
 
 func TestAllowsOtherBranchesWorktreesUnregisteredAndNonCommits(t *testing.T) {
+	for _, v := range []string{"", "1"} { // a chat, then a scrum-launched session
+		t.Run("CLAUDE_NOTIFIER_DISABLE="+v, func(t *testing.T) { allowsOtherBranches(t, v) })
+	}
+}
+
+func allowsOtherBranches(t *testing.T, notifier string) {
 	f := setup(t)
+	t.Setenv("CLAUDE_NOTIFIER_DISABLE", notifier)
 	for _, command := range []string{"git status", "git commit-tree HEAD^{tree} -m x", "git log --grep commit"} {
 		assertAllowed(t, guardReason(f.event(command, "", ""), "??", 0), command)
 	}
@@ -135,32 +142,17 @@ func TestAllowsOtherBranchesWorktreesUnregisteredAndNonCommits(t *testing.T) {
 	assertAllowed(t, guardReason(f.commit(), "??", 0), "unregistered repo")
 }
 
-func TestPipelineSessionsAreExempt(t *testing.T) {
+func TestScrumSessionsAreNotExempt(t *testing.T) {
 	f := setup(t)
-	for _, v := range []string{"1", "yes", "True"} {
-		t.Setenv("CLAUDE_NOTIFIER_DISABLE", v)
-		assertAllowed(t, guardReason(f.commit(), "??", 0), "CLAUDE_NOTIFIER_DISABLE="+v)
-	}
-	for _, v := range []string{"0", "FALSE", "false", ""} {
+	for _, v := range []string{"1", "yes", "True", "0", ""} {
 		t.Setenv("CLAUDE_NOTIFIER_DISABLE", v)
 		assertDenied(t, guardReason(f.commit(), "??", 0), "main", "CLAUDE_NOTIFIER_DISABLE="+v)
 	}
 	jobs := filepath.Join(f.repo, "scrum", "board.json")
-	f.write(jobs, `{"jobs": [{"id": "1", "stage": "merging", "pid": 111, "tty": "ttys004"},
-		{"id": "2", "stage": "done", "tty": "ttys007"}]}`)
-	assertAllowed(t, guardReason(f.commit(), "??", 111), "the orchestrator's own pid")
-	assertDenied(t, guardReason(f.commit(), "ttys004", 222), "main", "a later chat on a reused tty")
-	assertDenied(t, guardReason(f.commit(), "ttys007", 0), "main", "a done job exempts nobody")
+	f.write(jobs, `{"jobs": [{"id": "1", "stage": "merging", "pid": 111, "tty": "ttys004"}]}`)
+	assertDenied(t, guardReason(f.commit(), "??", 111), "main", "the orchestrator's own pid")
 	f.write(jobs, `{"jobs": [{"id": "1", "stage": "merging", "tty": "ttys004"}]}`)
-	assertAllowed(t, guardReason(f.commit(), "ttys004", 222), "a pid-less job matches by tty")
-	assertDenied(t, guardReason(f.commit(), "ttys005", 222), "main", "another tty")
-	assertDenied(t, guardReason(f.commit(), "??", 222), "main", "?? is not a tty")
-	f.write(jobs, `{"jobs": [{"id": "1", "stage": "build", "pid": 111}]}`)
-	assertDenied(t, guardReason(f.commit(), "??", 0), "main", "no claude pid never matches a pid job")
-	f.write(jobs, `not json`)
-	assertDenied(t, guardReason(f.commit(), "ttys004", 111), "main", "malformed board.json")
-	f.write(jobs, `{"jobs": ["x", {"stage": "build", "pid": 111}]}`)
-	assertDenied(t, guardReason(f.commit(), "??", 111), "main", "a non-object job ends the walk, as board.py's any()")
+	assertDenied(t, guardReason(f.commit(), "ttys004", 222), "main", "a pid-less job's tty")
 }
 
 func cli(stdin string) string {
@@ -241,20 +233,9 @@ func TestFastPathSkipsProcessAndFiles(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("fast path made %d process/file calls, want 0", calls)
 	}
-	// The counter works: a commit does reach ps (and fails on the empty PATH, so no output).
+	// The counter works: a commit does reach git (and fails on the empty PATH, so no output).
 	ev, _ = json.Marshal(f.commit())
 	if got := cli(string(ev)); got != "" || calls == 0 {
 		t.Fatalf("commit path: out %q, calls %d", got, calls)
-	}
-}
-
-func TestIsClaude(t *testing.T) {
-	for cmd, want := range map[string]bool{
-		"claude --resume x": true, "/usr/local/bin/claude": true, "node /x/claude-code/cli.js": true,
-		"node x claude": true, "next dev /a/.claude/worktrees/b": false, "": false,
-	} {
-		if isClaude(cmd) != want {
-			t.Errorf("isClaude(%q) != %v", cmd, want)
-		}
 	}
 }

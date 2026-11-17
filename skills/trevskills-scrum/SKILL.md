@@ -32,7 +32,7 @@ hooks:
 
 # Trevskills Scrum: orchestrator
 
-The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. It never writes code (except in the **Lilguy lane**), and it never reads diffs or reviews beyond their first lines. Agents get their context from files, never from this conversation.
+The session running this skill **is the orchestrator**. It spawns every agent, moves files between steps, and is the only caller of `board.py`. Outside the **Lilguy lane** it never edits or commits a repo file in the main checkout: a `fast` job with a pre-written spec.md still runs **New job** steps 4 (Worktree) and 5 (spawn `scrum-builder`), and `fit: false` from `B lilguy-fit` never means build it here. It never reads diffs or reviews beyond their first lines. Agents get their context from files, never from this conversation.
 
 **Headless sessions block.** In a `claude -p` session (a dashboard or nohup run), ending the turn exits the process and kills everything it spawned: background agents, pending SendMessage replies, ScheduleWakeup/cron/loop timers. So the orchestrator never ends its turn while an agent or subprocess it spawned is still running; it waits for every one to return or exit. It never relies on a later notification, SendMessage reply or timer to continue: those die with the process. It also never ends its turn with a question or an offer to continue ("say continue", an Optional Follow-up): it goes on stage by stage until the job merges or `B ask` stops it.
 
@@ -56,17 +56,17 @@ REPO="$(git rev-parse --show-toplevel)"; F="$REPO/scrum"
 B() { python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" "$@"; }
 ```
 
-Shell variables and functions don't survive between Bash calls: re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call.
+Shell state doesn't survive between Bash calls: re-derive `REPO`, `F` and the board function `B` (and the job's `WT`, `BASE`, `DEFAULT` from `board.json`) at the start of each call.
 
 **Agent-written text in a shell command** (a reason, title, verify string or prompt): never put it inside double quotes or backticks. Strip single quotes from it and wrap it in single quotes, or write it to a file and pass the file.
 
-**Abort:** Trevor can abort a job from the dashboard at any moment. From then on every `B set` or `sync` for it fails with `was aborted`. When you see that, stop immediately: spawn nothing more, push nothing, merge nothing. Report that the job was aborted. Leave its branch, worktree and PR exactly as they are.
+**Abort:** Trevor can abort a job from the dashboard. Then every `B set` or `sync` for it fails with `was aborted`. When you see that, stop at once: spawn, push and merge nothing, and report the abort. Leave its branch, worktree and PR as they are.
 
-**Pause:** Trevor can pause a job in progress from the dashboard. Its session is killed at once and the job stays in its stage with board `paused` true and reason `stalled in <stage>: paused by Trevor`. If a session survives, every `B set` or `sync` for it fails with `was paused by Trevor`. When you see that, stop quietly as for abort: spawn nothing more, push nothing, merge nothing. Play restarts it with `/trevskills-scrum resume <id>`. Only `B set --unpause` with a `stage=` (which `resume` and `rework` use) clears a pause; a plain `B set <id> ... reason=` is refused like any other write.
+**Pause:** Trevor can pause a job from the dashboard. Its session is killed and the job stays in its stage with board `paused` true and reason `stalled in <stage>: paused by Trevor`. If a session survives, every `B set` or `sync` for it fails with `was paused by Trevor`. Then stop quietly as for abort: spawn nothing more, push nothing, merge nothing. Play restarts it with `/trevskills-scrum resume <id>`. Only `B set --unpause` with a `stage=` (which `resume` and `rework` use) clears a pause; a plain `B set <id> ... reason=` is refused like any other write.
 
-**Untrusted reason text:** a reason that copies text from an agent-written file (assessment.md, decision.md, a track or review file) or from command output (stderr, file names, branch names) can contain `$(...)` or a backtick. Remove every `'` from that text, then pass the reason in single quotes, `reason='...'`, never in double quotes, so the shell expands nothing in it. Every reason template below with a `<placeholder>` is written this way; reasons whose only variables are `$ID` or `$DEFAULT` keep double quotes so those expand.
+**Untrusted reason text:** a reason that copies text from an agent-written file (assessment.md, decision.md, a track or review file) or from command output (stderr, file names, branch names) can contain `$(...)` or a backtick. Remove every `'` from that text, then pass the reason in single quotes, `reason='...'`, never in double quotes, so the shell expands nothing in it. Reason templates below with a `<placeholder>` do this; ones whose only variables are `$ID` or `$DEFAULT` keep double quotes.
 
-If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (it's idempotent): that's what puts this repo on the one all-projects dashboard.
+If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (idempotent): it puts this repo on the dashboard.
 
 **Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `resume`, `lilguy`, `cloud`, `cloud-job`, `cloud-home`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
@@ -81,7 +81,7 @@ If `$F/project.md` is missing, do the **first-run setup** below. Otherwise go to
 ```bash
 T=$(ps -o tty= -p $PPID | tr -d ' '); case "$T" in ttys[0-9]*) B set $ID tty=$T ;; esac
 ```
-A tty of `??` or empty sets nothing. The recorded tty is also what the frontmatter hooks (`board.py hook`) match on to mark the job `waiting` while this session waits on Trevor.
+A tty of `??` or empty sets nothing. The frontmatter hooks (`board.py hook`) match this tty to mark the job `waiting` while this session waits on Trevor.
 
 ### First-run setup (once per repo)
 
