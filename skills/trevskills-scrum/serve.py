@@ -546,7 +546,8 @@ def unqueue(root, job):
 
 
 def play_queue_tick(project, root, jobs) -> bool:
-    """Start the Play clicks the machine guard or a sibling queued, light jobs first then oldest (held_order), before any other start this tick. A
+    """Start the Play clicks the machine guard or a sibling queued, CPU-held launches (cpu_held) first, then light jobs
+    first then oldest (held_order), before any other start this tick. A
     job no longer resumable, limit-held (a sibling-blocked click) or answered, or already running, is dropped from the
     queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
     (take_room) stops here and keeps it and every later one queued. A launch spawn's gate queued (queued_launch) is
@@ -554,7 +555,8 @@ def play_queue_tick(project, root, jobs) -> bool:
     gate stops here too. A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. True when it
     started one or one waits on a slot."""
     started = False
-    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: held_order(root, j)):
+    # cpu_held first, so the order agrees with cpu_first(): spawn holds every other start while it waits
+    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: (not cpu_held(root, j), *held_order(root, j))):
         manual = bool(job.get("play_queued_manual"))
         if launch := job.get("queued_launch"):
             if running(project, job["id"]) or job["stage"] != launch["stage"]:

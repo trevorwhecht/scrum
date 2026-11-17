@@ -106,6 +106,16 @@ class LaunchCpuGate(ServeBase):
             _, spawn = self.launch(400, fast, tick)
         self.assertEqual([c.args[1] for c in spawn.call_args_list], [fast, std])
 
+    def test_play_queue_tick_cpu_held_before_cpu_queue(self):
+        """Review round 1: a newer fast cpu_queue-only launch never stands in front of the older CPU-held standard one."""
+        held = self.cpu_held_job("Cpu held std", "standard", "2020-01-01T00:00:00+00:00")
+        fresh = self.cpu_held_job("Cpu queue fast", "fast", "2026-11-16T05:00:00+00:00", gate="cpu_queue")
+        s = self.serve
+        tick = lambda: s.play_queue_tick("repo", self.root, s.board.read_board(self.root)["jobs"])
+        with mock.patch.object(s, "take_room", return_value=True):
+            _, spawn = self.launch(400, held, tick)
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], [held, fresh])
+
     def test_cpu_first_orders_across_projects(self):
         b, base = self.serve.board, Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, base)
