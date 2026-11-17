@@ -2016,11 +2016,12 @@ FIT_RANK = {"lilguy": 0, "fast": 1, "standard": 2, "debug": 2}  # cheaper_lane_j
 
 
 def cmd_process_health(root, digest_id: str) -> dict:
-    """{"digest", "previous", "metrics"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
+    """{"digest", "previous", "metrics", "auto_stalls"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
     questions.log, each job's routing.log, fable.log and round reviews, the digest's pipeline-fit.json and windows.json,
     pulse.log (unused_windows skips a window whose pulse lines all have Auto continue off in every project) and
     board.json; each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
-    broken input counts 0. Writes digests/<NNN>/health.json."""
+    broken input counts 0. auto_stalls ({"value", "jobs"}, no limit or flag) counts the auto stall lines of those jobs.
+    Writes digests/<NNN>/health.json."""
     root = Path(root)
     d = root / "digests" / str(digest_id)
     if not DIGEST_RE.fullmatch(str(digest_id)) or not (d / "jobs.txt").is_file():
@@ -2041,9 +2042,12 @@ def cmd_process_health(root, digest_id: str) -> dict:
             main_prs.append({m[1] for m in map(PR_SUBJECT_RE.search, subjects) if m})
         return main_prs[0]
     last = {}  # job -> kind of its last counted stop line: a stall right after a stall is the same episode
+    auto_stalls = []  # one job id per auto stall line: cleared without Trevor, shown on its own line
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
         if q.get("auto") is True:  # cleared without Trevor (log_stop auto): never a stop
+            if kind == "stall" and str(job) in claimed:
+                auto_stalls.append(job)
             continue
         if str(job) not in claimed or not (kind in HEALTH_STOP_KINDS or "question" in q and kind is None):
             continue
@@ -2146,7 +2150,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
             flag = "worse" if value > old else "over twice" if value > limit and old > limit else None
         metrics[name] = {"value": value, "previous": old, "limit": limit, "jobs": sorted(set(hits[name])), "flag": flag}
     metrics["test_waste_jobs"]["minutes"] = round(seconds / 60)
-    out = {"digest": str(digest_id), "previous": prev_id, "metrics": metrics}
+    out = {"digest": str(digest_id), "previous": prev_id, "metrics": metrics,
+           "auto_stalls": {"value": len(auto_stalls), "jobs": sorted(set(auto_stalls))}}
     _write_json(d / "health.json", out)
     return out
 
@@ -5333,7 +5338,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                 job.pop(k, None)
             job.update(reason=reason, updatedAt=now())
             questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
-                                 "reason": reason, "kind": "queue-wait"})
+                                 "reason": reason, "kind": "queue-wait", "auto": True})
             return {"waiting": True}
         # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
         # auto_resume retries it; not a human stop, so no question and no sound. A GitHub billing CI refusal stalls
@@ -5353,7 +5358,7 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                     j.pop(k, None)
                 j.update(stalled=True, reason=reason, updatedAt=now())
                 questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": j["id"],
-                                     "question": question, "reason": reason, "kind": "stall"})
+                                     "question": question, "reason": reason, "kind": "stall", "auto": True})
             if billing and alert:
                 play(sound("needs-human"))
             return {"stalled": True}
@@ -6281,6 +6286,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
     its stage with `stalled` true and a STALL reason, and plays no sound. Its stall line carries "exit" (exits, serve.py's
     {run log: exit code}, looked up by the job's runlog) and "last_log" (last_log_line), each None when unknown.
+    Every stall line is "auto" when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
     A live-idle stall for which `hold(job)` (serve.py stall_hold) names a gate token (e2e_lock, cpu_load(<pct>%)) is
     logged "auto" with that "hold": the gate, not the session, held it, so process-health counts no stop.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
@@ -6297,6 +6303,11 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
             for job in stale:
+                # auto: serve.py's auto_resume retries it (its run_child test), so it is no stop for Trevor
+                parent = next((j for j in board["jobs"] if j["id"] == job.get("parent")), None)
+                auto = not job.get("parent") or bool(parent and parent.get("stage") == "running"
+                                                     and not parent.get("paused")
+                                                     and parent.get("lane") in ("runall", "bigboy"))
                 live_idle = False
                 if alive(job):
                     if not (stalled_since(job, idle_cutoff) and job_dir_idle(root, job["id"], idle_cutoff.timestamp())):
@@ -6306,7 +6317,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board or job-dir "
                                f"change for {IDLE_HOURS} h (session alive but idle)")
                     gate = hold(job) if hold else None
-                    log_stop(root, job["id"], "stall", job["reason"], auto=bool(gate), **({"hold": gate} if gate else {}))
+                    log_stop(root, job["id"], "stall", job["reason"], auto=auto or bool(gate), **({"hold": gate} if gate else {}))
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
                 elif job["stage"] == "spec" and not job.get("parent") \
@@ -6316,11 +6327,6 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                 else:
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board update "
                                f"for {STALL_MINUTES} min and no live session")
-                    # auto: serve.py's auto_resume retries it (its run_child test), so it is no stop for Trevor
-                    parent = next((j for j in board["jobs"] if j["id"] == job.get("parent")), None)
-                    auto = not job.get("parent") or bool(parent and parent.get("stage") == "running"
-                                                         and not parent.get("paused")
-                                                         and parent.get("lane") in ("runall", "bigboy"))
                     log_stop(root, job["id"], "stall", job["reason"], auto=auto,
                              exit=(exits or {}).get(job.get("runlog")), last_log=last_log_line(root, job.get("runlog")))
                     roadmap_stall_locked(root, job)

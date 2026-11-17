@@ -1719,6 +1719,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn("    ## Usage windows\n", template)
         self.assertIn("over-routed <over_routed_pct>%", reader)
         self.assertIn("DIGEST_DIR/health.json", reader)
+        self.assertIn("`auto_stalls`", reader)
+        self.assertIn("Auto-cleared stalls:", reader)
         self.assertIn("    ## Process health\n", reader)
         self.assertLess(reader.index("    ## Time sinks"), reader.index("    ## Process health\n"))
         digester = (ROOT / "agents" / "scrum-digester.md").read_text()

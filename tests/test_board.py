@@ -681,7 +681,8 @@ class BoardTest(unittest.TestCase):
                 for k in ("question", "options", "recommend"):
                     self.assertNotIn(k, job)
                 lines = self.log_lines()[before:]
-                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "stall", want)])
+                self.assertEqual([(l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines],
+                                 [(job_id, "stall", want, True)])
         for q, stage in (("Pick a layout?", "build"), ("agent types are not loaded", "plan")):
             with self.subTest(q=q, stage=stage):
                 job_id = board.cmd_new(self.root, "x")
@@ -715,7 +716,8 @@ class BoardTest(unittest.TestCase):
                 self.assertTrue(board.queue_waiting(job))
                 self.assertEqual(board.resume_first([job]), 0)
                 lines = self.log_lines()[before:]
-                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "queue-wait", want)])
+                self.assertEqual([(l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines],
+                                 [(job_id, "queue-wait", want, True)])
                 self.assertRegex(lines[0]["date"], r"^\d{4}-\d\d-\d\dT")
 
     def test_ask_ci_billing_refusal_is_stalled(self):
@@ -739,7 +741,8 @@ class BoardTest(unittest.TestCase):
                 for k in ("question", "options", "recommend"):
                     self.assertNotIn(k, job)
                 lines = self.log_lines()[before:]
-                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "stall", want)])
+                self.assertEqual([(l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines],
+                                 [(job_id, "stall", want, True)])
         q = "GitHub refused to start the checks because of failed account payments or a spending limit."
         with self.subTest(stage="needs-human"):
             job_id = board.cmd_new(self.root, "x")
@@ -5241,16 +5244,19 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True, hold=hold), [held, plain])
         lines = {l["job"]: l for l in self.stall_lines()}
         self.assertEqual((lines[held].get("auto"), lines[held].get("hold")), (True, "e2e_lock"))
-        self.assertEqual(("auto" in lines[plain], "hold" in lines[plain]), (False, False))
+        self.assertEqual((lines[plain].get("auto"), "hold" in lines[plain]), (True, False))  # no parent: resumable
         self.assertEqual(self.get(held)["reason"], "stalled: no board or job-dir change for 2 h (session alive but idle)")
         bare = self.aged("Idle bare", 180, stage="review")
         (self.root / "jobs" / bare).mkdir(parents=True, exist_ok=True)
         self.age_job_dir(bare, 3)
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [bare])  # hold=None
-        self.assertNotIn("auto", next(l for l in self.stall_lines() if l["job"] == bare))
+        self.assertIs(next(l for l in self.stall_lines() if l["job"] == bare).get("auto"), True)
 
     def test_process_health_skips_gate_held_idle_stall(self):
         held, plain = self.idle_pair()
+        parent = self.aged("Plain parent", 1, stage="running", lane="standard")  # job 950: not resumable, so a stop
+        with board.locked_board(self.root) as b:
+            board.find(b, plain)["parent"] = parent
         board.cmd_watchdog(self.root, alive=lambda job: True,
                            hold=lambda job: "cpu_load(212%)" if job["id"] == held else None)
         (self.root / "digests" / "001").mkdir(parents=True)
@@ -5330,14 +5336,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [dead])
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])  # flags nothing: no line
         lines = self.log_lines()
-        # job 825: a standalone job with no live session is auto-resumed, so its line is auto; live-but-idle is not
-        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason"},
+        # job 825: a standalone job is auto-resumed, so its line is auto, live-but-idle too (job 950)
+        self.assertEqual([set(l) for l in lines], [{"date", "project", "job", "kind", "reason", "auto"},
                                                    {"date", "project", "job", "kind", "reason", "auto", "exit", "last_log"}])
         for l in lines:
             self.assertRegex(l["date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
         self.assertEqual([(l["project"], l["job"], l["kind"], l["reason"], l.get("auto")) for l in lines], [
             (Path(self.tmp.name).name, idle, "stall", "stalled: no board or job-dir change for 2 h "
-             "(session alive but idle)", None),
+             "(session alive but idle)", True),
             (Path(self.tmp.name).name, dead, "stall", "stalled: no board update for 30 min and no live session", True)])
 
     def test_watchdog_stall_logs_exit_and_last_line(self):
@@ -5374,6 +5380,18 @@ class BoardTest(unittest.TestCase):
                 line = self.log_lines()[-1]
                 self.assertEqual((line["job"], line["kind"], line.get("auto")), (kid, "stall", want))
                 self.assertEqual("auto" in line, want is True)
+                idle = self.aged(f"{title} idle kid", 180, stage="review", parent=parent)  # job 950: live-but-idle alike
+                (self.root / "jobs" / idle).mkdir(parents=True, exist_ok=True)
+                self.age_job_dir(idle, 3)
+                self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: job["id"] == idle), [idle])
+                line = self.log_lines()[-1]
+                self.assertEqual((line["job"], line["reason"], line.get("auto")),
+                                 (idle, "stalled: no board or job-dir change for 2 h (session alive but idle)", want))
+        lone = self.aged("Lone idle", 180, stage="review")
+        (self.root / "jobs" / lone).mkdir(parents=True, exist_ok=True)
+        self.age_job_dir(lone, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [lone])
+        self.assertEqual((self.log_lines()[-1]["job"], self.log_lines()[-1].get("auto")), (lone, True))
 
     def test_watchdog_flags_stalled_review_job(self):
         job_id = self.aged("Stuck review", 31, stage="review")
@@ -10047,6 +10065,21 @@ class ProcessHealthTest(unittest.TestCase):
             {"id": "102-b", "lane": "standard", "added": 5, "files": 1, "over_routed": True, "fit": "fast"},
             {"id": "103-c", "lane": "fast", "added": 5, "files": 1}]}))
         self.assertEqual(self.run_health("001")["metrics"]["cheaper_lane_jobs"]["jobs"], ["102-b"])
+
+    def test_process_health_auto_stalls_own_line(self):
+        self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"))
+        self.digest("001", "101-a", "102-b")
+        self.lines("questions.log", [
+            {"job": "101-a", "kind": "stall", "reason": "stalled: waiting on GitHub billing to run CI", "auto": True},
+            {"job": "101-a", "kind": "machine", "reason": "waiting: free RAM 7% (< 10%)", "auto": True},
+            {"job": "102-b", "kind": "ask", "question": "Pick a layout?"},
+            {"job": "999-z", "kind": "stall", "reason": "stalled: not claimed", "auto": True}])
+        got = self.run_health("001")
+        self.assertEqual(got["metrics"]["stops_per_job"]["jobs"], ["102-b"])
+        self.assertEqual(got["auto_stalls"], {"value": 1, "jobs": ["101-a"]})
+        self.assertNotIn("auto_stalls", got["metrics"])
+        self.lines("questions.log", [{"job": "102-b", "kind": "ask", "question": "Pick a layout?"}])
+        self.assertEqual(self.run_health("001")["auto_stalls"], {"value": 0, "jobs": []})
 
     def test_machine_load_waits_not_stops(self):
         self.board(("101-a", "done", "fast", "", "merged"), ("102-b", "done", "fast", "", "merged"))
