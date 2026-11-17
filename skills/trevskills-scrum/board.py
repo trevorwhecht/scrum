@@ -129,7 +129,7 @@
                                    --fix adds the one FIX child from bigboy-review.md's ## Fix ticket
   board.py ready <id>              claim the bigboy parent's startable children (stage -> spec; gated by machine_ok, free RAM
                                    per batch and the file-overlap rules), print
-                                   {"ready","merged","total","in_progress","all_merged"}
+                                   {"ready","merged","total","in_progress","all_merged","held"}
   board.py runall-start           make a Run-all parent with every open backlog item as a waiting child (needs become
                                    depends_on; items waiting on an outside job or on Human setup stay open), print {"id","children"}
                                    (id null = nothing to claim); `ready <id>` then schedules them
@@ -4941,7 +4941,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
     siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
     machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
-    Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was."""
+    Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was. Once that room
+    is spent, a light kid (LIGHT_LANES, its lane read as for the skip below) still claims while the call's claims stay
+    under ram_room(floor=0, light=True), spawn's size for it. `held` in the output: the machine_ok or usage refusal,
+    `ram_room` when the standard room is 0, else None (serve.py's start_ready notes it as a queue gate)."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
@@ -5000,6 +5003,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
         if cap is not None:
             room = min(room, cap)
+        light_room = None  # read once a light kid meets a spent standard room: spawn's size for it (job 955)
         ready = []
         critical = lambda j: str(j.get("title") or "").startswith("Critical")
         built = {}  # holder id -> not unbuilt(), so each holder's branch is read once per call
@@ -5007,10 +5011,19 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                                 if built.setdefault(o["id"], not unbuilt(root, o))]
         # Critical kids first, so they take the first ram_room slots; sorted is stable, so the rest keep plan order
         for k in sorted(kids, key=lambda j: not critical(j)) if go and not machine else []:
-            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
-                break
             if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only:
                 continue
+            light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
+                     or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
+            if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
+                if not light:  # standard room spent; a light kid may still fit the light share, as spawn sizes it
+                    continue
+                if light_room is None:
+                    light_room = ram_room(floor=0, light=True)
+                    if cap is not None:
+                        light_room = min(light_room, cap)
+                if len(ready) >= light_room:
+                    continue
             undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if undone:
                 k.pop("overlap_hold", None)
@@ -5019,9 +5032,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                 continue
             k_slots, k_outside = (held_by(slots), held_by(outside)) if critical(k) else (slots, outside)
             skipped = []
-            if (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
-                    or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in ("fast", "lilguy"):
-                # a fast or lilguy kid skips a holder still in spec (nothing in its tree yet) unless Likely files meet
+            if light:  # skips a holder still in spec (nothing in its tree yet) unless Likely files meet
                 skipped = [o["id"] for o in k_slots + k_outside
                            if o.get("stage") == "spec" and not shared_files(files[k["id"]], files[o["id"]])]
                 k_slots, k_outside = ([o for o in pool if o["id"] not in skipped] for pool in (k_slots, k_outside))
@@ -5098,7 +5109,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
             if new[0] == "needs-human":
                 parent["stopTitle"] = "BIGBOY_BLOCKED"
         out = {"ready": ready, "merged": merged, "total": len(kids), "in_progress": len(busy),
-               "all_merged": finished == len(kids)}
+               "all_merged": finished == len(kids), "held": machine or ("ram_room" if ram_full else None)}
     if was != "needs-human" and parent["stage"] == "needs-human":
         play(sound("needs-human"))
     return out
