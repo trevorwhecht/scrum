@@ -2040,7 +2040,7 @@ class ServeTest(unittest.TestCase):
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
                                "cpu_busy_pct": 1.0, "max_cpu_busy_pct": 90,
-                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
+                               "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
             self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting")},
@@ -2048,13 +2048,13 @@ class ServeTest(unittest.TestCase):
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
                               "cpu_busy_pct": 42.6, "max_cpu_busy_pct": 90,
-                              "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 150})
+                              "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
         with mock.patch.dict(os.environ, SCRUM_CPU_BUSY_PCT="95.04"):
             out = self.req("GET", "/api/machine")[1]
         self.assertEqual((out["cpu_busy_pct"], out["verdict"]), (95.0, "CPU busy 95% (> 90%)"))
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="168.04"):
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="368.04"):
             out = self.req("GET", "/api/machine")[1]
-        self.assertEqual((out["cpu_load_pct"], out["verdict"]), (168.0, "CPU load 168% of 8 cores (> 150%)"))
+        self.assertEqual((out["cpu_load_pct"], out["verdict"]), (368.0, "CPU load 368% of 8 cores (> 300%)"))
         disk = []
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_FREE_DISK_GB="", SCRUM_CPU_BUSY_PCT="",
                              SCRUM_CPU_LOAD_PCT="", SCRUM_CPU_LOG=str(Path(self.tmp.name) / "no-cpu-log.json")), \
@@ -2069,7 +2069,7 @@ class ServeTest(unittest.TestCase):
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
                                              "cpu_busy_pct": None, "max_cpu_busy_pct": 90,
-                                             "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 150}))
+                                             "cpu_load_pct": None, "cpu_cores": 8, "max_cpu_load_pct": 300}))
         self.assertEqual(set(disk), {ROOT / "skills" / "trevskills-scrum"}, "disk is read on serve.py's own volume")
         self.assertEqual(self.req("GET", "/api/machine", headers={"Host": "evil.example"})[0], 403)
 
@@ -9650,10 +9650,10 @@ class AutoContinueTest(unittest.TestCase):
     def test_auto_continue_holds_under_heavy_load_healthy_ram(self):
         """Job 520, the 2026-10-25 scenario: load 15 on 8 cores with free RAM healthy holds automatic starts."""
         root = self.project("a", n=1)
-        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="60", SCRUM_CPU_LOAD_PCT="187.5"), \
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="60", SCRUM_CPU_LOAD_PCT="387.5"), \
                 mock.patch.object(self.board.os, "cpu_count", return_value=8):
             self.assertEqual(self.tick(), [])
-            self.assertEqual(self.board.machine_ok(root, claim=True), "CPU load 188% of 8 cores (> 150%)")
+            self.assertEqual(self.board.machine_ok(root, claim=True), "CPU load 388% of 8 cores (> 300%)")
 
     def test_auto_continue_disk_refusal_tries_next_project(self):
         self.project("a", n=1); self.project("b", n=2)
@@ -10019,10 +10019,10 @@ class IdleClaimTest(unittest.TestCase):
             self.assertEqual((got, spawn.call_args.args[2], spawn.call_args.kwargs["manual"]), (True, "005-q", True))
 
     def test_idle_claim_small_fast_pick_refused_above_machine_ok_cpu_limit(self):
-        """Job 945: with the real machine_ok, a small fast pick gets no CPU exemption at SCRUM_CPU_LOAD_PCT=200."""
+        """Job 945: with the real machine_ok, a small fast pick gets no CPU exemption at SCRUM_CPU_LOAD_PCT=400."""
         self.write()
         (self.root / "jobs" / "003-small" / "spec.md").write_text("# x\nLane: fast\n\n## Likely files\n- `src/c.py`\n")
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="200"):
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="400"):
             got, spawn = self.claim()
         self.assertEqual((got, spawn.call_args_list, self.stage("003-small")), (False, [], "waiting"))
 
@@ -11982,7 +11982,7 @@ class PulseTest(unittest.TestCase):
                                  "seven_day": {"used_percentage": 60, "resets_at": self.NOW + 86400}}, "written_at": self.NOW}
         for p in (mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.base / "projects.json"), SCRUM_PULSE=str(self.log),
                                   SCRUM_PS=str(self.base / "ps.txt"),
-                                  SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="250",
+                                  SCRUM_FREE_RAM="40", SCRUM_SWAP_PCT="3", SCRUM_CPU_LOAD_PCT="350",
                                   SCRUM_COOLDOWN=str(self.base / "cooldown")),
                   mock.patch.object(serve.board, "read_usage", lambda: usage)):
             p.start()
@@ -12017,11 +12017,11 @@ class PulseTest(unittest.TestCase):
         self.assertEqual(s.board.pulse_path(), self.log)
         s.pulse_tick({"app": True}, now=self.NOW)
         self.assertEqual(self.lines(), [{
-            "t": 1_700_000_000, "sessions": 2, "cpu_load": 250.0, "free_ram": 40.0, "swap": 3.0, "cooldown": True,
+            "t": 1_700_000_000, "sessions": 2, "cpu_load": 350.0, "free_ram": 40.0, "swap": 3.0, "cooldown": True,
             "u5h": 30, "u7d": 60, "focus": "app",
             "projects": {"app": {"claimable": 2, "waiting": 0, "busy": True, "top": 12, "auto": False, "gates": []},
                          "lib": {"claimable": 0, "waiting": 0, "busy": False, "top": None, "auto": False, "gates": []}},
-            "gates": ["ram_room"], "guard": "CPU load 250% of " + f"{os.cpu_count()} cores (> 150%)",
+            "gates": ["ram_room"], "guard": "CPU load 350% of " + f"{os.cpu_count()} cores (> 300%)",
             "started": []}])  # 2 young sessions
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="", SCRUM_SWAP_PCT="", SCRUM_CPU_LOAD_PCT=""), \
                 mock.patch.object(s.board, "free_ram_pct", return_value=None), \
@@ -12411,8 +12411,8 @@ class StallHoldTest(unittest.TestCase):
         cases = (  # (waiter cwds, cpu, job, want)
             ([os.path.join(wt, "sub")], 900.0, job, "e2e_lock"),
             ([wt], 1.0, job, "e2e_lock"),
-            ([wt + "-other"], b.MAX_CPU_LOAD_PCT + 62.0, job, "cpu_load(212%)"),
-            ([wt], b.MAX_CPU_LOAD_PCT + 62.0, {"id": "1226-y"}, "cpu_load(212%)"),  # no worktree: never e2e_lock
+            ([wt + "-other"], b.MAX_CPU_LOAD_PCT + 62.0, job, "cpu_load(362%)"),
+            ([wt], b.MAX_CPU_LOAD_PCT + 62.0, {"id": "1226-y"}, "cpu_load(362%)"),  # no worktree: never e2e_lock
             ([], float(b.MAX_CPU_LOAD_PCT), job, None),
             ([], None, job, None))
         for cwds, cpu, j, want in cases:
