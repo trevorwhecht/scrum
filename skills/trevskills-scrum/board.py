@@ -2275,7 +2275,8 @@ def _timing_row(root, job_id, job, stalls, waits=()):
     (round 1: the build start, see _build_start) to its own last file, less the queue/machine waits in `waits` (epoch secs).
     Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
     spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
-    epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None."""
+    epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None,
+    then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for)."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2334,6 +2335,12 @@ def _timing_row(root, job_id, job, stalls, waits=()):
         resume += nxt - at if nxt else 0
     cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), ", ".join(times) or "-",
              f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
+    try:  # serve.py note_stall_hold: what held its stalls
+        held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
+    except OSError:
+        held = []
+    if held:
+        cells[-1] += f" (held: {', '.join(held)})"
     return cells, wall, len(rounds), len(same), waits, resume
 
 
@@ -4580,14 +4587,19 @@ def machine_ok(path, manual=False, claim=False):
 LIGHT_LANES = ("fast", "lilguy")  # light_job: lanes that run no E2E, so ram_room sizes them at LIGHT_SESSION_RAM_PCT
 
 
-def light_job(root, job: dict) -> bool:
-    """True when the job's board `lane` is in LIGHT_LANES; with no board lane, when feature.md's header `Lane:` is, or,
-    with no such line there, spec.md's. A job with no id or no folder is not light."""
+def job_lane(root, job: dict):
+    """The job's board `lane`; with none, feature.md's header `Lane:`, or, with no such line there, spec.md's. None when
+    the job has no id, no folder or no lane."""
     lane = job.get("lane")
     if not lane and job.get("id"):
         d = Path(root) / "jobs" / str(job["id"])
         lane = header_value(d / "feature.md", "Lane", LANES) or header_value(d / "spec.md", "Lane", LANES)
-    return lane in LIGHT_LANES
+    return lane
+
+
+def light_job(root, job: dict) -> bool:
+    """True when the job's lane (job_lane) is in LIGHT_LANES. A job with no id or no folder is not light."""
+    return job_lane(root, job) in LIGHT_LANES
 
 
 def ram_share(light=False):
@@ -6179,10 +6191,12 @@ def last_log_line(root, runlog):
     return next((l.strip()[:300] for l in reversed(tail.splitlines()) if l.strip()), None)
 
 
-def cmd_watchdog(root, alive=None, exits=None):
+def cmd_watchdog(root, alive=None, exits=None, hold=None):
     """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
     its stage with `stalled` true and a STALL reason, and plays no sound. Its stall line carries "exit" (exits, serve.py's
     {run log: exit code}, looked up by the job's runlog) and "last_log" (last_log_line), each None when unknown.
+    A live-idle stall for which `hold(job)` (serve.py stall_hold) names a gate token (e2e_lock, cpu_load(<pct>%)) is
+    logged "auto" with that "hold": the gate, not the session, held it, so process-health counts no stop.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
@@ -6205,7 +6219,8 @@ def cmd_watchdog(root, alive=None, exits=None):
                 if live_idle:
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board or job-dir "
                                f"change for {IDLE_HOURS} h (session alive but idle)")
-                    log_stop(root, job["id"], "stall", job["reason"])
+                    gate = hold(job) if hold else None
+                    log_stop(root, job["id"], "stall", job["reason"], auto=bool(gate), **({"hold": gate} if gate else {}))
                     roadmap_stall_locked(root, job)
                     flagged.append(job["id"])
                 elif job["stage"] == "spec" and not job.get("parent") \
