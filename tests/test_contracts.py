@@ -521,7 +521,7 @@ class ContractTest(unittest.TestCase):
     def test_skill_zsh_safe_snippets(self):
         text = skill_text()
         self.assertNotIn('"$REPO"/.env*', text)
-        self.assertIn('find "$REPO" -maxdepth 1', text)
+        self.assertIn('find "$REPO/" -maxdepth 1', text)
         self.assertIn("git remote set-head origin -a", text)
 
     def test_skill_base_step_has_no_no_remote_fallback(self):
