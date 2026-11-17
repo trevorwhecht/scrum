@@ -38,7 +38,8 @@ class Page(BaseHTTPRequestHandler):
         if self.path == "/slow":
             time.sleep(2)
         elif self.path == "/hang":
-            self.server.release.wait(30)  # held open until the test ends
+            self.server.release.wait(90)  # held open until the test ends
+            self.server.hangs_ended += 1
             return
         body = {"/fetch": FETCH_PAGE, "/hung": HUNG_PAGE, **LOADING_PAGES}.get(self.path, PAGE)
         self.send_response(200)
@@ -140,6 +141,7 @@ class RenderChromeTest(unittest.TestCase):
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Page)
         self.srv.cookies = []
         self.srv.release = threading.Event()
+        self.srv.hangs_ended = 0
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
@@ -201,9 +203,9 @@ class RenderChromeTest(unittest.TestCase):
         code, err, took = timed_chrome([self.url, str(self.out), "/load-never"], LOAD_CAP=3)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
-        for t in took:
+        for t in took:  # stops at the 3 s cap, well before the default 60 s LOAD_CAP or the 240 s BUDGET
             self.assertGreaterEqual(t, 3)
-            self.assertLess(t, 20)
+            self.assertLess(t, 45)
         page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
         self.assertEqual((page["status"], page["shots"]), ("ok", ["load-never-390.png", "load-never-1440.png"]))
 
@@ -236,9 +238,9 @@ class RenderChromeTest(unittest.TestCase):
         code, err, took = timed_chrome([self.url, str(self.out), "/hung"], SETTLE_CAP=2)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(took), 2)
-        for t in took:  # each width stops at the 2 s cap, long before /hang's 30 s hold ends
+        for t in took:
             self.assertGreaterEqual(t, 2)
-            self.assertLess(t, 20)
+        self.assertEqual(self.srv.hangs_ended, 0)  # each width stopped at the cap while /hang was still held open
         page = json.loads((self.out / "manifest.json").read_text())["pages"][0]
         self.assertEqual((page["status"], page["shots"]), ("ok", ["hung-390.png", "hung-1440.png"]))
 
