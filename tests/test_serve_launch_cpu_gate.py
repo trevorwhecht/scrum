@@ -136,12 +136,47 @@ class LaunchCpuGate(ServeBase):
                               ("3-std", "standard", "2026-11-15T00:00:00+00:00", "cpu", {})),
                  "b": project("b", ("4-old", "lilguy", "2026-11-16T03:00:00+00:00", "cpu", {}),
                               ("5-ram", "fast", "2026-11-16T01:00:00+00:00", "ram", {}))}
-        with mock.patch.object(b, "projects", return_value=repos):
+        with mock.patch.object(b, "projects", return_value=repos), mock.patch.object(b, "ram_room", return_value=1):
             self.assertEqual(tuple(self.serve.cpu_first()), ("b", "4-old"))
-        with mock.patch.object(b, "projects", return_value={"a": repos["a"]}):
+        with mock.patch.object(b, "projects", return_value={"a": repos["a"]}), mock.patch.object(b, "ram_room", return_value=1):
             self.assertEqual(tuple(self.serve.cpu_first()), ("a", "1-new"))
         with mock.patch.object(b, "projects", return_value={}):
             self.assertIsNone(self.serve.cpu_first())
+
+    def ram_blocked_setup(self):
+        """A standard CPU-held job older than a fast one; board.projects() names this test's board as project repo."""
+        std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
+        fast = self.cpu_held_job("Ram fast", "fast", "2021-01-01T00:00:00+00:00")
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        (base / "scrum").symlink_to(self.root)
+        return std, fast, mock.patch.object(self.serve.board, "projects", return_value={"repo": base})
+
+    def test_cpu_first_skips_ram_blocked_leader(self):
+        std, fast, projects = self.ram_blocked_setup()
+        b = self.serve.board
+        with projects:
+            for std_room, light_room, want in ((1, 1, fast), (1, 0, std), (0, 1, fast)):  # held_order: light first
+                with mock.patch.object(b, "ram_room", side_effect=lambda floor=0, light=False: light_room if light else std_room):
+                    self.assertEqual(tuple(self.serve.cpu_first()), ("repo", want))
+
+    def test_cpu_first_none_when_all_ram_blocked(self):
+        _, _, projects = self.ram_blocked_setup()
+        with projects, mock.patch.object(self.serve.board, "ram_room", return_value=0):
+            self.assertIsNone(self.serve.cpu_first())
+
+    def test_spawn_light_passes_ram_blocked_leader(self):
+        std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        (base / "scrum").symlink_to(self.root)
+        projects, b = mock.patch.object(self.serve.board, "projects", return_value={"repo": base}), self.serve.board
+        light_job = self.needs_human("Ram light", reason="approve: ready to merge", lane="fast")
+        with projects, mock.patch.object(b, "ram_room", side_effect=lambda floor=0, light=False: 1 if light else 0):
+            out, spawn = self.launch(400, light_job, lambda: self.start(light_job))
+        self.assertIsNotNone(out)
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], [light_job])
+        self.assertNotIn("play_queued", self.stage_of(light_job))
 
     def start(self, job_id, manual=False):
         return self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=manual)

@@ -229,8 +229,10 @@ def held_over(queued_at, secs=RAM_HOLD_SECS):
 
 def mark_ram_hold(project, root, jobs, skip=None):
     """Write ram_hold (the reading) on every job in `jobs` still play_queued and held over RAM_HOLD_SECS, except `skip`
-    (spawn already ruled on it). Re-checked on the live job under the lock; the stderr line prints the first time only."""
-    ids = [j["id"] for j in jobs if j.get("play_queued") and j["id"] != skip and held_over(j["play_queued"])]
+    (spawn already ruled on it) and any job cpu_held (the CPU gate holds it, not RAM). Re-checked on the live job under the
+    lock; the stderr line prints the first time only."""
+    ids = [j["id"] for j in jobs if j.get("play_queued") and j["id"] != skip and held_over(j["play_queued"])
+           and not cpu_held(root, j)]
     if not ids:
         return
     hold = ram_hold_text()
@@ -262,7 +264,8 @@ def held_order(root, job):
 
 def cpu_first():
     """(project, job id) of the CPU-held launch (cpu_held, not running) that starts first across every board.projects()
-    board, by held_order; None when none waits. spawn holds every other non-manual start while one waits."""
+    board, by held_order; None when none waits. A candidate the RAM gate refuses at its own share (spawn's ram_short test)
+    is skipped, so it never holds the others. spawn holds every other non-manual start while one waits."""
     best = None
     for project, repo in board.projects().items():
         root = repo / "scrum"
@@ -271,7 +274,8 @@ def cpu_first():
         except (OSError, ValueError, AttributeError):
             continue
         for job in jobs:
-            if cpu_held(root, job) and not running(project, job["id"]):
+            if (cpu_held(root, job) and not running(project, job["id"])
+                    and board.ram_room(floor=0, light=board.light_job(root, job)) >= 1):
                 key = held_order(root, job)
                 if best is None or key < best[0]:
                     best = (key, project, job["id"])

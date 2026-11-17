@@ -1141,6 +1141,18 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(self.ram_spawn(cpu, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1), (None, ""))
         self.assertNotIn("ram_hold", self.stage_of(cpu))
 
+    def test_mark_ram_hold_skips_cpu_held(self):
+        cpu, ram = self.held_job("Mark cpu", 2), self.held_job("Mark ram", 2)
+        for job_id in (cpu, ram):
+            self.edit_job(job_id, queued_launch={"action": "start", "prompt": "p", "stage": "needs-human"})
+        self.gates_file(cpu).write_text("cpu_load(600%)\n")
+        self.gates_file(ram).write_text("ram_room(free=5%)\n")
+        with mock.patch.object(self.serve.board, "session_ages", return_value=[500] * 3), \
+                mock.patch.object(self.serve.board, "free_ram_pct", return_value=9.0), contextlib.redirect_stderr(io.StringIO()):
+            self.serve.mark_ram_hold("repo", self.root, self.serve.board.read_board(self.root)["jobs"])
+        self.assertNotIn("ram_hold", self.stage_of(cpu))
+        self.assertEqual(self.stage_of(ram)["ram_hold"], "3 sessions running, 9% RAM free")
+
     def test_spawn_ram_hold_cleared(self):
         started = self.held_job("RAM hold then start", 2)
         self.ram_spawn(started, ram=0)
