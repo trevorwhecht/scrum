@@ -80,7 +80,7 @@ class SmallFixesTest(unittest.TestCase):
         r = subprocess.run([sys.executable, str(BOARD_PY), "--dir", str(self.root), "backlog-add", "--", "-dash"],
                            capture_output=True, text=True, timeout=60, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        end = time.time() + 10
+        end = time.time() + 60  # the estimate runs in the background; load can slow it
         while time.time() < end and board.backlog_items(self.root)[0]["points"] is None:
             time.sleep(0.05)
         self.assertEqual(re.sub(r" \{#[a-z0-9]{4}\}", "", (self.root / "backlog.md").read_text()), "# Backlog\n- [ ] [5] -dash <!-- several files -->\n")

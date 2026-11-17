@@ -362,9 +362,9 @@ class BuildLockTest(unittest.TestCase):
     def test_project_flag_bad_path_fails_without_waiting(self):
         self.hold()
         start = time.monotonic()
-        r = self.run_wrap("--project", str(self.dir / "missing.md"), SCRUM_BUILD_LOCK_TIMEOUT="20")
+        r = self.run_wrap("--project", str(self.dir / "missing.md"), SCRUM_BUILD_LOCK_TIMEOUT="120")
         self.assertEqual(r.returncode, 2)
-        self.assertLess(time.monotonic() - start, 2)
+        self.assertLess(time.monotonic() - start, 20)  # a wait for the held lock would run to run_wrap's 30 s timeout
 
     def test_missing_command_returns_127(self):
         self.assertEqual(self.run_wrap("no-such-cmd-buildlock-xyz", "arg").returncode, 127)
