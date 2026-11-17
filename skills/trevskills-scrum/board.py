@@ -2270,7 +2270,7 @@ def _waited(prev, end, starts, mtimes, human=()):
     return total
 
 
-def _timing_row(root, job_id, job, stalls, waits=(), human=()):
+def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     """(row cells, wall secs, rounds, no-change rounds, E2E lock waits, stall secs to resume) for one claimed job. The no-change cell is the count and the later round of each
     equal pair, e.g. `2 (rounds 2,3)`. Created is feature.md's
     mtime (else spec.md's), Spec starts at claimed-at.txt (cmd_ready) when sane, the wait before it counting as Queue; done is the board updatedAt; each round's time runs from the previous round's last file
@@ -2278,7 +2278,9 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=()):
     Each dep-waits.txt line (cmd_wait_on: `<epoch> <blocker>`) runs to the job's next run log (_run_starts), else
     spec.md's mtime; clipped to the Spec window, it moves from Spec to Queue. `stalls` maps a job id to its stall
     epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None,
-    then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for)."""
+    then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
+    Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
+    subtracted like `waits` and adds one to E2E lock waits."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2291,11 +2293,14 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=()):
         start, queue = spec_at, 0 if spec_at else None
     times, hwaits, heads, prev = [], [], [], start or created
     mtimes = sorted(t for q in folder.rglob("*") if (t := _mtime(q))) if waits else []
+    runs = _run_starts(root, job_id)
+    after = lambda t: next((r for r in runs if r > t), None)
+    qspans = [(w, after(w) or float("inf")) for w in queued]
     for n in rounds:
         rd = folder / f"round-{n}"
         end = max((t for q in rd.iterdir() if (t := _mtime(q))), default=None)
-        machine = _waited(prev, end, waits, mtimes) if end and prev else 0
-        both = _waited(prev, end, waits, mtimes, human) if end and prev else 0
+        machine = _waited(prev, end, waits, mtimes, qspans) if end and prev else 0
+        both = _waited(prev, end, waits, mtimes, [*qspans, *human]) if end and prev else 0
         times.append(_mins(end - prev - both if end and prev else None))
         hwaits.append(_mins(both - machine))
         prev = end or prev
@@ -2304,7 +2309,7 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=()):
         except OSError:
             heads.append("")
     same = [n for n, a, b in zip(rounds[1:], heads, heads[1:]) if a and a == b]
-    waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md"))
+    waits = sum(len(E2E_LOCK_RE.findall(t)) for t in _round_text(folder, "check.md")) + len(queued)
     spec = spec_at - created if spec_at and created else None
     try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
         claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
@@ -2313,8 +2318,6 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=()):
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
-    runs = _run_starts(root, job_id)
-    after = lambda t: next((r for r in runs if r > t), None)
     try:  # cmd_wait_on: a parentless job's dependency wait counts as Queue, not Spec
         dep = [float(l.split()[0]) for l in (folder / "dep-waits.txt").read_text(encoding="utf-8").splitlines()
                if re.fullmatch(r"\d+(\.\d+)? \S+", l.strip())]
@@ -2354,12 +2357,12 @@ RAM_HOLD_RE = re.compile(r"^\S+ free=(?:(\d+)%|unknown) sessions=(\d+)$", re.M) 
 
 def write_timing(root, digest_id, jobs):
     """digests/<NNN>/timing.md: one row per claimed job (wall, spec, queue, queue gate = queue-gates.txt, rounds, round times, no-change rounds = a
-    head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md, questions.log stall lines, each as
+    head.txt equal to the previous round's, E2E lock waits = `exit 124` in check.md plus queue-wait lines, questions.log stall lines, each as
     its minutes to the next run log),
-    totals, every job on every registered board (and this one) now stalled waiting on the E2E queue, and per claimed
+    totals, every job on every registered board (and this one) now stalled or held (queue_waiting) on the E2E queue, and per claimed
     job its ram-holds.txt lines (serve.py note_ram_hold): hold count, free RAM range and session range."""
     board = {j["id"]: j for j in read_board(root)["jobs"]}
-    stalls, waits, human = {}, {}, {}
+    stalls, waits, human, queue = {}, {}, {}, {}
     log, now = list(_json_lines(Path(root) / "questions.log")), time.time()
     for n, q in enumerate(log):  # needs-human spans: as the usage-window "needs-human time" loop
         at = _epoch(q.get("date"))
@@ -2378,7 +2381,9 @@ def write_timing(root, digest_id, jobs):
             waits.setdefault(q["job"], []).append(at)
         if q.get("kind") == "stall" and isinstance(q.get("job"), str):
             stalls.setdefault(q["job"], []).append(at)
-    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ())) for j in jobs]
+        if q.get("kind") == "queue-wait" and at and isinstance(q.get("job"), str):
+            queue.setdefault(q["job"], []).append(at)
+    rows = [_timing_row(root, j, board.get(j, {}), stalls, waits.get(j, ()), human.get(j, ()), queue.get(j, ())) for j in jobs]
     lines = [f"# Timing: digest {digest_id}", "",
              "| Job | Wall | Spec | Queue | Queue gate | Rounds | Round times | Human wait | No-change rounds | E2E lock waits | Stalls |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -2397,7 +2402,8 @@ def write_timing(root, digest_id, jobs):
             continue
         for j in other["jobs"]:
             at = _epoch(j.get("updatedAt"))
-            if stalled(j) and E2E_WAIT_REASON in str(j.get("reason") or "") and at:
+            if at and (stalled(j) and E2E_WAIT_REASON in str(j.get("reason") or "")
+                       or queue_waiting(j) and j["reason"].startswith(E2E_QUEUE_WAIT)):
                 waiting.append(f"- {scrum.parent.name}/{j['id']}: {_mins(t - at)}")
     lines += waiting or ["None"]
     lines += ["", "## RAM holds"]
@@ -5272,7 +5278,8 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
     An eligible kind (lanes/unblock.md) leaves the job in its stage and returns {"unblock": True, "n": N} instead.
-    title must be a STOP_TITLES key; it is stored as stopTitle on a parked job (not on an unblock or a stall)."""
+    title must be a STOP_TITLES key; it is stored as stopTitle on a parked job (not on an unblock, a stall or a queue wait: a check job asking `waiting on the
+    E2E|Check queue` stays in check with reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT and returns {"waiting": True})."""
     if title not in STOP_TITLES:
         raise SystemExit(f"ask needs --title, one of: {', '.join(STOP_TITLES)} (got {title!r})")
     question = question.strip()
@@ -5312,6 +5319,14 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
                                  "kind": kind, "unblock": n, "question": question})
             return {"unblock": True, "n": n}
         was = job["stage"]
+        if was == "check" and (m := QUEUE_ASK_RE.match(question)):  # a capacity wait, not a stall: no try spent
+            reason = E2E_QUEUE_WAIT if m[1].upper() == "E2E" else CHECK_QUEUE_WAIT
+            for k in ("question", "options", "recommend", "stopTitle", "outcome", "stalled"):
+                job.pop(k, None)
+            job.update(reason=reason, updatedAt=now())
+            questions_log(root, {"date": now(), "project": Path(root).resolve().parent.name, "job": job_id,
+                                 "reason": reason, "kind": "queue-wait"})
+            return {"waiting": True}
         # a session that did not load the scrum agent types is a session fault: stalled in its stage, so
         # auto_resume retries it; not a human stop, so no question and no sound. A GitHub billing CI refusal stalls
         # the same way: its answer is always Try again, which auto_resume gives
@@ -6026,6 +6041,8 @@ IDLE_HOURS = 2  # a live session with no board or job-dir change this long is fl
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the (?:E2E|Check) queue", re.I)
+QUEUE_ASK_RE = re.compile(r"^waiting on the (E2E|Check) queue", re.I)  # cmd_ask holds a check job on it as waiting, not stalled
+E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT = "waiting: E2E queue", "waiting: Check queue"  # serve.py auto_resume starts it once the lock frees
 CI_BILLING_RE = re.compile(r"failed account payments|spending limit|CI refused: GitHub billing", re.I)
 CI_BILLING_WAIT = "waiting on GitHub billing to run CI"  # serve.py auto_resume retries it after 60 s, then when the banner clears
 # Every needs-human reason prefix whose card offers Resume (serve.py's resume action, the dashboard, SKILL.md `resume`).
@@ -6046,6 +6063,13 @@ def stalled(job: dict) -> bool:
     if job.get("stalled"):
         return job.get("stage") in WATCHED
     return job.get("stage") == "needs-human" and str(job.get("reason") or "").startswith(STALLED)
+
+
+def queue_waiting(job: dict) -> bool:
+    """A check job cmd_ask holds on the E2E or Check queue (reason E2E_QUEUE_WAIT or CHECK_QUEUE_WAIT): not stalled,
+    not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
+    return job.get("stage") == "check" and not job.get("paused") and not job.get("stalled") \
+        and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT))
 
 
 def stall_stage(job: dict) -> str | None:
@@ -6259,7 +6283,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
         with locked_board(root) as board:
             # a lilguy job in the main checkout has no pipeline to resume: no worktree or builder.
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
-            stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting")
+            stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting") and not queue_waiting(j)
                      and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
                      and not j.get("stalled") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled

@@ -1194,12 +1194,16 @@ def auto_resume(project, root, jobs):
     it waits, spending no try and not busy, until then. A GitHub billing stall (board.CI_BILLING_WAIT) is resumed
     60 s after it is first seen, then each time an ACTIONS_ALERT check newer than its last resume shows no refusal;
     it spends no try, is never parked as spent and is not busy while it waits. Each hold that passes a stalled job
-    over (a refusal, a spent budget, a busy E2E or Check queue, cool-down) is noted in stall-holds.txt (note_stall_hold)."""
+    over (a refusal, a spent budget, a busy E2E or Check queue, cool-down) is noted in stall-holds.txt (note_stall_hold).
+    A check job held on a queue (board.queue_waiting: not stalled) is resumed as soon as its lock is free (queue_free),
+    whatever else sits in check, under the same one-per-tick E2E cap and one-per-call Check cap, spending no try and
+    never parked as spent."""
     global E2E_RESUMED
     now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
 
     def check_job(j):
-        return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j)
+        return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j) \
+            and not board.queue_waiting(j)
 
     def refused(job):  # resume_refusal, noting the hold (note_stall_hold) it passes the job over for
         refusal = resume_refusal(project, root, job)
@@ -1243,6 +1247,23 @@ def auto_resume(project, root, jobs):
                 BUILD_CHECK_RETRIED.add(f"{project}/{job['id']}")  # Trevor's Try again, once; a second stop stays on him
                 busy = True
                 answer_job(project, root, job, jobs, opt.get("key"))
+            continue
+        if board.queue_waiting(job):  # held on a lock, not stalled: starts once it frees, no try, never parked
+            if running(project, job["id"]):
+                continue
+            e2e = job["reason"].startswith(board.E2E_QUEUE_WAIT)
+            if (e2e_resumed if e2e else check_resumed) or not queue_free("e2e.lock" if e2e else "check.lock"):
+                busy = True
+                note_stall_hold(root, job["id"], "e2e_queue" if e2e else "check_queue")
+            elif refused(job) is None and room(job):
+                busy = True
+                if e2e:
+                    e2e_resumed = True
+                    if E2E_RESUMED is not None:
+                        E2E_RESUMED = True
+                else:
+                    check_resumed = True
+                resume_job(project, root, job, jobs)
             continue
         if not board.stalled(job) or board.lilguy_in_checkout(job) or running(project, job["id"]):
             continue
@@ -1535,7 +1556,7 @@ def respawn_exited(project, root):
     for key, run in runs:
         job = next((j for j in jobs if j["id"] == key.split("/", 1)[1]), None)
         if not job or job.get("stage") not in board.WATCHED or job.get("waiting") or board.lilguy_in_checkout(job) \
-                or job.get("paused") or job.get("stalled"):
+                or job.get("paused") or job.get("stalled") or board.queue_waiting(job):
             run["handled"] = True
             continue
         alive = alive or board.session_alive_fn()  # one ps scan, only when something exited mid-stage
@@ -1583,7 +1604,7 @@ def respawn_orphans(project, root, p, kids, alive):
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
-                or kid.get("paused") or kid.get("stalled") \
+                or kid.get("paused") or kid.get("stalled") or board.queue_waiting(kid) \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
                 or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
             continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick

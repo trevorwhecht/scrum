@@ -660,7 +660,7 @@ class BoardTest(unittest.TestCase):
                  "stalled: scrum-debugger, scrum-builder are not loaded as agent types in this session"),
                 ("The scrum Agent Types not loaded here", "check", "stalled: The scrum Agent Types not loaded here"),
                 ("agent types are not loaded", "review", "stalled: agent types are not loaded"),
-                ("waiting on the Check queue", "check", "stalled: waiting on the Check queue")):
+                ("waiting on the Check queue", "build", "stalled: waiting on the Check queue")):
             with self.subTest(q=q, stage=stage):
                 job_id = board.cmd_new(self.root, "x")
                 board.cmd_set(self.root, job_id, [f"stage={stage}"])
@@ -687,6 +687,30 @@ class BoardTest(unittest.TestCase):
                 self.assertEqual((job["stage"], job["reason"], job["question"], [o["command"] for o in job["options"]]),
                                  ("needs-human", q, q, [f"resume {job_id}", f"abort {job_id}"]))
                 self.assertNotIn("stalled", job)
+
+    def test_ask_e2e_queue_wait_is_waiting_not_stalled(self):
+        for q, want in (("waiting on the E2E queue", "waiting: E2E queue"), ("waiting on the Check queue", "waiting: Check queue")):
+            with self.subTest(q=q):
+                job_id = board.cmd_new(self.root, "x")
+                board.cmd_set(self.root, job_id, ["stage=check"])
+                with board.locked_board(self.root) as b:  # an earlier stall's flag and an old question are dropped
+                    board.find(b, job_id).update(stalled=True, question="Old?", options=[{"key": "a"}])
+                before = len(self.log_lines())
+                with mock.patch.object(board, "play") as play:
+                    out = board.cmd_ask(self.root, job_id, q, [f"Carry on=resume {job_id}", f"Remove=abort {job_id} --cascade"],
+                                        title="CHECKS_FAILING")
+                self.assertEqual(out, {"waiting": True})
+                play.assert_not_called()
+                job = next(j for j in self.jobs() if j["id"] == job_id)
+                self.assertFalse(job.get("stalled"))
+                self.assertEqual((job["stage"], job["reason"]), ("check", want))
+                self.assertNotIn("question", job)
+                self.assertFalse(board.stalled(job))
+                self.assertTrue(board.queue_waiting(job))
+                self.assertEqual(board.resume_first([job]), 0)
+                lines = self.log_lines()[before:]
+                self.assertEqual([(l["job"], l["kind"], l["reason"]) for l in lines], [(job_id, "queue-wait", want)])
+                self.assertRegex(lines[0]["date"], r"^\d{4}-\d\d-\d\dT")
 
     def test_ask_ci_billing_refusal_is_stalled(self):
         opts = lambda j: [f"R=resume {j}", f"A=abort {j}"]
@@ -4827,6 +4851,26 @@ class BoardTest(unittest.TestCase):
             board.write_timing(self.root, "001", ["j"])
         self.assertIn("| j | - | 0m | 0m | - | 1 | 2h00m | 0m | 0 | 0 | open, open |", (self.root / "digests" / "001" / "timing.md").read_text())
 
+    def test_timing_counts_queue_wait(self):
+        t0 = 1_700_000_000
+        self.timing_two_hour(t0)
+        iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
+        (self.root / "questions.log").write_text(
+            json.dumps({"job": "j", "kind": "queue-wait", "reason": "waiting: E2E queue", "date": iso(1800)}) + "\n")
+        (self.root / "runs").mkdir()
+        stamp = datetime.fromtimestamp(t0 + 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{stamp}-resume-j.log").write_text("x")
+        held = board.cmd_new(self.root, "held")
+        with board.locked_board(self.root) as b:
+            board.find(b, held).update(stage="check", reason="waiting: E2E queue",
+                                       updatedAt=(datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat())
+        (self.root / "digests" / "001").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "none.json")}):
+            board.write_timing(self.root, "001", ["j"])
+        text = (self.root / "digests" / "001" / "timing.md").read_text()
+        self.assertIn("| j | - | 0m | 0m | - | 1 | 1h30m | 0m | 0 | 1 | 0 |", text)
+        self.assertIn(f"## Waiting on the E2E queue\n- {Path(self.tmp.name).resolve().name}/{held}: 1h30m\n", text)
+
     def human_log(self, t0, rows):
         iso = lambda at: datetime.fromtimestamp(t0 + at, timezone.utc).isoformat()
         (self.root / "questions.log").write_text("".join(json.dumps({**d, "date": iso(at)}) + "\n" for at, d in rows))
@@ -5125,6 +5169,14 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
         self.assertEqual((self.get(held)["stage"], self.get(held)["limitResetAt"]), ("review", 1_800_000_000))
         plain = self.aged("Plain review", 120, stage="review")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
+    def test_watchdog_skips_queue_wait(self):
+        waiting = self.aged("Queued check", 24 * 60, stage="check", reason="waiting: E2E queue")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertEqual((self.get(waiting)["stage"], self.get(waiting)["reason"]), ("check", "waiting: E2E queue"))
+        self.assertNotIn("stalled", self.get(waiting))
+        plain = self.aged("Plain check", 24 * 60, stage="check")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
 
     def age_job_dir(self, job_id, hours):
