@@ -39,7 +39,7 @@
    WT="$REPO/.claude/worktrees/scrum-$ID"
    git fetch origin
    git worktree add "$WT" -b "scrum/$ID" "$BASE"
-   find "$REPO" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
+   find "$REPO/" -maxdepth 1 -name '.env*' | while read -r e; do git -C "$REPO" ls-files --error-unmatch -- "$(basename "$e")" >/dev/null 2>&1 || ln -sfn "$e" "$WT/$(basename "$e")"; done
    ```
    Run `Install` from `project.md` in `$WT`; never symlink `node_modules` from `$REPO`.
    When `$WT/prisma/schema.prisma` exists, run `npx prisma generate` in `$WT` after the install.
