@@ -395,7 +395,7 @@ class PickAccountTest(AccountEnv):
         self.assertIn("owa usage", allow.reason)
 
     def test_owa_at_reserve_with_main_full_gives_none(self):
-        self.write(self.main, five=self.FULL)
+        self.write(self.main, five=self.FULL, seven=(10, 50000))  # main resets first: order stays main, owa
         for five, seven in (((80, 9000), (10, 90000)), ((10, 9000), (90, 90000))):
             self.write(self.owa, five=five, seven=seven, written_at=NOW - 3600)  # stale: the reserve still counts
             name, allow = board.pick_account(NOW)
@@ -430,6 +430,32 @@ class PickAccountTest(AccountEnv):
     def test_prefer_owa_with_owa_full_gives_main(self):
         self.write(self.owa, five=self.FULL)
         self.assertEqual(board.pick_account(NOW, prefer="owa")[0], "main")
+
+    def test_soonest_weekly_reset_first(self):
+        self.write(self.main, seven=(10, 90000))
+        self.write(self.owa, seven=(10, 80000))
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+
+    def test_soonest_reset_owa_at_reserve_gives_main(self):
+        self.write(self.main, seven=(10, 90000))
+        self.write(self.owa, seven=(90, 80000))
+        self.assertEqual(board.pick_account(NOW)[0], "main")
+
+    def test_soonest_reset_prefer_wins(self):
+        self.write(self.main, seven=(10, 90000))
+        self.write(self.owa, seven=(10, 80000))
+        self.assertEqual(board.pick_account(NOW, prefer="main")[0], "main")
+
+    def test_no_weekly_window_keeps_accounts_order(self):
+        read = board.read_usage
+        with mock.patch.object(board, "read_usage", wraps=read) as spy:
+            self.assertEqual(board.pick_account(NOW)[0], "main")
+            self.assertEqual(spy.call_count, 2)
+        self.write(self.main, seven=(10, -5))
+        self.write(self.owa, seven=(10, -9))  # both expired
+        self.assertEqual(board.pick_account(NOW)[0], "main")
+        self.write(self.owa, seven=(10, 80000))  # only owa has one
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
 
     def test_limit_marker_and_reset_window(self):
         board.note_limit("main", NOW + 60)
