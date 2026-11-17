@@ -409,6 +409,45 @@ class BoardTest(unittest.TestCase):
         self.assertNotIn("stalled", job, "a question is not a stall")
         self.assertNotIn("limitResetAt", job)
 
+    def cli_ask(self, q):
+        job_id = board.cmd_new(self.root, "x")
+        args = ["--dir", str(self.root), "ask", job_id, q, "--a", f"Approve=approve {job_id}",
+                "--b", f"Abort=abort {job_id}", "--title", "MERGE_CONFLICT"]
+        return job_id, args
+
+    def test_ask_refuses_question_over_40_words(self):
+        _, args = self.cli_ask(" ".join(["w"] * 41))
+        with self.assertRaises(SystemExit) as cm:
+            board.main(args)
+        self.assertIn("40 words", str(cm.exception))
+        self.assertIn("stop.md", str(cm.exception))
+        self.assertNotIn("question", self.jobs()[0])
+        self.assertNotEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_ask_accepts_40_word_question(self):
+        _, args = self.cli_ask(" ".join(["w"] * 40))
+        board.main(args)
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_ask_refuses_path_or_rule_question(self):
+        for q in ("Fix skills/x/board.py?", "Does rule 3 apply?"):
+            with self.subTest(q=q):
+                _, args = self.cli_ask(q)
+                with self.assertRaises(SystemExit) as cm:
+                    board.main(args)
+                self.assertIn("stop.md", str(cm.exception))
+
+    def test_cmd_ask_direct_not_limited(self):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_ask(self.root, job_id, " ".join(["w"] * 50), [f"A=approve {job_id}", f"B=abort {job_id}"], title="MERGE_CONFLICT")
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_health_and_refusal_share_predicate(self):
+        self.assertTrue(board.unreadable_question(" ".join(["w"] * 41)))
+        self.assertTrue(board.unreadable_question("see skills/x/board.py"))
+        self.assertTrue(board.unreadable_question("per rule 3"))
+        self.assertFalse(board.unreadable_question(" ".join(["w"] * 40)))
+
     def test_ask_cli_three_options(self):
         job_id = board.cmd_new(self.root, "x")
         buf = io.StringIO()
