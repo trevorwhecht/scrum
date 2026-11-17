@@ -162,6 +162,9 @@ class ReadyPacingTest(unittest.TestCase):
         pace = mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # these fixtures sit at 50 % elapsed: test the ladder alone
         pace.start()
         self.addCleanup(pace.stop)
+        hold = mock.patch.object(board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the ladder alone
+        hold.start()
+        self.addCleanup(hold.stop)
 
     def write_usage(self, p5):
         """A fresh usage file whose five_hour window projects to p5 % (half the window elapsed)."""
@@ -295,6 +298,27 @@ class ReadyPacingTest(unittest.TestCase):
         self.assertEqual((out["ready"], out["in_progress"]), ([], 2))
         self.assertEqual(self.jobs()[parent]["stage"], "running")
 
+class UsageHoldTest(unittest.TestCase):
+    def test_usage_hold_90(self):
+        for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+            kw = lambda pct: {"five" if key == "five_hour" else "seven": (pct, 7200)}
+            with mock.patch.object(board, "PACE_LEAD_PCT", 1000):
+                held = board.usage_allowance(usage(**kw(90)), NOW, 0)
+                self.assertEqual(held, 0)
+                self.assertTrue(held.reason.startswith(f"hold {label} 90% used (90% cap), resets "), held.reason)
+                self.assertIsNone(board.usage_allowance(usage(**kw(89)), NOW, 0))
+
+    def test_usage_hold_near_reset(self):
+        held = board.usage_allowance(usage(five=(95, 600)), NOW, 0)
+        self.assertEqual(held, 0)
+        self.assertTrue(held.reason.startswith("hold 5h 95%"), held.reason)
+
+    def test_usage_hold_expired_or_stale(self):
+        self.assertIsNone(board.usage_allowance(usage(five=(95, 0)), NOW, 0))
+        self.assertIsNone(board.usage_allowance(usage(five=(95, -5)), NOW, 0))
+        self.assertIsNone(board.usage_allowance(usage(five=(95, 600), written_at=NOW - 301), NOW, 0))
+
+
 class AccountEnv(unittest.TestCase):
     """A main and an owa config dir under a temp folder, listed through SCRUM_ACCOUNTS; SCRUM_USAGE unset."""
     def setUp(self):
@@ -312,6 +336,9 @@ class AccountEnv(unittest.TestCase):
         pace = mock.patch.object(board, "PACE_LEAD_PCT", 1000)  # 9000 s fixtures are 50 % elapsed: the ladder and reserves alone
         pace.start()
         self.addCleanup(pace.stop)
+        hold = mock.patch.object(board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the ladder alone
+        hold.start()
+        self.addCleanup(hold.stop)
 
     def write(self, folder, five=None, seven=None, written_at=NOW):
         (folder / "usage.json").write_text(json.dumps(usage(five, seven, written_at)))
@@ -380,6 +407,17 @@ class PickAccountTest(AccountEnv):
         self.write(self.main, five=self.FULL)
         self.write(self.owa, five=(79, 9000), seven=(89, 90000))
         self.assertEqual(board.pick_account(NOW)[0], "owa")
+
+    def test_pick_account_hold(self):
+        self.write(self.main, five=(90, 9000))
+        with mock.patch.object(board, "USAGE_HOLD_PCT", 90):
+            self.write(self.owa, five=(90, 9000))
+            name, allow = board.pick_account(NOW)
+            self.assertEqual((name, allow), (None, 0))
+            self.assertIn("main hold 5h 90% used (90% cap)", allow.reason)
+            self.write(self.main, five=(90, -1))  # reset passed: claims again
+            self.write(self.owa, five=(90, -1))
+            self.assertEqual(board.pick_account(NOW)[0], "main")
 
     def test_both_free_gives_main(self):
         self.write(self.main, five=(10, 9000))
