@@ -2978,8 +2978,7 @@ class BoardTest(unittest.TestCase):
 
     def test_machine_ok_cpu_load(self):
         self.assertEqual(board.MAX_CPU_LOAD_PCT, 300)
-        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="208", SCRUM_CPU_BUSY_PCT="70"), \
-                mock.patch.object(board.os, "cpu_count", return_value=8):
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="208", SCRUM_CPU_BUSY_PCT="70"), mock.patch.object(board.os, "cpu_count", return_value=8):
             self.assertIsNone(board.machine_ok(self.tmp.name, claim=True), "job 958: high load with idle CPU claims")
         reason = "CPU load 350% of 8 cores (> 300%)"
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"), mock.patch.object(board.os, "cpu_count", return_value=8):
