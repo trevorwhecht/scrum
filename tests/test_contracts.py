@@ -2796,6 +2796,24 @@ class ContractTest(unittest.TestCase):
         self.assertLess(migrate.index("Auto-rework: duplicate column"), migrate.index("On any other stop"))
         self.assertIn("`rework.md`", (ROOT / "agents" / "scrum-digest-reader.md").read_text())
 
+    def test_migrate_duplicate_column_applied_needs_new_folder(self):
+        migrate = self.section(skill_text(), "## Migrate", "## Merge")
+        for phrase in ("is applied on prod: leave it unchanged", "new migration folder"):
+            self.assertIn(phrase, migrate)
+            self.assertLess(migrate.index(phrase), migrate.index("On any other stop"))
+
+    def test_builder_never_edits_applied_migration(self):
+        builder = (ROOT / "agents" / "scrum-builder.md").read_text()
+        line = next(l for l in builder.splitlines() if l.startswith("- Never run `prisma migrate` or `prisma db push`."))
+        for phrase in ("MIGRATION NEEDED", "applied migration folder", "migrated.md", "migrate-stop.md",
+                       "new migration folder", "on `BASE`", "ls-tree --name-only"):
+            self.assertIn(phrase, line)
+
+    def test_approver_rework_never_edits_applied_migration(self):
+        approver = (ROOT / "agents" / "scrum-approver.md").read_text()
+        for phrase in ("applied migration folder", "migrated.md", "migrate-stop.md", "new migration folder"):
+            self.assertIn(phrase, approver)
+
     def test_migrate_drift_behind_main_merges_main(self):
         migrate = self.section(skill_text(), "## Migrate", "## Merge")
         for phrase in ("Auto-rework: behind main", "merge-base --is-ancestor", "Conflicts** sub-steps 1-4",
