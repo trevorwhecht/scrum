@@ -8666,11 +8666,11 @@ class LilguyFitTest(unittest.TestCase):
         self.points(1)
         out = self.fit()
         self.assertEqual(out, {"fit": True, "why": "backlog item is 1 point"})
-        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text()), out)
+        self.assertEqual({k: json.loads((self.jd / "lilguy-fit.json").read_text())[k] for k in out}, out)
         (self.jd / "feature.md").write_text("Lane: standard\n")
         out = self.fit()
         self.assertEqual(out, {"fit": False, "why": "feature.md Lane: standard"})
-        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text()), out)
+        self.assertEqual({k: json.loads((self.jd / "lilguy-fit.json").read_text())[k] for k in out}, out)
 
     def test_lilguy_fit_no_folder_writes_nothing(self):
         shutil.rmtree(self.jd)
@@ -8751,6 +8751,7 @@ class LilguyFitTest(unittest.TestCase):
         self.points(1)
         board.cmd_set(self.root, self.job, ["lane=fast"])
         self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+        self.assertEqual(json.loads((self.jd / "lilguy-fit.json").read_text())["why"], "already on fast lane")
         board.cmd_set(self.root, self.job, ["lane=lilguy"])
         self.assertIs(self.fit()["fit"], True)
 
@@ -8772,6 +8773,39 @@ class LilguyFitTest(unittest.TestCase):
         saved = json.loads((self.jd / "lilguy-fit.json").read_text())
         self.assertIs(saved["fit"], False)
         self.assertEqual(saved["why"], "hard-stop word 'Payment' in feature.md")
+        self.assertEqual(saved["hard_stop"], "Payment")
+
+    def test_lilguy_fit_logs_check_inputs(self):
+        self.points(2)
+        (self.jd / "feature.md").write_text("Fix mergeLeads in src/a.ts (from 016-x)\n")
+        self.jev('{"score":1.2,"confidence":0.8}')
+        self.fit()
+        saved = json.loads((self.jd / "lilguy-fit.json").read_text())
+        self.assertEqual((saved["parent"], saved["points"], saved["hard_stop"]), ("016-x", 2, None))
+        self.assertEqual(saved["estimate"], {"files": 1, "lines": 10})
+        self.assertEqual(saved["jev"], {"score": 1.2, "confidence": 0.8})
+
+    def test_lilguy_fit_keeps_first_refusal(self):
+        self.points(1)
+        (self.jd / "feature.md").write_text("Show the Payment total\n")
+        self.fit()
+        board.cmd_set(self.root, self.job, ["lane=fast"])
+        self.assertEqual(self.fit(), {"fit": False, "why": "already on fast lane"})
+        saved = json.loads((self.jd / "lilguy-fit.json").read_text())
+        self.assertEqual((saved["why"], saved["hard_stop"]), ("hard-stop word 'Payment' in feature.md", "Payment"))
+
+    def test_lilguy_fit_session_word_only_with_auth(self):
+        self.points(1)
+        for text, fit in (("Rework the single session flow in src/a.ts", True), ("Fix the login session expiry", False),
+                          ("Change the session token", False), ("Read the session cookie", False)):
+            with self.subTest(text):
+                (self.jd / "feature.md").write_text(text + "\n")
+                self.assertIs(self.fit()["fit"], fit)
+
+    def test_lilguy_refuses_session_word(self):
+        (self.jd / "feature.md").write_text("Reword the fresh session note in a.md\n")
+        self.assertIs(board._lilguy_refuses(self.jd), False)
+        self.assertIs(board._fit_excluded(self.jd, "fast", None), False)
 
     def test_lilguy_fit_from_suffix_ignored(self):
         self.points(2)

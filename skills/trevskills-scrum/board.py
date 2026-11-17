@@ -3394,8 +3394,9 @@ def cmd_route_check(root, job_id: str, check_fails: int = 0, clean_start: bool =
 # with no hard-stop word in feature.md and a small size estimate. Anything unreadable counts as not tiny.
 LILGUY_HARD_STOP_RE = re.compile(
     r"\b(?:schema|migrations?|migrate|prisma|sql|money|payments?|pricing|billing|checkout|stripe|auth[nz]?"
-    r"|authenticat(?:ion|e)|authoriz(?:ation|e)|sessions?|login|passwords?|permissions?|secrets?|credentials?"
-    r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b", re.I)
+    r"|authenticat(?:ion|e)|authoriz(?:ation|e)|login|passwords?|permissions?|secrets?|credentials?"
+    r"|api\s+keys?|env\s+vars?|environment\s+variables?)\b|\.env\b"
+    r"|\b(?:login|auth|user|cookie|token)\w*\s+sessions?\b|\bsessions?\s+(?:login|auth|user|cookie|token)", re.I)
 LILGUY_JEV_MAX_SCORE, LILGUY_JEV_MIN_CONFIDENCE = 1.5, 0.7
 # lilguy_estimate: a feature.md's named file paths, at LILGUY_LINES_PER_FILE added lines each (a heuristic; Route
 # still promotes from the real diff).
@@ -3474,7 +3475,23 @@ def cmd_lilguy_fit(root, job_id: str) -> dict:
     verdict = _lilguy_verdict(root, job_id)
     folder = Path(root) / "jobs" / job_id
     if folder.is_dir():
-        _write_json(folder / "lilguy-fit.json", verdict)
+        out = folder / "lilguy-fit.json"
+        try:
+            old = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+        if isinstance(old, dict) and old.get("fit") is False and verdict["why"].startswith("already on "):
+            return verdict  # the first refusal is the cause; a re-run after promotion must not hide it
+        feature = folder / "feature.md"
+        text = _request_text(feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else ""
+        parent = re.search(r"[ \t]\(from (\d+-[\w-]+)\)\s*\Z", feature.read_text(encoding="utf-8", errors="replace")) if feature.is_file() else None
+        item = next((i for i in read_backlog(root)[1] if i["job"] == job_id), None)
+        raw = _jev_model(folder) or {}
+        files, lines = lilguy_estimate(text)
+        hard = LILGUY_HARD_STOP_RE.search(text)
+        _write_json(out, {**verdict, "parent": parent[1] if parent else None, "points": item["points"] if item else None,
+                          "hard_stop": hard[0] if hard else None, "estimate": {"files": files, "lines": lines},
+                          "jev": {"score": raw.get("score"), "confidence": raw.get("confidence")} if raw else None})
     return verdict
 
 
