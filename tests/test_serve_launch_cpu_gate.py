@@ -1,5 +1,7 @@
 """Job 643: serve.spawn also queues a non-manual GATED launch while the CPU load is above MAX_LAUNCH_CPU_LOAD_PCT (500)."""
-import os, unittest
+import json, os, shutil, tempfile, unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest import mock
 
 import test_serve  # module import only: unittest must not collect ServeTest a second time from here
@@ -82,6 +84,92 @@ class LaunchCpuGate(ServeBase):
         out, spawn = self.launch(None, job_id, lambda: self.approve(job_id))
         self.assertIsNotNone(out)
         self.assertEqual(spawn.call_count, 1)
+
+    def cpu_held_job(self, title, lane, queued_at, gate="cpu_load(600%)", **fields):
+        """A needs-human job spawn's CPU gate queued: play_queued, queued_launch in its stage, `gate` in queue-gates.txt."""
+        job_id = self.needs_human(title, reason="approve: ready to merge", lane=lane, play_queued=queued_at,
+                                  queued_launch={"action": "start", "prompt": f"/trevskills-scrum start x",
+                                                 "stage": "needs-human"}, **fields)
+        (self.root / "jobs" / job_id / "queue-gates.txt").write_text(gate + "\n")
+        return job_id
+
+    def test_play_queue_tick_light_job_first(self):
+        std = self.needs_human("Cpu std", reason="approve: ready to merge", lane="standard")
+        fast = self.needs_human("Cpu fast", reason="approve: ready to merge", lane="fast")
+        self.launch(600, std, lambda: self.approve(std))
+        self.launch(600, fast, lambda: self.approve(fast))
+        self.edit_job(std, play_queued="2026-11-16T00:00:00+00:00")
+        self.edit_job(fast, play_queued="2026-11-16T05:00:00+00:00")
+        s = self.serve
+        tick = lambda: s.play_queue_tick("repo", self.root, s.board.read_board(self.root)["jobs"])
+        with mock.patch.object(s, "take_room", return_value=True):
+            _, spawn = self.launch(400, fast, tick)
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], [fast, std])
+
+    def test_cpu_first_orders_across_projects(self):
+        b, base = self.serve.board, Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        gate = {"cpu": "cpu_load(600%)", "ram": "ram_room(free=5%)"}
+
+        def project(name, *jobs):  # jobs: (id, lane, play_queued, gate key, extra fields)
+            root = base / name / "scrum"
+            for job_id, lane, at, g, extra in jobs:
+                (root / "jobs" / job_id).mkdir(parents=True)
+                (root / "jobs" / job_id / "queue-gates.txt").write_text(gate[g] + "\n")
+            (root / "board.json").write_text(json.dumps({"jobs": [
+                {"id": i, "stage": "spec", "lane": lane, "play_queued": at, **extra,
+                 "queued_launch": {"action": "start", "prompt": "p", "stage": "spec"}} for i, lane, at, g, extra in jobs]}))
+            return base / name
+
+        repos = {"a": project("a", ("1-new", "fast", "2026-11-16T05:00:00+00:00", "cpu", {}),
+                              ("2-manual", "fast", "2026-11-16T00:00:00+00:00", "cpu", {"play_queued_manual": True}),
+                              ("3-std", "standard", "2026-11-15T00:00:00+00:00", "cpu", {})),
+                 "b": project("b", ("4-old", "lilguy", "2026-11-16T03:00:00+00:00", "cpu", {}),
+                              ("5-ram", "fast", "2026-11-16T01:00:00+00:00", "ram", {}))}
+        with mock.patch.object(b, "projects", return_value=repos):
+            self.assertEqual(tuple(self.serve.cpu_first()), ("b", "4-old"))
+        with mock.patch.object(b, "projects", return_value={"a": repos["a"]}):
+            self.assertEqual(tuple(self.serve.cpu_first()), ("a", "1-new"))
+        with mock.patch.object(b, "projects", return_value={}):
+            self.assertIsNone(self.serve.cpu_first())
+
+    def start(self, job_id, manual=False):
+        return self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=manual)
+
+    def test_spawn_defers_to_longest_held(self):
+        held = self.cpu_held_job("Cpu held", "fast", "2020-01-01T00:00:00+00:00")
+        other = self.needs_human("Cpu fresh", reason="approve: ready to merge", lane="fast")
+        out, spawn = self.launch(400, other, lambda: self.start(other))
+        self.assertIsNone(out)
+        spawn.assert_not_called()
+        self.assertTrue(self.stage_of(other).get("play_queued"))
+        self.assertIn("cpu_queue", (self.root / "jobs" / other / "queue-gates.txt").read_text().split())
+        out, spawn = self.launch(400, held, lambda: self.start(held))
+        self.assertIsNotNone(out)
+        self.assertEqual([c.args[1] for c in spawn.call_args_list], [held])
+
+    def test_spawn_manual_and_empty_queue_unchanged(self):
+        held = self.cpu_held_job("Cpu held manual", "fast", "2020-01-01T00:00:00+00:00")
+        other = self.needs_human("Cpu click", reason="approve: ready to merge")
+        out, spawn = self.launch(400, other, lambda: self.start(other, manual=True))
+        self.assertIsNotNone(out)
+        self.assertEqual(spawn.call_count, 1)
+        self.serve.board.cmd_abort(self.root, held, False)
+        self.serve.RUNS.pop(f"repo/{other}", None)
+        fresh = self.needs_human("Cpu no queue", reason="approve: ready to merge")
+        out, spawn = self.launch(400, fresh, lambda: self.start(fresh))
+        self.assertIsNotNone(out)
+        self.assertEqual(spawn.call_count, 1)
+
+    def test_board_with_activity_cpu_held_secs(self):
+        at = (datetime.now(timezone.utc) - timedelta(seconds=7800)).isoformat(timespec="seconds")
+        held = self.cpu_held_job("Cpu held secs", "standard", at)
+        ram = self.cpu_held_job("Cpu held ram", "standard", at, ram_hold="14 sessions running, 12% RAM free")
+        plain = self.needs_human("Cpu not queued", reason="approve: ready to merge")
+        jobs = {j["id"]: j for j in self.serve.board_with_activity(self.root, "repo")["jobs"]}
+        self.assertTrue(7795 <= jobs[held]["cpuHeldSecs"] <= 7900, jobs[held].get("cpuHeldSecs"))
+        self.assertNotIn("cpuHeldSecs", jobs[ram])
+        self.assertNotIn("cpuHeldSecs", jobs[plain])
 
 
 if __name__ == "__main__":

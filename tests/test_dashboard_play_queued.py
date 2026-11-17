@@ -184,6 +184,14 @@ class PlayQueued(unittest.TestCase):
                                 "Waiting for RAM: 14 sessions running, 12% RAM free",
                                 "Waiting for CPU/RAM: swap used 28.1% of RAM (> 25%).", "Done"]])
 
+    def test_cpu_held_status_line(self):
+        """Job 940: a launch spawn's CPU gate holds (serve.py cpuHeldSecs) shows how long it has waited."""
+        build = {"key": "p/213-c", "project": "p", "id": "213-c", "title": "C", "stage": "build",
+                 "play_queued": "2026-10-25T10:00:00Z", "updatedAt": "2026-10-25T10:00:00Z"}
+        got = run(f"""const b = {json.dumps(build)};
+            out([{{...b, cpuHeldSecs: 7800}}, {{...b, cpuHeldSecs: 7800, ram_hold: "2 sessions running, 9% RAM free"}}].map(statusLine));""")
+        self.assertEqual(got, [["Waiting for CPU 2h 10m", "Waiting for RAM: 2 sessions running, 9% RAM free"]])
+
     def test_missing_job_file_tab_hidden(self):
         job = {**STUCK, "files": ["feature.md", "plan.md"]}
         notfound = 'fetchImpl = async url => url.endsWith("feature.md") ? {ok: false, status: 404, text: async () => "nope"} : {ok: true, status: 200, text: async () => "# plan"};'

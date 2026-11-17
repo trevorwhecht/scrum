@@ -242,6 +242,42 @@ def mark_ram_hold(project, root, jobs, skip=None):
                 live["ram_hold"] = hold
 
 
+def cpu_held(root, job):
+    """True for a non-manual queued launch (play_queued + queued_launch still in its stage, no play_queued_manual) that
+    spawn's CPU gate held: cpu_load in its jobs/<id>/queue-gates.txt (note_queue_gate)."""
+    launch = job.get("queued_launch")
+    if not (job.get("play_queued") and launch) or job.get("play_queued_manual") or job.get("stage") != launch.get("stage"):
+        return False
+    try:
+        gates = (Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt").read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    return any(g.split("(", 1)[0] == "cpu_load" for g in gates)
+
+
+def held_order(root, job):
+    """The queued-launch order: light jobs (board.light_job: fast or lilguy) first, then the oldest play_queued."""
+    return not board.light_job(root, job), job.get("play_queued") or ""
+
+
+def cpu_first():
+    """(project, job id) of the CPU-held launch (cpu_held, not running) that starts first across every board.projects()
+    board, by held_order; None when none waits. spawn holds every other non-manual start while one waits."""
+    best = None
+    for project, repo in board.projects().items():
+        root = repo / "scrum"
+        try:
+            jobs = cached_board(root).get("jobs", [])
+        except (OSError, ValueError, AttributeError):
+            continue
+        for job in jobs:
+            if cpu_held(root, job) and not running(project, job["id"]):
+                key = held_order(root, job)
+                if best is None or key < best[0]:
+                    best = (key, project, job["id"])
+    return best and best[1:]
+
+
 def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
@@ -255,7 +291,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
-    to PULSE_STARTS for pulse_tick."""
+    to PULSE_STARTS for pulse_tick. While the CPU gate is open, a non-manual `start` of any job other than cpu_first()
+    (the longest-held CPU launch) is queued too, noted cpu_queue, so that job starts ahead of new claims and other projects."""
     reason, on_board, queued_at, hold = None, False, None, None
     if action in GATED:
         try:
@@ -273,10 +310,13 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             cpu = None if manual else board.cpu_load_pct()
             light = board.light_job(root, job)
             ram_short = not idle and board.ram_room(floor=0, light=light) < 1
-            if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT and not cpu_exempt(root, job)):
+            cpu_short = cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT and not cpu_exempt(root, job)
+            first = None if manual or cpu_short or action != "start" else cpu_first()
+            behind = first is not None and tuple(first) != (project, job_id)  # the longest-held CPU launch goes first
+            if ram_short or cpu_short or behind:
                 proc = None
                 gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
-                         if ram_short else [f"cpu_load({cpu:.0f}%)"])
+                         if ram_short else [f"cpu_load({cpu:.0f}%)"] if cpu_short else ["cpu_queue"])
                 for gate in gates:
                     note_queue_gate(root, job_id, gate)
                 if ram_short:
@@ -506,7 +546,7 @@ def unqueue(root, job):
 
 
 def play_queue_tick(project, root, jobs) -> bool:
-    """Start the Play clicks the machine guard or a sibling queued, oldest first, before any other start this tick. A
+    """Start the Play clicks the machine guard or a sibling queued, light jobs first then oldest (held_order), before any other start this tick. A
     job no longer resumable, limit-held (a sibling-blocked click) or answered, or already running, is dropped from the
     queue; another kind of refusal keeps it queued and moves on; a machine-guard refusal or a spent resume budget
     (take_room) stops here and keeps it and every later one queued. A launch spawn's gate queued (queued_launch) is
@@ -514,7 +554,7 @@ def play_queue_tick(project, root, jobs) -> bool:
     gate stops here too. A click Trevor made (play_queued_manual) is gated as his click: no CPU gate. True when it
     started one or one waits on a slot."""
     started = False
-    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: j["play_queued"]):
+    for job in sorted((j for j in jobs if j.get("play_queued")), key=lambda j: held_order(root, j)):
         manual = bool(job.get("play_queued_manual"))
         if launch := job.get("queued_launch"):
             if running(project, job["id"]) or job["stage"] != launch["stage"]:
@@ -3858,7 +3898,8 @@ def board_with_activity(root, project):
     waiting job with a dependency not yet done or aborted ("not merged yet"), else one cmd_ready held on an overlap
     (its `overlap_hold`, live holders only). A job not done or aborted whose
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
-    `nextRetryAt` (epoch seconds, or None). A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
+    `nextRetryAt` (epoch seconds, or None). A cpu_held job without ram_hold gets `cpuHeldSecs` (seconds since play_queued).
+    A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
     (e2e_wait_info). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
@@ -3895,6 +3936,11 @@ def board_with_activity(root, project):
             job["buildLockWait"] = True  # the dashboard's "Waiting for the build lock" line
         if job.get("stage") == "check" and job.get("worktree") and (wait := e2e_wait_info(job, time.time())):
             job["e2eWait"] = wait  # the dashboard's "Waiting for the E2E queue" line
+        if not job.get("ram_hold") and cpu_held(root, job):  # the dashboard's "Waiting for CPU 2h 10m" line
+            try:
+                job["cpuHeldSecs"] = max(0, int(time.time() - datetime.fromisoformat(job["play_queued"]).timestamp()))
+            except ValueError:
+                pass
         if job.get("waitingOn"):  # the dashboard's "Waiting on <id> <title>" line
             job["waitingOn"] = {**job["waitingOn"], "titles": [title.get(i, "") for i in job["waitingOn"]["ids"]]}
     data["checkoutAlert"] = checkout_alert(root.parent, data.get("jobs", []))
