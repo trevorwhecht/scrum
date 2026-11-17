@@ -2029,6 +2029,16 @@ def cmd_process_health(root, digest_id: str) -> dict:
     every = {j["id"]: j for j in read_board(root)["jobs"] if isinstance(j, dict) and "id" in j}
     board = {i: j for i, j in every.items() if str(i) in claimed}
     hits = {name: [] for name in HEALTH_LIMITS}  # one entry per counted line, job or window
+    main_prs = []  # PR numbers on origin/main, read once and only when a flagged job has a PR
+
+    def on_main():
+        if not main_prs:
+            try:  # any git failure: empty set, so the flag stands
+                subjects = _git(root.parent, "log", "--format=%s", "origin/main").decode(errors="replace").splitlines()
+            except (ValueError, OSError, subprocess.SubprocessError):
+                subjects = []
+            main_prs.append({m[1] for m in map(PR_SUBJECT_RE.search, subjects) if m})
+        return main_prs[0]
     last = {}  # job -> kind of its last counted stop line: a stall right after a stall is the same episode
     for q in _json_lines(root / "questions.log"):
         job, kind = q.get("job"), q.get("kind")
@@ -2103,6 +2113,9 @@ def cmd_process_health(root, digest_id: str) -> dict:
         job = board.get(job_id, {})
         if job.get("stage") == "done" and (str(job.get("reason") or "").startswith("merged, not live")
                                           or job.get("lane") not in ("lilguy", "runall", "bigboy") and not job.get("pr")):
+            m = re.search(r"/pull/(\d+)/?$", str(job.get("pr") or ""))
+            if m and m[1] in on_main():  # main holds the PR: a stale reason must not flag it
+                continue
             hits["not_shipped"].append(job_id)
     pulse = pulse_auto(_json_lines(pulse_path()))
     for card in _health_file(d / "windows.json", list):

@@ -10029,6 +10029,22 @@ class ProcessHealthTest(unittest.TestCase):
             self.assertEqual((m[name]["previous"], m[name]["flag"]), (None, None), name)
         self.assertEqual(m["test_waste_jobs"]["minutes"], 8)  # 101-alpha's 300 s + 150 s
 
+    def test_not_shipped_skips_pr_on_main(self):
+        stale = "merged, not live: no Deploy line in project.md to verify"
+        pr = "https://github.com/o/r/pull/948"
+        self.board(("101-alpha", "done", "standard", pr, stale), ("102-beta", "done", "standard", None, "merged"))
+        self.digest("001", "101-alpha", "102-beta")
+        repo = self.root.parent
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "Fix thing (#947)")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        flagged = lambda: self.run_health("001")["metrics"]["not_shipped"]["jobs"]
+        self.assertEqual(flagged(), ["101-alpha", "102-beta"])  # main holds #947 only
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "Fix thing (#948)")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(flagged(), ["102-beta"])  # #948 on main; the job with no pr stays flagged
+
     def test_auto_lines_not_stops(self):
         # Job 825: self-resumed stalls and CPU-load waits carry "auto": true and count for no metric.
         self.board(("101-alpha", "done", "standard", None, "merged"), ("102-beta", "done", "standard", None, "merged"))
