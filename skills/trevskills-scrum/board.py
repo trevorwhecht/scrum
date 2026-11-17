@@ -3998,6 +3998,7 @@ USAGE_STOP_PCT = 2  # remaining % below which automated claims stop (USAGE_STEPS
 USAGE_STEPS = (3, 1, 0)  # live-session allowance at each rung; None (above the ladder) means unlimited
 USAGE_RELAX_SECS = 1200  # a window resetting within this many seconds relaxes one rung
 USAGE_TIGHTEN_SECS = 10800  # a low window resetting further away than this tightens one rung
+USAGE_HOLD_PCT = 90  # a window at or past this used % holds every automated claim until it resets
 USAGE_STALE_SECS = 300  # usage.json older than this is unknown, and unknown never tapers
 PACE_LEAD_PCT = 15  # a 5h or 7d window's used % this many points ahead of its elapsed % holds automated claims (allowance 0)
 
@@ -4016,7 +4017,8 @@ def usage_allowance(usage, now, live):
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
     only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour or seven_day window whose used % runs
-    PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder."""
+    PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder.
+    Hold: a window at USAGE_HOLD_PCT used or more gives Allowance(0, "hold 5h ..." or "hold 7d ...") after pace, before the ladder, with no relax near its reset."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
         return None
     at = usage.get("written_at")
@@ -4030,6 +4032,12 @@ def usage_allowance(usage, now, live):
             if w["used_percentage"] - elapsed >= PACE_LEAD_PCT:
                 return Allowance(0, f"pace {label} {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, "
                                     f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
+    for key, label in WINDOWS:
+        w = usage["rate_limits"].get(key)
+        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now \
+                and w["used_percentage"] >= USAGE_HOLD_PCT:
+            return Allowance(0, f"hold {label} {round(w['used_percentage'])}% used ({USAGE_HOLD_PCT}% cap), "
+                                f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M}")
     rungs = (None,) + USAGE_STEPS
     best = None
     for key, label in WINDOWS:

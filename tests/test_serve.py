@@ -2163,15 +2163,15 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertEqual(sorted(out.pop("server")), ["disconnects", "routes", "slow", "worst"])
             self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
-                                            "five_hour_resets_at": now + 3600, "allowance": 3,
-                                            "fable": "paused"})  # 7 % left: rung 1
+                                            "five_hour_resets_at": now + 3600, "allowance": 0,
+                                            "fable": "paused", "hold_until": now + 3600})  # 93 % used: held
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
             fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             del fresh["rate_limits"]["seven_day"]["used_percentage"]
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
                 "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None,
-                "fable": "unknown"})
+                "fable": "unknown", "hold_until": None})
             fresh["written_at"] = time.time() - 301
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
@@ -8206,6 +8206,19 @@ class ResumeFirstTest(unittest.TestCase):
         log = root / "questions.log"
         return log.read_text() if log.exists() else ""
 
+    def test_ready_held_at_90(self):
+        now = time.time()
+        root = self.tree([], [("002-w", "waiting", ["src/a.py"], {})])
+        usage = Path(self.base) / "usage.json"
+        usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+            "five_hour": {"used_percentage": 90, "resets_at": now + 600}}}))
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage), SCRUM_ACCOUNTS=json.dumps([["main", "/unused", None]])):
+            self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], [], "held at 90 % used")
+            self.assertEqual(self.job(root, "002-w")["stage"], "waiting")
+            usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                "five_hour": {"used_percentage": 90, "resets_at": now - 1}}}))
+            self.assertEqual(self.board.cmd_ready(root, "001-par")["ready"], ["002-w"], "after the reset: claims")
+
     def test_paused_sibling_holds_only_overlapping_claims(self):
         paused = {"paused": True, "reason": self.PAUSED}
         root = self.tree([], [("002-pz", "build", ["src/a.py"], paused), ("003-w", "waiting", ["src/b.py"], {})])
@@ -9645,6 +9658,8 @@ class AutoContinueTest(unittest.TestCase):
         a slot frees or usage.json is gone, and a hold partway through a tick stops the later starts."""
         self.project("a", n=1)
         ps = self.base / "ps.txt"
+        hold = mock.patch.object(self.board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: the ladder alone
+        hold.start(); self.addCleanup(hold.stop)
         self.usage.write_text(json.dumps({"written_at": time.time(), "rate_limits": {
             "five_hour": {"used_percentage": 96, "resets_at": time.time() + 1300}}}))  # 4 % left: allowance 1
         with mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
@@ -10394,6 +10409,8 @@ class HighUsageStartsTest(unittest.TestCase):
         self.usage = self.base / "usage.json"
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage))
         env.start(); self.addCleanup(env.stop)
+        hold = mock.patch.object(serve.board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the taper alone
+        hold.start(); self.addCleanup(hold.stop)
         for name, value in (("spawn", "runs/001-std.log"), ("running", False)):  # spawn's log path: the launch started
             p = mock.patch.object(serve, name, return_value=value)
             setattr(self, name, p.start()); self.addCleanup(p.stop)

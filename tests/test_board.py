@@ -10868,6 +10868,10 @@ def usage(five=None, seven=None, written_at=USAGE_NOW):
 
 
 class UsageAllowanceTest(unittest.TestCase):
+    def setUp(self):
+        hold = mock.patch.object(board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the ladder alone
+        hold.start()
+        self.addCleanup(hold.stop)
     def allow(self, u, live=0):
         a = board.usage_allowance(u, USAGE_NOW, live)
         return None if a is None else int(a)
@@ -11160,6 +11164,9 @@ class ReadyUsageTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.usage), SCRUM_PS=str(self.ps), SCRUM_FREE_RAM="30")  # 30%: the young ramp applies
         env.start()
         self.addCleanup(env.stop)
+        hold = mock.patch.object(board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the ladder alone
+        hold.start()
+        self.addCleanup(hold.stop)
         self.root.mkdir()
         (self.root / "backlog.md").write_text("".join(f"- [ ] item {i}\n" for i in range(5)))
         out = board.cmd_runall_start(self.root)
