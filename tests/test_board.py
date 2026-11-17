@@ -336,6 +336,62 @@ class BoardTest(unittest.TestCase):
                          ("needs-human", "Ship it?", "Ship it?", want))
         self.assertRegex(job["updatedAt"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
 
+    # --- ask: behind main with a prisma diff ---
+    def behind_repo(self, prisma=True, behind=True):
+        repo = Path(self.tmp.name) / "wt"
+        def g(*a):
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+        repo.mkdir()
+        g("init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a")
+        g("add", "-A"); g("commit", "-qm", "a")
+        g("branch", "feat")
+        if behind:
+            (repo / ("prisma" if prisma else "src")).mkdir()
+            (repo / ("prisma" if prisma else "src") / "x.prisma").write_text("x")
+            g("add", "-A"); g("commit", "-qm", "b")
+        g("checkout", "-q", "feat")
+        return repo
+
+    def ask_db(self, repo, rework=None):
+        job_id = board.cmd_new(self.root, "x")
+        board.cmd_set(self.root, job_id, ["stage=merging"])
+        with board.locked_board(self.root) as b:
+            board.find(b, job_id).update(worktree=str(repo), base="main")
+        if rework:
+            self.write(f"{job_id}/rework.md", rework)
+        opts = [f"Resume=resume {job_id}", f"Abort=abort {job_id}"]
+        return job_id, lambda title="DATABASE_CHANGE": board.cmd_ask(self.root, job_id, "Drift?", opts, title=title)
+
+    def test_ask_database_change_refused_when_behind_main(self):
+        _, ask = self.ask_db(self.behind_repo())
+        with self.assertRaises(SystemExit) as cm:
+            ask()
+        self.assertIn("Auto-rework: behind main", str(cm.exception))
+        job = self.jobs()[0]
+        self.assertEqual(job["stage"], "merging")
+        self.assertNotIn("question", job)
+
+    def test_ask_database_change_allowed_when_up_to_date(self):
+        _, ask = self.ask_db(self.behind_repo(behind=False))
+        ask()
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_ask_database_change_allowed_when_no_prisma_diff(self):
+        _, ask = self.ask_db(self.behind_repo(prisma=False))
+        ask()
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_ask_database_change_allowed_after_behind_main_rework(self):
+        _, ask = self.ask_db(self.behind_repo(), rework="Auto-rework: behind main\n")
+        ask()
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
+    def test_ask_other_title_not_refused(self):
+        _, ask = self.ask_db(self.behind_repo())
+        ask("MERGE_CONFLICT")
+        self.assertEqual(self.jobs()[0]["stage"], "needs-human")
+
     def test_ask_ends_a_stall(self):
         job_id = board.cmd_new(self.root, "x")
         board.cmd_set(self.root, job_id, ["stage=check"])

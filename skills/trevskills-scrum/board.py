@@ -5205,6 +5205,24 @@ def park(root, job, question, parsed, title, recommend=None):
     questions_log(root, entry)
 
 
+def _behind_main_prisma(root, job_id):
+    """True when the job's worktree lacks its base and base differs under prisma/, with no behind-main rework yet:
+    the Merge step "Auto-rework: behind main" applies, not a DATABASE_CHANGE ask. Any git failure is False."""
+    job = next((j for j in read_board(root)["jobs"] if j["id"] == job_id), None)
+    wt, base = (job or {}).get("worktree"), (job or {}).get("base")
+    if not wt or not base or not Path(wt).is_dir() or base.startswith("-"):
+        return False
+    rework = Path(root) / "jobs" / job_id / "rework.md"
+    if rework.exists() and any(l.startswith("Auto-rework: behind main") for l in rework.read_text(errors="replace").splitlines()):
+        return False
+    try:
+        if subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", base, "HEAD"], capture_output=True, timeout=60).returncode == 0:
+            return False
+        return bool(_git(wt, "diff", "--name-only", "HEAD", base, "--", "prisma").strip())
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return False
+
+
 def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title):
     """Park the job at needs-human with a closed question: options are 2-3 "label=command" strings, keyed a, b, c in
     order. recommend is an optional (key, why) naming the option the agent advises. Returns the stored option dicts.
@@ -5236,6 +5254,9 @@ def cmd_ask(root, job_id, question, options, kind=None, recommend=None, *, title
         if not why:
             raise SystemExit("recommend needs a reason")
         recommend = {"key": rkey, "why": why}
+    if title == "DATABASE_CHANGE" and _behind_main_prisma(root, job_id):
+        raise SystemExit("this job is behind main with a prisma diff: do not ask. Append `Auto-rework: behind main` to "
+                         "rework.md, merge origin/<default> per Conflicts sub-steps 1-4, go to the Check gate (no `B ask`)")
     with locked_board(root) as board:
         job = live(board, check_id(job_id))
         kinds = job.get("unblockKinds", [])
