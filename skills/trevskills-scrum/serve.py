@@ -159,19 +159,42 @@ LAUNCH_LOCK = threading.Lock()  # spawn's room check and its Popen run as one st
 GATED = ("start", "resume", "approve", "rework")  # the job launches spawn's gate holds to board.ram_room(floor=0)
 
 
-def note_queue_gate(root, job_id, gate):
-    """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load) to
-    jobs/<id>/queue-gates.txt once per name (the text before `(`), so a job held twice keeps its first readings, for
+def note_queue_gate(root, job_id, gate, name="queue-gates.txt"):
+    """Add `gate` (board.ram_room_reason's ram_room(<readings>), ram_room:<live id> or cpu_load(<pct>%)) to
+    jobs/<id>/<name> (queue-gates.txt) once per name (the text before `(`), so a job held twice keeps its first readings, for
     timing.md's Queue gate column. It outlives the launch, unlike play_queued. Called under LAUNCH_LOCK; a write error
     never blocks the queue."""
-    path = Path(root) / "jobs" / job_id / "queue-gates.txt"
-    name = lambda g: g.split("(", 1)[0]
+    path = Path(root) / "jobs" / job_id / name
+    head = lambda g: g.split("(", 1)[0]
     try:
-        if name(gate) not in (map(name, path.read_text(encoding="utf-8").split()) if path.exists() else []):
+        if head(gate) not in (map(head, path.read_text(encoding="utf-8").split()) if path.exists() else []):
             with path.open("a", encoding="utf-8") as f:
                 f.write(gate + "\n")
     except OSError:
         pass
+
+
+def note_stall_hold(root, job_id, token):
+    """note_queue_gate into jobs/<id>/stall-holds.txt: a hold auto_resume passed a stalled job over for, for
+    timing.md's Stalls cell."""
+    note_queue_gate(root, job_id, token, name="stall-holds.txt")
+
+
+def cpu_token():
+    """The queue-gate token for a CPU-load hold: cpu_load(<pct>%) from board.cpu_load_pct(), bare cpu_load when unread."""
+    cpu = board.cpu_load_pct()
+    return "cpu_load" if cpu is None else f"cpu_load({cpu:.0f}%)"
+
+
+def cpu_exempt(root, job):
+    """A fast or debug job (board.job_lane) whose Likely files (board.child_files) are all tests or exactly one file,
+    while board.live_sessions() is under MAX_SESSIONS: small enough that spawn's and idle_claim's CPU launch gate lets
+    it through. The RAM gate still holds it."""
+    if board.job_lane(root, job) not in ("fast", "debug"):
+        return False
+    files = board.child_files(Path(root) / "jobs", job["id"])
+    return bool(files) and (len(files) == 1 or all(map(board.is_test_path, files))) \
+        and board.live_sessions() < board.MAX_SESSIONS
 
 
 def note_ram_hold(root, job_id):
@@ -223,7 +246,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
-    young ones counted as spent RAM; a fast or lilguy job sizes at the light share) and, unless `manual` (Trevor's click), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
+    young ones counted as spent RAM; a fast or lilguy job sizes at the light share) and, unless `manual` (Trevor's click) or
+    cpu_exempt (a small fast or debug job), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
     None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
@@ -249,10 +273,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             cpu = None if manual else board.cpu_load_pct()
             light = board.light_job(root, job)
             ram_short = not idle and board.ram_room(floor=0, light=light) < 1
-            if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT):
+            if ram_short or (cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT and not cpu_exempt(root, job)):
                 proc = None
                 gates = ([board.ram_room_reason(light)] + [f"ram_room:{i}" for i in sorted(live_ids(project))]
-                         if ram_short else ["cpu_load"])
+                         if ram_short else [f"cpu_load({cpu:.0f}%)"])
                 for gate in gates:
                     note_queue_gate(root, job_id, gate)
                 if ram_short:
@@ -350,7 +374,7 @@ def start_ready(project, root, parent_id, manual=False):
     """Claim the parent's startable children and start each one headless. Returns cmd_ready's output ({"ready": []}
     when CPU load holds it: cpu_hot claims nothing). Cool-down and CPU load hold the claims unless `manual`."""
     if cpu_hot(manual):
-        note_held(root, "cpu_load", ready_waiting(root, parent_id))
+        note_held(root, cpu_token(), ready_waiting(root, parent_id))
         return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
     for child in out["ready"]:
@@ -385,7 +409,7 @@ def wake_waiting(project, root):
         if room < 1:
             note_held(root, "usage_pace" if "pace 5h" in allow.reason else "usage_allowance", ready_waiting(root))
     if cpu_hot():  # re-read right before the claim
-        note_held(root, "cpu_load", ready_waiting(root))
+        note_held(root, cpu_token(), ready_waiting(root))
         return
     out = board.wake_waiting(root, room, hold=lambda j: (cooling and not j.get("wake")) or j.get("wake") and board.resume_blocker(
         root, j["id"], live_ids(project)))
@@ -537,8 +561,8 @@ def idle_claim(project, root, jobs) -> bool:
     live_ids run, or a WATCHED leaf job whose session is alive); a running job with unreadable files blocks all, and
     a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
     a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
-    limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing and keeps the pick
-    held. True when one started."""
+    limit (cpu_hot, re-read just before the claim; a manual queued launch or a cpu_exempt pick skips it) claims nothing
+    and keeps the pick held. True when one started."""
     by_id = {j["id"]: j for j in jobs}
 
     def waiting_child(k):
@@ -570,7 +594,8 @@ def idle_claim(project, root, jobs) -> bool:
     if not ok:
         return False
     pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
-    if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual"))) or not take_room():
+    if cpu_hot(bool(pick.get("queued_launch") and pick.get("play_queued_manual") or cpu_exempt(root, pick))) \
+            or not take_room():
         return False
     IDLE_SINCE.pop(project, None)  # one try per IDLE_CLAIM_SECS, so a refused pick never spends a slot every tick
     if launch := pick.get("queued_launch"):
@@ -1126,12 +1151,28 @@ def auto_resume(project, root, jobs):
     launch never started) is resumed whatever its parent, with no per-stage limit, once board.ram_room(floor=0) >= 1;
     it waits, spending no try and not busy, until then. A GitHub billing stall (board.CI_BILLING_WAIT) is resumed
     60 s after it is first seen, then each time an ACTIONS_ALERT check newer than its last resume shows no refusal;
-    it spends no try, is never parked as spent and is not busy while it waits."""
+    it spends no try, is never parked as spent and is not busy while it waits. Each hold that passes a stalled job
+    over (a refusal, a spent budget, a busy E2E or Check queue, cool-down) is noted in stall-holds.txt (note_stall_hold)."""
     global E2E_RESUMED
     now, busy, e2e_resumed, check_resumed = time.time(), False, bool(E2E_RESUMED), False
 
     def check_job(j):
         return j.get("stage") == "check" and not j.get("paused") and not board.stalled(j) and not limit_held(j)
+
+    def refused(job):  # resume_refusal, noting the hold (note_stall_hold) it passes the job over for
+        refusal = resume_refusal(project, root, job)
+        if refusal and getattr(refusal, "blocker", None):
+            note_stall_hold(root, job["id"], "overlap:" + ",".join(refusal.blocker.ids))
+        elif refusal and refusal.startswith(board.MACHINE_WAIT):
+            tok = held_gate(refusal)
+            note_stall_hold(root, job["id"], cpu_token() if tok == "cpu_load" else tok)
+        return refusal
+
+    def room(job):  # take_room, noting resume_room when the tick's budget is spent
+        if take_room():
+            return True
+        note_stall_hold(root, job["id"], "resume_room")
+        return False
 
     checking = any(check_job(j) for j in jobs)
     if not checking and any(not j.get("paused") and str(j.get("reason") or "").startswith(board.STALL + E2E_WAIT)
@@ -1168,7 +1209,7 @@ def auto_resume(project, root, jobs):
             first, at = CI_BILLING.setdefault(key, (True, now + 60))
             hit = ACTIONS_ALERT.get(str(Path(root).parent))  # the watchdog refreshes it every ACTIONS_ALERT_EVERY
             if (now >= at if first else bool(hit) and hit[0] > at and "refused to start runs" not in (hit[1] or "")) \
-                    and resume_refusal(project, root, job) is None and take_room():
+                    and refused(job) is None and room(job):
                 busy = True
                 CI_BILLING[key] = (False, now)
                 resume_job(project, root, job, jobs)
@@ -1178,7 +1219,9 @@ def auto_resume(project, root, jobs):
             park_spent(root, job, board.stall_stage(job), AUTO_RESUME_MAX)
             continue
         if str(job.get("reason") or "").startswith(board.STALL + board.COOLDOWN_PARK):  # waits out cool down, no try spent
-            if not board.cooling_down() and resume_refusal(project, root, job) is None and take_room():
+            if board.cooling_down():
+                note_stall_hold(root, job["id"], "cool_down")
+            elif refused(job) is None and room(job):
                 busy = True
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
@@ -1186,7 +1229,8 @@ def auto_resume(project, root, jobs):
         if str(job.get("reason") or "").startswith(board.STALL + E2E_WAIT):  # a capacity wait: one per tick, lock free
             if checking or e2e_resumed or not e2e_queue_free():
                 busy = True
-            elif resume_refusal(project, root, job) is None and take_room():
+                note_stall_hold(root, job["id"], "e2e_queue")
+            elif refused(job) is None and room(job):
                 e2e_resumed = busy = True
                 if E2E_RESUMED is not None:
                     E2E_RESUMED = True
@@ -1196,7 +1240,8 @@ def auto_resume(project, root, jobs):
         if str(job.get("reason") or "").startswith(board.STALL + CHECK_WAIT):  # like E2E_WAIT, on check.lock
             if check_resumed or not queue_free("check.lock"):
                 busy = True
-            elif resume_refusal(project, root, job) is None and take_room():
+                note_stall_hold(root, job["id"], "check_queue")
+            elif refused(job) is None and room(job):
                 check_resumed = busy = True
                 AUTO_RESUME[key] = [tries + 1, now]
                 resume_job(project, root, job, jobs)
@@ -1207,14 +1252,14 @@ def auto_resume(project, root, jobs):
         hit, reset, fixed = limit_reset(root, job)
         if not hit:
             if net_error(root, job):
-                if resume_refusal(project, root, job) is None:
+                if refused(job) is None:
                     busy = True
-                    if take_room() and resume_job(project, root, job, jobs):  # a queued launch spends no try
+                    if room(job) and resume_job(project, root, job, jobs):  # a queued launch spends no try
                         AUTO_RESUME[key] = [tries + 1, now + NET_RETRY_EVERY]
                 continue
             m = board.stall_stage(job)
             if m == "spec" and not (Path(root) / "jobs" / job["id"] / "spec.md").exists():  # no spec work done yet
-                if board.ram_room(floor=0) >= 1 and resume_refusal(project, root, job) is None and take_room():
+                if board.ram_room(floor=0) >= 1 and refused(job) is None and room(job):
                     busy = True
                     AUTO_RESUME[key] = [tries + 1, now]
                     resume_job(project, root, job, jobs)
@@ -1224,9 +1269,9 @@ def auto_resume(project, root, jobs):
                 and parent.get("lane") in ("runall", "bigboy")
             if m and (run_child or not job.get("parent")) and stall_spent(key, m):
                 park_spent(root, job, m, STALL_RESUMES.get(m, 1))  # never retried again, so never left holding resume_first
-            elif m and (run_child or not job.get("parent")) and resume_refusal(project, root, job) is None:
+            elif m and (run_child or not job.get("parent")) and refused(job) is None:
                 busy = True
-                if not take_room():
+                if not room(job):
                     continue
                 if resume_job(project, root, job, jobs):  # a launch that raised (CLI missing) or was queued spends no retry
                     stall_mark(key, m)
@@ -1240,7 +1285,7 @@ def auto_resume(project, root, jobs):
         if reset and reset + 120 > now and due < reset + 120:
             AUTO_RESUME[key] = [tries, reset + 120]  # wait for the reset itself, not a blind retry
             continue
-        if resume_refusal(project, root, job) or not take_room():  # no slot: retry next tick without spending a try
+        if refused(job) or not room(job):  # no slot: retry next tick without spending a try
             continue
         AUTO_RESUME[key] = [tries + 1, now + AUTO_RESUME_EVERY]
         resume_job(project, root, job, jobs)
@@ -2239,10 +2284,10 @@ def watchdog_tick():
        Plays (play_queue_tick) and auto-resume stalled or limit-held jobs (auto_resume), sharing one session budget
        from board.ram_room() (RESUME_ROOM); a board.machine_ok refusal ends the pass for every project (a free-disk
        refusal first runs reclaim_disk on that project and checks again). Then resume
-       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick); when none of the three started
-       anything, idle_claim starts one long-held job. Then start a due full E2E run on the main checkout (e2e_full_tick),
+       BigBoy parents waiting on the main checkout's fast-forward (main_ff_tick). Then start a due full E2E run on the main checkout (e2e_full_tick),
        then, in its own guard, a due UI sweep there (ui_sweep_tick).
-       Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick).
+       Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick). After every project's
+       resumes, in each project where none of the three started anything, idle_claim starts one long-held job.
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
@@ -2263,7 +2308,7 @@ def watchdog_tick():
         e2e_lock_reap(time.time())  # frees e2e.lock from a dead or out-of-check holder once a waiter has waited 2 h
     except Exception as e:
         print(f"watchdog: e2e lock reap: {e}", file=sys.stderr, flush=True)
-    busy, alive, seen, candidates = {}, once(lambda: board.session_alive_fn()), [], []
+    busy, alive, seen, candidates, idle = {}, once(lambda: board.session_alive_fn()), [], [], []
     pending = disk_short = False
     RESUME_ROOM, E2E_RESUMED = board.ram_room(), False
     try:
@@ -2274,7 +2319,7 @@ def watchdog_tick():
                 claude_migrate(project, root)
                 respawn_exited(project, root)
                 record_outcomes(project, root)
-                flagged = set(board.cmd_watchdog(root, exits=run_exits(project)))
+                flagged = set(board.cmd_watchdog(root, exits=run_exits(project), hold=stall_hold))
                 if not (root / "board.json").exists():
                     busy[project] = False
                     continue
@@ -2297,8 +2342,8 @@ def watchdog_tick():
                 # their True also means "waits on a slot", so a real start is read from RUNS
                 if launched_since(project, tick_start):  # a start this tick: the slot is not idle
                     IDLE_SINCE.pop(project, None)
-                else:
-                    resumed = idle_claim(project, root, jobs) or resumed
+                else:  # after every project's resumes, so a claim never spends a later project's resume room
+                    idle.append((project, root, jobs))
                 busy[project] = resumed or busy[project]
                 pending = pending or resumed
                 try:  # its own guard: a batch-window failure must not skip auto-play candidates or e2e
@@ -2317,6 +2362,12 @@ def watchdog_tick():
                         print(f"watchdog: {project}: ui sweep: {e}", file=sys.stderr, flush=True)
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
+        for project, root, jobs in idle:
+            try:
+                if idle_claim(project, root, jobs):
+                    busy[project] = pending = True
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: idle claim: {e}", file=sys.stderr, flush=True)
     finally:
         RESUME_ROOM, E2E_RESUMED = None, None
     played = False
@@ -3597,6 +3648,16 @@ def in_tree(path, worktree):
     """True when path is worktree or sits inside it (both resolved)."""
     wt, p = os.path.realpath(worktree), os.path.realpath(path)
     return p == wt or p.startswith(wt + os.sep)
+
+
+def stall_hold(job):
+    """board.cmd_watchdog's hold for a live-idle stall: e2e_lock when a live e2e.lock waiter sits in the job's worktree,
+    else cpu_load(<pct>%) while the load is over machine_ok's MAX_CPU_LOAD_PCT, else None (the session itself is idle)."""
+    wt = job.get("worktree")
+    if wt and any(in_tree(cwd, wt) for cwd, _ in e2e_waiters(time.time())):
+        return "e2e_lock"
+    cpu = board.cpu_load_pct()
+    return f"cpu_load({cpu:.0f}%)" if cpu is not None and cpu > board.MAX_CPU_LOAD_PCT else None
 
 
 def read_holder(slot):

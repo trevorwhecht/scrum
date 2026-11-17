@@ -4897,6 +4897,19 @@ class BoardTest(unittest.TestCase):
         gates.write_text("ram_room\ncpu_load\n")
         self.assertEqual(cell(), "ram_room, cpu_load")
 
+    def test_timing_row_stall_holds_cell(self):
+        """Job 927: stall-holds.txt (serve.py note_stall_hold) names what held the job's stalls in its Stalls cell."""
+        self.write("j/spec.md", "s\n")
+        stalls = {"j": [None]}
+        row = lambda: board._timing_row(self.root, "j", {}, stalls)[0]
+        self.assertEqual(row()[-1], "?")  # no file
+        holds = self.root / "jobs/j/stall-holds.txt"
+        holds.write_text("")
+        self.assertEqual(row()[-1], "?")  # empty file
+        holds.write_text("cpu_load(212%)\ne2e_queue\n")
+        self.assertEqual(row()[-1], "? (held: cpu_load(212%), e2e_queue)")
+        self.assertEqual(len(row()), 10)  # one cell more would break the table header
+
     def test_timing_row_claim_clock(self):
         t0 = 1_700_000_000
         self.write("j/feature.md", "f\n")
@@ -5085,6 +5098,44 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(self.get(paused)["stage"], "review")
         self.assertNotIn("stalled", self.get(paused))
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [])  # not flagged again
+
+    def idle_pair(self):
+        """Two live-idle review jobs, both due for the 2 h no-change flag."""
+        ids = [self.aged(f"Idle {n}", 180, stage="review") for n in ("held", "plain")]
+        for j in ids:
+            (self.root / "jobs" / j).mkdir(parents=True, exist_ok=True)
+            (self.root / "jobs" / j / "build.md").write_text("x")
+            self.age_job_dir(j, 3)
+        return ids
+
+    def stall_lines(self):
+        return [json.loads(l) for l in (self.root / "questions.log").read_text().splitlines()
+                if json.loads(l).get("kind") == "stall"]
+
+    def test_watchdog_live_idle_gate_hold_is_auto(self):
+        """Job 927: a live-idle stall the E2E lock or CPU load held is auto, with its hold token; else as before."""
+        held, plain = self.idle_pair()
+        hold = lambda job: "e2e_lock" if job["id"] == held else None
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True, hold=hold), [held, plain])
+        lines = {l["job"]: l for l in self.stall_lines()}
+        self.assertEqual((lines[held].get("auto"), lines[held].get("hold")), (True, "e2e_lock"))
+        self.assertEqual(("auto" in lines[plain], "hold" in lines[plain]), (False, False))
+        self.assertEqual(self.get(held)["reason"], "stalled: no board or job-dir change for 2 h (session alive but idle)")
+        bare = self.aged("Idle bare", 180, stage="review")
+        (self.root / "jobs" / bare).mkdir(parents=True, exist_ok=True)
+        self.age_job_dir(bare, 3)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: True), [bare])  # hold=None
+        self.assertNotIn("auto", next(l for l in self.stall_lines() if l["job"] == bare))
+
+    def test_process_health_skips_gate_held_idle_stall(self):
+        held, plain = self.idle_pair()
+        board.cmd_watchdog(self.root, alive=lambda job: True,
+                           hold=lambda job: "cpu_load(212%)" if job["id"] == held else None)
+        (self.root / "digests" / "001").mkdir(parents=True)
+        (self.root / "digests" / "001" / "jobs.txt").write_text(f"{held}\n{plain}\n")
+        with redirect_stdout(io.StringIO()):
+            m = board.cmd_process_health(self.root, "001")["metrics"]["stops_per_job"]
+        self.assertEqual(m["jobs"], [plain])
 
     def test_watchdog_skips_live_job_with_recent_job_dir_file(self):
         job_id = self.aged("Busy review", 180, stage="review")

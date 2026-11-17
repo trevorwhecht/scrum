@@ -1015,12 +1015,48 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(job["play_queued"], first)
         self.assertEqual(job["queued_launch"], {"action": "approve", "prompt": f"/trevskills-scrum approve {held}",
                                                 "stage": "needs-human"})
-        self.assertEqual(self.gates_file(held).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
+        self.assertEqual(self.gates_file(held).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load(501%)\n")
 
     def test_spawn_queue_records_cpu_gate(self):
         job_id = self.gate_job("CPU gate")
         self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
-        self.assertEqual(self.gates_file(job_id).read_text(), "cpu_load\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "cpu_load(501%)\n")
+
+    def test_spawn_cpu_exempt_small_fast_job(self):
+        """Job 927: over MAX_LAUNCH_CPU_LOAD_PCT a fast or debug start whose Likely files are all tests, or exactly one
+        file, launches while sessions are under MAX_SESSIONS; anything else stays queued. RAM still holds it."""
+        b = self.serve.board
+        cases = (  # (title, board lane, spec.md text or None, live sessions, ram_room, launches)
+            ("Fast tests", "fast", ["tests/test_a.py", "tests/test_b.py"], 0, 1, True),
+            ("Debug one", "debug", ["src/a.py"], 0, 1, True),
+            ("Header fast", None, ["src/a.py"], 0, 1, True),
+            ("Standard one", "standard", ["src/a.py"], 0, 1, False),
+            ("Fast two", "fast", ["src/a.py", "src/b.py"], 0, 1, False),
+            ("Fast no spec", "fast", None, 0, 1, False),
+            ("Fast full", "fast", ["src/a.py"], b.MAX_SESSIONS, 1, False),
+            ("Fast no RAM", "fast", ["src/a.py"], 0, 0, False))
+        for title, lane, files, live, ram, launches in cases:
+            with self.subTest(title):
+                job_id = self.gate_job(title, stage="spec")
+                with b.locked_board(self.root) as data:
+                    b.find(data, job_id)["lane"] = lane
+                if files is not None:
+                    (self.root / "jobs" / job_id / "spec.md").write_text(
+                        "# x\nLane: fast\n\n## Likely files\n" + "".join(f"- `{f}`\n" for f in files))
+                with mock.patch.dict(self.serve.RUNS, {}, clear=True), \
+                        mock.patch.object(b, "ram_room", return_value=ram), \
+                        mock.patch.object(b, "cpu_load_pct", return_value=501.0), \
+                        mock.patch.object(b, "live_sessions", return_value=live), \
+                        mock.patch.object(b, "spawn", return_value=(mock.Mock(), f"runs/{job_id}-start.log")):
+                    got = self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}")
+                self.assertEqual(got, f"runs/{job_id}-start.log" if launches else None)
+                gates = self.gates_file(job_id).read_text() if self.gates_file(job_id).exists() else None
+                if launches:
+                    self.assertIsNone(gates)
+                elif ram:
+                    self.assertEqual(gates, "cpu_load(501%)\n")
+                else:
+                    self.assertTrue(gates.startswith("ram_room("), gates)
 
     def test_spawn_queue_gate_dedup(self):
         job_id = self.gate_job("Gate dedup")
@@ -1029,9 +1065,10 @@ class ServeTest(unittest.TestCase):
             self.assertIsNone(self.gate_spawn(job_id, ram=0))
         self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\n")
         self.assertIsNone(self.gate_spawn(job_id, cpu=self.serve.board.MAX_LAUNCH_CPU_LOAD_PCT + 1))
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load(501%)\n")
+        self.assertIsNone(self.gate_spawn(job_id, cpu=900.0))  # a second CPU hold keeps the first reading
         self.assertEqual(self.gate_spawn(job_id), f"runs/{job_id}-approve.log")
-        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load\n")
+        self.assertEqual(self.gates_file(job_id).read_text(), "ram_room(free=100%,est=5%,min=20%,young=0/2,sessions=0/14)\ncpu_load(501%)\n")
         other = self.gate_job("Gate never queued")
         self.assertEqual(self.gate_spawn(other), f"runs/{other}-approve.log")
         self.assertFalse(self.gates_file(other).exists())
@@ -7134,6 +7171,54 @@ class AutoResumeTest(unittest.TestCase):
         s.AUTO_RESUME["p/limit"] = [s.AUTO_RESUME_MAX, 0.0]
         self.assertEqual(self.sweep(), [], "capped")
 
+    def test_auto_resume_notes_stall_holds(self):
+        """Job 927: each hold that passes a stalled job over writes one token to stall-holds.txt; a resumed job none."""
+        s, b = self.serve, self.serve.board
+        plain = "stalled: no board update for 30 min and no live session"
+        blocker = s.Refusal("can't resume yet")
+        blocker.blocker = mock.Mock(ids=["005-a", "006-b"])
+        checking = {"id": "c-run", "stage": "check"}
+        cases = (  # (name, reason, patches, extra jobs, expected file text)
+            ("cpu", plain, {"machine": "CPU load 212% of 8 cores (> 150%)", "cpu": 212.0}, [], "cpu_load(212%)\n"),
+            ("ram", plain, {"machine": "free RAM 7% (< 20%)"}, [], "ram\n"),
+            ("overlap", plain, {"refusal": blocker}, [], "overlap:005-a,006-b\n"),
+            ("room", plain, {"room": 0}, [], "resume_room\n"),
+            ("e2e", f"stalled: {s.E2E_WAIT}", {}, [checking], "e2e_queue\n"),
+            ("check", f"stalled: {s.CHECK_WAIT}", {"check_free": False}, [], "check_queue\n"),
+            ("cool", f"stalled: {b.COOLDOWN_PARK}", {"cooling": True}, [], "cool_down\n"),
+            ("resumed", plain, {}, [], None))
+        for name, reason, p, extra, want in cases:
+            with self.subTest(name):
+                s.AUTO_RESUME.clear(); s.STALL_RESUMED.clear()
+                jid = f"h-{name}"
+                (self.root / "jobs" / jid).mkdir(parents=True)
+                self.jobs = [{"id": jid, "stage": "build", "stalled": True, "reason": reason}, *extra]
+                patches = [mock.patch.object(b, "machine_ok", return_value=p.get("machine")),
+                           mock.patch.object(b, "cpu_load_pct", return_value=p.get("cpu", 1.0)),
+                           mock.patch.object(b, "cooling_down", return_value=p.get("cooling", False)),
+                           mock.patch.object(s, "queue_free", return_value=p.get("check_free", True)),
+                           mock.patch.object(s, "RESUME_ROOM", p.get("room"))]
+                if "refusal" in p:
+                    patches.append(mock.patch.object(s, "resume_refusal", return_value=p["refusal"]))
+                with contextlib.ExitStack() as stack:
+                    for x in patches:
+                        stack.enter_context(x)
+                    got = self.sweep()
+                    self.sweep()  # a second pass-over adds nothing
+                self.assertEqual(got, [] if want else [jid])
+                f = self.root / "jobs" / jid / "stall-holds.txt"
+                self.assertEqual(f.read_text() if f.exists() else None, want)
+        with mock.patch.object(b, "machine_ok", return_value="CPU load 300% of 8 cores (> 150%)"), \
+                mock.patch.object(b, "cpu_load_pct", return_value=300.0):
+            self.jobs = [{"id": "h-cpu", "stage": "build", "stalled": True, "reason": plain}]
+            self.sweep()
+        self.assertEqual((self.root / "jobs" / "h-cpu" / "stall-holds.txt").read_text(), "cpu_load(212%)\n",
+                         "a second reading keeps the first")
+        (self.root / "jobs" / "h-err" / "stall-holds.txt").mkdir(parents=True)  # a folder in its place: the write fails
+        with mock.patch.object(b, "machine_ok", return_value="free RAM 7% (< 20%)"):
+            self.jobs = [{"id": "h-err", "stage": "build", "stalled": True, "reason": plain}]
+            self.assertEqual(self.sweep(), [])
+
     def bc_job(self, **extra):
         return {"id": "bc", "stage": "needs-human", "reason": "Build check could not run: Build timed out",
                 "options": [{"key": "a", "label": "Try again", "command": "resume bc"},
@@ -8653,6 +8738,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
         for load, woke in (("501", False), ("500", True)):
             self.queue_board({"id": "001-first", "stage": "done"},
                              {"id": "002-second", "stage": "waiting", "depends_on": ["001-first"], "started_by": "hand"})
+            (self.root / "jobs" / "002-second").mkdir(parents=True, exist_ok=True)
             with mock.patch.object(self.serve, "spawn") as spawn, mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=load), \
                     mock.patch.object(self.board, "machine_ok", return_value=None), \
                     mock.patch.object(self.board, "ram_room", return_value=1), \
@@ -8661,6 +8747,8 @@ class WatchdogIdleParentTest(unittest.TestCase):
             job = self.job("002-second")
             self.assertEqual(([c.args[2] for c in spawn.call_args_list], job["stage"], job["started_by"]),
                              (["002-second"], "spec", "wake") if woke else ([], "waiting", "hand"), load)
+            if not woke:
+                self.assertEqual(self.gate_text("002-second"), "cpu_load(501%)\n")
 
     def test_wake_waiting_holds_without_ram_room(self):
         self.queue_board({"id": "001-first", "stage": "done"},
@@ -8721,7 +8809,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
             (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
         with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
             self.assertEqual(self.serve.start_ready("idle", self.root, "001-par"), {"ready": []})
-        self.assertEqual((self.gate_text("002-kid"), self.gate_text("003-kid")), ("cpu_load\n", None))
+        self.assertEqual((self.gate_text("002-kid"), self.gate_text("003-kid")), ("cpu_load(501%)\n", None))
 
     def test_wake_waiting_gate_dedup_and_unready(self):
         self.waiting_pair()
@@ -9813,6 +9901,19 @@ class IdleClaimTest(unittest.TestCase):
                 got, spawn = self.claim()
             self.assertEqual((got, spawn.call_args.args[2], spawn.call_args.kwargs["manual"]), (True, "005-q", True))
 
+    def test_idle_claim_cpu_exempt_pick(self):
+        """Job 927: over MAX_LAUNCH_CPU_LOAD_PCT a small fast or debug pick (cpu_exempt) is still claimed."""
+        with mock.patch.object(self.board, "machine_ok", return_value=None):
+            for lane, claimed in (("fast", True), ("standard", False)):
+                with self.subTest(lane):
+                    self.write()
+                    (self.root / "jobs" / "003-small" / "spec.md").write_text(
+                        f"# x\nLane: {lane}\n\n## Likely files\n- `src/c.py`\n")
+                    with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="501"):
+                        got, spawn = self.claim()
+                    self.assertEqual((got, self.started(spawn), self.stage("003-small")),
+                                     (True, [("003-small", "start", True)], "spec") if claimed else (False, [], "waiting"))
+
     def test_no_claim_without_free_slot(self):
         s = self.serve
         self.write()
@@ -9951,6 +10052,33 @@ class IdleClaimTest(unittest.TestCase):
                     s.watchdog_tick()
                 self.assertEqual([c[0] for c in calls.mock_calls], want)
                 self.assertEqual("ic" in s.IDLE_SINCE, "start" not in (pq, ar))  # a start this tick restarts the timer
+
+    def test_watchdog_tick_resumes_stall_before_idle_claim(self):
+        """Job 927: with one session of resume room, a later project's stalled job resumes before an earlier
+        project's idle_claim; with no stall, the idle claim starts as before."""
+        s = self.serve
+        other = Path(tempfile.mkdtemp()) / "scrum"
+        (other / "jobs").mkdir(parents=True)
+        stall = {"id": "020-stuck", "stage": "build", "stalled": True, "updatedAt": self.board.now(),
+                 "reason": "stalled: no board update for 30 min and no live session"}
+        s.AUTO_RESUME.clear(); s.STALL_RESUMED.clear()
+        self.addCleanup(s.STALL_RESUMED.clear)
+        for jobs, want in (([stall], [("020-stuck", "resume")]), ([], [("003-small", "start")])):
+            with self.subTest(stalled=bool(jobs)):
+                self.write()
+                (other / "board.json").write_text(json.dumps({"jobs": jobs}))
+                s.IDLE_SINCE.clear()
+                with mock.patch.object(self.board, "projects", return_value={"ic": self.repo, "zb": other.parent}), \
+                        mock.patch.object(self.board, "cmd_watchdog", return_value=[]), \
+                        mock.patch.object(self.board, "machine_ok", return_value=None), \
+                        mock.patch.object(self.board, "ram_room", return_value=1), \
+                        mock.patch.object(self.board, "live_sessions", return_value=0), \
+                        mock.patch.object(s, "spawn", return_value="runs/x.log") as spawn, \
+                        mock.patch.object(s, "sweep_parents"), mock.patch.object(s, "e2e_full_tick"), \
+                        mock.patch.object(s, "auto_continue_tick"), mock.patch.object(s, "terminal_batch_tick"):
+                    s.watchdog_tick()
+                self.assertEqual([c.args[2:4] for c in spawn.call_args_list], want)
+                self.assertEqual(self.stage("003-small"), "waiting" if jobs else "spec")
 
     def test_tick_claims_ram_held_queued_launch(self):
         """Review round 1: a launch spawn's RAM gate held keeps play_queue_tick returning True every tick; after
@@ -11130,7 +11258,7 @@ class IdleCleanupTest(unittest.TestCase):
                 mock.patch.object(s.board, "cmd_watchdog", return_value=[]) as watch, \
                 mock.patch.object(s, "idle_cleanup"), mock.patch("sys.stderr", new=io.StringIO()):
             s.watchdog_tick()
-        self.assertEqual(watch.call_args.kwargs, {"exits": {"runs/20261101-100000-start-101-a.log": 137}})
+        self.assertEqual(watch.call_args.kwargs, {"exits": {"runs/20261101-100000-start-101-a.log": 137}, "hold": s.stall_hold})
 
     def test_watchdog_tick_calls_idle_cleanup(self):
         s = self.serve
@@ -12156,6 +12284,28 @@ class ProdErrorsTest(unittest.TestCase):
         self.assertEqual(err.getvalue().count("watchdog: p1: prod errors: boom"), 1)
         self.assertEqual(err.getvalue().count("watchdog: p2: prod errors: boom"), 1)
         self.assertIn("prod_errors_tick", self.serve.watchdog_tick.__doc__)
+
+
+class StallHoldTest(unittest.TestCase):
+    """Job 927: stall_hold names the gate behind a live-idle stall for board.cmd_watchdog."""
+
+    def test_stall_hold_cause(self):
+        import serve
+        b = serve.board
+        wt = os.path.realpath(tempfile.mkdtemp())
+        job = {"id": "1225-x", "worktree": wt}
+        cases = (  # (waiter cwds, cpu, job, want)
+            ([os.path.join(wt, "sub")], 900.0, job, "e2e_lock"),
+            ([wt], 1.0, job, "e2e_lock"),
+            ([wt + "-other"], b.MAX_CPU_LOAD_PCT + 62.0, job, "cpu_load(212%)"),
+            ([wt], b.MAX_CPU_LOAD_PCT + 62.0, {"id": "1226-y"}, "cpu_load(212%)"),  # no worktree: never e2e_lock
+            ([], float(b.MAX_CPU_LOAD_PCT), job, None),
+            ([], None, job, None))
+        for cwds, cpu, j, want in cases:
+            with self.subTest(cwds=cwds, cpu=cpu, job=j["id"]), \
+                    mock.patch.object(serve, "e2e_waiters", return_value=[(c, 60.0) for c in cwds]), \
+                    mock.patch.object(b, "cpu_load_pct", return_value=cpu):
+                self.assertEqual(serve.stall_hold(j), want)
 
 
 class E2eWaitRecordTest(unittest.TestCase):
