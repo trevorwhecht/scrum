@@ -4449,8 +4449,7 @@ MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-1
 #                       queued behind the cores, and the 1-minute average lets a post-reboot spike (681%) clear in minutes
 MAX_CPU_LOAD_PCT = 300  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459);
-#                        150 -> 300 by job 958: macOS load counts threads waiting on disk and swap, so 150 held claims ~16 h
-#                        in 3 days at a median of 5 sessions while top showed 30% idle. Sessions now run at SESSION_NICE.
+#                        150 -> 300 by job 958: load counts disk/swap waits; 150 held claims ~16 h in 3 days at 30% idle
 SESSION_NICE = 10  # spawn: every headless claude -p session runs at this nice level, below Trevor's own apps
 MAX_LAUNCH_CPU_LOAD_PCT = 500  # serve.spawn queues every non-manual job launch (resume, approve, rework, start) above this load
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
@@ -7206,8 +7205,8 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     except OSError:  # never started (e.g. the claude CLI missing mid-update): no empty log that reads like a dead session
         log.unlink(missing_ok=True)
         raise
-    try:  # job 958: below Trevor's own apps, so sessions take only spare CPU; its tools and tests inherit it. Not
-        os.setpriority(os.PRIO_PROCESS, proc.pid, SESSION_NICE)  # taskpolicy -b, which pins to the efficiency cores
+    try:  # job 958: below Trevor's apps (its tools inherit it); not taskpolicy -b, which pins to the efficiency cores
+        os.setpriority(os.PRIO_PROCESS, proc.pid, SESSION_NICE)
     except (OSError, TypeError):  # already exited, or a test's mock pid
         pass
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
