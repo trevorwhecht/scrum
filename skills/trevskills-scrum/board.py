@@ -4920,8 +4920,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
     holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
-    slot_conflict's `fast`. Paused and stalled siblings keep their
-    overlap slot, and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
+    slot_conflict's `fast`. Paused and stalled siblings with readable Likely files keep their
+    overlap slot (one that runs alone holds nothing without a live session, job 951), and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no; one
     with no spec.md uses holder_files and holds nothing when that is empty. An overlap gate names the file (overlap_gate).
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
@@ -4969,7 +4969,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         by_id = {j["id"]: j for j in board["jobs"]}
         slots = [k for k in slots if not parked_bigboy(k, by_id, live, root)]  # a parked BigBoy child runs no session
         parked = lambda j: (j.get("paused") or stalled(j)) and j["stage"] not in ("done", "aborted")
-        slots += [k for k in kids if k not in busy and parked(k)]  # a paused or stalled sibling resumes on its files
+        # a paused or stalled sibling resumes on its files; one that runs alone and has no live session holds nothing (job 951)
+        slots += [k for k in kids if k not in busy and parked(k) and k.get("parallel") and files.get(k["id"])]
         slots = [k for k in slots if k["stage"] not in POST_BUILD]  # built: holds no slot, still counts in busy
         outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
                    and j["id"] != parent["id"] and not j.get("children") and j["stage"] not in POST_BUILD

@@ -1259,6 +1259,45 @@ class BoardTest(unittest.TestCase):
         board.cmd_set(self.root, d1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [d2])
 
+    def test_ready_paused_stalled_runs_alone_holder_does_not_block(self):
+        def setup(a_ticket, b_ticket, a_files, b_files):
+            self.tearDown(); self.setUp()
+            parent = self.plan(self.ticket(1, **a_ticket), self.ticket(2, **b_ticket), self.ticket(3, deps="T1, T2", exposure="yes"))
+            a, b, _ = board.cmd_plan_apply(self.root, parent)["children"]
+            self.spec(a, *a_files)
+            self.spec(b, *b_files)
+            with board.locked_board(self.root) as bd:
+                board.find(bd, a)["stage"] = "build"
+            return parent, a, b
+        gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split()
+        for park in ({"paused": True}, {"stalled": True}):
+            with self.subTest(park=park):
+                parent, a, b = setup({"parallel": "no"}, {}, ["src/a.py"], ["src/b.py"])
+                with board.locked_board(self.root) as bd:
+                    board.find(bd, a).update(park)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
+            with self.subTest(park=park, waiting="runs alone"):
+                parent, a, b = setup({"parallel": "no"}, {"parallel": "no"}, ["src/a.py"], ["src/b.py"])
+                with board.locked_board(self.root) as bd:
+                    board.find(bd, a).update(park)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [b])
+            with self.subTest(park=park, shared="file"):
+                parent, a, b = setup({}, {}, ["src/a.py"], ["src/a.py"])
+                with board.locked_board(self.root) as bd:
+                    board.find(bd, a).update(park)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+                self.assertEqual(gates(b), [f"overlap:{a}:src/a.py"])
+            with self.subTest(park=park, live=True):
+                parent, a, b = setup({"parallel": "no"}, {"parallel": "no"}, ["src/a.py"], ["src/b.py"])
+                with board.locked_board(self.root) as bd:
+                    board.find(bd, a).update(park)
+                self.assertEqual(board.cmd_ready(self.root, parent, live=[a])["ready"], [])
+                self.assertEqual(gates(b), [f"runs_alone:{a}"])
+        with self.subTest(running="build"):
+            parent, a, b = setup({"parallel": "no"}, {"parallel": "no"}, ["src/a.py"], ["src/b.py"])
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
+            self.assertEqual(gates(b), [f"runs_alone:{a}"])
+
     def test_cmd_ready_notes_queue_gates(self):
         gates = lambda c: (self.root / "jobs" / c / "queue-gates.txt").read_text().split() \
             if (self.root / "jobs" / c / "queue-gates.txt").exists() else []
