@@ -36,6 +36,7 @@ The first line is `VERDICT: CHANGES` whenever any failure's verdict is `real bug
 
 **Rules:**
 - Never weaken or delete an assertion to make a spec pass.
+- When the diff changes a data table, look at your own screenshot of it at 1440 px and 390 px with real dev rows, and write a `[blocking]` `real bug` finding for any visible fault even when every spec passes: a column empty in every row, cut-off key text, rows taller than one line for no reason, a big empty gap, or a wrapped header (UB-3, UB-4).
 - A `flake` in a spec this round runs is healed in this round when one wait on the element the step needs (a visible listbox, option or field before the click) fixes it: commit it like a stale test and re-run it twice; never a fixed sleep or a higher timeout.
 - A `flake` in a spec this round runs is healed in this round when one wait on the element the step needs (a visible listbox, option or field before the click) fixes it: commit it like a stale test and re-run it twice; never a fixed sleep or a higher timeout.
 - When the prompt has `DEV_URL=<url>`, the E2E command and every spec run use that server: prefix the command with `E2E_PORT=<port of DEV_URL>`, replacing any `E2E_PORT=` already in it, and drive the skill's section 4 pages at `DEV_URL`. Never start another dev server, never wait on the dev lock, and never stop the `DEV_URL` server: the orchestrator owns it. If the run still fails with "Another next dev server is already running", record that under Notes as an environment problem, never a finding.
