@@ -1025,7 +1025,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn("scrum-base-", bash, name)
         for path in [ROOT / "agents" / f"scrum-{n}.md" for n in agents]:
             self.assertLessEqual(len(path.read_text()), 22200, path.name)
-        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26000, "newjob.md")  # trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
+        self.assertLessEqual(len((SKILL_DIR / "lanes" / "newjob.md").read_text()), 26150, "newjob.md")  # +shop E2E channel, job 962; trimmed Check gate repeats, job 948 (27290 -> 26000); +debug lane named E2E specs, job 942; +db-up in Check gate, job 761; +Test on-backlog shortcut, job 742; +docker start in Check gate, job 731; +Terminal open on created, job 712; +Terminal auto-open, job 710; +fast visual skip job 689; +fast lane related tests, job 678; +Lane: fast skip, job 684
 
     def test_check_gate_dev_migrate(self):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
