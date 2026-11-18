@@ -7775,7 +7775,7 @@ class AutoResumeTest(unittest.TestCase):
         self.assertEqual(self.held_sweep(jobs), [])
 
     def test_start_ready_run_all_fails_over_to_owa(self):
-        """Job 850: the Auto continue run-all starts on owa while main is limited or tapered, on main while it is free."""
+        """Job 850: the Auto continue run-all starts on owa while main is limited, on main otherwise (job 1182)."""
         s, now = self.serve, time.time()
         self.two_accounts()
         root = self.root / "repo" / "scrum"
@@ -7803,7 +7803,7 @@ class AutoResumeTest(unittest.TestCase):
         (self.main / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
             "five_hour": {"used_percentage": 99, "resets_at": now + 4 * 3600}}}))
         self.assertEqual(s.board.usage_allowance(s.board.read_usage("main"), now, 0), 0)  # tapered
-        self.assertEqual(run_all_env(), str(self.owa), "main tapered: owa")
+        self.assertIsNone(run_all_env(), "main tapered: still main, the primary has no cap")
 
     def test_limit_held_early_failover_drops_limit_reset_at(self):
         self.two_accounts()

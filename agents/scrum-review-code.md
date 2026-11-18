@@ -64,6 +64,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - a basic security pass: injection (SQL, command, path), authorization on new routes and actions, secrets in code or logs, and unsafe HTML sinks (`dangerouslySetInnerHTML`, `innerHTML`)
 - a hardening change on a path real data flows through (blocking redirects, tightening an allowlist, stricter validation, a new content-type check): it is proven against at least one real stored input per affected host or source (a live request or a test fixture copied from a real stored value), not only made-up fixtures. A change that breaks that real input, or has no such proof in build.md, is `[blocking]`
 - a guard, hook or rule that exempts a caller (a session kind, env var, path or flag) from a check: the exempted caller must still be unable to do what the guard forbids (a scrum session committing on the main checkout), shown by a test; without one it is `[blocking]`
+- a check the diff adds or changes that decides a job has no live session (so it starts, resumes or flags the job stalled): it must count every session that can be doing that job's work, not only one under the job's own id (a BigBoy parent's final review runs in its last child's session); a check that looks only at the job's own id is `[blocking]` (job 1157)
 
 **Output:** write exactly one file, `JOB_DIR/round-ROUND/review-code.md`:
 

@@ -190,7 +190,7 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
-          "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: once past, the job takes pick_account's first pick
+          "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$"),  # the dashboard links it
           "shop": re.compile(r"^[0-9]{1,10}$"),  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
           "worker": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")}  # the workers.txt ssh alias that session runs on
@@ -4447,7 +4447,7 @@ def usage_allowance(usage, now, live):
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
-    only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour or seven_day window whose used % runs
+    only feeds the reason text. Trevor's own Play/Resume never call this, nor pick_account for a primary with a backup. Pace: a five_hour or seven_day window whose used % runs
     PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder.
     Hold: a window at USAGE_HOLD_PCT used or more gives Allowance(0, "hold 5h ..." or "hold 7d ...") after pace, before the ladder, with no relax near its reset."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
@@ -4552,7 +4552,8 @@ def pick_account(now, live=0, prefer=None):
     """(name, allowance): name is the first account with room, `prefer` first when listed, then the soonest seven_day reset
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
-    reserve window reached (reserve_hit). allowance is the claims cap across every account with room (job 1130):
+    reserve window reached (reserve_hit). With a backup listed, the primary (primary_account) skips usage_allowance
+    (job 1182: no pace, hold or taper), so it stops only on its limit marker; a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
     None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
     why, room = [], []
@@ -4564,12 +4565,14 @@ def pick_account(now, live=0, prefer=None):
         at = w.get("resets_at") if isinstance(w, dict) else None
         return acc.name != prefer, not (is_num(at) and at > now), at if is_num(at) and at > now else 0
 
+    primary = min(accs, key=lambda a: order(a)[1:]).name if len(accs) > 1 else None  # primary_account, no re-read
+
     for acc in sorted(accs, key=order):
         if until := limited_until(acc.name, now):
             why.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
             continue
         usage = usages[acc.name]
-        allow = usage_allowance(usage, now, live)
+        allow = None if acc.name == primary else usage_allowance(usage, now, live)
         if allow is not None and allow <= (live if isinstance(live, int) else len(live)):  # no slot left
             why.append(f"{acc.name} {allow.reason}")
             continue
@@ -7895,10 +7898,11 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
             job = find(read_board(root), job_id)
             recorded = job.get("account")
             if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
-                recorded = None  # its seven_day window reset since: the first pick wins again, no session is killed
+                recorded = None  # its seven_day window reset since: fallback_account no longer favours it
         except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
             recorded = None
-        account = pick_account(time.time(), prefer=recorded)[0] or fallback_account(time.time(), recorded)
+        # job 1184: never prefer the recorded account, so a restart takes the primary whenever it has room
+        account = pick_account(time.time())[0] or fallback_account(time.time(), recorded)
     acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
     env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise

@@ -283,11 +283,12 @@ class ReadyPacingTest(unittest.TestCase):
     def test_ready_holds_when_every_account_is_full(self):
         self.root.mkdir(parents=True, exist_ok=True)
         self.two_accounts(99, 85)
+        board.note_limit("main", int(time.time()) + 3600)  # the primary stops only on its limit (job 1182)
         parent, kids = self.runall(1)
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
         job = self.jobs()[parent]
         self.assertEqual(job["stage"], "running")
-        self.assertTrue(job["reason"].startswith("waiting: no account has room: main usage 5h 99% used"), job["reason"])
+        self.assertTrue(job["reason"].startswith("waiting: no account has room: main limited until"), job["reason"])
         self.assertIn("; owa reserve 5h 85% used", job["reason"])
 
     def test_ready_only_held_kids_left_keeps_parent_running(self):
@@ -380,21 +381,6 @@ class AccountsTest(AccountEnv):
 class PickAccountTest(AccountEnv):
     FULL = (99, 9000)  # 1 % left, resetting in 2.5 h: usage_allowance 0
 
-    def test_main_full_gives_owa(self):
-        self.write(self.main, five=self.FULL)
-        self.assertEqual(board.pick_account(NOW), ("owa", None))
-
-    def test_tapered_main_filled_by_live_sessions_fails_over(self):
-        self.write(self.main, five=(91, 9000))  # allowance 3
-        self.assertEqual(board.pick_account(NOW, 3)[0], "owa")
-        self.assertEqual(board.pick_account(NOW, [1, 2, 3])[0], "owa")
-        self.assertEqual(board.pick_account(NOW, 2), ("main", None))  # owa has room with no taper (job 1130)
-        self.write(self.owa, five=self.FULL)
-        name, allow = board.pick_account(NOW, 3)
-        self.assertEqual((name, int(allow)), (None, 0))
-        self.assertIn("main usage", allow.reason)
-        self.assertIn("owa usage", allow.reason)
-
     def test_tapered_main_with_owa_clear_gives_no_taper(self):
         """Job 1130: one account near its limit never caps claims while another has room with no taper."""
         self.write(self.main, five=(91, 9000))  # fresh, 9 % left: allowance 3
@@ -402,29 +388,14 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.pick_account(NOW), ("main", None))
         self.assertEqual(board.pick_account(NOW, 2), ("main", None))
 
-    def test_both_tapered_gives_the_larger_allowance(self):
-        """Job 1130: every account with room is tapered: the cap is the largest of their allowances."""
-        with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps([["main", str(self.main), None],
-                                                                     ["owa", str(self.owa), None]])):
-            self.write(self.main, five=(96, 9000))  # 4 % left: allowance 1
-            self.write(self.owa, five=(91, 9000))  # 9 % left: allowance 3
-            name, allow = board.pick_account(NOW)
-            self.assertEqual((name, int(allow)), ("main", 3))  # the name keeps the account order
-            self.assertIn("usage 5h 91% used", allow.reason)
-            name, allow = board.pick_account(NOW, 1)  # main is full: only owa has room
-            self.assertEqual((name, int(allow)), ("owa", 3))
-            name, allow = board.pick_account(NOW, 3)  # both out
-            self.assertEqual((name, int(allow)), (None, 0))
-            self.assertTrue(allow.reason.startswith("no account has room: main usage 5h 96% used"), allow.reason)
-            self.assertIn("owa usage 5h 91% used", allow.reason)
-
     def test_owa_at_reserve_with_main_full_gives_none(self):
-        self.write(self.main, five=self.FULL, seven=(10, 50000))  # main resets first: order stays main, owa
+        self.write(self.main, seven=(10, 50000))  # main resets first: order stays main, owa
+        board.note_limit("main", NOW + 60)  # the primary stops only on its limit (job 1182)
         for five, seven in (((80, 9000), (10, 90000)), ((10, 9000), (90, 90000))):
             self.write(self.owa, five=five, seven=seven, written_at=NOW - 3600)  # stale: the reserve still counts
             name, allow = board.pick_account(NOW)
             self.assertEqual((name, allow), (None, 0), (five, seven))
-            self.assertTrue(allow.reason.startswith("no account has room: main usage 5h 99% used"), allow.reason)
+            self.assertTrue(allow.reason.startswith("no account has room: main limited until"), allow.reason)
             self.assertIn("owa reserve", allow.reason)
 
     def test_primary_is_never_held_and_the_roles_flip(self):
@@ -439,6 +410,19 @@ class PickAccountTest(AccountEnv):
         self.write(self.owa, seven=(95, 100000))  # owa now resets last: it flips to backup
         self.assertEqual(board.primary_account(NOW), "main")
         self.assertIn("reserve 7d", board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
+
+    def test_primary_never_held_by_pace_hold_or_taper(self):
+        """Job 1182: the primary has no cap: pace, the 90 % hold and the taper never skip it; only its limit marker fails over."""
+        with mock.patch.object(board, "PACE_LEAD_PCT", 15), mock.patch.object(board, "USAGE_HOLD_PCT", 90):
+            self.write(self.main, seven=(72, 300000))  # 72 % used at 50 % elapsed: 22 points ahead of pace
+            self.write(self.owa, seven=(4, 600000))
+            self.assertEqual(board.pick_account(NOW), ("main", None))
+            self.write(self.main, seven=(97, 300000))  # past the hold and the taper
+            self.assertEqual(board.pick_account(NOW, 5), ("main", None))
+            board.note_limit("main", NOW + 60)
+            self.assertEqual(board.pick_account(NOW)[0], "owa")
+            self.write(self.owa, seven=(90, 600000))  # the backup still stops at its 90 % reserve
+            self.assertIsNone(board.pick_account(NOW)[0])
 
     def test_non_dict_rate_limits_never_crash_primary_or_reset(self):
         """Job 1146: a usage.json whose rate_limits is a list or string must not crash primary_account or seven_day_reset."""
@@ -466,17 +450,6 @@ class PickAccountTest(AccountEnv):
         self.write(self.main, five=self.FULL)
         self.write(self.owa, five=(79, 9000), seven=(89, 90000))
         self.assertEqual(board.pick_account(NOW)[0], "owa")
-
-    def test_pick_account_hold(self):
-        self.write(self.main, five=(90, 9000))
-        with mock.patch.object(board, "USAGE_HOLD_PCT", 90):
-            self.write(self.owa, five=(90, 9000))
-            name, allow = board.pick_account(NOW)
-            self.assertEqual((name, allow), (None, 0))
-            self.assertIn("main hold 5h 90% used (90% cap)", allow.reason)
-            self.write(self.main, five=(90, -1))  # reset passed: claims again
-            self.write(self.owa, five=(90, -1))
-            self.assertEqual(board.pick_account(NOW)[0], "main")
 
     def test_both_free_gives_main(self):
         self.write(self.main, five=(10, 9000))
@@ -599,7 +572,7 @@ class SpawnAccountTest(AccountEnv):
         return json.loads((self.root / "board.json").read_text())["jobs"][0].get("account")
 
     def test_spawn_sets_config_dir_and_records_account(self):
-        self.write(self.main, five=(99, 9000), written_at=int(time.time()))
+        board.note_limit("main", int(time.time()) + 3600)
         env = self.spawn()
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.owa))
         self.assertEqual(self.account(), "owa")
@@ -621,16 +594,27 @@ class SpawnAccountTest(AccountEnv):
         self.assertIsNone(env.get("CLAUDE_CONFIG_DIR"))  # never assertNotIn: it would print the whole env
         self.assertEqual(self.account(), "main")
 
-    def test_resume_keeps_recorded_account_while_it_has_room(self):
-        board.cmd_set(self.root, self.job, ["account=owa"])
-        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
-        self.assertEqual(self.account(), "owa")
+    def test_restart_takes_the_primary_not_the_recorded_backup(self):
+        """Job 1184: a job recorded on the backup restarts on the primary while it has room; only main's limit marker sends it to owa."""
+        now = time.time()
+        with mock.patch.object(board, "PACE_LEAD_PCT", 15), mock.patch.object(board, "USAGE_HOLD_PCT", 90):
+            self.write(self.main, seven=(72, 3 * 86400), written_at=now)  # the primary, ahead of pace
+            self.write(self.owa, seven=(4, 7 * 86400 - 60), written_at=now)
+            board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(now) + 7 * 86400}"])
+            self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))
+            self.assertEqual(self.account(), "main")
+            board.note_limit("main", int(now) + 3600)
+            self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
+            self.assertEqual(self.account(), "owa")
 
-    def test_recorded_account_dropped_once_its_seven_day_reset_passed(self):
-        board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(time.time()) + 3600}"])
-        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))  # window still ahead: kept
+    def test_fallback_drops_recorded_account_once_its_seven_day_reset_passed(self):
+        later = int(time.time()) + 3600
+        board.note_limit("main", later)
+        board.note_limit("owa", later)
+        board.cmd_set(self.root, self.job, ["account=owa", f"reset={later}"])
+        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))  # window still ahead: the fallback keeps it
         board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(time.time()) - 1}"])
-        self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))  # reset passed: the first pick (main)
+        self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))  # reset passed: the first account (main)
         self.assertEqual(self.account(), "main")
 
     def test_spawn_falls_back_when_every_account_is_full(self):

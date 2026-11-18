@@ -1534,7 +1534,7 @@ def resume_held(project, root, job, jobs, now):
     if running(project, job["id"]):
         return False
     if now < job["limitResetAt"] + 120:
-        other = board.pick_account(now, prefer=job.get("account"))[0]
+        other = board.pick_account(now)[0]  # job 1184: no prefer, so a backup job resumes early on the primary
         if other in (None, job.get("account") or board.accounts()[0].name):
             return True
     if tries >= AUTO_RESUME_MAX:
@@ -3404,7 +3404,7 @@ def machine_status():
 def machine_usage(now):
     """The meter's usage segment: one weekly reading per board.accounts() account, {"name", "seven_day_pct",
     "resets_at", "max_pct"} (claude_usage's weekly %, whatever its age; max_pct, where its red starts, is its 7d
-    reserve, else board.USAGE_HOLD_PCT), then this session's usage_allowance cap, board.fable_state and the later reset
+    reserve, else board.USAGE_HOLD_PCT), then board.pick_account's claims cap, board.fable_state and the later reset
     of a held window, which need usage.json under USAGE_STALE_SECS old (else null, "unknown", null). "unknown" when no
     account has a weekly reading."""
     accounts = [{"name": a.name, "seven_day_pct": (u := claude_usage(now, a.name))["weekly"],
@@ -3414,7 +3414,7 @@ def machine_usage(now):
     if all(a["seven_day_pct"] is None for a in accounts):
         return "unknown"
     usage = board.read_usage() or {}
-    allow = board.usage_allowance(usage, now, 0)  # None when stale; a held window gives 0, so stale holds stay hidden
+    allow = board.pick_account(now)[1]  # job 1184: the real claims cap, None while the primary has room; stale holds stay hidden
     held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)] if allow is not None else []
     return {"accounts": accounts, "allowance": None if allow is None else int(allow),
             "fable": board.fable_state(usage, now), "hold_until": max(held) if held else None}
