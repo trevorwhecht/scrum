@@ -1012,6 +1012,26 @@ class ChannelConfigTest(unittest.TestCase):
         got = self.config({"playwright.config.cjs": 'exports.__esModule = true;\nexports.default = { testDir: "c" };\n'})
         self.assertEqual(got["testDir"], f"{self.repo}/c")
 
+    def test_custom_reporter_resolved_from_repo(self):
+        r = self.repo
+        mod = Path(r, "node_modules", "my-reporter")
+        mod.mkdir(parents=True)
+        (mod / "index.js").write_text("module.exports = class {};\n")
+        got = self.config({"package.json": "{}", "playwright.config.mjs": """export default {
+  reporter: [["my-reporter", {}], ["./rep.js"], ["missing-reporter"], ["list"], ["html"], ["json"], ["junit"],
+             ["line"], ["dot"], ["null"], ["github"], ["blob"]],
+};
+"""})
+        self.assertEqual(got["reporter"], [
+            [f"{r}/node_modules/my-reporter/index.js", {}], [f"{r}/rep.js", {}], ["missing-reporter", {}],
+            ["list", {}], ["html", {"outputFolder": f"{r}/playwright-report"}], ["json", {}], ["junit", {}],
+            ["line", {}], ["dot", {}], ["null", {}], ["github", {}], ["blob", {}]])
+
+    def test_top_level_respect_git_ignore_kept(self):
+        got = self.config({"playwright.config.mjs": "export default { respectGitIgnore: false, projects: [{ name: 'a' }] };\n"})
+        self.assertIs(got["respectGitIgnore"], False)
+        self.assertEqual([p.get("respectGitIgnore") for p in got["projects"]], [None])
+
     def test_paths_resolved_to_repo(self):
         r = self.repo
         got = self.config({"playwright.config.mjs": """export default {
