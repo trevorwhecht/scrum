@@ -149,7 +149,7 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/review.md` when this section r
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/merge.md` when this section runs.
 
-When **Prod check** fails on the deploy wait or the smoke check and no `## Prod runs` bullet ran, it waits 2 minutes and reruns once from its top (the default answer, Try again); only a second failure runs its `B ask`.
+When **Prod check** fails on the deploy wait or the smoke check and no `## Prod runs` bullet ran, or a `## Prod runs` bullet exited non-zero or had an error line (never a `prod run refused`, `not allowed` or `changes the schema` failure), it waits 2 minutes and reruns once from its top (the default answer, Try again); only a second failure runs its `B ask`.
 
 ## Merge (APPROVE, or /trevskills-scrum approve)
 
