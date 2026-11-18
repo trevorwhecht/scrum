@@ -3133,6 +3133,24 @@ class ContractTest(unittest.TestCase):
         self.assertIn("— data gap —", passed)
         self.assertIn("are not filed", passed)
 
+    def test_bigboy_reviewer_reuses_full_e2e(self):
+        """Job 1158: the reviewer reran the whole 30 min E2E suite two commits after serve's Full E2E on main ran."""
+        reviewer = (ROOT / "agents" / "scrum-bigboy-reviewer.md").read_text()
+        step3 = reviewer[reviewer.index("3. Run the project's Test command"):reviewer.index("\n4. ")]
+        for phrase in ("`e2e-full.json` in the directory holding `PROJECT`",
+                       "When its `result` is `pass` or `fail` and "
+                       "`git -C \"$REPO\" merge-base --is-ancestor <its head> HEAD` exits 0",
+                       "run only the record's `failed` specs plus the specs `<head>..HEAD` touches",
+                       "`git -C \"$REPO\" diff --name-only --diff-filter=d <head>..HEAD`",
+                       "board.py\" e2e-specs --worktree \"$REPO\" --base <head> --project \"$PROJECT\"",
+                       "Run the full `E2E:` command when the record is missing, `running`, `error` or `loaded`, "
+                       "its head is not an ancestor of HEAD, or `e2e-specs` returns mode `full`",
+                       "Name the case taken under `## Tests`",
+                       # the failure rules that were there before stay
+                       "A failure of either counts as a gap", "re-run only those files once",
+                       "a line starting `pre-existing:` and is not a gap"):
+            self.assertIn(phrase, step3, phrase)
+
     def test_bigboy_main_not_updated_waits(self):
         bigboy = self.lane("bigboy")
         step7 = next(l for l in bigboy.splitlines() if l.startswith("7. **Final BigBoy review.**"))
