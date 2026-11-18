@@ -23,7 +23,7 @@ FEATURE = "Fix the widget\n"
 SPEC = "# Spec\n## Likely files\n- `src/a.py`\n"
 READY = {"ready": True, "up": True, "gh": True, "node": True, "claude": True, "accounts": {"main": True, "owa": True}}
 SETUP = {"node": "ok", "gh": "ok", "gh login": "ok", "gh git": "ok", "owa links": "ok", "permissions": "ok",
-         "account main": "ok", "account owa": "ok"}
+         "account main": "ok", "account owa": "ok", "jev key": "ok"}
 SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start", "run", "ended")
 PAR = "041-run-all"
 

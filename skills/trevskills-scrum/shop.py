@@ -63,6 +63,10 @@ SHOP_ACCOUNTS = {"main": None, "owa": "$HOME/.claude-owa"}  # account: its CLAUD
 ACCOUNT_CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
 NO_TOKEN = 3  # the account check's exit code when the account's oauth-token file is missing
 TOKEN_HINT = " (run claude setup-token in the shop GUI)"
+JEV_KEY_FILE = "$HOME/.config/typesafe/key"  # jev's TypeSafe key on a worker: its keychain is locked over ssh
+JEV_KEYCHAIN = ["/usr/bin/security", "find-generic-password", "-s", "TypeSafe", "-a", "typesafe", "-w"]  # jev.api_key's
+JEV_KEY_WRITE = ("umask 077 && mkdir -p ~/.config/typesafe && cat > ~/.config/typesafe/key.tmp"
+                 " && mv -f ~/.config/typesafe/key.tmp ~/.config/typesafe/key")  # mv: never a partial or loose-mode key
 # This Mac's ~/.claude/settings.json permissions a headless scrum job needs (read 2026-11-17), home paths as {home};
 # local-only entries (MCP tools, Chrome, .env.prod, Homebrew, PR merge, safe-reset) are left out. The Edit denies keep
 # shop sessions off the docs md_sync() owns.
@@ -158,8 +162,9 @@ CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" c
          ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
 SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
-START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + SHOP_ENV
-         + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
+JEV_KEY_ENV = f'[ -r "{JEV_KEY_FILE}" ] && export TYPESAFE_API_KEY="$(cat "{JEV_KEY_FILE}")"; '  # read on the shop only
+START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + JEV_KEY_ENV
+         + SHOP_ENV + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
          ' < /dev/null > {d}/{j}.log 2>&1 & echo $!')
 # ponytail: liveness is `ps -p` showing claude; a reused pid of another claude keeps a dead job alive until it ends
 ENDED = ('ps -p {pid} -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/{p}/{d}/{j}.log"; [ -f "$f" ] || exit 0;'
@@ -291,20 +296,25 @@ def _done(r: subprocess.CompletedProcess) -> tuple[str, str]:
     return ("changed", "") if r.returncode == 0 else ("failed", f" (exit {r.returncode})")
 
 
+def _local_secret(argv: list[str]) -> tuple[str, str]:
+    """(the stripped stdout of `argv` run on this Mac, "") or ("", " (exit <n>)"): 127 when it cannot start, 124 on a
+    timeout, 1 for an exit 0 with no output. Never prints it."""
+    try:
+        local = subprocess.run(argv, capture_output=True, text=True, timeout=STEP_TIMEOUT)
+    except OSError:
+        return "", " (exit 127)"
+    except subprocess.TimeoutExpired:
+        return "", " (exit 124)"
+    secret = local.stdout.strip()
+    return (secret, "") if secret and not local.returncode else ("", f" (exit {local.returncode or 1})")
+
+
 def _gh_login(alias: str) -> tuple[str, str]:
     """Pipe this Mac's gh token into the shop's gh login on stdin, unless the shop is already logged in."""
     if run("gh auth status", STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
-    try:
-        local = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=STEP_TIMEOUT)
-    except OSError:
-        return "failed", " (exit 127)"
-    except subprocess.TimeoutExpired:
-        return "failed", " (exit 124)"
-    token = local.stdout.strip()
-    if local.returncode or not token:
-        return "failed", f" (exit {local.returncode or 1})"
-    return _done(run(GH_LOGIN, STEP_TIMEOUT, input=token, alias=alias))
+    token, note = _local_secret(["gh", "auth", "token"])
+    return _done(run(GH_LOGIN, STEP_TIMEOUT, input=token, alias=alias)) if token else ("failed", note)
 
 
 def _gh_git(alias: str) -> tuple[str, str]:
@@ -336,6 +346,14 @@ def _account_step(name: str, alias: str) -> tuple[str, str]:
     return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
 
 
+def _jev_key(alias: str) -> tuple[str, str]:
+    """Pipe this Mac's Keychain TypeSafe key into the shop's JEV_KEY_FILE on stdin, unless that file is non-empty."""
+    if run(f'[ -s "{JEV_KEY_FILE}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
+        return "ok", ""
+    key, note = _local_secret(JEV_KEYCHAIN)
+    return _done(run(JEV_KEY_WRITE, STEP_TIMEOUT, input=key, alias=alias)) if key else ("failed", note)
+
+
 def _accounts(alias: str) -> list[str]:
     """The SHOP_ACCOUNTS names on `alias`'s workers() line, in SHOP_ACCOUNTS order; every one when it has no line."""
     line = next((w.accounts for w in workers() if w.alias == alias), SHOP_ACCOUNTS)
@@ -358,7 +376,8 @@ def setup(alias: str = ALIAS) -> dict[str, str]:
              "gh": lambda: ("ok", "") if tools["gh"] else _done(run(GH_INSTALL, INSTALL_TIMEOUT, alias=alias)),
              "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
              "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
-             **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)}}
+             **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)},
+             "jev key": lambda: _jev_key(alias)}
     out = {}
     for name, step in steps.items():
         out[name], note = step()
