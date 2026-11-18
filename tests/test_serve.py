@@ -12352,7 +12352,7 @@ class ProdErrorsTest(unittest.TestCase):
         rows = [self.row("/api/orders/1", "Error: upstream 503", 1762732800000, "dpl_old"),
                 self.row("/api/orders/2", "Error: upstream 502", 1762736400000, "dpl_new")]
         self.sweep(rows)
-        want = (f"Prod error on /api/orders/:id: Error: upstream N — 2x in 24 h, first seen 2025-11-10T00:00:00Z, "
+        want = (f"Prod error on `/api/orders/:id`: `Error: upstream N` — 2x in 24 h, first seen 2025-11-10T00:00:00Z, "
                 f"last seen 2025-11-10T01:00:00Z, deployment dpl_new (sig {sig})")
         self.assertEqual([(i["text"], i["done"]) for i in self.backlog()], [(want, False)])
         self.assertEqual(self.state()["seen"][sig], {"route": "/api/orders/:id", "message": "Error: upstream N",
@@ -12368,7 +12368,7 @@ class ProdErrorsTest(unittest.TestCase):
         self.sweep([self.row("/api/orders/9", "Error: upstream 500", 1762909200000, "dpl_3")], now=day + 86400)
         items = self.backlog()
         self.assertEqual(len(items), 2)
-        self.assertEqual(items[1]["text"], f"Prod error on /api/orders/:id: Error: upstream N — 1x in 24 h, first seen "
+        self.assertEqual(items[1]["text"], f"Prod error on `/api/orders/:id`: `Error: upstream N` — 1x in 24 h, first seen "
                                            f"2025-11-10T00:00:00Z, last seen 2025-11-12T01:00:00Z, deployment dpl_3 (sig {sig})")
         self.assertFalse(items[1]["done"])
         (self.root / "backlog.md").write_text("# Backlog\n")
@@ -12398,18 +12398,23 @@ class ProdErrorsTest(unittest.TestCase):
         self.sweep([other], now=self.NOW + 2 * 86400)
         self.assertEqual(self.state()["seen"][sig], seen[sig], "an unseen signature keeps its stored values")
 
+    def test_backticks_in_route_and_message_become_quotes(self):
+        self.sweep([self.row("/api/`x`", "Error: `evil` failed", 1762736400000)])
+        text = self.backlog()[0]["text"]
+        self.assertTrue(text.startswith("Prod error on `/api/'x'`: `Error: 'evil' failed` — 1x in 24 h"), text)
+
     def test_caps_five_items_plus_one_summary(self):
         rows = [self.row(f"/r{chr(97 + n)}", "Error: boom", 1762736400000) for n in range(8) for _ in range(n + 1)]
         self.sweep(rows)
         texts = [i["text"] for i in self.backlog()]
-        self.assertEqual([t.split(":")[0] for t in texts[:5]], [f"Prod error on /r{c}" for c in "hgfed"])
+        self.assertEqual([t.split(":")[0] for t in texts[:5]], [f"Prod error on `/r{c}`" for c in "hgfed"])
         self.assertEqual(texts[5], "Prod error sweep: 3 more new production error signatures in the last 24 h were not "
                                    "backlogged (cap 5 a day); see scrum/prod-errors.json")
         self.assertEqual(len(texts), 6)
         self.assertEqual(len(self.state()["seen"]), 8)
         self.sweep(rows, now=self.NOW + 86400)
         texts = [i["text"] for i in self.backlog()]
-        self.assertEqual([t.split(":")[0] for t in texts[6:]], [f"Prod error on /r{c}" for c in "cba"],
+        self.assertEqual([t.split(":")[0] for t in texts[6:]], [f"Prod error on `/r{c}`" for c in "cba"],
                          "signatures over yesterday's cap are added the next day")
         self.assertEqual(len(texts), 9, "no second summary while one is open")
 

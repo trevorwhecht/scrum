@@ -2160,7 +2160,8 @@ def prod_errors_tick(project, repo, root, now=None) -> None:
         if added >= PROD_ERRORS_CAP:
             over += not any(f"(sig {sig})" in t for t in open_text)
             continue
-        text = (f"Prod error on {g['route']}: {g['message']} — {g['count']}x in 24 h, first seen {iso(g['first'])}, "
+        route, msg = (str(g[k]).replace("`", "'") for k in ("route", "message"))
+        text = (f"Prod error on `{route}`: `{msg}` — {g['count']}x in 24 h, first seen {iso(g['first'])}, "
                 f"last seen {iso(g['last'])}, deployment {g['deployment']} (sig {sig})")
         added += bool(board.cmd_backlog_add(root, [text], unless_open=f"(sig {sig})"))
     if over:
