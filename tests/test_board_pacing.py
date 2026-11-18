@@ -440,6 +440,19 @@ class PickAccountTest(AccountEnv):
         self.assertEqual(board.primary_account(NOW), "main")
         self.assertIn("reserve 7d", board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
 
+    def test_primary_never_held_by_pace_hold_or_taper(self):
+        """Job 1182: the primary has no cap: pace, the 90 % hold and the taper never skip it; only its limit marker fails over."""
+        with mock.patch.object(board, "PACE_LEAD_PCT", 15), mock.patch.object(board, "USAGE_HOLD_PCT", 90):
+            self.write(self.main, seven=(72, 300000))  # 72 % used at 50 % elapsed: 22 points ahead of pace
+            self.write(self.owa, seven=(4, 600000))
+            self.assertEqual(board.pick_account(NOW), ("main", None))
+            self.write(self.main, seven=(97, 300000))  # past the hold and the taper
+            self.assertEqual(board.pick_account(NOW, 5), ("main", None))
+            board.note_limit("main", NOW + 60)
+            self.assertEqual(board.pick_account(NOW)[0], "owa")
+            self.write(self.owa, seven=(90, 600000))  # the backup still stops at its 90 % reserve
+            self.assertIsNone(board.pick_account(NOW)[0])
+
     def test_non_dict_rate_limits_never_crash_primary_or_reset(self):
         """Job 1146: a usage.json whose rate_limits is a list or string must not crash primary_account or seven_day_reset."""
         self.write(self.main, seven=(95, 90000))
