@@ -38,12 +38,13 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    - **Needs-human:** every time this job would run `B ask` (or abort itself as obsolete, with its `obsolete: ...` reason, or with a `requeue: ...` auto-abort or `looks already fixed: ...` close from **Auto-abort instead of needs-human**), it also reports to GitHub, then stops: push `scrum/$ID` (with no commits beyond `$BASE`, push `$(git commit-tree "$BASE^{tree}" -p "$BASE" -m "[scrum $ID] needs-human")` to `refs/heads/scrum/$ID` so a PR can exist), open the PR as above (its body with the `Scrum lane:` line) or keep the open one, add the label with `gh api "$R/issues/<number>/labels" -f "labels[]=scrum:needs-human"`, and post a comment whose first line is the question (written to the **Issue** bar in `lanes/stops.md`) and whose second line is `<!-- scrum needs-human -->`, with `gh api "$R/issues/<number>/comments" -F body=@<file holding it>`.
    - **Artifacts:** every time the job ends (merged, needs-human or obsolete abort), as its last action before it stops (after Merge step 7's `B set`, or after the **Needs-human** PR, label and comment), push the job folder to `scrum-artifacts/<id>` without touching the checkout or its index, so local **Sync** can bring it home:
      ```bash
-     I=$(mktemp -u); cd "$F"
-     B artifacts $ID | tr '\n' '\0' | GIT_INDEX_FILE=$I xargs -0 git add -f --
-     T=$(GIT_INDEX_FILE=$I git write-tree); C=$(git commit-tree "$T" -m "[scrum $ID] artifacts")
-     git push origin "${C}:refs/heads/scrum-artifacts/${ID}"; rm -f "$I"; cd "$REPO"
+     I=$(mktemp -u); P=$(B artifacts $ID); cd "$F"; E=$(git hash-object -t tree /dev/null); T=$E
+     [ -n "$P" ] && printf '%s\n' "$P" | tr '\n' '\0' | GIT_INDEX_FILE=$I xargs -0 git add -f -- && T=$(GIT_INDEX_FILE=$I git write-tree)
+     if [ "$T" != "$E" ]; then C=$(git commit-tree "$T" -m "[scrum $ID] artifacts"); git push origin "${C}:refs/heads/scrum-artifacts/${ID}"
+     else echo "artifacts: empty tree, not pushed"; fi
+     rm -f "$I"; cd "$REPO"
      ```
-     `B artifacts` prints only the files that are safe to push and names the rest in `skipped-secrets.txt`. The branch is never merged and never has a PR. A failed push is reported in the final report but does not change the job's outcome.
+     `B artifacts` prints only the files that are safe to push and names the rest in `skipped-secrets.txt`. It runs before `cd "$F"`, from the same directory as every other step. The branch is never merged and never has a PR. A failed push is reported in the final report but does not change the job's outcome. When `B artifacts` printed nothing or `T` is the empty tree, nothing is committed or pushed: the final report names `artifacts: empty tree, not pushed` as a failure, and an empty-tree skip does not change the job's outcome either.
 3. **Sync** (`/trevskills-scrum cloud-sync`; also the start of `cloud` and of bare `/trevskills-scrum`). Run `B cloud-sync`, never `gh pr list` or `gh pr view`: it finds each `cloud` job's newest `[scrum $ID]` PR whose head is this repo's own scrum/$ID branch (a fork's PR, or one from another branch, is ignored) with one GitHub REST pulls call and makes the board update itself, with no LLM. It prints `{"moved": [{"id", "state", "pr", "reason", "worktree", "artifacts"}], "arrived": [ids], "error"}`. A job moved before its `scrum-artifacts/$ID` branch exists gets an internal `artifactsPending` mark; each later run re-checks it, lists the id in `arrived` once the branch exists, and drops a mark whose branch is still missing after 24 h. When it exits 1 (`gh` not signed in, offline, any `gh` failure), nothing changed: report its `error` and skip the rest of Sync. serve.py also runs it every 10 minutes while a job is in stage `cloud` or carries `artifactsPending`, and starts `/trevskills-scrum cloud-home <id>` headless for each id in `arrived` and for each job it moved with `artifacts` true or a reason starting `Hard stop: schema`. For every job it moves (merged, needs-human or aborted), `B cloud-sync` also writes `lane=<lane>` from the PR body's `Scrum lane:` line; with no valid line it writes no lane. Per job, `B cloud-sync` does exactly this:
    - No PR, or an open PR without the `scrum:needs-human` label: still running; leave it.
    - PR `MERGED`: `B set $ID stage=done pr=<url> reason=` (the done guard re-checks the PR).
@@ -54,15 +55,19 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
    Then run the **Cloud-home tail** for every job in `moved` and every id in `arrived`, in this session, one job at a time with `ID=<its id>`.
 
    **Cloud-home tail** (`/trevskills-scrum cloud-home <id>`: serve.py starts it headless; interactive Sync runs the same steps for every moved or arrived job). The job must be one `B cloud-sync` already moved or listed in `arrived`: `done`, or `needs-human` or `aborted` with a `pr`. Otherwise **refuse** and stop. Load it from `$F/board.json`: `<url>` is its `pr`, `<baseRefName>` is its `base` without `origin/`, and "the worktree add succeeded" means it has a `worktree`. Then run these steps unchanged, in order:
-   - **Artifacts home.** For a `MERGED`, `scrum:needs-human` or `CLOSED` PR, right after its `B set` (and before **Schema auto-migrate** starts the detached approve), bring the job folder home. A missing branch means the fetch fails: extract nothing, report no error, and go on. The copy never overwrites the local `feature.md`: it copies all but `feature.md`. The branch is deleted only after the copy succeeds, and never force:
+   - **Artifacts home.** For a `MERGED`, `scrum:needs-human` or `CLOSED` PR, right after its `B set` (and before **Schema auto-migrate** starts the detached approve), bring the job folder home. A missing branch means the fetch fails: extract nothing, report no error, and go on. The copy never overwrites the local `feature.md`: it copies all but `feature.md`. The branch is deleted only after the copy succeeds, and never force. A branch whose tree is empty is deleted with nothing copied, and the final report says the artifacts were empty:
      ```bash
      cd "$REPO"
      if git fetch origin scrum-artifacts/$ID 2>/dev/null; then
-       T=$(mktemp -d)
-       git archive FETCH_HEAD scrum/jobs/$ID | tar -x -C "$T" && rm -f "$T/scrum/jobs/$ID/feature.md" &&
-         mkdir -p "$F/jobs/$ID" && cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" &&
-         git push origin --delete scrum-artifacts/$ID
-       rm -rf "$T"
+       if [ -z "$(git ls-tree -r FETCH_HEAD)" ]; then
+         echo "artifacts: empty, nothing copied"; git push origin --delete scrum-artifacts/$ID
+       else
+         T=$(mktemp -d)
+         git archive FETCH_HEAD scrum/jobs/$ID | tar -x -C "$T" && rm -f "$T/scrum/jobs/$ID/feature.md" &&
+           mkdir -p "$F/jobs/$ID" && cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" &&
+           git push origin --delete scrum-artifacts/$ID
+         rm -rf "$T"
+       fi
      fi
      ```
    - **Follow-ups.** Then, as **Approve** step 3 (including its Fallback) does on its own board: when `$F/jobs/$ID/followups/*.md` exist, run `B backlog-spec $ID`, and when it succeeds run `B rank-backlog` once (a `rank-backlog` failure is named in the final report only and never stops the sync); otherwise, when `decision.md` has a non-empty `## Follow-ups` section that is not just `- none`, run the **Rank** (SKILL.md New job 3c, `jev-gate.py rank`) on each bullet, then `B backlog-add "<item> (from $ID)" ...`, one argument per bullet (one call per item when ranked items differ in N). Separately, when `decision.md` has a non-empty `## Manual checks` section that is not just `- none`, run `B manual-add "<item> (from $ID)" ...`, one argument per bullet, whatever `## Follow-ups` holds; a failing `manual-add` never blocks the sync. Spawn no spec writer here.

@@ -4128,6 +4128,31 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
         self.assertIn("scrum-artifacts/<id>", readme)
 
+    def test_cloud_artifacts_refuse_empty_tree(self):
+        cloud = self.lane("cloud")
+        step = self.section(cloud, "- **Artifacts:**", "3. **Sync**")
+        block = self.section(step, "```bash", "`B artifacts` prints only")
+        # Job 984: B took its dir from $PWD, so `cd "$F"` before it listed nothing and an empty tree was pushed.
+        self.assertLess(block.index("P=$(B artifacts $ID)"), block.index('cd "$F"'))
+        self.assertIn("E=$(git hash-object -t tree /dev/null)", block)
+        self.assertLess(block.index('[ -n "$P" ]'), block.index("git write-tree"))
+        self.assertLess(block.index('if [ "$T" != "$E" ]; then'), block.index("git commit-tree"))
+        self.assertLess(block.index("git commit-tree"), block.index("git push origin"))
+        self.assertLess(block.index("git push origin"), block.index('else echo "artifacts: empty tree, not pushed"'))
+        self.assertIn("names `artifacts: empty tree, not pushed` as a failure", step)
+        self.assertIn("an empty-tree skip does not change the job's outcome", step)
+        home = self.section(cloud, "- **Artifacts home.**", "- **Follow-ups.**")
+        fetch, empty = home.index("if git fetch origin scrum-artifacts/$ID 2>/dev/null; then"), home.index('if [ -z "$(git ls-tree -r FETCH_HEAD)" ]; then')
+        self.assertLess(fetch, empty)
+        self.assertLess(empty, home.index("git push origin --delete scrum-artifacts/$ID", empty))
+        self.assertLess(home.index("git push origin --delete scrum-artifacts/$ID", empty), home.index("git archive FETCH_HEAD"))
+        self.assertIn("the artifacts were empty", home)
+        self.assertLess(home.index("git archive FETCH_HEAD"), home.index("cp -R"))
+        self.assertLess(home.index("cp -R"), home.rindex("git push origin --delete scrum-artifacts/$ID"))
+        # The safety hook reads `git push ... -f` anywhere later on the line, `rm -f` included.
+        for line in (block + home).splitlines():
+            self.assertNotRegex(line, r"git +(-C +[^ ]+ +)?push( +[^ ]+)* +-f( |$)")
+
     def test_skill_cloud_stale_skill_stops(self):
         text = skill_text()
         cloud = self.lane("cloud")
