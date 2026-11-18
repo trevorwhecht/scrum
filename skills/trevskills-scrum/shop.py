@@ -541,7 +541,7 @@ def _md_tar(alias: str = ALIAS) -> bytes:
     """The copy step's stdin: CLAUDE.md (this Mac's bytes, a newline when they lack one, then notes_import(alias), left
     out when this repo has no notes file for that worker), memory/<name>/ for each _projects() entry that has a memory
     dir here, and skills/<name>/ for each plain folder in ~/.claude/skills (not a link, not `synced`, a PROJECT_RE name;
-    jobs read files there, e.g. trevskills-email's ai-tells.md), its links copied as files and a broken one skipped.
+    jobs read files there, e.g. trevskills-email's ai-tells.md), its links copied as files (a directory link is walked, once per real path) and a broken one skipped.
     Raises OSError (no CLAUDE.md, a bad read)."""
     claude = Path.home() / ".claude"
     text = (claude / "CLAUDE.md").read_bytes()
@@ -560,7 +560,13 @@ def _md_tar(alias: str = ALIAS) -> bytes:
         for d in sorted(skills.iterdir()) if skills.is_dir() else ():
             if d.is_symlink() or not d.is_dir() or d.name == "synced" or not PROJECT_RE.fullmatch(d.name):
                 continue
-            for top, _, files in os.walk(d):
+            seen = set()  # real paths of walked dirs: a directory link back up the tree is not walked twice
+            for top, dirs, files in os.walk(d, followlinks=True):
+                real = os.path.realpath(top)
+                if real in seen:
+                    dirs[:] = []
+                    continue
+                seen.add(real)
                 for f in sorted(files):
                     p = Path(top, f)
                     if p.is_file():  # follows a link; a broken one is skipped (tar.add would raise)

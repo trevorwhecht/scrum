@@ -1304,6 +1304,9 @@ class MdSyncTest(SetupCase):
         self.write(email, {"SKILL.md": b"email skill\n", "ai-tells.md": b"tells\n"})
         (email / "customers.md").symlink_to("profiles/owa/customers.md")  # arrives as a file
         (email / "gone.md").symlink_to("nowhere.md")  # broken: skipped
+        self.write(self.mac / "shared", {"x.md": b"via dir link\n"})
+        (email / "linked").symlink_to(self.mac / "shared")  # a directory link: its files arrive
+        (email / "profiles" / "up").symlink_to("..")  # a cycle back up the tree: walked once
         self.write(here / "trevskills-backlog", {"SKILL.md": b"backlog here\n"})
         self.write(here / "synced", {"big.md": b"never sent\n"})
         self.write(here / "_private", {"SKILL.md": b"off PROJECT_RE\n"})
@@ -1322,10 +1325,12 @@ class MdSyncTest(SetupCase):
             self.assertEqual(sorted(n for n in tar.getnames() if n.startswith("skills")),
                              ["skills/trevskills-backlog/SKILL.md", "skills/trevskills-email/SKILL.md",
                               "skills/trevskills-email/ai-tells.md", "skills/trevskills-email/customers.md",
+                              "skills/trevskills-email/linked/x.md",
                               "skills/trevskills-email/profiles/owa/customers.md"])
         want = {"trevskills-backlog/SKILL.md": b"backlog here\n", "trevskills-email/SKILL.md": b"email skill\n",
                 "trevskills-email/ai-tells.md": b"tells\n", "trevskills-email/customers.md": b"owa customers\n",
                 "trevskills-email/profiles/owa/customers.md": b"owa customers\n",
+                "trevskills-email/linked/x.md": b"via dir link\n",
                 "trevskills-mine/SKILL.md": b"shop only\n"}
         for _ in range(2):  # a second sync leaves the same tree
             self.assertEqual(tree(there), want)
