@@ -54,6 +54,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - the repo's conventions: file naming, file size, the Result pattern if used, the TODO format
 - fetching only what is needed: no `SELECT *`, no over-fetching
 - dead code
+- a shell line the diff adds to a lane, agent or skill `.md` file: `find "$X"` on a path that can be a symlink (like `$REPO`) needs a trailing `/`, and a command a permission allow rule must match is written exactly as that rule, as its own Bash call: `[blocking]`
 - a basic security pass: injection (SQL, command, path), authorization on new routes and actions, secrets in code or logs, and unsafe HTML sinks (`dangerouslySetInnerHTML`, `innerHTML`)
 - a hardening change on a path real data flows through (blocking redirects, tightening an allowlist, stricter validation, a new content-type check): it is proven against at least one real stored input per affected host or source (a live request or a test fixture copied from a real stored value), not only made-up fixtures. A change that breaks that real input, or has no such proof in build.md, is `[blocking]`
 
