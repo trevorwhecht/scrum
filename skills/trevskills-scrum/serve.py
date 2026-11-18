@@ -377,6 +377,9 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         except (SystemExit, OSError):
             account = board.pick_account(time.time())[0]
         proc, log = board.spawn(root, job_id, action, prompt, flags, account=account)
+        if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
+            with PULSE_STARTS_LOCK:
+                PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
                                        "account": account,
@@ -4363,7 +4366,7 @@ JOB_STATES_MAX = 200  # ids one GET /api/p/<project>/job-states may ask for
 
 
 def job_states(root, ids):
-    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, question, options} per job, in board order,
+    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, play_queued, question, options} per job, in board order,
     read from cached_board only (no activity, refusal, lock or session work). ids (exact strings) picks those jobs and
     leaves unknown ids out; None or empty gives every job not done or aborted."""
     jobs = cached_board(root).get("jobs", [])
@@ -4374,7 +4377,7 @@ def job_states(root, ids):
         jobs = [j for j in jobs if j.get("stage") not in ("done", "aborted")]
     return [{"id": j.get("id"), "title": j.get("title"), "stage": j.get("stage"), "reason": j.get("reason"),
              "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j),
-             "question": j.get("question"), "options": j.get("options")}
+             "play_queued": bool(j.get("play_queued")), "question": j.get("question"), "options": j.get("options")}
             for j in jobs]
 
 
