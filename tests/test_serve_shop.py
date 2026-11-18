@@ -66,6 +66,7 @@ class ShopTickTest(unittest.TestCase):
         for p in (mock.patch.multiple(serve.shop, **{n: getattr(self.sh, n) for n in SHOP_FNS}),
                   mock.patch.object(self.board, "projects", side_effect=lambda: dict(self.projects)),
                   mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: False),
+                  mock.patch.object(self.board, "jev_main_only", return_value=None),  # Jev down: the term list decides
                   mock.patch.object(serve, "run_terminal", side_effect=AssertionError("no Terminal window"))):
             p.start()
             self.addCleanup(p.stop)
@@ -1000,6 +1001,173 @@ class ShopTickTest(unittest.TestCase):
                 job = self.job(root, "001-polish-the-knob")
                 self.assertEqual(job["stage"], "cloud")
                 self.assertNotIn("queued_launch", job)
+
+    # --- job 1155: the Runs on tag and shop-room.json ---
+    def room_file(self):
+        return json.loads((self.base / "shop-room.json").read_text())
+
+    def test_shop_room_file_lists_workers_with_room(self):
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\nthird 1 owa\n")
+        self.sh.ready.side_effect = lambda alias: dict(READY, ready=False) if alias == "third" else READY
+        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"}])  # shopmac: 1 of 2
+        t0 = time.time()
+        self.serve.write_shop_room()
+        room = self.room_file()
+        self.assertEqual(room["workers"], ["shopmac", "newmac"])
+        self.assertTrue(t0 <= room["at"] <= time.time())
+        self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias=a) for a in ("shopmac", "newmac", "third")])
+        self.assertEqual(self.calls(), ["ready"] * 3, "no ssh beyond shop.ready's cached answer")
+        self.assertEqual(sorted(p.name for p in self.base.iterdir() if p.name.startswith("shop-room")), ["shop-room.json"])
+        self.assertTrue(self.board.shop_room(self.project("mm", self.runall({"id": "043-a"}))))
+
+    def test_shop_room_file_empty_when_down_full_or_backoff(self):
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\nthird 1 owa\nfourth 1 owa\n")
+        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"},  # shopmac full
+                            {"id": "011-x", "stage": "cloud", "shop": "12", "account": "owa"}])
+        self.serve.SHOP_RETRY_AT["newmac"] = time.time() + 600  # backed off
+        self.sh.ready.side_effect = lambda alias: dict(READY, ready=False) if alias == "third" \
+            else dict(READY, accounts={"main": True, "owa": False})  # third down; fourth lists only owa, not ready
+        self.serve.write_shop_room()
+        self.assertEqual(self.room_file()["workers"], [])
+        self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias="third"), mock.call(alias="fourth")],
+                         "a full or backed-off worker is not probed")
+        self.assertFalse(self.board.shop_room(self.project("mm", self.runall({"id": "043-a"}))))
+        with self.subTest("under unittest with the registry not moved, nothing is written"):
+            (self.base / "shop-room.json").unlink()
+            with mock.patch.dict(os.environ), \
+                    mock.patch.object(self.board, "registry_path", return_value=self.base / "projects.json"):
+                del os.environ["SCRUM_REGISTRY"]
+                self.serve.write_shop_room()
+            self.assertFalse((self.base / "shop-room.json").exists())
+
+    def test_shop_room_rewritten_after_dispatch(self):
+        self.workers("shopmac 1 owa,main\n")
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        seen, real = [], self.serve.write_shop_room
+
+        def write():
+            real()
+            seen.append((self.room_file()["workers"], self.job(root, "043-a")["stage"]))
+
+        with mock.patch.object(self.serve, "write_shop_room", side_effect=write), \
+                mock.patch.object(self.serve, "cloud_tick"), mock.patch.object(self.serve, "prune_worktrees"), \
+                mock.patch.object(self.serve, "actions_alert", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.serve.watchdog_tick()
+        self.assertEqual(seen, [(["shopmac"], "waiting"), ([], "cloud")],
+                         "once before the project loop, again after the dispatch filled shopmac")
+        self.assertEqual(self.job(root, "043-a")["worker"], "shopmac")
+
+    def test_runall_any_child_goes_to_shop(self):
+        root = self.project("mm", self.runall({"id": "043-a", "parallel": True, "likely": ["src/a.py"]},
+                                              {"id": "044-b", "parallel": True, "likely": ["src/b.py"],
+                                               "feature": "Redraw the logo in VectorCraft\n"}))
+        self.serve.write_shop_room()
+        with mock.patch.object(self.board, "ram_room", return_value=5), \
+                mock.patch.dict(os.environ, SCRUM_FREE_RAM="100"):  # this Mac has room too
+            self.assertEqual(self.board.cmd_ready(root, PAR)["ready"], ["044-b"], "the main child is claimed here")
+        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+        self.assertIn("shop_first_since", self.job(root, "043-a"))
+        self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n", ""))
+        job = self.job(root, "043-a")
+        self.assertEqual((job["stage"], job["runs_on"], job["worker"]), ("cloud", "any", "shopmac"))
+        self.assertNotIn("shop_first_since", job)
+
+    def test_queued_start_of_shop_job_stays_queued_locally(self):
+        os.environ["SCRUM_FREE_RAM"] = "100"  # this Mac has room (setUp's env patch restores it)
+        shop_job = self.queued("050-q", feature="Runs on: shop\n\nFix the widget\n")
+        root = self.project("mm", [shop_job, self.queued("051-r")])
+        with mock.patch.object(self.serve, "spawn", return_value="runs/x.log") as spawn:
+            self.assertIs(self.serve.play_queue_tick("mm", root, self.board.read_board(root)["jobs"]), True)
+        self.assertEqual([c.args[2] for c in spawn.call_args_list], ["051-r"], "only the untagged launch starts here")
+        self.assert_held(root)
+        self.assertTrue(self.job(root, "050-q")["play_queued"])
+        root = self.project("mm", [shop_job] + self.runall({"id": "043-a", "feature": "Runs on: shop\n"}))
+        with mock.patch.object(self.serve, "spawn", return_value="runs/x.log") as spawn:
+            self.assertIs(self.serve.idle_claim("mm", root, self.board.read_board(root)["jobs"]), False)
+        spawn.assert_not_called()
+        self.assert_held(root)
+        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+        with self.subTest("control: an untagged queued start goes"):
+            self.serve.IDLE_SINCE.clear()
+            root = self.project("mm", [self.queued("051-r")])
+            with mock.patch.object(self.serve, "spawn", return_value="runs/x.log") as spawn:
+                self.assertIs(self.serve.idle_claim("mm", root, self.board.read_board(root)["jobs"]), True)
+            self.assertEqual([c.args[2] for c in spawn.call_args_list], ["051-r"])
+
+    def test_shop_job_dispatched_when_room(self):
+        root = self.project("mm", [self.queued("050-q", feature="Runs on: shop\n\nFix the widget\n")])
+        self.assertEqual(self.tick(), (True, "shop: mm: 050-q: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual((self.job(root, "050-q")["stage"], self.job(root, "050-q")["runs_on"]), ("cloud", "shop"))
+
+    def test_main_job_never_dispatched(self):
+        root = self.project("mm", self.runall({"id": "043-a", "feature": "Runs on: main\n\nFix the widget\n"},
+                                              {"id": "044-b", "feature": "Redraw the logo in VectorCraft\n"},
+                                              {"id": "045-c"})
+                            + [self.queued("040-q", feature="Tell them by iMessage\n")])
+        self.assertEqual(self.tick(), (True, "shop: mm: 045-c: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual(self.sh.start.call_count, 1)
+        self.assertNotIn("VectorCraft", self.sh.start.call_args.args[2])
+        self.assertEqual({j: self.job(root, j).get("runs_on") for j in ("040-q", "043-a", "044-b", "045-c")},
+                         {"040-q": "main", "043-a": "main", "044-b": "main", "045-c": "any"})
+        self.assertEqual([self.job(root, j)["stage"] for j in ("043-a", "044-b")], ["waiting", "waiting"])
+        self.assert_held(root, "040-q")
+        with self.subTest("a pool of main jobs only sends nothing"):
+            self.sh.reset_mock()
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(self.calls(), ["ready"])
+            self.assertEqual(self.serve.SHOP_RETRY_AT, {})
+
+    def test_new_work_skips_item_naming_main_only_term(self):
+        root = self.project("mm", [], AUTO)
+        skipped = ["Redraw the logo in VectorCraft {p:5}", "Tidy the copy {p:5}"]
+        self.backlog(root, *skipped, "Fix the gadget {p:3}",
+                     specs={"Tidy the copy": "# Spec\nSend it by iMessage.\n\n## Likely files\n- `src/z.py`\n"})
+        inside, asked, real = [], [], self.board.cmd_next
+
+        def cmd_next(*a, **kw):
+            inside.append(True)
+            try:
+                return real(*a, **kw)
+            finally:
+                inside.pop()
+
+        with mock.patch.object(self.board, "cmd_next", side_effect=cmd_next), \
+                mock.patch.object(self.board, "jev_main_only", side_effect=lambda *a: asked.append(bool(inside))):
+            self.assertEqual(self.tick(), (True, "shop: mm: 001-fix-the-gadget: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual(asked, [False], "Jev asked once, after the claim, never under cmd_next's lock")
+        self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n" + "".join(f"- [ ] {s}\n" for s in skipped)
+                         + "- [x] Fix the gadget {p:3} → 001-fix-the-gadget\n")
+
+    def test_fresh_claim_tagged_main_stays_local_without_backoff(self):
+        root = self.project("mm", [], AUTO)
+        self.backlog(root, "Polish the knob")
+        with mock.patch.object(self.board, "jev_main_only", return_value=True):  # Jev: it needs this Mac
+            self.assertEqual(self.tick(), (False, "", ""))
+        self.assertEqual(self.calls(), ["ready"], "no shop step")
+        self.assertEqual(self.serve.SHOP_RETRY_AT, {})
+        job = self.job(root, "001-polish-the-knob")
+        self.assertEqual((job["stage"], job["runs_on"], job["queued_launch"]),
+                         ("spec", "main", {"action": "start", "prompt": "/trevskills-scrum start 001-polish-the-knob",
+                                           "stage": "spec"}))
+        self.assertTrue(job["play_queued"])
+        self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [x] Polish the knob → 001-polish-the-knob\n")
+        self.sh.reset_mock()
+        self.assertEqual(self.tick(), (False, "", ""), "the held main job is never sent")
+        self.sh.start.assert_not_called()
+
+    def test_board_with_activity_runs_on_fields(self):
+        root = self.project("mm", self.runall({"id": "043-a", "feature": "Runs on: shop\n\nFix the widget\n"},
+                                              {"id": "044-b", "runs_on": "main"}, {"id": "045-c"},
+                                              {"id": "046-d", "stage": "cloud", "shop": "11", "runs_on": "shop"})
+                            + [self.queued("050-q", feature="Runs on: shop\n"),
+                               self.queued("051-r", action="approve", runs_on="shop"),
+                               {"id": "060-x", "stage": "done", "runs_on": "any"}])
+        data = self.serve.board_with_activity(root, "mm")
+        self.assertEqual({j["id"]: (j.get("runsOn"), j.get("shopWait")) for j in data["jobs"]},
+                         {PAR: (None, None), "043-a": ("shop", True), "044-b": ("main", None), "045-c": (None, None),
+                          "046-d": ("shop", None), "050-q": ("shop", True), "051-r": ("shop", None),
+                          "060-x": ("any", None)})
 
 
 if __name__ == "__main__":

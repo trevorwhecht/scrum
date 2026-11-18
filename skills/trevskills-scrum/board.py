@@ -1476,7 +1476,7 @@ PROCESSES = (
     ("E2E lock reaps", ("e2e_lock_reap",), ()),
     ("Digest retry", ("digest_retry_tick",), ()),
     ("Weekly digest", ("weekly_tick",), ()),
-    ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick"), ()),
+    ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick", "write_shop_room"), ()),
     ("Usage windows", ("window_tick",), ("windows",)),
     ("Pulse", ("pulse_tick", "record_cpu_sample", "cooldown_chime"), ()),
     ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
