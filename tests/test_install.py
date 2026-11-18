@@ -159,19 +159,24 @@ class InstallTest(unittest.TestCase):
                     "refreshInterval": 60}
             guard = {"matcher": "Bash", "hooks": [{"type": "command", "timeout": 5,
                                                    "command": f"{home}/skills/trevskills-scrum/gitguard/gitguard || true"}]}
-            # no settings.json: created holding only statusLine and the git-guard hook; a second run changes nothing
+            check = {"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "timeout": 60,
+                                                                   "command": f"python3 {home}/skills/trevskills-scrum/edit-check.py"}]}
+            # no settings.json: created holding only statusLine and the two hooks; a second run changes nothing
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
-                self.assertEqual(json.loads(settings.read_text()), {"statusLine": want, "hooks": {"PreToolUse": [guard]}})
+                self.assertEqual(json.loads(settings.read_text()),
+                                 {"statusLine": want, "hooks": {"PreToolUse": [guard], "PostToolUse": [check]}})
             # other keys and no statusLine: added, every other key kept
             settings.write_text(json.dumps({"model": "opus", "hooks": {"Stop": [{"x": 1}]}}))
             for _ in range(2):
                 self.assertEqual(self.run_install(home).returncode, 0)
                 self.assertEqual(json.loads(settings.read_text()),
-                                 {"model": "opus", "hooks": {"Stop": [{"x": 1}], "PreToolUse": [guard]}, "statusLine": want})
+                                 {"model": "opus", "statusLine": want,
+                                  "hooks": {"Stop": [{"x": 1}], "PreToolUse": [guard], "PostToolUse": [check]}})
             # an existing statusLine and git-guard hook, or invalid JSON or a non-object: byte-for-byte unchanged
             mine = '{"statusLine": {"type": "command", "command": "mine"},  "a": 1, "hooks": {"PreToolUse": ' \
-                   '[{"matcher": "Bash", "hooks": [{"type": "command", "command": "my git-guard"}]}]}}\n'
+                   '[{"matcher": "Bash", "hooks": [{"type": "command", "command": "my git-guard"}]}], ' \
+                   '"PostToolUse": [{"hooks": [{"type": "command", "command": "my edit-check.py"}]}]}}\n'
             for text in (mine, "{not json", "[1, 2]\n"):
                 settings.write_text(text)
                 result = self.run_install(home)
@@ -193,12 +198,38 @@ class InstallTest(unittest.TestCase):
                 self.assertEqual(self.run_install(home).returncode, 0)
             got = json.loads(settings.read_text())
             self.assertEqual(list(got), ["model", "statusLine", "hooks", "z"])
-            self.assertEqual(list(got["hooks"]), ["Stop", "PreToolUse"])
+            self.assertEqual(list(got["hooks"]), ["Stop", "PreToolUse", "PostToolUse"])
             self.assertEqual(got["hooks"]["Stop"], [{"x": 1}])
             binary = f"{t}/my home/.claude/skills/trevskills-scrum/gitguard/gitguard"
             self.assertEqual(got["hooks"]["PreToolUse"], [inline, {"matcher": "Bash", "hooks": [
                 {"type": "command", "command": "'" + binary + "' || true", "timeout": 5}]}])
             self.assertEqual(shlex.split(got["hooks"]["PreToolUse"][1]["hooks"][0]["command"]), [binary, "||", "true"])
+
+    def test_install_registers_edit_check_hook_once(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = Path(t) / "my home" / ".claude"
+            home.mkdir(parents=True)
+            settings = home / "settings.json"
+            other = {"matcher": "Write", "hooks": [{"type": "command", "command": "prettier.sh"}]}
+            settings.write_text(json.dumps({"statusLine": {"command": "mine"}, "hooks": {"PostToolUse": [other]}}))
+            for _ in range(2):
+                self.assertEqual(self.run_install(home).returncode, 0)
+            post = json.loads(settings.read_text())["hooks"]["PostToolUse"]
+            script = f"{t}/my home/.claude/skills/trevskills-scrum/edit-check.py"
+            self.assertEqual(post, [other, {"matcher": "Edit|Write|MultiEdit", "hooks": [
+                {"type": "command", "command": "python3 '" + script + "'", "timeout": 60}]}])
+            self.assertEqual(shlex.split(post[1]["hooks"][0]["command"]), ["python3", script])
+            # PostToolUse not a list, or hooks not a dict: warned and left as it was
+            for hooks, kept in (({"PostToolUse": {"x": 1}}, ["PostToolUse"]), ([1], [])):
+                settings.write_text(json.dumps({"statusLine": {"command": "mine"}, "hooks": hooks}))
+                result = self.run_install(home)
+                self.assertEqual(result.returncode, 0)
+                got, want = json.loads(settings.read_text())["hooks"], hooks
+                for key in kept:
+                    got, want = got[key], want[key]
+                self.assertEqual(got, want)
+                self.assertNotIn("edit-check", settings.read_text())
+                self.assertIn("edit-check hook not set", result.stderr)
 
     def test_install_migrates_python_git_guard_hook(self):
         with tempfile.TemporaryDirectory() as t:
@@ -212,7 +243,8 @@ class InstallTest(unittest.TestCase):
             want = {"z": 1, "statusLine": {"command": "mine"}, "hooks": {"PreToolUse": [
                 {"matcher": "Bash", "hooks": [{"type": "command", "timeout": 5,
                                                "command": f"'{home}/skills/trevskills-scrum/gitguard/gitguard' || true"}]},
-                mine]}}
+                mine], "PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [
+                    {"type": "command", "command": f"python3 '{home}/skills/trevskills-scrum/edit-check.py'", "timeout": 60}]}]}}
             texts = []
             for _ in range(2):
                 result = self.run_install(home)

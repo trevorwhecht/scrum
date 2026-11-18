@@ -88,7 +88,7 @@ class LaunchCpuGate(ServeBase):
     def cpu_held_job(self, title, lane, queued_at, gate="cpu_load(600%)", **fields):
         """A needs-human job spawn's CPU gate queued: play_queued, queued_launch in its stage, `gate` in queue-gates.txt."""
         job_id = self.needs_human(title, reason="approve: ready to merge", lane=lane, play_queued=queued_at,
-                                  queued_launch={"action": "start", "prompt": f"/trevskills-scrum start x",
+                                  queued_launch={"action": "start", "prompt": "/trevskills-scrum start x",
                                                  "stage": "needs-human"}, **fields)
         (self.root / "jobs" / job_id / "queue-gates.txt").write_text(gate + "\n")
         return job_id
@@ -180,7 +180,7 @@ class LaunchCpuGate(ServeBase):
             self.assertIsNone(self.serve.cpu_first())
 
     def test_spawn_light_passes_ram_blocked_leader(self):
-        std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
+        self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
         base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, base)
         (base / "scrum").symlink_to(self.root)

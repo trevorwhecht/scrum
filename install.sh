@@ -49,13 +49,15 @@ else
 fi
 # Register board.py as the status line (it feeds usage.json to `ready`'s pacing), only when none is set, and the
 # git-guard PreToolUse hook (refuses a chat's git commit on main in a scrum repo), only when no git-guard hook exists.
-# An old `board.py git-guard` hook entry is rewritten in place to the Go binary.
+# An old `board.py git-guard` hook entry is rewritten in place to the Go binary. The edit-check PostToolUse hook
+# (compile + ruff F on a scrum-repo .py, test_contracts on an agent/lane .md) is added when no edit-check hook exists.
 python3 - "$dest" <<'PY'
 import json, os, shlex, sys
 dest = sys.argv[1]
 path = os.path.join(dest, "settings.json")
 board = "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/board.py")
 guard = shlex.quote(f"{dest}/skills/trevskills-scrum/gitguard/gitguard") + " || true"
+check = "python3 " + shlex.quote(f"{dest}/skills/trevskills-scrum/edit-check.py")
 try:
     with open(path) as f:
         settings = json.load(f)
@@ -63,10 +65,10 @@ except FileNotFoundError:
     settings = {}
 except (OSError, ValueError) as e:
     settings = None
-    print(f"warning: {path} is not readable JSON ({e}); statusLine and git-guard hook not set, add them by hand", file=sys.stderr)
+    print(f"warning: {path} is not readable JSON ({e}); statusLine and hooks not set, add them by hand", file=sys.stderr)
 if settings is not None and not isinstance(settings, dict):
     settings = None
-    print(f"warning: {path} is not a JSON object; statusLine and git-guard hook not set, add them by hand", file=sys.stderr)
+    print(f"warning: {path} is not a JSON object; statusLine and hooks not set, add them by hand", file=sys.stderr)
 changed = []
 if settings is not None and "statusLine" not in settings:
     settings["statusLine"] = {"type": "command", "refreshInterval": 60, "command": f"{board} statusline"}
@@ -86,6 +88,12 @@ if settings is not None:
         if "git-guard" not in json.dumps(pre) and "gitguard" not in json.dumps(pre):
             pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": guard, "timeout": 5}]})
             changed.append("git-guard PreToolUse hook")
+    post = hooks.setdefault("PostToolUse", []) if isinstance(hooks, dict) else None
+    if not isinstance(post, list):
+        print(f"warning: {path} hooks.PostToolUse is not a list; edit-check hook not set, add it by hand", file=sys.stderr)
+    elif "edit-check" not in json.dumps(post):
+        post.append({"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": check, "timeout": 60}]})
+        changed.append("edit-check PostToolUse hook")
 if changed:
     with open(path + ".tmp", "w") as f:
         json.dump(settings, f, indent=2)

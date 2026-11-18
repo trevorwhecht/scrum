@@ -615,7 +615,6 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(text.count("permission|payment|billing"), 1)
 
     def test_skill_debug_repro_needs_interpreter_when_no_test_command(self):
-        text = skill_text()
         debug = self.lane("debug")
         for phrase in ("`python3`", "`python`", "`node`", "`bash`", "`sh`", "`ruby`", "`perl`", "second word",
                        "first space-separated word"):
@@ -1376,7 +1375,6 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("Worktree mode", self.lane("runall"))
 
     def test_skill_bigboy_lane_handles_runall_parent(self):
-        text = skill_text()
         bigboy = self.lane("bigboy")
         self.assertIn("runall", self.section(bigboy, "# BigBoy lane", "1. **Plan.**"))
         self.assertIn("runall", self.section(bigboy, "1. **Tracker.**", "   2. Run `B ready $P`"))
@@ -1422,7 +1420,6 @@ class ContractTest(unittest.TestCase):
         text = (ROOT / "agents" / "scrum-builder.md").read_text()
         step2 = ("2. Implement the spec. Follow the repo's conventions exactly; reuse existing components "
                  "and helpers before writing new ones.")
-        step3 = "3. For each acceptance criterion:"
         must_fail = ("   - Every test must fail if the behaviour breaks: hand-written literal expectations "
                      "(never values computed by the code under test), and never an assertion on a mock.")
         handoff = ("   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, "
@@ -2038,7 +2035,6 @@ class ContractTest(unittest.TestCase):
         self.assertIn('$("blRunAllMatch").value = ""', disarm)
 
     def test_skill_run_all_triager_on_sonnet(self):
-        text = skill_text()
         run_all = self.lane("runall")
         step2 = run_all[run_all.index("2. Spawn"):run_all.index("3. Run")]
         self.assertIn('model: "sonnet"', step2)
@@ -2982,7 +2978,6 @@ class ContractTest(unittest.TestCase):
         """After its machine prefix, every in-scope ask question meets the stops.md bar."""
         dash = (ROOT / "skills" / "trevskills-scrum" / "dashboard.html").read_text()
         stop_prefix = re.compile(re.search(r"const STOP_PREFIX = /(.+)/;", dash).group(1))
-        skill = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         # Pinned machine prefixes the dashboard regex cannot strip (a placeholder or id follows them).
         fixed = ("bigboy chain lock held by ",)
         checked = 0
@@ -3534,7 +3529,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
     def test_debugger_respawn_reuses_or_drops_repro(self):
         line = ("An earlier attempt may have committed a repro test: reuse it if it still fails for the reported "
                 "reason, otherwise remove it with git rm and commit that removal.")
-        text = skill_text()
         debug = self.lane("debug")
         self.assertIn(line, debug)
         self.assertIn("re-spawn line", self.section(debug, "2. **Validate", "\n3. "))
@@ -4136,7 +4130,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("**Unreviewed merge.**", cloud)  # job 1105: a gh-api merge skips stage=merging
 
     def test_skill_cloud_artifacts_come_home(self):
-        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "git write-tree",
@@ -4164,7 +4157,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("scrum-artifacts/<id>", readme)
 
     def test_skill_cloud_stale_skill_stops(self):
-        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         setup = job[job.index("   - **Setup:**"):job.index("   - **Job:**")]
@@ -4182,7 +4174,6 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertIn("HEAD", intro)
 
     def test_skill_cloud_schema_migrates_locally(self):
-        text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         self.assertIn("first line starts `Hard stop: schema`", job)  # cloud reports, never migrates

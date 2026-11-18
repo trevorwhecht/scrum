@@ -1,4 +1,4 @@
-import ast, contextlib, datetime, hashlib, io, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, time
+import ast, contextlib, datetime, hashlib, io, json, os, shutil, stat, subprocess, sys, tarfile, tempfile, time
 import unittest
 import zipfile
 from pathlib import Path

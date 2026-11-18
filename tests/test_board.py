@@ -4680,7 +4680,6 @@ class BoardTest(unittest.TestCase):
         (job,) = self.done_jobs(1)
         waiting = board.cmd_new(self.root, "queued")
         t0 = 1_700_000_000
-        folder = self.root / "jobs" / job
         runs = self.root / "runs"
         runs.mkdir()
         stamp = datetime.fromtimestamp(t0 + 1200, timezone.utc).strftime("%Y%m%d-%H%M%S")

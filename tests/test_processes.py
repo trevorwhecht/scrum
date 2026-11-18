@@ -1,7 +1,7 @@
 """Job 976: the process registry (board.PROCESSES), the machine-wide processes.log (board.log_process) and the
 digest's processes.md (board.write_processes), plus a coverage check that fails when serve.py or board.py gains a
 watchdog process or a scrum-folder state file the registry does not name."""
-import ast, io, json, os, sys, tempfile, time, unittest
+import ast, io, json, os, sys, tempfile, unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
