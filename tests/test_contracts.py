@@ -3747,6 +3747,18 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "never load above 8"):
             self.assertIn(phrase, stops, phrase)
 
+    def test_stops_wrong_project_is_automatic(self):
+        stops = (SKILL_DIR / "lanes" / "stops.md").read_text()
+        line = next(l for l in stops.splitlines() if l.startswith("- **Wrong project:**"))
+        for phrase in ("never calls `B ask`", "trevskills-scrum backlog", "no question"):
+            self.assertIn(phrase, line, phrase)
+
+    def test_stops_no_resume_abort_only_ask(self):
+        stops = (SKILL_DIR / "lanes" / "stops.md").read_text()
+        line = next(l for l in stops.splitlines() if l.startswith("- **Never only resume or abort:**"))
+        for phrase in ("all `resume` or `abort`", "`followup <id> \"<fix>\"`", "`B wait-on <id> <blocker>`"):
+            self.assertIn(phrase, line, phrase)
+
     def test_builder_keeps_new_ui_on_screen_at_390(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         self.assertEqual(builder.count("UB-15"), 1)

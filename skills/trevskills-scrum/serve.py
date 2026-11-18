@@ -1550,7 +1550,8 @@ def cloud_tick(project, root, jobs, now=None):
     artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
     spawn keeps the mark, so a later poll reports the id again. Held during cool-down (no sync, no spawn, CLOUD_LAST
     unstamped, so the first tick after it polls at once). Errors are printed, never raised.
-    Before the sync, each stage-cloud job with a `shop` pid asks shop.ended; after a sync with no error, one whose
+    Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
+    shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
     (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit); once
     that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate."""
@@ -1562,7 +1563,8 @@ def cloud_tick(project, root, jobs, now=None):
         return
     CLOUD_LAST[project] = now
     try:
-        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]))
+        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]),
+                                     alias=j.get("worker") or shop.ALIAS)
                  for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
         out = board.cmd_cloud_sync(root)
         for m in out.get("moved") or []:
@@ -1599,10 +1601,9 @@ def cloud_tick(project, root, jobs, now=None):
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
 
 
-SHOP_MAX = 2  # shop Mac sessions at once across every project's board (stage cloud with a `shop` pid)
-SHOP_RETRY_EVERY = 600  # seconds shop_tick calls no shop function after a failed dispatch step
-# ponytail: one global backoff; make it per-step or per-project if one project's clone failure stalls the others
-SHOP_RETRY_AT = 0.0  # time.time() before which shop_tick dispatches nothing
+SHOP_RETRY_EVERY = 600  # seconds shop_tick calls a worker no shop function after a failed dispatch step there
+# ponytail: per-worker backoff; make it per-step or per-project if one project's clone failure stalls the others
+SHOP_RETRY_AT = {}  # worker alias -> time.time() before which shop_tick sends that worker nothing
 SHOP_ENDED = "requeue: shop session ended without a PR"
 DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md expands these; shop dispatch does not
 
@@ -1612,15 +1613,20 @@ def shop_tick(project, repo, root) -> bool:
     lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy (board lane, `Lane: lilguy` anywhere in
     feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent), setup pending or
     naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md, nor a
-    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the shop Mac
-    as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
-    shop.ready(). Cool-down counts as a hold (machine_ok refuses), so the shop keeps working through it. Account: the
-    first in pick_account's own order (soonest seven-day reset) the shop has ready, else the other. A child is claimed
-    (cmd_ready shop=), then md_sync, setup, clone, env_copy, profile_copy and start run; a failed step puts a claimed
-    child back to waiting, prints one `shop: <project>: <id>: ` line and holds every shop call for SHOP_RETRY_EVERY. The
-    job is then marked stage cloud with shop=<pid> and account=; a refused mark, or a local run started meanwhile, kills
-    the shop session. A down shop or nothing to send: no output, no change. True when it dispatched."""
-    if time.time() < SHOP_RETRY_AT:
+    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to
+    the first shop.workers() worker, in file order, that is out of backoff, runs fewer than its max stage-cloud `shop`
+    jobs on every board (no `worker` field: shopmac), is shop.ready(alias) and has an account: pick_account's own order
+    (soonest seven-day reset), then prefer= each of the worker's accounts in its listed order, until one is on the
+    worker's line and ready there. Later workers are not probed. Cool-down counts as a hold (machine_ok refuses), so
+    the shop keeps working through it. A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
+    profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
+    `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. The job is then
+    marked stage cloud with shop=<pid>, account= and worker=<alias>; a refused mark, or a local run started meanwhile,
+    kills the session on that worker. No worker, a down one or nothing to send: no output, no change. True when it
+    dispatched."""
+    now = time.time()
+    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0)]
+    if not workers:
         return False
     try:
         profile = (Path(root) / "project.md").read_text(errors="replace")
@@ -1653,23 +1659,29 @@ def shop_tick(project, repo, root) -> bool:
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
                   key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
     # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
-    if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()) \
-            or sum(j.get("stage") == "cloud" and bool(j.get("shop")) for r in board.projects().values()
-                   for j in board.read_board(r / "scrum")["jobs"]) >= SHOP_MAX:
+    if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()):
         return False
     if not all(map(is_child, pool)):  # a launch overlapping a running or cloud job waits; cmd_ready checks a child
         busy = busy_files(project, root, jobs)
         pool = [j for j in pool if is_child(j) or clear_of_busy(board.child_files(jobs_dir, j["id"]), busy)]
         if not pool:
             return False
-    ready = shop.ready()
-    if not ready["ready"]:
+    on = collections.Counter(j.get("worker") or shop.ALIAS for r in board.projects().values()
+                             for j in board.read_board(r / "scrum")["jobs"]
+                             if j.get("stage") == "cloud" and j.get("shop"))  # each worker's shop jobs, every board
+    for w in workers:  # the first with room, ready and an account; a later worker is never probed
+        if on[w.alias] >= w.max or not (ready := shop.ready(alias=w.alias))["ready"]:
+            continue
+        # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
+        n_live = board.live_sessions()
+        account = next((name for pref in (None, *w.accounts)  # pick_account's own order first, then the worker's order
+                        if (name := board.pick_account(time.time(), n_live, prefer=pref)[0]) in w.accounts
+                        and ready["accounts"].get(name)), None)
+        if account:
+            break
+    else:
         return False
-    n_live = board.live_sessions()  # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
-    account = next((name for pref in (None, "owa", "main")  # pick_account's own order first, then each account as a fallback
-                    if (name := board.pick_account(time.time(), n_live, prefer=pref)[0]) and ready["accounts"].get(name)), None)
-    if not account:
-        return False
+    alias = w.alias
     for job in pool:  # the first that claims; a child held on an overlap tries the next
         child = is_child(job)
         if not child or job["id"] in board.cmd_ready(root, job["parent"], live_ids(project), shop=job["id"])["ready"]:
@@ -1679,31 +1691,30 @@ def shop_tick(project, repo, root) -> bool:
     job_id, claimed = job["id"], "spec" if child else job["stage"]
 
     def fail(step):
-        global SHOP_RETRY_AT
         if child:
             try:
                 board.cmd_set(root, job_id, ["stage=waiting"], expect="spec")
                 (jobs_dir / job_id / "claimed-at.txt").unlink(missing_ok=True)
             except SystemExit:
                 pass  # moved meanwhile: its new owner keeps it
-        print(f"shop: {project}: {job_id}: {step} failed", file=sys.stderr, flush=True)
-        SHOP_RETRY_AT = time.time() + SHOP_RETRY_EVERY
+        print(f"shop: {project}: {job_id}: {step} failed on {alias}", file=sys.stderr, flush=True)
+        SHOP_RETRY_AT[alias] = time.time() + SHOP_RETRY_EVERY
         return False
 
-    if not shop.md_sync():
+    if not shop.md_sync(alias=alias):
         return fail("md-sync")
-    steps = shop.setup()
+    steps = shop.setup(alias=alias)
     if "failed" in steps.values() or steps.get(f"account {account}") != "ok":
         return fail("setup")
     try:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
     except (ValueError, OSError, subprocess.SubprocessError):
         url = ""
-    if not shop.clone(repo.name, url):
+    if not shop.clone(repo.name, url, alias=alias):
         return fail("clone")
-    if shop.env_copy(repo.name, str(repo)) == "failed":
+    if shop.env_copy(repo.name, str(repo), alias=alias) == "failed":
         return fail("env copy")
-    if shop.profile_copy(repo.name, str(repo)) == "failed":
+    if shop.profile_copy(repo.name, str(repo), alias=alias) == "failed":
         return fail("profile copy")
     try:
         prompt = f"/trevskills-scrum cloud-job {job_id} " + (jobs_dir / job_id / "feature.md").read_text()
@@ -1711,20 +1722,21 @@ def shop_tick(project, repo, root) -> bool:
             prompt += "\n\n## Pre-written spec\n\n" + (jobs_dir / job_id / "spec.md").read_text()
     except (OSError, ValueError):
         return fail("feature.md")
-    pid = shop.start(repo.name, job_id, prompt, account, model=board.orchestrator_model(root, job_id))
+    pid = shop.start(repo.name, job_id, prompt, account, model=board.orchestrator_model(root, job_id), alias=alias)
     if pid is None:
         return fail("start")
     try:
         if running(project, job_id):
             raise SystemExit("a local session started it meanwhile")
-        board.cmd_set(root, job_id, ["stage=cloud", f"shop={pid}", f"account={account}"], expect=claimed)
+        board.cmd_set(root, job_id, ["stage=cloud", f"shop={pid}", f"account={account}", f"worker={alias}"],
+                      expect=claimed)
     except SystemExit as e:
-        shop.run(f"kill {pid}", shop.STEP_TIMEOUT)
+        shop.run(f"kill {pid}", shop.STEP_TIMEOUT, alias=alias)
         print(f"shop: {project}: {job_id}: not marked ({e}); stopped shop pid {pid}", file=sys.stderr, flush=True)
         return False
     if not child:
         unqueue(root, job)
-    print(f"shop: {project}: {job_id}: started on the shop Mac (pid {pid}, account {account})", flush=True)
+    print(f"shop: {project}: {job_id}: started on {alias} (pid {pid}, account {account})", flush=True)
     return True
 
 
