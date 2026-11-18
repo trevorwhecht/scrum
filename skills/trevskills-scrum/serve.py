@@ -1540,8 +1540,8 @@ CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a sessio
 
 
 def shop_pr_close(project, root, job_id):
-    """Close the open PR board._cloud_trusted accepts as this job's of a shop job cloud_tick
-    just aborted, with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
+    """Close the open PR that board._cloud_trusted accepts as this job's, for a shop job cloud_tick just aborted,
+    with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
     repo = Path(root).parent
     try:
         prs = board.gh_api(repo, board.CLOUD_PULLS)

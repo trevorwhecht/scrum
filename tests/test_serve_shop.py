@@ -676,7 +676,9 @@ class ShopTickTest(unittest.TestCase):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
         self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
         pr = self.pr("050-x", 11, state="closed", head_repo="someone/mm", merged_at="2026-11-18T00:00:00Z")
-        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]):
+        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]), \
+                mock.patch.object(self.board, "merge_refusal", return_value=None), \
+                mock.patch.object(self.board, "artifacts_pushed", return_value=False):
             self.cloud()
         job = self.job(root, "050-x")
         self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
