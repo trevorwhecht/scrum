@@ -4100,6 +4100,37 @@ def checkout_alert(repo: Path, jobs: list[dict]) -> str | None:
     return None
 
 
+JOB_COST_TTL = 300  # seconds one board.transcript_tokens read serves every project's job costs
+JOB_COST_DAYS = 7  # how far back job costs read transcripts; an older job shows no cost
+JOB_COST_CACHE = {}  # "at" -> time.monotonic() of the read; "costs" -> {project: {job: (tokens, usd)}}
+JOB_COST_LOCK = threading.Lock()  # one read at a time; a poll that waits shares the result
+REAL_TRANSCRIPT_TOKENS = board.transcript_tokens  # job_costs skips the real read under unittest unless a test replaced it
+
+
+def job_costs(project):
+    """{job: (tokens, usd)} for project from board.transcript_tokens over the last JOB_COST_DAYS days (usd by
+    board.row_cost), one read for every project per JOB_COST_TTL seconds. A failed read logs to stderr and is cached
+    as no costs. Under unittest with the real reader and no SCRUM_TRANSCRIPTS it reads nothing (Trevor's transcripts)."""
+    with JOB_COST_LOCK:
+        if JOB_COST_CACHE and time.monotonic() - JOB_COST_CACHE["at"] < JOB_COST_TTL:
+            return JOB_COST_CACHE["costs"].get(project, {})
+        costs = {}
+        if not ("unittest" in sys.modules and board.transcript_tokens is REAL_TRANSCRIPT_TOKENS
+                and not os.environ.get("SCRUM_TRANSCRIPTS")):
+            now = time.time()
+            try:
+                for r in board.transcript_tokens(now - JOB_COST_DAYS * 86400, now):
+                    if r["project"] and r["job"]:
+                        tok, usd = costs.setdefault(r["project"], {}).get(r["job"], (0, 0))
+                        costs[r["project"]][r["job"]] = (tok + sum(r[k] for k in board.TOKEN_KEYS),
+                                                         usd + board.row_cost(r))
+            except Exception as e:  # noqa: BLE001  a bad transcript never breaks the board
+                print(f"job costs: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                costs = {}
+        JOB_COST_CACHE.update(at=time.monotonic(), costs=costs)
+        return costs.get(project, {})
+
+
 def board_with_activity(root, project):
     """board.json plus a computed `activity` on every job that isn't done or aborted, and `routed` on every job
     (its jobs/<id>/routing.log exists, so the dashboard knows to fetch it). A job whose Play/Resume could show (the
@@ -4109,7 +4140,8 @@ def board_with_activity(root, project):
     board.orchestrator_model names a Fable model gets `fable: True` (the card's Fable chip). A stalled or limit-held job gets
     `nextRetryAt` (epoch seconds, or None). A cpu_held job without ram_hold gets `cpuHeldSecs` (seconds since play_queued).
     A check job with an E2E waiter over E2E_WAIT_RECORD_SECS gets `e2eWait`
-    (e2e_wait_info). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
+    (e2e_wait_info). A job with transcript rows in the last JOB_COST_DAYS days gets `costUsd` and `costTokens`
+    (job_costs). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
     None), `e2eFull` (the full-E2E record's at, head, result, failed, or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
@@ -4117,7 +4149,10 @@ def board_with_activity(root, project):
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
     title = {j.get("id"): j.get("title") or "" for j in cached.get("jobs", [])}
     data = {**cached, "jobs": [dict(j) for j in cached.get("jobs", [])]}
+    costs = job_costs(project)
     for job in data["jobs"]:
+        if (cost := costs.get(job.get("id"))) is not None:  # the card's "$1.24 · 3.2M tokens" line
+            job["costTokens"], job["costUsd"] = cost
         if job.get("stage") not in ("done", "aborted"):  # a final job's routed flag is cached by cached_board
             job["routed"] = (root / "jobs" / str(job.get("id")) / "routing.log").is_file()
             job["activity"] = activity(root, job)

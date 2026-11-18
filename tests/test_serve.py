@@ -10790,6 +10790,78 @@ class CheckoutAlertTest(unittest.TestCase):
             self.assertEqual(g.call_count, 4)
 
 
+class JobCostTest(unittest.TestCase):
+    """Job 975: board_with_activity adds costUsd and costTokens per job from board.transcript_tokens over the last 7 days,
+    read at most once per JOB_COST_TTL seconds; a failed or empty read leaves every job without a cost."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        serve.JOB_COST_CACHE.clear()
+        self.addCleanup(serve.JOB_COST_CACHE.clear)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / "repo" / "scrum"
+        self.root.mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": [
+            {"id": "1-a", "title": "A", "stage": "done"}, {"id": "2-b", "title": "B", "stage": "build"},
+            {"id": "3-c", "title": "C", "stage": "done"}]}))
+
+    @staticmethod
+    def row(job, project="p", model="claude-opus-4-5", **counts):
+        return {"ts": 1, "model": model, "project": project, "job": job, "agent": "main", "skill": None,
+                **{k: counts.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                                                   "cache_creation_input_tokens")}}
+
+    def jobs(self, project="p"):
+        return {j["id"]: j for j in self.serve.board_with_activity(self.root, project)["jobs"]}
+
+    def test_cost_on_jobs_with_rows_only(self):
+        rows = [self.row("1-a", output_tokens=1_000_000), self.row("1-a", input_tokens=2_000_000),
+                self.row("2-b", model="claude-sonnet-4-5", cache_read_input_tokens=1_000_000),
+                self.row("3-c", project="other", output_tokens=5), self.row(None, output_tokens=9)]
+        with mock.patch.object(self.serve.board, "transcript_tokens", return_value=rows) as tt:
+            jobs = self.jobs()
+        start, end = tt.call_args.args[:2]
+        self.assertAlmostEqual(end - start, 7 * 86400, delta=1)
+        self.assertAlmostEqual(jobs["1-a"]["costUsd"], 35.0)  # opus 1M out 25 + 2M in 10
+        self.assertEqual(jobs["1-a"]["costTokens"], 3_000_000)
+        self.assertAlmostEqual(jobs["2-b"]["costUsd"], 0.3)
+        self.assertEqual(jobs["2-b"]["costTokens"], 1_000_000)
+        self.assertNotIn("costUsd", jobs["3-c"])  # its only row is another project's
+        self.assertNotIn("costTokens", jobs["3-c"])
+
+    def test_transcript_tokens_read_once_per_ttl(self):
+        rows = [self.row("1-a", output_tokens=1000)]
+        with mock.patch.object(self.serve.board, "transcript_tokens", return_value=rows) as tt:
+            for _ in range(3):
+                self.assertAlmostEqual(self.jobs()["1-a"]["costUsd"], 0.025)
+            self.assertEqual(tt.call_count, 1)
+            self.assertNotIn("costUsd", self.jobs("q")["1-a"])  # another project: its rows are p's
+            self.assertLessEqual(tt.call_count, 2)
+            calls = tt.call_count
+            at = time.monotonic()
+            with mock.patch.object(self.serve.time, "monotonic", return_value=at + 299):
+                self.jobs()
+                self.assertEqual(tt.call_count, calls, "inside 300 s: no new read")
+            with mock.patch.object(self.serve.time, "monotonic", return_value=at + 301):
+                self.jobs()
+                self.assertEqual(tt.call_count, calls + 1, "after 300 s: one new read")
+
+    def test_failed_or_empty_read_shows_no_cost(self):
+        for kw in ({"side_effect": OSError("boom")}, {"return_value": []}):
+            self.serve.JOB_COST_CACHE.clear()
+            with self.subTest(kw=kw), mock.patch.object(self.serve.board, "transcript_tokens", **kw) as tt, \
+                    mock.patch("sys.stderr", new=io.StringIO()):
+                data = self.serve.board_with_activity(self.root, "p")
+                self.assertEqual([j["id"] for j in data["jobs"]], ["1-a", "2-b", "3-c"])
+                for j in data["jobs"]:
+                    self.assertNotIn("costUsd", j)
+                    self.assertNotIn("costTokens", j)
+                self.serve.board_with_activity(self.root, "p")
+                self.assertEqual(tt.call_count, 1, "a failed read is not retried every poll")
+
+
 class ActionsAlertTest(unittest.TestCase):
     """Job 725: actions_alert reads gh run list (and gh run view for a failed newest run) and says when GitHub refused
     to start runs or a scheduled workflow's newest run failed; the watchdog caches it, board_with_activity only reads it."""
