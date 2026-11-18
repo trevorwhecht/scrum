@@ -1905,6 +1905,31 @@ class BoardTest(unittest.TestCase):
         (jobs / c2 / "spec.md").unlink()
         self.assertEqual(board.child_files(jobs, c2), set())
 
+    def test_child_files_spec_without_likely_files_falls_back_to_prose(self):
+        self.write("j1/spec.md", "# x\nEdit `src/a.py` only.\n## Assumptions\n- none\n")
+        self.assertEqual(board.child_files(self.root / "jobs", "j1"), {"src/a.py"})
+
+    def test_child_files_bare_name_needs_single_git_match(self):
+        repo = Path(self.tmp.name)
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        for f in ("src/hooks/useQuoteBuilderDraft.ts", "a/dup.ts", "b/dup.ts", "notes.foo"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (repo / f).write_text("x")
+        sh("add", "-A")
+        jobs = self.root / "jobs"
+        self.write("j1/spec.md", "Fix useQuoteBuilderDraft.ts, then dup.ts and `missing.ts`; notes.foo is 1.2.3.\n")
+        self.assertEqual(board.child_files(jobs, "j1"), {"src/hooks/useQuoteBuilderDraft.ts"})
+        self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
+        self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
+
+    def test_ready_spec_copy_of_feature_uses_prose_paths(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.write(f"{c1}/spec.md", "# x\nEdit `src/a.py`.\n")
+        self.write(f"{c2}/spec.md", "# x\nEdit `src/b.py`.\n")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+
     def test_child_files_terminal_batch_reads_claude_paths(self):
         batch = board.TERMINAL_BATCH_INTRO + "\n## From 1: a\n- `.claude/skills/scrum-digest-flow/SKILL.md`\n- `.claude/agents/x.md`\n- `tests/test_x.py`\n"
         self.write("b1/feature.md", batch)
