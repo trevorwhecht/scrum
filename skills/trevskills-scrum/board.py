@@ -2194,6 +2194,29 @@ def _previous_health(root, digest_id):
     return None, {}
 
 
+def windows_flagged_path():
+    """Which digest first flagged each account-wide window: $SCRUM_WINDOWS_FLAGGED, else beside projects.json."""
+    return Path(os.environ.get("SCRUM_WINDOWS_FLAGGED") or registry_path().parent / "windows-flagged.json")
+
+
+def _first_flag_only(owner, hits):
+    """Drop from hits (metric -> window names) every window an earlier digest of any project already flagged for that
+    metric, so one account-wide window counts once. Records the new ones under owner; a rerun by the same owner keeps them."""
+    path = windows_flagged_path()
+    seen = _health_file(path, dict)
+    for metric in ("unused_windows", "overburned_windows"):
+        mine = []
+        for name in hits[metric]:
+            if seen.setdefault(f"{metric}:{name}", owner) == owner:
+                mine.append(name)
+        hits[metric] = mine
+    try:  # ponytail: no lock, two digests finishing in the same instant could both count a window
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, seen)
+    except OSError:
+        pass
+
+
 FIT_RANK = {"lilguy": 0, "fast": 1, "standard": 2, "debug": 2}  # cheaper_lane_jobs: a fit below its lane
 
 
@@ -2201,7 +2224,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
     """{"digest", "previous", "metrics", "auto_stalls"}: HEALTH_LIMITS' metrics over the jobs in digests/<NNN>/jobs.txt, from
     questions.log, each job's routing.log, fable.log and round reviews, the digest's pipeline-fit.json and windows.json,
     pulse.log (unused_windows skips a window whose pulse lines all have Auto continue off in every project) and
-    board.json; each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
+    board.json; a window counts only in the first digest, across projects, that flags it (windows_flagged_path); each carries the previous digest's value and a flag ("worse", "over twice" or null). A missing or
     broken input counts 0. auto_stalls ({"value", "jobs"}, no limit or flag) counts the auto stall lines of those jobs.
     Writes digests/<NNN>/health.json."""
     root = Path(root)
@@ -2320,6 +2343,7 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
                 or is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SECS):
             hits["overburned_windows"].append(name)
+    _first_flag_only(f"{root}:{digest_id}", hits)
     prev_id, prev = _previous_health(root, str(digest_id))
     metrics = {}
     for name, limit in HEALTH_LIMITS.items():
