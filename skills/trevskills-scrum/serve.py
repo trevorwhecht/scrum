@@ -6253,6 +6253,8 @@ class Handler(BaseHTTPRequestHandler):
                 if job["stage"] != launch["stage"]:  # the stage moved on: play_queue_tick would drop it too
                     unqueue(root, job)
                     return 409, {"error": "job isn't stalled, or is already running"}
+                if launch["action"] == "start" and board.stored_runs_on(root, job) == "shop":
+                    return 202, {"id": job_id, "action": action, **queued(None)}  # shop_tick sends it, never this Mac
                 # Start now on a launch spawn's gate queued: re-run it as Trevor's click (the RAM gate still holds it)
                 started = spawn(project, root, job_id, launch["action"], launch["prompt"], manual=manual)
                 return 202, {"id": job_id, "action": action, **queued(started)}

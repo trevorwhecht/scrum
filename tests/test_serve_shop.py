@@ -1131,6 +1131,34 @@ class ShopTickTest(unittest.TestCase):
                 self.assertIs(self.serve.idle_claim("mm", root, self.board.read_board(root)["jobs"]), True)
             self.assertEqual([c.args[2] for c in spawn.call_args_list], ["051-r"])
 
+    def test_start_now_on_queued_shop_job_stays_queued(self):
+        os.environ["SCRUM_FREE_RAM"] = "100"  # this Mac has room (setUp's env patch restores it)
+
+        def click(job):
+            root = self.project("mm", [job])
+            with mock.patch.object(self.serve, "spawn", return_value="runs/x.log") as spawn:
+                got = self.serve.Handler.route(None, "mm", root, "/jobs/050-q/resume", {"manual": True})
+            return root, got, spawn
+
+        root, got, spawn = click(self.queued("050-q", feature="Runs on: shop\n\nFix the widget\n"))
+        spawn.assert_not_called()
+        self.assertEqual(got, (202, {"id": "050-q", "action": "resume", "queued": True,
+                                     "message": self.serve.PLAY_QUEUED}))
+        job = self.job(root, "050-q")
+        self.assertEqual((job["stage"], job["play_queued"], job["queued_launch"]),
+                         ("spec", True, {"action": "start", "prompt": "/trevskills-scrum start 050-q", "stage": "spec"}))
+        for feature in ("Runs on: any\n\nFix the widget\n", "Runs on: main\n\nFix the widget\n", FEATURE):
+            with self.subTest(feature=feature):
+                _, got, spawn = click(self.queued("050-q", feature=feature))
+                self.assertEqual(got, (202, {"id": "050-q", "action": "resume"}))
+                self.assertEqual([(c.args[2:4], c.kwargs) for c in spawn.call_args_list],
+                                 [(("050-q", "start"), {"manual": True})])
+        with self.subTest("a queued resume launch of a shop job is not blocked"):
+            _, got, spawn = click(self.queued("050-q", action="resume", feature="Runs on: shop\n\nFix the widget\n"))
+            self.assertEqual(got, (202, {"id": "050-q", "action": "resume"}))
+            self.assertEqual([(c.args[2:4], c.kwargs) for c in spawn.call_args_list],
+                             [(("050-q", "resume"), {"manual": True})])
+
     def test_shop_job_dispatched_when_room(self):
         root = self.project("mm", [self.queued("050-q", feature="Runs on: shop\n\nFix the widget\n")])
         self.assertEqual(self.tick(), (True, "shop: mm: 050-q: started on shopmac (pid 4242, account owa)\n", ""))
