@@ -143,6 +143,21 @@ class LaunchCpuGate(ServeBase):
         with mock.patch.object(b, "projects", return_value={}):
             self.assertIsNone(self.serve.cpu_first())
 
+    def test_cpu_first_light_memory_held_leads(self):
+        """A light job held by vm_pressure or swap leads cpu_first ahead of an older CPU-held standard job; a standard one does not."""
+        std = self.cpu_held_job("Mem std", "standard", "2020-01-01T00:00:00+00:00")
+        light = self.cpu_held_job("Mem fast", "fast", "2021-01-01T00:00:00+00:00", gate="vm_pressure")
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, base)
+        (base / "scrum").symlink_to(self.root)
+        b = self.serve.board
+        with mock.patch.object(b, "projects", return_value={"repo": base}), mock.patch.object(b, "ram_room", return_value=1):
+            self.assertEqual(tuple(self.serve.cpu_first()), ("repo", light))
+            (self.root / "jobs" / light / "queue-gates.txt").write_text("swap(30%)\n")
+            self.assertEqual(tuple(self.serve.cpu_first()), ("repo", light))
+            self.edit_job(light, lane="standard")
+            self.assertEqual(tuple(self.serve.cpu_first()), ("repo", std))
+
     def ram_blocked_setup(self):
         """A standard CPU-held job older than a fast one; board.projects() names this test's board as project repo."""
         std = self.cpu_held_job("Ram std", "standard", "2020-01-01T00:00:00+00:00")
