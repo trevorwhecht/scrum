@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""The scrum's one way to talk to the shop MacBook Pro: every remote command goes through `ssh shopmac`.
+"""The scrum's one way to talk to its worker Macs: every remote command goes through `ssh <alias>`, one alias per
+workers() line of workers.txt beside projects.json (no file: the one shop MacBook Pro, `shopmac`).
 
-usage: shop.py probe   (print the cached probe as one JSON line; exit 0 whether the shop Mac is up or down)
-       shop.py setup   (prepare the shop Mac for a scrum job: one `<step>: <result>` line per step; exit 1 when the
-                        shop Mac is down or a step failed)
-       shop.py md-sync (pull the shop's skill clones and copy this Mac's CLAUDE.md and memory notes there: one line,
-                        `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1))
+usage: shop.py probe [alias]   (print the cached probe as one JSON line; exit 0 whether the worker is up or down)
+       shop.py setup [alias]   (prepare the worker for a scrum job: one `<step>: <result>` line per step; exit 1 when
+                                it is down or a step failed)
+       shop.py md-sync [alias] (pull the worker's skill clones and copy this Mac's CLAUDE.md and memory notes there:
+                                one line, `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1))
+       alias defaults to the first workers() alias, else shopmac.
 
-run() never raises: a timeout comes back as exit 124, ssh that cannot start as 127, and ssh's own failure as 255.
+Every function that makes an ssh call takes alias= (default ALIAS, shopmac); probe and ready() caches are per alias.
+run() never raises: a timeout comes back as exit 124, ssh that cannot start (or an alias off PROJECT_RE) as 127, and
+ssh's own failure as 255.
 probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy(),
 profile_copy() and md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses
 clone() to clone or fast-forward a project in ~/scrum-work, profile_copy() to give that clone this Mac's project.md and
@@ -195,15 +199,18 @@ for p in memory/*; do
 done'''))
 
 # ponytail: module globals with no lock; add one when a second thread calls probe(). Callers treat the dicts as read-only.
-_cache = None  # (time.monotonic() of the probe, its result)
-_ready = None  # (time.monotonic() of the ready() check, its result)
+_cache = {}  # alias -> (time.monotonic() of the probe, its result)
+_ready = {}  # alias -> (time.monotonic() of the ready() check, its result)
 REAL_RUN = subprocess.run  # run() refuses ssh under unittest unless a test replaced subprocess.run
 
 
-def run(cmd: str, timeout: float, input: str | bytes | None = None) -> subprocess.CompletedProcess:
-    """Run `cmd` on the shop Mac. Secrets go in `input` (stdin), never in `cmd`. stdout and stderr come back as str.
-    Under unittest with the real subprocess.run (no test faked it) it returns 127 with no ssh, as a down shop Mac."""
-    argv = ["ssh", ALIAS, *SSH_OPTS, PATH_PREFIX + cmd]
+def run(cmd: str, timeout: float, input: str | bytes | None = None, alias: str = ALIAS) -> subprocess.CompletedProcess:
+    """Run `cmd` on worker `alias` (a ~/.ssh/config Host). Secrets go in `input` (stdin), never in `cmd`. stdout and
+    stderr come back as str. An alias off PROJECT_RE (an ssh option, user@host) returns 127 with no ssh, and so does
+    unittest with the real subprocess.run (no test faked it), as a down shop Mac."""
+    argv = ["ssh", alias, *SSH_OPTS, PATH_PREFIX + cmd]
+    if not PROJECT_RE.fullmatch(alias):
+        return subprocess.CompletedProcess(argv, 127, "", "bad ssh alias")
     if "unittest" in sys.modules and subprocess.run is REAL_RUN:  # a watchdog test must never dispatch to the real shop
         return subprocess.CompletedProcess(argv, 127, "", "ssh refused under unittest")
     feed = {"stdin": subprocess.DEVNULL} if input is None else {
@@ -211,29 +218,30 @@ def run(cmd: str, timeout: float, input: str | bytes | None = None) -> subproces
     try:
         r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **feed)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(argv, 124, "", f"ssh {ALIAS} timed out after {timeout} s")
+        return subprocess.CompletedProcess(argv, 124, "", f"ssh {alias} timed out after {timeout} s")
     except OSError as e:
-        return subprocess.CompletedProcess(argv, 127, "", f"ssh {ALIAS} could not start: {e}")
+        return subprocess.CompletedProcess(argv, 127, "", f"ssh {alias} could not start: {e}")
     return subprocess.CompletedProcess(argv, r.returncode, r.stdout.decode("utf-8", "replace"),
                                        r.stderr.decode("utf-8", "replace"))
 
 
-def probe() -> dict:
-    """{"up", "load", "tools"} from one cached round trip; `load` is the 1-minute load as a percent of all cores
-    (board.cpu_load_pct's unit) or None when unreadable. Down (any non-zero exit) is silent and never raises."""
-    global _cache
+def probe(alias: str = ALIAS) -> dict:
+    """{"up", "load", "tools"} of worker `alias` from one round trip cached per alias; `load` is the 1-minute load as a
+    percent of all cores (board.cpu_load_pct's unit) or None when unreadable. Down (any non-zero exit) is silent and
+    never raises."""
     now = time.monotonic()
-    if _cache and now - _cache[0] < (UP_TTL if _cache[1]["up"] else DOWN_TTL):
-        return _cache[1]
-    r = run(PROBE_CMD, PROBE_TIMEOUT)
+    hit = _cache.get(alias)
+    if hit and now - hit[0] < (UP_TTL if hit[1]["up"] else DOWN_TTL):
+        return hit[1]
+    r = run(PROBE_CMD, PROBE_TIMEOUT, alias=alias)
     lines = r.stdout.splitlines() if r.returncode == 0 else []
     try:
         load = round(float(lines[0].strip("{} ").split()[0]) / int(lines[1]) * 100, 1)
     except (IndexError, ValueError, ZeroDivisionError):
         load = None
     tools = {t: any(line.rsplit("/", 1)[-1] == t for line in lines) for t in TOOLS}
-    _cache = (now, {"up": r.returncode == 0, "load": load, "tools": tools})
-    return _cache[1]
+    _cache[alias] = (now, {"up": r.returncode == 0, "load": load, "tools": tools})
+    return _cache[alias][1]
 
 
 def account_env(name: str) -> str:
@@ -249,10 +257,11 @@ def _token_file(name: str) -> str:
     return f'"{SHOP_ACCOUNTS[name] or "$HOME/.claude"}/oauth-token"'
 
 
-def _account(name: str) -> str:
+def _account(name: str, alias: str) -> str:
     """"ok" when shop account `name` answers a headless `claude -p`, "no token" when its token file is missing, else
     "not ready"."""
-    r = run(f"[ -r {_token_file(name)} ] || exit {NO_TOKEN}; {account_env(name)}{ACCOUNT_CHECK}", ACCOUNT_TIMEOUT)
+    r = run(f"[ -r {_token_file(name)} ] || exit {NO_TOKEN}; {account_env(name)}{ACCOUNT_CHECK}", ACCOUNT_TIMEOUT,
+            alias=alias)
     if r.returncode == 0 and "ok" in r.stdout.lower():
         return "ok"
     return "no token" if r.returncode == NO_TOKEN else "not ready"
@@ -268,9 +277,9 @@ def _done(r: subprocess.CompletedProcess) -> tuple[str, str]:
     return ("changed", "") if r.returncode == 0 else ("failed", f" (exit {r.returncode})")
 
 
-def _gh_login() -> tuple[str, str]:
+def _gh_login(alias: str) -> tuple[str, str]:
     """Pipe this Mac's gh token into the shop's gh login on stdin, unless the shop is already logged in."""
-    if run("gh auth status", STEP_TIMEOUT).returncode == 0:
+    if run("gh auth status", STEP_TIMEOUT, alias=alias).returncode == 0:
         return "ok", ""
     try:
         local = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=STEP_TIMEOUT)
@@ -281,81 +290,92 @@ def _gh_login() -> tuple[str, str]:
     token = local.stdout.strip()
     if local.returncode or not token:
         return "failed", f" (exit {local.returncode or 1})"
-    return _done(run(GH_LOGIN, STEP_TIMEOUT, input=token))
+    return _done(run(GH_LOGIN, STEP_TIMEOUT, input=token, alias=alias))
 
 
-def _gh_git() -> tuple[str, str]:
-    if "gh auth git-credential" in run(GIT_HELPER, STEP_TIMEOUT).stdout:
+def _gh_git(alias: str) -> tuple[str, str]:
+    if "gh auth git-credential" in run(GIT_HELPER, STEP_TIMEOUT, alias=alias).stdout:
         return "ok", ""
-    return _done(run("gh auth setup-git", STEP_TIMEOUT))
+    return _done(run("gh auth setup-git", STEP_TIMEOUT, alias=alias))
 
 
-def _owa_links() -> tuple[str, str]:
-    r = run(OWA_CHECK, STEP_TIMEOUT)
+def _owa_links(alias: str) -> tuple[str, str]:
+    r = run(OWA_CHECK, STEP_TIMEOUT, alias=alias)
     if r.returncode:
         return _done(r)
     missing = [n for n in r.stdout.split() if n in OWA_LINKS]
     if not missing:
         return "ok", ""
-    return _done(run(" && ".join(f'ln -s "$HOME/.claude/{n}" "$HOME/.claude-owa/{n}"' for n in missing), STEP_TIMEOUT))
+    return _done(run(" && ".join(f'ln -s "$HOME/.claude/{n}" "$HOME/.claude-owa/{n}"' for n in missing), STEP_TIMEOUT,
+                     alias=alias))
 
 
-def _permissions() -> tuple[str, str]:
-    r = run("python3 -", STEP_TIMEOUT, input=_permissions_script())
+def _permissions(alias: str) -> tuple[str, str]:
+    r = run("python3 -", STEP_TIMEOUT, input=_permissions_script(), alias=alias)
     if r.returncode:
         return _done(r)
     return ("changed" if "changed" in r.stdout.split() else "ok"), ""  # split: a shell startup line may come first
 
 
-def _account_step(name: str) -> tuple[str, str]:
-    a = _account(name)
+def _account_step(name: str, alias: str) -> tuple[str, str]:
+    a = _account(name, alias)
     return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
 
 
-def setup() -> dict[str, str]:
-    """Prepare the shop Mac for a scrum job: {step: "ok"|"changed"|"failed"|"not ready"}, printing one
-    `<step>: <result>` line per step and never remote output. Every step checks before it acts, so a second run changes
-    nothing. A down shop Mac prints `shop: down` and returns {"shop": "failed"} after the one probe."""
-    global _cache, _ready
-    _cache = _ready = None
-    p = probe()
+def _accounts(alias: str) -> list[str]:
+    """The SHOP_ACCOUNTS names on `alias`'s workers() line, in SHOP_ACCOUNTS order; every one when it has no line."""
+    line = next((w.accounts for w in workers() if w.alias == alias), SHOP_ACCOUNTS)
+    return [n for n in SHOP_ACCOUNTS if n in line]
+
+
+def setup(alias: str = ALIAS) -> dict[str, str]:
+    """Prepare worker `alias` for a scrum job: {step: "ok"|"changed"|"failed"|"not ready"}, printing one
+    `<step>: <result>` line per step and never remote output; the account steps cover _accounts(alias). Every step
+    checks before it acts, so a second run changes nothing. A down worker prints `shop: down` and returns
+    {"shop": "failed"} after the one probe. Drops only this alias's probe and ready() caches."""
+    _cache.pop(alias, None)
+    _ready.pop(alias, None)
+    p = probe(alias)
     if not p["up"]:
         print("shop: down", flush=True)
         return {"shop": "failed"}
     tools = p["tools"]
-    steps = {"node": lambda: ("ok", "") if tools["node"] else _done(run(NODE_INSTALL, INSTALL_TIMEOUT)),
-             "gh": lambda: ("ok", "") if tools["gh"] else _done(run(GH_INSTALL, INSTALL_TIMEOUT)),
-             "gh login": _gh_login, "gh git": _gh_git, "permissions": _permissions, "owa links": _owa_links,
-             **{f"account {n}": (lambda n=n: _account_step(n)) for n in SHOP_ACCOUNTS}}
+    steps = {"node": lambda: ("ok", "") if tools["node"] else _done(run(NODE_INSTALL, INSTALL_TIMEOUT, alias=alias)),
+             "gh": lambda: ("ok", "") if tools["gh"] else _done(run(GH_INSTALL, INSTALL_TIMEOUT, alias=alias)),
+             "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
+             "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
+             **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)}}
     out = {}
     for name, step in steps.items():
         out[name], note = step()
         print(f"{name}: {'ok (changed)' if out[name] == 'changed' else out[name]}{note}", flush=True)
-    _cache = _ready = None  # the steps changed what probe() and ready() report
+    _cache.pop(alias, None)  # the steps changed what probe() and ready() report
+    _ready.pop(alias, None)
     return out
 
 
-def ready() -> dict:
-    """{"ready", "up", "gh", "node", "claude", "accounts": {"main", "owa"}}, all bools. `ready`: up, gh logged in,
-    node and claude present and at least one account answering. A down shop Mac returns all false at once, with no ssh
-    beyond probe()'s cache; an up result is cached for READY_TTL and setup() clears it. Prints nothing."""
-    global _ready
-    p = probe()
+def ready(alias: str = ALIAS) -> dict:
+    """{"ready", "up", "gh", "node", "claude", "accounts": {<name>: bool for _accounts(alias)}}, all bools, of worker
+    `alias`. `ready`: up, gh logged in, node and claude present and at least one account answering. A down worker
+    returns all false at once, with no ssh beyond probe()'s cache; an up result is cached per alias for READY_TTL and
+    setup(alias) clears it. Prints nothing."""
+    p = probe(alias)
     if not p["up"]:
         return {"ready": False, "up": False, "gh": False, "node": False, "claude": False,
-                "accounts": {n: False for n in SHOP_ACCOUNTS}}
+                "accounts": {n: False for n in _accounts(alias)}}
     now = time.monotonic()
-    if _ready and now - _ready[0] < READY_TTL:
-        return _ready[1]
-    gh = run("gh auth status", STEP_TIMEOUT).returncode == 0
-    accounts = {n: _account(n) == "ok" for n in SHOP_ACCOUNTS}
+    hit = _ready.get(alias)
+    if hit and now - hit[0] < READY_TTL:
+        return hit[1]
+    gh = run("gh auth status", STEP_TIMEOUT, alias=alias).returncode == 0
+    accounts = {n: _account(n, alias) == "ok" for n in _accounts(alias)}
     node, claude = p["tools"]["node"], p["tools"]["claude"]
-    _ready = (now, {"ready": gh and node and claude and any(accounts.values()), "up": True, "gh": gh, "node": node,
-                    "claude": claude, "accounts": accounts})
-    return _ready[1]
+    _ready[alias] = (now, {"ready": gh and node and claude and any(accounts.values()), "up": True, "gh": gh,
+                           "node": node, "claude": claude, "accounts": accounts})
+    return _ready[alias][1]
 
 
-def env_copy(project: str, repo: str) -> str:
+def env_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     """Copy `<repo>/.env.local` to the shop's `~/scrum-work/<project>/.env.local` over stdin under umask 077:
     "copied", "none" (no .env.local; no ssh) or "failed" (a bad project name, a down shop Mac or a failed copy).
     Prints and logs nothing."""
@@ -367,9 +387,10 @@ def env_copy(project: str, repo: str) -> str:
         return "none"
     except OSError:
         return "failed"
-    if not probe()["up"]:
+    if not probe(alias)["up"]:
         return "failed"
-    return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data).returncode == 0 else "failed"
+    return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data, alias=alias).returncode == 0 \
+        else "failed"
 
 
 def _render_auth(text: str) -> str | None:
@@ -385,7 +406,7 @@ def _render_auth(text: str) -> str | None:
     return rel
 
 
-def profile_copy(project: str, repo: str) -> str:
+def profile_copy(project: str, repo: str, alias: str = ALIAS) -> str:
     """Write the shop's ~/scrum-work/<project>/scrum/project.md from this Mac's <repo>/scrum/project.md (stdin only,
     tmp file + mv -f), so a cloud-job session there keeps its E2E, Test sign-in and Render auth lines (cloud.md Setup).
     The repo path (as given and its realpath) becomes the shop clone and any other path under this Mac's home moves
@@ -411,25 +432,26 @@ def profile_copy(project: str, repo: str) -> str:
     text = re.sub("(?:" + "|".join(map(re.escape, paths)) + r")(?![A-Za-z0-9._-])",
                   lambda _: f"{HOME_TOKEN}/scrum-work/{project}", text)
     text = text.replace(str(Path.home()) + "/", HOME_TOKEN + "/")
-    if not probe()["up"] or run(PROFILE_COPY.format(p=project, t=HOME_TOKEN), STEP_TIMEOUT,
-                                input=text.encode("utf-8", "surrogateescape")).returncode:
+    if not probe(alias)["up"] or run(PROFILE_COPY.format(p=project, t=HOME_TOKEN), STEP_TIMEOUT,
+                                     input=text.encode("utf-8", "surrogateescape"), alias=alias).returncode:
         return "failed"
     if auth is not None and run(AUTH_COPY.format(p=project, d=shlex.quote(posixpath.dirname(rel)),
-                                                 f=shlex.quote(rel)), STEP_TIMEOUT, input=auth).returncode:
+                                                 f=shlex.quote(rel)), STEP_TIMEOUT, input=auth, alias=alias).returncode:
         return "failed"
     return "copied"
 
 
-def clone(project: str, url: str) -> bool:
+def clone(project: str, url: str, alias: str = ALIAS) -> bool:
     """Clone `url` into the shop's ~/scrum-work/<project>, or fetch and fast-forward that clone to origin's HEAD when
     its origin is `url`. False with no ssh for a name off PROJECT_RE or a URL off REPO_URL_RE (https GitHub only), and
     False for another origin, a merge that is not a fast-forward or a failed call. Never resets or deletes."""
     if not PROJECT_RE.fullmatch(project) or not REPO_URL_RE.fullmatch(url):
         return False
-    return run(CLONE.format(p=project, u=shlex.quote(url)), INSTALL_TIMEOUT).returncode == 0
+    return run(CLONE.format(p=project, u=shlex.quote(url)), INSTALL_TIMEOUT, alias=alias).returncode == 0
 
 
-def start(project: str, job_id: str, prompt: str, account: str, model: str | None = None) -> int | None:
+def start(project: str, job_id: str, prompt: str, account: str, model: str | None = None,
+          alias: str = ALIAS) -> int | None:
     """Start a headless `claude -p` cloud-job session in the shop's ~/scrum-work/<project> on SHOP_ACCOUNTS `account`,
     in the background with its output in .git/scrum-shop/<job_id>.log: its pid, or None (a non-zero exit, output that
     is not a pid). `prompt` goes only on stdin, into a umask 077 prompt file. None with no ssh for a project off
@@ -437,17 +459,18 @@ def start(project: str, job_id: str, prompt: str, account: str, model: str | Non
     if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id) or account not in SHOP_ACCOUNTS:
         return None
     r = run(START.format(p=project, d=SHOP_LOGS, j=job_id, env=account_env(account),
-                         model=f" --model {shlex.quote(model)}" if model else ""), STEP_TIMEOUT, input=prompt)
+                         model=f" --model {shlex.quote(model)}" if model else ""), STEP_TIMEOUT, input=prompt,
+            alias=alias)
     lines = r.stdout.split()  # the pid is the last word: a shell startup line may come first
     return int(lines[-1]) if r.returncode == 0 and lines and re.fullmatch(r"[0-9]{1,10}", lines[-1]) else None
 
 
-def ended(project: str, job_id: str, pid: int) -> str | None:
+def ended(project: str, job_id: str, pid: int, alias: str = ALIAS) -> str | None:
     """The last 8192 bytes of a finished shop session's log ("" with no log), or None while `ps -p <pid>` still shows
     claude, the shop Mac is down, a name is off PROJECT_RE or JOB_RE, or the call fails. Prints nothing."""
-    if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id) or not probe()["up"]:
+    if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id) or not probe(alias)["up"]:
         return None
-    r = run(ENDED.format(pid=int(pid), p=project, d=SHOP_LOGS, j=job_id), STEP_TIMEOUT)
+    r = run(ENDED.format(pid=int(pid), p=project, d=SHOP_LOGS, j=job_id), STEP_TIMEOUT, alias=alias)
     return r.stdout if r.returncode == 0 else None
 
 
@@ -518,7 +541,7 @@ def _md_tar() -> bytes:
     return buf.getvalue()
 
 
-def md_sync() -> bool:
+def md_sync(alias: str = ALIAS) -> bool:
     """Make this Mac the single writer of what shop sessions read: pull the shop's skill clones (MD_PULL), run the
     one-time cleanup (MD_CLEANUP) and replace its CLAUDE.md and memory dirs (MD_COPY), each one run() of STEP_TIMEOUT.
     True when all three exit 0; False at the first failure, with no later call. This Mac's files are read before any
@@ -527,29 +550,31 @@ def md_sync() -> bool:
         stream = _md_tar()
     except OSError:
         return False
-    if not probe()["up"]:
+    if not probe(alias)["up"]:
         return False
-    return all(run(cmd, STEP_TIMEOUT, input=data).returncode == 0
+    return all(run(cmd, STEP_TIMEOUT, input=data, alias=alias).returncode == 0
                for cmd, data in ((MD_PULL, None), (MD_CLEANUP, None), (MD_COPY, stream)))
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="shop.py", description="Talk to the shop Mac over ssh shopmac.")
+    parser = argparse.ArgumentParser(prog="shop.py", description="Talk to a worker Mac over ssh <alias>.")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("probe", help="print the probe as one JSON line")
-    sub.add_parser("setup", help="prepare the shop Mac for a scrum job; one line per step")
-    sub.add_parser("md-sync", help="pull the shop's skill clones and copy CLAUDE.md and memory there; one line")
-    command = parser.parse_args(argv).command
+    for name, text in (("probe", "print the probe as one JSON line"),
+                       ("setup", "prepare the worker Mac for a scrum job; one line per step"),
+                       ("md-sync", "pull the worker's skill clones and copy CLAUDE.md and memory there; one line")):
+        sub.add_parser(name, help=text).add_argument("alias", nargs="?", help="default: the first workers.txt alias")
+    args = parser.parse_args(argv)
+    command, alias = args.command, args.alias or next((w.alias for w in workers()), ALIAS)
     if command == "setup":
-        return 1 if "failed" in setup().values() else 0
+        return 1 if "failed" in setup(alias).values() else 0
     if command == "md-sync":
-        if not probe()["up"]:
+        if not probe(alias)["up"]:
             print("shop: down")
             return 1
-        ok = md_sync()
+        ok = md_sync(alias)
         print(f"md-sync: {'ok' if ok else 'failed'}")
         return 0 if ok else 1
-    print(json.dumps(probe()))
+    print(json.dumps(probe(alias)))
     return 0
 
 
