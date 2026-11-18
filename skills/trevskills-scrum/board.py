@@ -4447,7 +4447,7 @@ def usage_allowance(usage, now, live):
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
     one rung, a reset beyond USAGE_TIGHTEN_SECS tightens one. The stricter window wins (five_hour on a tie). Stale,
     missing or malformed data, or a window whose reset already passed, limits nothing. `live` (an int or a list)
-    only feeds the reason text. Trevor's own Play/Resume never call this. Pace: a five_hour or seven_day window whose used % runs
+    only feeds the reason text. Trevor's own Play/Resume never call this, nor pick_account for a primary with a backup. Pace: a five_hour or seven_day window whose used % runs
     PACE_LEAD_PCT or more points ahead of its elapsed % (0..100) gives Allowance(0, "pace 5h ..." or "pace 7d ...", five_hour first) before the ladder.
     Hold: a window at USAGE_HOLD_PCT used or more gives Allowance(0, "hold 5h ..." or "hold 7d ...") after pace, before the ladder, with no relax near its reset."""
     if not isinstance(usage, dict) or not isinstance(usage.get("rate_limits"), dict):
@@ -4552,7 +4552,8 @@ def pick_account(now, live=0, prefer=None):
     """(name, allowance): name is the first account with room, `prefer` first when listed, then the soonest seven_day reset
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
-    reserve window reached (reserve_hit). allowance is the claims cap across every account with room (job 1130):
+    reserve window reached (reserve_hit). With a backup listed, the primary (primary_account) skips usage_allowance
+    (job 1182: no pace, hold or taper), so it stops only on its limit marker; a lone account keeps them. allowance is the claims cap across every account with room (job 1130):
     None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
     why, room = [], []
@@ -4564,12 +4565,14 @@ def pick_account(now, live=0, prefer=None):
         at = w.get("resets_at") if isinstance(w, dict) else None
         return acc.name != prefer, not (is_num(at) and at > now), at if is_num(at) and at > now else 0
 
+    primary = min(accs, key=lambda a: order(a)[1:]).name if len(accs) > 1 else None  # primary_account, no re-read
+
     for acc in sorted(accs, key=order):
         if until := limited_until(acc.name, now):
             why.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
             continue
         usage = usages[acc.name]
-        allow = usage_allowance(usage, now, live)
+        allow = None if acc.name == primary else usage_allowance(usage, now, live)
         if allow is not None and allow <= (live if isinstance(live, int) else len(live)):  # no slot left
             why.append(f"{acc.name} {allow.reason}")
             continue
