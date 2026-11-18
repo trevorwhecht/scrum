@@ -5249,6 +5249,19 @@ class BoardTest(unittest.TestCase):
         waits = [board._epoch(q["date"]) for q in board._json_lines(self.root / "questions.log")]
         self.assertEqual(board._timing_row(self.root, "j", {}, {}, waits)[0][6], "1h40m")
 
+    def test_timing_marks_auto_played_rounds_paused(self):
+        self.timing_two_hour(1_700_000_000)
+        self.assertEqual(board._timing_row(self.root, "j", {"autoPlayed": True}, {})[0][6], "paused 2h00m")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][6], "2h00m")
+
+    def test_timing_depends_on_fills_empty_queue_gate(self):
+        self.timing_two_hour(1_700_000_000)
+        job = {"depends_on": ["1439-a", "1440-b"]}
+        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "depends_on:1439-a, depends_on:1440-b")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][4], "-")
+        self.write("j/queue-gates.txt", "ram_room\n")
+        self.assertEqual(board._timing_row(self.root, "j", job, {})[0][4], "ram_room")
+
     def test_timing_ignores_other_stalls(self):
         t0 = 1_700_000_000
         self.write("j/spec.md", "s\n")
@@ -10760,6 +10773,29 @@ class ProcessHealthTest(unittest.TestCase):
         m = json.loads(out.getvalue())["metrics"]
         self.assertEqual((m["unused_windows"]["jobs"], m["overburned_windows"]["jobs"]), ([], []))
 
+    def test_window_names_carry_account(self):
+        self.board()
+        self.digest("001")
+        cards = [{**self.unused_card("seven_day", 1795028400), "account": a} for a in ("main", "owa")]
+        self.put("digests/001/windows.json", json.dumps(cards + [self.unused_card("five_hour", 100000)]))
+        self.assertEqual(self.run_health("001")["metrics"]["unused_windows"]["jobs"],
+                         ["five_hour-100000", "seven_day-1795028400-main", "seven_day-1795028400-owa"])
+        self.assertEqual(sorted(json.loads((Path(self.tmp.name) / "flagged.json").read_text())),
+                         ["unused_windows:five_hour-100000", "unused_windows:seven_day-1795028400-main",
+                          "unused_windows:seven_day-1795028400-owa"])
+
+    def test_overburned_early_90_is_20_pct_of_window(self):
+        self.board()
+        self.digest("001")
+        hit = lambda window, reset, early: {"window": window, "resets_at": reset, "budget": {
+            "left_at_reset_pct": 8, "cap_idle_secs": 0, "hit_90_at": reset - early}}
+        self.put("digests/001/windows.json", json.dumps([
+            hit("seven_day", 1795028400, 3 * 3600 + 34 * 60),  # digest 121: drained in its last hours
+            hit("seven_day", 1795309200, 78 * 3600),
+            hit("five_hour", 100000, 3500), hit("five_hour", 200000, 3700)]))
+        self.assertEqual(self.run_health("001")["metrics"]["overburned_windows"]["jobs"],
+                         ["five_hour-200000", "seven_day-1795309200"])
+
     def unused_with_pulse(self, cards, rows):
         """unused_windows' jobs for windows.json `cards` with pulse.log rows (t, {project: auto})."""
         self.board()
@@ -10850,7 +10886,7 @@ class ProcessHealthTest(unittest.TestCase):
             {"window": "five_hour", "resets_at": 1000000,
              "budget": {"left_at_reset_pct": 40, "cap_idle_secs": 0, "hit_90_at": None}},
             {"window": "seven_day", "resets_at": 2000000,
-             "budget": {"left_at_reset_pct": 5, "cap_idle_secs": 0, "hit_90_at": 1992800}},
+             "budget": {"left_at_reset_pct": 5, "cap_idle_secs": 0, "hit_90_at": 1700000}},
             {"window": "five_hour", "resets_at": 3000000,
              "budget": {"left_at_reset_pct": 15, "cap_idle_secs": 120, "hit_90_at": 2999940}},
             {"window": "five_hour", "resets_at": 4000000,
@@ -11388,6 +11424,30 @@ class WindowReportTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (self.root / "windows").iterdir()),
                          [".lock", f"five_hour-{self.R}.json", f"five_hour-{self.R + 100}-owa.json", "open.json"])
         self.assertEqual(board.cmd_window_report(self.root, self.R + 200), [])
+
+    def test_window_report_drops_phantom_seven_day(self):
+        """Digest 121: a main sample carried owa's 7-day reset, 78 h before main's real one; it opens no main window."""
+        self.two_accounts(owa_five=None)
+        real, phantom = self.R + 300000, self.R + 300000 - 78 * 3600
+        self.usage({"seven_day": {"used_percentage": 49, "resets_at": real}})
+        self.assertEqual(board.cmd_window_report(self.root, self.R), [])
+        self.usage({"seven_day": {"used_percentage": 10, "resets_at": phantom}})
+        (self.base / "owa" / "usage.json").write_text(json.dumps({"rate_limits": {"seven_day": {
+            "used_percentage": 92, "resets_at": phantom}}}))
+        self.assertEqual(board.cmd_window_report(self.root, self.R + 60), [])
+        self.assertEqual(sorted(self.open_json()), [f"seven_day-{phantom}-owa", f"seven_day-{real}"])
+        self.assertEqual(self.open_json()[f"seven_day-{real}"]["used_pct"], 49)
+
+    def test_window_report_scored_seven_day_bounds_next(self):
+        week, scored = 7 * 86400, self.R - 1000
+        (self.root / "windows").mkdir()
+        (self.root / "windows" / f"seven_day-{scored}.json").write_text("{}")
+        self.usage({"seven_day": {"used_percentage": 10, "resets_at": scored + week - 3600}})
+        self.assertEqual(board.cmd_window_report(self.root, self.R), [])
+        self.assertEqual(self.open_json(), {})
+        self.usage({"seven_day": {"used_percentage": 10, "resets_at": scored + week}})
+        self.assertEqual(board.cmd_window_report(self.root, self.R), [])
+        self.assertEqual(list(self.open_json()), [f"seven_day-{scored + week}"])
 
     def test_window_report_points_by_account(self):
         self.two_accounts()
