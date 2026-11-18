@@ -5355,6 +5355,17 @@ class BoardTest(unittest.TestCase):
         (self.root / "runs" / f"{start}-start-j.log").write_text("")
         self.assertEqual(cells(), ["10m", "3h05m"])
 
+    def test_timing_row_no_claim_uses_first_run(self):
+        t0 = 1_700_000_000
+        self.write("j/feature.md", "f\n")
+        self.write("j/spec.md", "s\n")
+        os.utime(self.root / "jobs/j/feature.md", (t0, t0))
+        os.utime(self.root / "jobs/j/spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        (self.root / "runs").mkdir(exist_ok=True)
+        start = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{start}-start-j.log").write_text("")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["10m", "3h00m"])
+
     def test_timing_row_bad_claim_ignored(self):
         t0 = 1_700_000_000
         self.write("j/feature.md", "f\n")

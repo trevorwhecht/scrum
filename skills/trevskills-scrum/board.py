@@ -2470,8 +2470,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     spec = spec_at - created if spec_at and created else None
     try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
         claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        claim = None
+    except (OSError, ValueError):  # no claim (a hand start): the first run log before spec.md stands in
+        claim = next((r for r in runs if created and spec_at and created <= r <= spec_at), None)
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
