@@ -326,6 +326,16 @@ class BacklogTest(unittest.TestCase):
         self.assertTrue(board.backlog_set_estimate(self.root, "Only needs", 1, "one line"))
         self.assertIn("- [ ] [1] Only needs {needs #a1b2} <!-- one line -->\n", self.text())
 
+    def test_out_of_order_markers_parse_and_rewrite_in_order(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n"
+            "- [ ] [2] Check the Google Places address {p:3} {#k3f9} {by:t} {needs #a1b2} {p:2} <!-- why -->\n")
+        (i,) = board.backlog_items(self.root)
+        self.assertEqual((i["text"], i["id"], i["priority"], i["needs"], i["by"], i["points"], i["why"]),
+                         ("Check the Google Places address", "k3f9", 2, ["a1b2"], "t", 2, "why"))
+        board.backlog_op(self.root, "edit", index=0, points=3)
+        self.assertIn("- [ ] [3] Check the Google Places address {#k3f9} {p:2} {needs #a1b2} {by:t} <!-- why -->\n", self.text())
+
     def test_old_lines_parse_unchanged(self):
         (self.root / "backlog.md").write_text(
             "# Backlog\n"
