@@ -13,6 +13,7 @@ os.environ["SCRUM_CPU_BUSY_PCT"] = "1"
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ.setdefault("SCRUM_PS", os.devnull)
+os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # job 971: finish_first reads every registered board; never the real ones
 import board  # noqa: E402
 
 

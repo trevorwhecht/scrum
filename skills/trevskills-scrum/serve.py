@@ -385,8 +385,11 @@ def setup_done(project, root, job_id):
 
 
 def held_gate(why):
-    """Whitespace-free queue-gate token for a machine_ok or allowance refusal `why`: cool_down, session_cap(<live>/<ceiling>)
-    (bare session_cap when unparsed), usage_pace (a 5h pace hold), the PULSE_GATES token, else other."""
+    """Whitespace-free queue-gate token for a machine_ok, board.finish_first or allowance refusal `why`: finish_first,
+    cool_down, session_cap(<live>/<ceiling>) (bare session_cap when unparsed), usage_pace (a 5h pace hold), the
+    PULSE_GATES token, else other."""
+    if why.startswith(board.FINISH_FIRST):
+        return "finish_first"
     if why == board.COOLING:
         return "cool_down"
     if m := re.search(r"(\d+) sessions running \(ceiling (\d+)\)", why):
@@ -443,11 +446,12 @@ def wake_waiting(project, root):
     them waiting, never needs-human, and so does cool-down (an automatic start: machine_ok with claim=True), except
     a `wake` job, which is approved work in flight and only needs RAM room. A
     `wait-on --then` job comes back at needs-human ("retry") and gets an approve spawn instead, from the same room.
-    CPU load over the launch limit (cpu_hot, read just before the claim) leaves every one waiting."""
+    CPU load over the launch limit (cpu_hot, read just before the claim) leaves every one waiting. board.finish_first
+    (work in flight waits on a queue or the machine) holds the plain waiting jobs as cool-down does."""
     if not any(map(board.parked_waiting, board.read_board(root)["jobs"])):
         return
-    why = board.machine_ok(root, claim=True)
-    cooling = why == board.COOLING
+    why = board.machine_ok(root, claim=True) or board.finish_first(root)
+    cooling = why == board.COOLING or bool(why and why.startswith(board.FINISH_FIRST))
     if cooling:  # only a parked wake job passes; plain waiting jobs stay held (hold below)
         why = board.machine_ok(root) or (None if any(j.get("wake") for j in filter(board.parked_waiting, board.read_board(root)["jobs"])) else why)
     if why:
@@ -633,10 +637,13 @@ def idle_claim(project, root, jobs) -> bool:
     live_ids run, a WATCHED leaf job whose session is alive, or a stage-cloud leaf job: a claude.ai or shop Mac
     session); a running job with unreadable files blocks all, and
     a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
-    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
+    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start; while board.finish_first
+    holds, only queued launches count as held work. CPU load over the launch
     limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing
     and keeps the pick held. True when one started."""
     held = held_work(project, jobs)
+    if any(not j.get("queued_launch") for j in held) and board.finish_first(root):
+        held = [j for j in held if j.get("queued_launch")]  # a queued launch is work in flight, a waiting child is new
     if not held or board.live_sessions() >= board.MAX_SESSIONS or board.machine_ok(root, claim=True):
         IDLE_SINCE.pop(project, None)
         return False
@@ -677,13 +684,14 @@ LILGUY_RESUME = ("lilguy job: there is no pipeline to resume. Fix: finish the ch
 def resume_refusal(project, root, job, manual=False):
     """Why the Resume button / auto-resume must not restart this stalled job, or None. A lilguy job in the main
     checkout has no worktree or builder to resume; no job resumes while free RAM or disk is low
-    (board.machine_ok; cool-down holds automatic starts of new work, never a resume), nor, unless `manual`, while no
+    (board.resume_gate: machine_ok, past the CPU load for a stall whose own session is alive and idle; cool-down holds
+    automatic starts of new work, never a resume), nor, unless `manual`, while no
     account has usage room (board.pick_account: a limit, a reserve, the ladder or the 5h pace); a Run-all/BigBoy child
     also waits for the overlap rules `ready` applies to new claims."""
     if board.lilguy_in_checkout(job):
         return LILGUY_RESUME
     global RESUME_ROOM
-    machine = board.machine_ok(root, manual=manual)
+    machine = board.resume_gate(root, job, manual=manual)  # its own live idle session skips the CPU load gate
     if machine and RESUME_ROOM is not None:
         RESUME_ROOM = 0  # inside watchdog_tick's resume pass: no later project resumes this tick
     if machine:
@@ -1984,7 +1992,8 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     auto-started run-all still running and a claimable backlog line, in rank order: board.projects() order, which the
     dashboard's Rank dialog sets. A live, paused or stalled tree never holds it (job 751): cmd_ready keeps the new
     children off their Likely files. board.machine_ok
-    (cool-down, RAM, disk, the session ceiling; claim=True) and board.pick_account's allowance are checked before each start; the first failure stops
+    (cool-down, RAM, disk, the session ceiling; claim=True), board.finish_first and board.pick_account's allowance are
+    checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
@@ -1996,7 +2005,7 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                 refused = board.machine_ok(root, claim=True)
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
                     continue
-                if refused:  # no room on this machine; retry next tick
+                if refused or board.finish_first(root):  # no room on this machine, or work in flight first
                     return
                 live = board.live_sessions()
                 allow = board.pick_account(time.time(), live)[1]
@@ -2519,7 +2528,8 @@ def watchdog_tick():
        Each parked Terminal batch gets its lilguy window opened once (terminal_batch_tick). After every project's
        resumes, in each project where none of the three started anything, idle_claim starts one long-held job.
     2. Auto-play: when nothing was resumed and nothing waits, and no headless session runs, Play the oldest paused job.
-    3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
+    3. Claim: only when passes 1 and 2 started nothing and nothing waits (and, in each claim, board.finish_first finds
+       no job anywhere on the Check or E2E queue or stalled on the machine gate), start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
        tick, with shop_tick (one held job to the shop Mac) between the last two in its own guard, and actions_alert
