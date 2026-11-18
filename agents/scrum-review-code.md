@@ -52,7 +52,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - a catch block the diff adds or moves in a route or service that returns a generic 500 without logging the caught error's `code` and message (Prisma errors included): `[blocking]`, since production errors then cannot be diagnosed
 - a test, worktree or review run that reaches a real side effect (a real send, a real network call with stored credentials, a hard-coded file under the home folder) because the code reads a fixed real path or a test leaves that call unpatched: `[blocking]`
 - a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
-- a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
+- a gate that stops a whole flow (every dispatch, launch or job) when any entry of a list fails (`"failed" in steps.values()`): a nice-to-have entry (a lint tool, a cache) the diff adds to that list, or a gate the diff writes over the whole list without naming the entries the flow cannot run without, is `[blocking]`, since one failed extra then stops all work (job 1160)
 - a weakened test: an existing test the diff skips (an added `.skip`, `.only` or `xit`), loosens (a loosened assertion), special-cases to pass, or deletes (a test deleted while the behaviour stays) is `[blocking]`; a skip already in the file before the diff is not flagged
 - logic duplicated where something existing could be reused
 - unrequested abstractions and over-engineering
