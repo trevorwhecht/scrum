@@ -2164,7 +2164,7 @@ HEALTH_LIMITS = {"stops_per_job": 0.5, "resume_abort_stops": 0, "waiting_on_job_
                  "cheaper_lane_jobs": 0, "test_waste_jobs": 0, "fable_misuse": 0, "unused_windows": 0,
                  "overburned_windows": 0, "not_shipped": 0}
 HEALTH_UNUSED_PCT = 15  # a window left more than this % unused at reset
-HEALTH_EARLY_90_SECS = 3600  # a window that reached 90% more than this long before reset burned too early
+HEALTH_EARLY_90_SHARE = 0.2  # a window that reached 90% more than this share of its span before reset burned too early
 HEALTH_WAITING_RE = re.compile(r"(?i)blocked on sibling|waiting (?:on|for) (?:job |another job|\d{3})")
 HEALTH_UNREADABLE_RE = re.compile(r"[\w.-]*/[\w.-]+\.[A-Za-z]{1,5}\b|\brule \d+\b", re.I)
 
@@ -2207,7 +2207,8 @@ def windows_flagged_path():
 
 def _first_flag_only(owner, hits):
     """Drop from hits (metric -> window names) every window an earlier digest of any project already flagged for that
-    metric, so one account-wide window counts once. Records the new ones under owner; a rerun by the same owner keeps them."""
+    metric, so one account-wide window counts once; names carry the card's account (`seven_day-<reset>-owa`), so two
+    accounts sharing a reset count apart. Records the new ones under owner; a rerun by the same owner keeps them."""
     path = windows_flagged_path()
     seen = _health_file(path, dict)
     for metric in ("unused_windows", "overburned_windows"):
@@ -2338,7 +2339,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
         b = card.get("budget") if isinstance(card, dict) else None
         if not isinstance(b, dict):
             continue
-        name, reset = f"{card.get('window')}-{card.get('resets_at')}", card.get("resets_at")
+        account = f"-{card['account']}" if card.get("account") else ""  # main and owa can share a reset
+        name, reset = f"{card.get('window')}-{card.get('resets_at')}{account}", card.get("resets_at")
         tokens = card.get("tokens") if isinstance(card.get("tokens"), dict) else {}
         burned = b.get("used_pct") == 0 and is_num(tokens.get("total")) and tokens["total"] > 0  # stale 0% sample
         span = WINDOW_SECS.get(card.get("window"))
@@ -2347,7 +2349,8 @@ def cmd_process_health(root, digest_id: str) -> dict:
         if is_num(b.get("left_at_reset_pct")) and b["left_at_reset_pct"] > HEALTH_UNUSED_PCT and not burned and not paused:
             hits["unused_windows"].append(name)
         if (is_num(b.get("cap_idle_secs")) and b["cap_idle_secs"] > 0
-                or is_num(b.get("hit_90_at")) and is_num(reset) and reset - b["hit_90_at"] > HEALTH_EARLY_90_SECS):
+                or span and is_num(b.get("hit_90_at")) and is_num(reset)
+                and reset - b["hit_90_at"] > HEALTH_EARLY_90_SHARE * span):
             hits["overburned_windows"].append(name)
     _first_flag_only(f"{root}:{digest_id}", hits)
     prev_id, prev = _previous_health(root, str(digest_id))
@@ -2499,7 +2502,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     epochs (None: no date); the Stalls cell gives each one's minutes to the next run log, `open` when none, `?` for None,
     then ` (held: <tokens>)` from stall-holds.txt (serve.py note_stall_hold: what auto_resume passed it over for).
     Each `queued` epoch (a questions.log queue-wait line) runs to the job's next run log, else the round's end, is
-    subtracted like `waits` and adds one to E2E lock waits."""
+    subtracted like `waits` and adds one to E2E lock waits. An autoPlayed job's Round times start `paused `, and a job
+    whose board entry lists depends_on gets `depends_on:<id>` as its Queue gate when queue-gates.txt gives none."""
     folder = Path(root) / "jobs" / job_id
     created = _mtime(folder / "feature.md") or _mtime(folder / "spec.md")
     done, spec_at = _epoch(job.get("updatedAt")), _mtime(folder / "spec.md")
@@ -2555,12 +2559,15 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
         gates = ", ".join((folder / "queue-gates.txt").read_text(encoding="utf-8", errors="replace").split()) or "-"
     except OSError:
         gates = "-"
+    if gates == "-" and isinstance(job.get("depends_on"), list) and job["depends_on"]:  # waited on an earlier job by plan
+        gates = ", ".join(f"depends_on:{d}" for d in job["depends_on"])
     stall_cell, resume = [], 0
     for at in sorted(stalls.get(job_id, ()), key=lambda t: (t is None, t or 0)):  # dated in order, then undated
         nxt = None if at is None else after(at)
         stall_cell.append("?" if at is None else "open" if nxt is None else _mins(nxt - at))
         resume += nxt - at if nxt else 0
-    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), ", ".join(times) or "-",
+    paused = "paused " if job.get("autoPlayed") and times else ""  # sat paused until serve.py auto_play played it
+    cells = [job_id, _mins(wall), _mins(spec), _mins(queue), gates, str(len(rounds)), paused + ", ".join(times) or "-",
              ", ".join(hwaits) or "-", f"{len(same)} (rounds {','.join(map(str, same))})" if same else "0", str(waits), ", ".join(stall_cell) or "0"]
     try:  # serve.py note_stall_hold: what held its stalls
         held = (folder / "stall-holds.txt").read_text(encoding="utf-8", errors="replace").split()
@@ -2896,7 +2903,9 @@ def _write_json(path, data):
 def cmd_window_report(root, now=None) -> list[dict]:
     """Record every usage.json window into windows/open.json, then score each remembered window whose resets_at has
     passed into windows/<window>-<resets_at>.json (once: an existing scorecard is never rewritten) and drop it from
-    open.json. Returns the scorecards written this run. The whole run holds windows/.lock."""
+    open.json. A seven_day sample whose resets_at is under WINDOW_SECS['seven_day'] after (or before) that account's
+    latest open or scored seven_day reset is dropped: another account's reset. Returns the scorecards written this run.
+    The whole run holds windows/.lock."""
     t = time.time() if now is None else now
     wdir = Path(root) / "windows"
     wdir.mkdir(parents=True, exist_ok=True)
@@ -2909,6 +2918,14 @@ def cmd_window_report(root, now=None) -> list[dict]:
         opened = {k: v for k, v in raw.items() if isinstance(v, dict) and v.get("window") in WINDOW_SECS
                   and type(v.get("resets_at")) is int} if isinstance(raw, dict) else {}
         board, idle, accs = read_board(root), None, accounts()
+        week = {}  # account -> its latest open or scored seven_day reset
+        for p in wdir.glob("seven_day-*.json"):
+            if m := re.fullmatch(r"seven_day-(\d+)(?:-(.+))?\.json", p.name):
+                week[m[2] or accs[0].name] = max(int(m[1]), week.get(m[2] or accs[0].name, 0))
+        for v in opened.values():
+            if v["window"] == "seven_day":
+                name = v.get("account") or accs[0].name
+                week[name] = max(v["resets_at"], week.get(name, 0))
         for acc in accs:
             usage = read_usage(acc.name) or {}
             limits = usage.get("rate_limits") if isinstance(usage.get("rate_limits"), dict) else {}
@@ -2918,6 +2935,9 @@ def cmd_window_report(root, now=None) -> list[dict]:
                 if not isinstance(w, dict) or not is_num(w.get("resets_at")):
                     continue
                 r = int(w["resets_at"])
+                last = week.get(acc.name)
+                if key == "seven_day" and last is not None and r != last and r - last < WINDOW_SECS["seven_day"]:
+                    continue  # another account's reset in this one's sample (digest 121): no phantom window
                 e = opened.setdefault(f"{key}-{r}" + ("" if acc is accs[0] else f"-{acc.name}"), {
                     "window": key, "resets_at": r, "used_pct": None, "hit_90_at": None, "hit_cap_at": None,
                     "idle_secs": 0, "last_tick": None, **({} if acc is accs[0] else {"account": acc.name})})
