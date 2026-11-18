@@ -1032,6 +1032,8 @@ class ContractTest(unittest.TestCase):
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
         merge = (SKILL_DIR / "lanes" / "merge.md").read_text()
         self.assertIn("**Dev migrate (Check gate)**", newjob)
+        self.assertIn("holds it in check as a queue wait, not a stall and not a stop, that serve.py starts when the lock frees", newjob)
+        self.assertNotIn("into a stall", newjob)
         sec = merge.split("## Dev migrate (Check gate)")[1].split("\n## ")[0]
         skill = (SKILL_DIR / "SKILL.md").read_text()
         self.assertIn("dev-only **Dev migrate** (Steps 0-7, never Step 8/prod)", skill)
