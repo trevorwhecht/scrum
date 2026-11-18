@@ -4,6 +4,7 @@
 // relative paths against the config file's folder (this one), so each of them is pinned to the repo here instead.
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const repo = process.cwd();
@@ -22,7 +23,10 @@ for (const o of [config, ...projects]) {
 }
 if (!config.testDir) {
   // Playwright skips gitignored files only when no testDir is set; keep that now testDir is the repo.
-  for (const o of projects.length ? projects : [config]) if (!o.testDir) o.respectGitIgnore ??= true;
+  // A project-level value would beat a top-level one, so a repo's own top-level respectGitIgnore is left alone.
+  if (config.respectGitIgnore === undefined) {
+    for (const o of projects.length ? projects : [config]) if (!o.testDir) o.respectGitIgnore ??= true;
+  }
   config.testDir = repo;
 }
 config.outputDir ||= path.join(repo, "test-results");
@@ -31,12 +35,19 @@ for (const key of ["globalSetup", "globalTeardown"]) {
 }
 if (config.tsconfig) config.tsconfig = at(config.tsconfig);
 for (const server of [config.webServer ?? []].flat()) server.cwd = server.cwd ? at(server.cwd) : repo;
+const builtinReporters = ["list", "line", "dot", "json", "junit", "null", "github", "html", "blob"];
+// Playwright resolves a custom reporter id from this file's folder; resolve it from the repo instead.
+const reporterId = (name) => {
+  if (typeof name !== "string" || builtinReporters.includes(name)) return name;
+  if (name.startsWith(".")) return at(name);
+  try { return createRequire(path.join(repo, "package.json")).resolve(name); } catch { return name; }
+};
 if (config.reporter) {
   config.reporter = (typeof config.reporter === "string" ? [[config.reporter]] : config.reporter).map(([name, opts]) => {
     const o = { ...opts };
     for (const key of ["outputFolder", "outputFile"]) if (o[key]) o[key] = at(o[key]);
     if (name === "html") o.outputFolder ??= path.join(repo, "playwright-report");
-    return [name, o];
+    return [reporterId(name), o];
   });
 }
 
