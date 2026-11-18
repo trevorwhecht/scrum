@@ -1,5 +1,5 @@
-"""A stage-cloud job with a `shop` pid runs on the shop Mac: its card is highlighted (class shop), shows a Shop chip and
-reads "Running on shop Mac". Cloud without `shop`, or a job past cloud, looks as before."""
+"""A job with a `shop` pid ran on the shop Mac: its card stays highlighted (class shop) with a Shop chip in every column,
+and reads "Running on shop Mac" only while it is in stage cloud. Cloud without `shop` looks as before."""
 import json, re, sys, unittest
 from pathlib import Path
 
@@ -21,10 +21,20 @@ class ShopChip(unittest.TestCase):
         self.assertIn('<span class="lanechip">Shop</span>', html)
         self.assertIn("Running on shop Mac, ", html)
         self.assertIn('<span class="lanechip">Shop · mac2</span>', run(card(shop="4242", worker="mac2"))[0])
-        for other in (plain, left, none):
+        for other in (plain, none):
             self.assertNotIn("shop", other.lower())
         self.assertIn("Running in cloud, ", plain)
+        self.assertIn('class="card shop"', left, "a shop job past cloud keeps its blue border")
         self.assertIn("Checking, ", left)
+        self.assertNotIn("Running on shop Mac", left)
+
+    def test_finished_shop_job_stays_blue(self):
+        done, aborted = run(card(shop="4242", stage="done", worker="mac2") + card(shop="4242", stage="aborted"))
+        self.assertIn('class="card shop"', done)
+        self.assertIn('<span class="lanechip">Shop · mac2</span>', done)
+        self.assertIn('class="card aborted shop"', aborted)
+        for html in (done, aborted):
+            self.assertNotIn("Running on shop Mac", html)
 
 
 if __name__ == "__main__":

@@ -606,7 +606,7 @@ const roadmapWaiting = p => {
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
 function card(job) {
-  const shop = job.stage === "cloud" && !!job.shop; // on the shop Mac: the remote session pid sits in `shop`
+  const shop = !!job.shop; // ran on the shop Mac (its remote session pid sits in `shop`): blue in every column
   // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
   const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);
