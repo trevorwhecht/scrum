@@ -251,11 +251,22 @@ def cpu_held(root, job):
     launch = job.get("queued_launch")
     if not (job.get("play_queued") and launch) or job.get("play_queued_manual") or job.get("stage") != launch.get("stage"):
         return False
+    return "cpu_load" in gate_heads(root, job)
+
+
+def gate_heads(root, job):
+    """The gate names (text before `(`) in queue-gates.txt; empty when unreadable."""
     try:
         gates = (Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt").read_text(encoding="utf-8").split()
     except OSError:
-        return False
-    return any(g.split("(", 1)[0] == "cpu_load" for g in gates)
+        return set()
+    return {g.split("(", 1)[0] for g in gates}
+
+
+def mem_held(root, job):
+    """True for a non-manual light job whose queue-gates.txt names vm_pressure or swap; cpu_first lets it lead while held_work."""
+    return (not job.get("play_queued_manual") and board.light_job(root, job)
+            and bool(gate_heads(root, job) & {"vm_pressure", "swap"}))
 
 
 def held_order(root, job):
@@ -264,7 +275,7 @@ def held_order(root, job):
 
 
 def cpu_first():
-    """(project, job id) of the CPU-held launch (cpu_held, not running) that starts first across every board.projects()
+    """(project, job id) of the CPU-held launch (cpu_held, or a mem_held light job in held_work; not running) that starts first across every board.projects()
     board, by held_order; None when none waits. A candidate the RAM gate refuses at its own share (spawn's ram_short test)
     is skipped, so it never holds the others. spawn holds every other non-manual start while one waits."""
     best = None
@@ -274,8 +285,9 @@ def cpu_first():
             jobs = cached_board(root).get("jobs", [])
         except (OSError, ValueError, AttributeError):
             continue
+        held = {j["id"] for j in held_work(project, jobs)}
         for job in jobs:
-            if (cpu_held(root, job) and not running(project, job["id"])
+            if ((cpu_held(root, job) or job["id"] in held and mem_held(root, job)) and not running(project, job["id"])
                     and board.ram_room(floor=0, light=board.light_job(root, job)) >= 1):
                 key = held_order(root, job)
                 if best is None or key < best[0]:
