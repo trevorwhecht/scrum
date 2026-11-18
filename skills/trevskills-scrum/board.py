@@ -695,9 +695,12 @@ def claim_item(lines, item, job_id):
 
 def cmd_next(root, index=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
-    Cool-down refuses the automatic claim (no index); an explicit index is Trevor's Run now and still claims."""
+    Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
+    and still claims."""
     if index is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
+    if index is None and (hold := finish_first(root)):
+        raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
@@ -2231,6 +2234,7 @@ def pipeline_health(root, digest_id: str, jobs: list[str]) -> list[str]:
 
 # --- timing: digest-start writes digests/<NNN>/timing.md, the time each claimed job cost, for ## Time sinks ---
 E2E_WAIT_REASON = "waiting on the E2E queue"  # newjob.md Check gate step 2 stalls a job on it (serve.py E2E_WAIT)
+CHECK_WAIT_REASON = "waiting on the Check queue"  # the same stall on check.lock (serve.py CHECK_WAIT)
 E2E_LOCK_RE = re.compile(r"\bexit 124\b")
 
 
@@ -4649,12 +4653,13 @@ def swap_pressing(ram, swap, limit):
     return swap is not None and swap > limit and ((ram is not None and ram < SWAP_FREE_RAM_PCT) or swap_grew(swap))
 
 
-def machine_ok(path, manual=False, claim=False):
+def machine_ok(path, manual=False, claim=False, own_load=False):
     """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
     not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then the kernel memory
     pressure level (vm_pressure_level, 2+ refuses), then swap, then free
     disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
-    manual clicks), then the session ceiling.
+    manual clicks; CPU load also skipped with own_load, a resume whose own idle session is already in it: resume_gate),
+    then the session ceiling.
     Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
     if claim and not manual and cooling_down():
         return COOLING
@@ -4673,7 +4678,7 @@ def machine_ok(path, manual=False, claim=False):
     cpu = None if manual else cpu_busy_pct()
     if cpu is not None and cpu > MAX_CPU_BUSY_PCT:
         return f"CPU busy {cpu:.0f}% (> {MAX_CPU_BUSY_PCT}%)"
-    load = None if manual else cpu_load_pct()
+    load = None if manual or own_load else cpu_load_pct()
     if load is not None and load > MAX_CPU_LOAD_PCT:
         return f"CPU load {load:.0f}% of {os.cpu_count()} cores (> {MAX_CPU_LOAD_PCT}%)"
     live = live_sessions()
@@ -4962,7 +4967,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no; one
     with no spec.md uses holder_files and holds nothing when that is empty. An overlap gate names the file (overlap_gate).
     Paused or stalled work never holds a claim otherwise (job 751). Cool-down holds every claim (Run-all and
-    BigBoy alike) unless `manual` (Trevor's Setup done or Play); a parent whose children all finished still reports
+    BigBoy alike) unless `manual` (Trevor's Setup done or Play), and so does finish_first, held like a machine wait; a parent whose children all finished still reports
     all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text, since} (the card's
     "Waiting on" line; `since` is set once and a hold past OVERLAP_HOLD_MAX_S is released); a claim or a depends_on wait drops it.
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
@@ -4995,6 +5000,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         go = not held and (parent["stage"] == "running" or legacy)
         # checked once: a machine-wide state, so it gates the whole call
         machine = go and not shop and machine_ok(root, manual=manual, claim=True)  # a shop claim runs off this Mac
+        if go and not shop and not manual and not machine:  # job 971: work in flight finishes before new claims
+            machine = finish_first(root, board["jobs"]) or False
         cap = None  # the usage ladder's slots left this call; None = no taper
         if go and not machine:
             n_live = live_sessions()
@@ -6112,6 +6119,7 @@ def cmd_hook(event, tty, pid=None):
 WATCHED = ("spec", "build", "check", "review", "approve", "merging", "deploying")
 STALL_MINUTES = 30  # fixed, the same as the dashboard's STALE_MS; not a setting (UB-24)
 IDLE_HOURS = 2  # a live session with no board or job-dir change this long is flagged too; fixed, not a setting
+LIVE_IDLE = "(session alive but idle)"  # cmd_watchdog's live-idle stall reason ends on it; resume_gate reads it
 STALLED = "stalled in "  # reason prefix: serve.py's resume, the dashboard's Resume button and SKILL.md read it
 STALL = "stalled: "  # new-shape reason prefix: the job keeps its WATCHED stage and has board `stalled` true
 AGENT_TYPES_RE = re.compile(r"not loaded as agent types|agent types (?:are )?not loaded|^waiting on the (?:E2E|Check) queue", re.I)
@@ -6144,6 +6152,62 @@ def queue_waiting(job: dict) -> bool:
     not paused; serve.py auto_resume starts it as soon as that lock is free, spending no try."""
     return job.get("stage") == "check" and not job.get("paused") and not job.get("stalled") \
         and str(job.get("reason") or "").startswith((E2E_QUEUE_WAIT, CHECK_QUEUE_WAIT))
+
+
+FINISH_FIRST = "finishing work in flight first"  # finish_first's reason prefix; serve.py held_gate's finish_first token
+
+
+def resume_waits(job: dict, by_id: dict) -> bool:
+    """A stalled job serve.py auto_resume restarts once the machine lets it: stalled in its own WATCHED stage (never
+    needs-human, never paused: job 751), not lilguy-in-checkout, not parked for cool down or GitHub billing, with no
+    parent or a running, unpaused Run-all/BigBoy parent."""
+    reason = str(job.get("reason") or "")
+    if not stalled(job) or job.get("stage") == "needs-human" or lilguy_in_checkout(job) \
+            or reason.startswith((STALL + COOLDOWN_PARK, STALL + CI_BILLING_WAIT)):
+        return False
+    p = by_id.get(job.get("parent")) if job.get("parent") else None
+    return not job.get("parent") or bool(p) and p.get("stage") == "running" and not p.get("paused") \
+        and p.get("lane") in ("runall", "bigboy")
+
+
+def finish_first(root=None, jobs=None) -> str | None:
+    """Why no automatic new claim (backlog next, a Run-all or BigBoy child, auto-continue, wake) may start in any
+    project now, or None (job 971: finish the task at hand first). Read across root's board (`jobs` when given: the
+    caller's locked copy) and every registered project's: a job held on the E2E or Check queue (queue_waiting, or
+    stalled on E2E_WAIT_REASON or CHECK_WAIT_REASON), else a stalled job auto_resume restarts (resume_waits) that waits
+    on the machine gate: spawn's gate queued its resume (queued_launch), or resume_gate refuses it. Paused and
+    needs-human jobs never hold it (job 751); Trevor's clicks (Play, Resume, Run now) never ask it."""
+    here = Path(root).resolve() if root else None
+    waiting = []
+    for scrum in dict.fromkeys(([here] if here else []) + [(p / "scrum").resolve() for p in projects().values()]):
+        try:
+            js = jobs if jobs is not None and scrum == here else read_board(scrum)["jobs"]
+        except SystemExit:
+            continue
+        name, by_id = scrum.parent.name, {j.get("id"): j for j in js}
+        for j in js:
+            reason = str(j.get("reason") or "")
+            if queue_waiting(j) or stalled(j) and j.get("stage") != "needs-human" \
+                    and reason.startswith((STALL + E2E_WAIT_REASON, STALL + CHECK_WAIT_REASON)):
+                queue = "E2E" if reason.startswith((E2E_QUEUE_WAIT, STALL + E2E_WAIT_REASON)) else "Check"
+                return f"{FINISH_FIRST}: {name}/{j.get('id')} waits on the {queue} queue"
+            if resume_waits(j, by_id):
+                waiting.append((scrum, name, j))
+    for scrum, name, j in waiting:  # the machine readings only when a stalled job could be waiting on them
+        why = "its launch is queued" if j.get("queued_launch") else resume_gate(scrum, j)
+        if why:
+            return f"{FINISH_FIRST}: {name}/{j.get('id')} waits to resume ({why})"
+    return None
+
+
+def resume_gate(root, job: dict, manual=False) -> str | None:
+    """machine_ok for resuming `job`. A stalled job whose own session is still alive and idle (cmd_watchdog's LIVE_IDLE
+    stall, and session_alive_fn still sees it) skips the CPU load gate: that session is already counted in the load."""
+    why = machine_ok(root, manual=manual)
+    if why and why.startswith("CPU load") and stalled(job) and LIVE_IDLE in str(job.get("reason") or "") \
+            and session_alive_fn()(job):
+        why = machine_ok(root, manual=manual, own_load=True)
+    return why
 
 
 def stall_stage(job: dict) -> str | None:
@@ -6380,7 +6444,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                     live_idle = True
                 if live_idle:
                     job.update(stalled=True, updatedAt=now(), reason=f"{STALL}no board or job-dir "
-                               f"change for {IDLE_HOURS} h (session alive but idle)")
+                               f"change for {IDLE_HOURS} h {LIVE_IDLE}")
                     gate = hold(job) if hold else None
                     log_stop(root, job["id"], "stall", job["reason"], auto=auto or bool(gate), **({"hold": gate} if gate else {}))
                     roadmap_stall_locked(root, job)
