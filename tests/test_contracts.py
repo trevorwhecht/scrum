@@ -1419,7 +1419,9 @@ class ContractTest(unittest.TestCase):
         must_fail = ("   - Every test must fail if the behaviour breaks: hand-written literal expectations "
                      "(never values computed by the code under test), and never an assertion on a mock.")
         handoff = ("   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, "
-                   "existing patterns reused.")
+                   "existing patterns reused, and no existing behaviour (an animation, a nudge, a control) removed "
+                   "unless the spec names it for removal: a bug in a behaviour is fixed, never fixed by "
+                   "deleting the behaviour.")
         running_app = "   - A criterion that needs the running app"
         b1 = ("   - UI that can change while shown (an open modal, a polled list, a field being edited) "
               "refreshes on every re-render, never overwrites what the user is typing, and tolerates a "
@@ -2980,7 +2982,8 @@ class ContractTest(unittest.TestCase):
         stops = self.lane("stops")
         self.assertLessEqual(len(stops.splitlines()), 15)
         for phrase in ("say what happened and why it needs Trevor", "say what each button does",
-                       "must read on its own", "a rule number or an internal term",
+                       "must read on its own", "never use a file path or a rule number, even with an explanation",
+                       "or an internal term (`human-only`",
                        "rewrites any templated or passed-through text", "before calling `B ask`, keeping its prefix",
                        "decision.md line 2", "`## For Trevor` line",
                        "`This change adds a database column, which agents aren't allowed to apply on their own. Reviews "
@@ -3686,7 +3689,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             heading = "## Run all" if name == "runall" else "## Digest" if name == "digest" else f"## {title} lane"
             body = [l for l in self.h2(text, heading).splitlines()[2:] if l.strip()]
             if name == "lilguy":  # +parked Terminal batch default, digest 062 p1, job 716
-                self.assertEqual(len(body), 2, title)
+                self.assertEqual(len(body), 3, title)
+                self.assertIn("takes the same default", body.pop())  # digest 088 p4
                 self.assertIn("default answer is `Run it in a Terminal window`", body.pop())
             self.assertEqual(body, [f"Read `$HOME/.claude/skills/trevskills-scrum/lanes/{name}.md` when this lane runs."], title)
         heads = ["Run all", "Fast lane", "Debug lane", "BigBoy lane", "Roadmap lane", "Lilguy lane", "Cloud lane", "Check gate"]

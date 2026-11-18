@@ -2470,8 +2470,8 @@ def _timing_row(root, job_id, job, stalls, waits=(), human=(), queued=()):
     spec = spec_at - created if spec_at and created else None
     try:  # cmd_ready's claim: a BigBoy child's dependency wait counts as Queue, not Spec
         claim = float((folder / "claimed-at.txt").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        claim = None
+    except (OSError, ValueError):  # no claim (a hand start): the first run log before spec.md stands in
+        claim = next((r for r in runs if created and spec_at and created <= r <= spec_at), None)
     spec_from = created
     if claim and spec_at and created and created <= claim <= spec_at:
         spec, queue, spec_from = spec_at - claim, queue + claim - created, claim
@@ -4693,6 +4693,8 @@ MAX_CPU_BUSY_PCT = 90  # ... or with the CPU busier than this (cpu_busy_pct, 0-1
 MAX_CPU_LOAD_PCT = 300  # ... or with the 1-minute load average above this share of the cores (cpu_load_pct): load 13.4 on 8
 #                        cores (168%) timed out next dev, jest and Playwright while busy read 51% (2026-10-26, job 459);
 #                        150 -> 300 by job 958: load counts disk/swap waits; 150 held claims ~16 h in 3 days at 30% idle
+# Jobs 1373, 1403, 1420, 1386: cache-tax drops a cold session's wake prompt, so the -p session exits mid-job
+NO_CACHE_TAX = '{"enabledPlugins": {"cache-tax@claude-code-mods": false}}'
 SESSION_NICE = 10  # spawn: every headless claude -p session runs at this nice level, below Trevor's own apps
 MAX_LAUNCH_CPU_LOAD_PCT = 500  # serve.spawn queues every non-manual job launch (resume, approve, rework, start) above this load
 CPU_SAMPLES = 3  # cpu_busy_pct: the mean of at most this many watchdog samples (record_cpu_sample) ...
@@ -7557,7 +7559,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     logs = root / "runs"
     logs.mkdir(exist_ok=True)
     log = logs / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{action}-{job_id}.log"
-    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags]
+    argv = [CLAUDE, "-p", prompt, *(("--model", model) if model else ()), *flags, *(() if "--settings" in flags else ("--settings", NO_CACHE_TAX))]
     try:
         with open(log, "w") as fh:
             proc = subprocess.Popen(argv, cwd=root.parent,

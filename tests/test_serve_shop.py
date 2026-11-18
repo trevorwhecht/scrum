@@ -154,6 +154,15 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(out, "shop: mm: 043-a: started on the shop Mac (pid 4242, account owa)\n")
         self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
 
+    def test_fast_job_goes_before_older_standard_job(self):
+        root = self.project("mm", self.runall({"id": "043-a", "lane": "standard"}, {"id": "090-b", "lane": "fast"}))
+        flag = self.base / "cooldown"
+        flag.write_text("")
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
+            self.assertIs(self.tick()[0], True)
+        self.assertEqual(self.job(root, "090-b")["stage"], "cloud")
+        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+
     def test_two_job_cap_across_boards(self):
         self.assertEqual(self.serve.SHOP_MAX, 2)
         root = self.project("mm", self.runall({"id": "043-a"}))

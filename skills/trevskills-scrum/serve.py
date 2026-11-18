@@ -1629,7 +1629,7 @@ def shop_tick(project, repo, root) -> bool:
                    if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
                    and j.get("setup") != "pending" and not lilguy(j)
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
-                  key=lambda j: (int(j["id"].split("-")[0]), j["id"]))  # numeric: 1000- sorts after 999-
+                  key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
     # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
     if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()) \
             or sum(j.get("stage") == "cloud" and bool(j.get("shop")) for r in board.projects().values()
