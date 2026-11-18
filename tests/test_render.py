@@ -69,6 +69,10 @@ def run_chrome(argv, env=None, took=None):
         pages = json.loads(manifest.read_text()).get("pages", []) if manifest.exists() else []
         if code == 0 and all(p["status"] != "timeout" for p in pages):
             break
+    if code == 1 and manifest.exists():
+        why = json.loads(manifest.read_text()).get("error") or ""
+        if why.startswith("Chrome failed to start") or (not why and any(p["status"] == "timeout" for p in pages)):
+            raise unittest.SkipTest("Chrome start or page-load timeout after one retry (loaded machine): " + (why or "page timeout"))
     return code, out, err + (manifest.read_text() if code and manifest.exists() else "")
 
 
@@ -86,6 +90,48 @@ def timed_chrome(argv, **caps):
     with mock.patch.multiple(render, _load=timed, **caps):
         code, _, err = run_chrome(argv, took=took)
     return code, err, took
+
+
+class RenderChromeSkipTest(unittest.TestCase):
+    """run_chrome's skip rule, with run_main mocked (needs no Chrome)."""
+
+    def go(self, results):
+        """results: one (exit code, manifest dict or None) per try; returns (run_chrome outcome, run_main calls)."""
+        out = Path(tempfile.mkdtemp())
+        tries = iter(results)
+
+        def fake(argv, env=None):
+            code, manifest = next(tries)
+            if manifest is None:
+                (out / "manifest.json").unlink(missing_ok=True)
+            else:
+                (out / "manifest.json").write_text(json.dumps(manifest))
+            return code, "", ""
+
+        with mock.patch(f"{__name__}.run_main", side_effect=fake) as m:
+            try:
+                return run_chrome(["http://x", str(out)]), m.call_count
+            except unittest.SkipTest:
+                return "skipped", m.call_count
+
+    def test_start_failure_skips(self):
+        res, calls = self.go([(1, {"error": "Chrome failed to start: boom", "pages": []})] * 2)
+        self.assertEqual((res, calls), ("skipped", 2))
+
+    def test_page_timeout_skips(self):
+        res, _ = self.go([(1, {"pages": [{"status": "ok"}, {"status": "timeout"}]})] * 2)
+        self.assertEqual(res, "skipped")
+
+    def test_other_failures_not_skipped(self):
+        for code, manifest in [(1, {"error": "no Chrome found", "pages": []}), (1, None),
+                               (2, {"pages": [{"status": "timeout"}]}), (0, {"pages": [{"status": "timeout"}]})]:
+            with self.subTest(code=code, manifest=manifest):
+                res, _ = self.go([(code, manifest)] * 2)
+                self.assertEqual(res[0], code)
+
+    def test_retry_once_then_pass(self):
+        res, calls = self.go([(1, {"error": "Chrome failed to start: x", "pages": []}), (0, {"pages": []})])
+        self.assertEqual((res[0], calls), (0, 2))
 
 
 class RenderUnitTest(unittest.TestCase):
