@@ -4526,8 +4526,10 @@ def child_files(jobs_dir, job_id):
             if found or name == "spec.md" and re.search(r"^#+\s*Likely files", text, re.M | re.I):
                 return found  # a Likely files heading that names no path still means "files unknown"
             # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
-            tracked = git_tracked(Path(jobs_dir).parent.parent)
-            return {p if p in tracked or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
+            root = Path(jobs_dir).parent.parent
+            tracked = git_tracked(root)
+            # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
+            return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
                     for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
     return set()
 
