@@ -7439,7 +7439,7 @@ class CloudSyncTest(unittest.TestCase):
         labelled = self.pr(labels=[{"name": "bug"}, {"name": "scrum:needs-human"}], base={"ref": "dev", "repo": {"full_name": "o/r"}})
         with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=worktree) as wt:
             out = board.cmd_cloud_sync(self.root)
-        wt.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_called_once_with(self.root.parent, self.job, f"scrum/{self.job}")
         return out
 
     def test_needs_human_pr_reads_reason_and_adds_worktree(self):
@@ -7452,6 +7452,41 @@ class CloudSyncTest(unittest.TestCase):
         job = self.get()
         self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"]),
                          ("needs-human", self.URL, "origin/dev", reason, "/r/.claude/worktrees/scrum-x"))
+
+    def short_head_pr(self):
+        return self.pr(labels=[{"name": "scrum:needs-human"}], head={"ref": "scrum/001", "repo": {"full_name": "o/r"}})
+
+    def test_cloud_plan_returns_matched_head_ref(self):
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        for ref in ("scrum/001", f"scrum/{self.job}"):
+            pr = self.short_head_pr()
+            pr["head"]["ref"] = ref
+            with self.gh([pr], comments):
+                plan = board._cloud_plan(self.root.parent, self.job, [pr])
+            self.assertEqual(plan[5], ref)
+
+    def test_cloud_worktree_checks_out_given_ref(self):
+        runs = []
+        def run(argv, **kw):
+            runs.append(argv)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with mock.patch.object(board.subprocess, "run", side_effect=run):
+            path = board.cloud_worktree(self.root.parent, "7-x", "scrum/7")
+            board.cloud_worktree(self.root.parent, "7-x")
+        wt = str(self.root.parent.resolve() / ".claude" / "worktrees" / "scrum-7-x")
+        self.assertEqual(path, wt)
+        adds = [r for r in runs if "worktree" in r]
+        self.assertEqual([a[-1] for a in adds], ["scrum/7", "scrum/7-x"])
+        self.assertEqual([a[-2] for a in adds], [wt, wt])
+
+    def test_needs_human_short_head_gets_worktree_and_branch(self):
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        with self.gh([self.short_head_pr()], comments), \
+                mock.patch.object(board, "cloud_worktree", return_value="/wt") as wt:
+            board.cmd_cloud_sync(self.root)
+        wt.assert_called_once_with(self.root.parent, self.job, "scrum/001")
+        job = self.get()
+        self.assertEqual((job["stage"], job["worktree"], job["branch"]), ("needs-human", "/wt", "scrum/001"))
 
     def test_needs_human_reason_is_capped_at_300(self):
         out = self.needs_human([{"user": self.TREV, "body": "x" * 400 + "\n<!-- scrum needs-human -->"}], None)
@@ -7644,7 +7679,7 @@ class CloudSyncTest(unittest.TestCase):
     def test_cloud_sync_removes_worktree_when_set_refused(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
         comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
-        def add(repo, job_id):  # the worktree lands, then Trevor aborts the job before cmd_set
+        def add(repo, job_id, ref):  # the worktree lands, then Trevor aborts the job before cmd_set
             board.cmd_abort(self.root, job_id, False)
             return "/r/.claude/worktrees/scrum-x"
         for rc, err in ((0, b""), (128, b"fatal: not a working tree")):
@@ -7662,6 +7697,7 @@ class CloudSyncTest(unittest.TestCase):
                 self.assertEqual(runs, [["git", "-C", str(self.root.parent), "worktree", "remove",
                                          "/r/.claude/worktrees/scrum-x"]])
                 self.assertEqual(self.get()["stage"], "aborted")
+                self.assertEqual(self.get()["branch"], f"scrum/{self.job}")
                 self.assertNotIn("artifactsPending", self.get())
                 if rc:
                     self.assertIn("fatal: not a working tree", e.getvalue())

@@ -5990,14 +5990,15 @@ def gh_api(repo: Path, endpoint: str, *flags: str) -> list | dict:
         raise GhError(f"gh api {endpoint} printed no JSON ({e})") from None
 
 
-def cloud_worktree(repo: Path, job_id: str) -> str | None:
-    """`git fetch origin`, then `git worktree add <repo>/.claude/worktrees/scrum-<id> scrum/<id>`, as rework does.
-    Returns the path, or None when the add failed."""
+def cloud_worktree(repo: Path, job_id: str, ref: str | None = None) -> str | None:
+    """`git fetch origin`, then `git worktree add <repo>/.claude/worktrees/scrum-<id> <ref>` (ref defaults to
+    scrum/<id>; the PR's head ref can be the short scrum/<number>), as rework does. Returns the path, or None when the
+    add failed."""
     repo = Path(repo).resolve()
     path = repo / ".claude" / "worktrees" / f"scrum-{check_id(job_id)}"  # an id starts with a digit, never "-"
     try:
         subprocess.run(["git", "-C", str(repo), "fetch", "origin"], capture_output=True, timeout=120)
-        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), f"scrum/{job_id}"],
+        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), ref or f"scrum/{job_id}"],
                            capture_output=True, timeout=60)
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -6082,18 +6083,18 @@ def cloud_pending_clear(root: Path, job_id: str) -> None:
 
 
 def _cloud_plan(repo, job_id, prs):
-    """(state, pairs, reason, needs a worktree, abort) for this job's newest PR (_cloud_trusted), or None while it still
+    """(state, pairs, reason, needs a worktree, abort, head ref) for this job's newest PR (_cloud_trusted), or None while it still
     runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
     raises GhError."""
     pr = next((p for p in prs if isinstance(p, dict) and _cloud_trusted(p, job_id)), None)
     if not pr:
         return None
-    url = pr.get("html_url") or ""
+    url, head = pr.get("html_url") or "", pr["head"]["ref"]  # _cloud_trusted checked head is a dict with a ref
     lane = [f"lane={m[1]}"] if (m := CLOUD_LANE.search(str(pr.get("body") or ""))) else []  # first line wins
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None
+        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None, head
     if pr.get("state") == "closed":
-        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None)
+        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None), head
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -6108,12 +6109,12 @@ def _cloud_plan(repo, job_id, prs):
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
-        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number)
+        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number), head
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None
+    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None, head
 
 
 def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
@@ -6150,7 +6151,7 @@ def cmd_cloud_sync(root: Path) -> dict:
     except GhError as e:
         return {"moved": [], "arrived": arrived, "error": str(e) or type(e).__name__}
     moved = []
-    for job_id, (state, pairs, reason, wants_worktree, abort) in plans:
+    for job_id, (state, pairs, reason, wants_worktree, abort, head) in plans:
         worktree, url = None, next(p[3:] for p in pairs if p.startswith("pr="))
         try:
             if live(read_board(root), job_id)["stage"] != "cloud":
@@ -6159,9 +6160,14 @@ def cmd_cloud_sync(root: Path) -> dict:
                 lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
                 _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
-                worktree = cloud_worktree(repo, job_id) if wants_worktree else None
+                worktree = cloud_worktree(repo, job_id, head) if wants_worktree else None
                 cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
                         internal=True)
+                if wants_worktree:  # branch is not in FIELDS, so cmd_set cannot write it
+                    with locked_board(root) as board:
+                        job = live(board, job_id)
+                        if job["branch"] != head:
+                            job["branch"] = head
         except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
             print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
             if worktree:  # added for a move that did not happen: leave no orphan behind
