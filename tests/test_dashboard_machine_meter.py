@@ -1,7 +1,8 @@
-import json, re, shutil, subprocess, unittest
+import json, os, re, shutil, subprocess, unittest
 from pathlib import Path
 
 DASHBOARD = Path(__file__).resolve().parent.parent / "skills" / "trevskills-scrum" / "dashboard.html"
+NOW = 1763460000  # 2025-11-18 10:00 UTC
 S = {"min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10, "max_cpu_busy_pct": 90,
      "max_cpu_load_pct": 150, "cpu_cores": 8}
 CPU_NONE = ('<span class="ring none" role="img" style="--pct:0" aria-label="CPU load — of 8 cores · busy — · limit 150%" '
@@ -25,6 +26,10 @@ class MachineMeter(unittest.TestCase):
         self.assertIn("of all cores", meter.group(0))
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
         self.assertIn("Trevor's Play and Resume are never tapered", meter.group(0))
+        self.assertIn("main 49% · owa 90%", meter.group(0), "the hint names the per-account usage segment")
+        self.assertNotIn("Claude's 5h and 7d used %", meter.group(0), "the header has no 5h reading")
+        self.assertIn("read over ssh in the background at most every 30 s", meter.group(0), "the hint names the shop rings")
+        self.assertIn("grey Shop —", meter.group(0))
         ra = fn_body(text, "renderActions")
         self.assertIn('''job.play_queued ? '<p class="note" role="status">queued, starts next</p>' : ""''', ra,
                       "the queued text is a neutral note drawn from the flag, so a re-render keeps it")
@@ -58,9 +63,9 @@ class MachineMeter(unittest.TestCase):
                   "const ok = [el.hidden, el.innerHTML];\n"
                   "renderMachine({...s, free_ram_pct: 14, swap_pct: 3, free_disk_gb: 50, verdict: 'free RAM 14% (< 20%)'});\n"
                   "const bad = el.innerHTML;\n"
-                  "const use = [{five_hour_pct: 93, seven_day_pct: 40, five_hour_resets_at: 1, allowance: 1},\n"
-                  "  {five_hour_pct: 99.6, seven_day_pct: null, five_hour_resets_at: 1, allowance: 0},\n"
-                  "  {five_hour_pct: null, seven_day_pct: 12, five_hour_resets_at: null, allowance: null}, 'unknown']\n"
+                  "const acc = v => [{name: 'main', seven_day_pct: v, resets_at: null, max_pct: 90}];\n"
+                  "const use = [{accounts: acc(40), allowance: 1}, {accounts: acc(null), allowance: 0},\n"
+                  "  {accounts: acc(12), allowance: null}, 'unknown']\n"
                   "  .map(u => { renderMachine({...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null, usage: u});\n"
                   "              return el.innerHTML; });\n"
                   "renderMachine({...s, free_ram_pct: 14, swap_pct: 1, free_disk_gb: 100, verdict: 'free RAM 14% (< 20%)', usage: 'unknown'});\n"
@@ -90,9 +95,9 @@ class MachineMeter(unittest.TestCase):
                                      + CPU_NONE + ' · <span class="ok">disk 50 GB</span>', "the red ring already shows the RAM verdict")
         self.assertEqual(out["gone"], [False, '<span class="danger" title="Couldn\'t load machine status.">—</span>'])
         base = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span> RAM · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span> · '
-        self.assertEqual(out["use"], [base + '<span class="low">5h 93% · 7d 40% · allowance 1</span>',
-                                      base + '<span class="danger">5h 100% · 7d — · allowance 0</span>',
-                                      base + '<span class="ok">5h — · 7d 12%</span>',
+        self.assertEqual(out["use"], [base + '<span class="ok">main 40%</span> · <span class="low">allowance 1</span>',
+                                      base + '<span class="ok">main —</span> · <span class="danger">allowance 0</span>',
+                                      base + '<span class="ok">main 12%</span>',
                                       base + '<span class="ok">usage: unknown</span>'])
         self.assertEqual(out["order"], '<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 1%" title="RAM 14% free · swap 1%">14%</span> RAM · '
                                        + CPU_NONE + ' · <span class="ok">disk 100 GB</span> · <span class="ok">usage: unknown</span>')
@@ -155,18 +160,75 @@ class MachineMeter(unittest.TestCase):
             raise unittest.SkipTest("node not on PATH")
         text = DASHBOARD.read_text()
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
-        u = {"five_hour_pct": 70, "seven_day_pct": 20, "five_hour_resets_at": 1, "allowance": None}
+        u = {"accounts": [{"name": "main", "seven_day_pct": 20, "resets_at": None, "max_pct": 90}], "allowance": None}
         cases = [{**u, "fable": "warn"}, {**u, "fable": "paused"}, {**u, "fable": "ok"}, u, {**u, "fable": "unknown"},
                  "unknown"]
         script = (f"{esc}\n{fn_body(text, 'usagePart')}\n"
                   f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        plain = '<span class="ok">5h 70% · 7d 20%</span>'
+        plain = '<span class="ok">main 20%</span>'
         self.assertEqual(out, [plain + ' · <span class="low">Fable near limit</span>',
                                plain + ' · <span class="danger">Fable paused, using Opus</span>',
                                plain, plain, plain, '<span class="ok">usage: unknown</span>'])
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
         self.assertRegex(meter, r'Fable[^"]*65%[^"]*75%[^"]*80%[^"]*85%')
+
+    def node_meter(self, body):
+        """Runs `body` after the meter's functions, with the clock at NOW (2025-11-18 10:00 UTC) in TZ=UTC."""
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest("node not on PATH")
+        text = DASHBOARD.read_text()
+        esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
+        ago = text[text.index("const ago = "):text.index("\n};\n", text.index("const ago = ")) + 3]
+        script = (f"Date.now = () => {NOW} * 1000;\nconst $ = () => globalThis.el;\nglobalThis.el = {{hidden: false, innerHTML: ''}};\n"
+                  f"{esc}\n{ago}\n" + "".join(fn_body(text, f) + "\n" for f in ("machineLevel", "heldUntilText", "usagePart", "renderMachine"))
+                  + f"const s = {json.dumps(S)};\n{body}")
+        return json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True,
+                                         env={**os.environ, "TZ": "UTC"}).stdout)
+
+    def test_machine_meter_usage_per_account(self):
+        reset = NOW + 4 * 3600 + 300  # 14:05
+        main = {"name": "main", "seven_day_pct": 49, "resets_at": reset, "max_pct": 90}
+        owa = {"name": "owa", "seven_day_pct": 90, "resets_at": NOW + 86000, "max_pct": 90}
+        cases = [{"accounts": [main, owa], "allowance": None, "fable": "ok", "hold_until": None},
+                 {"accounts": [{**main, "seven_day_pct": 80}, {**owa, "seven_day_pct": 79.4}], "allowance": None},
+                 {"accounts": [{**main, "seven_day_pct": 95}, {**owa, "seven_day_pct": None, "resets_at": None}],
+                  "allowance": 0, "hold_until": reset, "fable": "paused"},
+                 {"accounts": [{**main, "max_pct": 85, "seven_day_pct": 75.2, "name": "<b>"}], "allowance": 2}]
+        out = self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
+        self.assertEqual(out, [
+            '<span class="ok" title="resets 14:05">main 49%</span> · <span class="danger" title="resets 09:53">owa 90%</span>',
+            '<span class="low" title="resets 14:05">main 80%</span> · <span class="ok" title="resets 09:53">owa 79%</span>',
+            '<span class="danger" title="resets 14:05">main 95%</span> · <span class="ok">owa —</span>'
+            ' · <span class="danger">allowance 0 · held until 14:05</span> · <span class="danger">Fable paused, using Opus</span>',
+            '<span class="low" title="resets 14:05">&lt;b&gt; 75%</span> · <span class="low">allowance 2</span>'])
+
+    def test_machine_meter_shop_rings(self):
+        at = NOW - 40
+        up = {"name": "shopmac", "free_ram_pct": 41, "cpu_load_pct": 62.5, "cpu_cores": 4, "at": at}
+        down = {"name": "shopmac", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": at}
+        cases = [[up], [down], [{**up, "free_ram_pct": 14, "cpu_load_pct": 168.4}],
+                 [{**up, "free_ram_pct": None}], [up, {**down, "name": "mac2"}], [], None]
+        out = self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(shop => {{\n"
+                              "  const m = {...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null};\n"
+                              "  if (shop) m.shop = shop;\n"
+                              "  renderMachine(m); return el.innerHTML; })));")
+        ring = lambda lvl, pct, text, tip: f'<span class="ring {lvl}" role="img" style="--pct:{pct}" aria-label="{tip}" title="{tip}">{text}</span>'
+        head = ring("ok", 60, "40%", "RAM 40% free · swap 1%") + " RAM · " + CPU_NONE + " · "
+        tail = ' · <span class="ok">disk 100 GB</span>'
+        shop = (ring("ok", 59, "41%", "Shop RAM 41% free · read 40s ago") + " "
+                + ring("ok", 63, "63%", "Shop CPU load 63% of 4 cores · read 40s ago") + " Shop")
+        self.assertEqual(out, [
+            head + shop + tail,
+            head + ring("none", 0, "—", "Shop unreachable · checked 40s ago") + " Shop" + tail,
+            head + ring("danger", 86, "14%", "Shop RAM 14% free · read 40s ago") + " "
+            + ring("danger", 100, "2x", "Shop CPU load 168% of 4 cores · read 40s ago") + " Shop" + tail,
+            head + ring("none", 0, "—", "Shop RAM — · read 40s ago") + " "
+            + ring("ok", 63, "63%", "Shop CPU load 63% of 4 cores · read 40s ago") + " Shop" + tail,
+            head + shop.replace("Shop", "Shop shopmac") + " · "
+            + ring("none", 0, "—", "Shop mac2 unreachable · checked 40s ago") + " Shop mac2" + tail,
+            head[:-3] + tail, head[:-3] + tail])
 
     def test_machine_meter_colours_are_theme_variables(self):
         text = DASHBOARD.read_text()
