@@ -837,6 +837,18 @@ class MdSyncTest(SetupCase):
                                           f"{web.name}/memory/note_a.md": b"fact a\n",
                                           f"{web.name}/s1.jsonl": b"{}\n", "-Users-someone/s2.jsonl": b"{}\n"})
 
+    def test_colliding_keys_sync_neither(self):
+        self.repo("x/app.one", memory={"MEMORY.md": b"dot\n"})
+        self.repo("y/app-one", memory={"MEMORY.md": b"dash\n"})  # a different name, the same key on the shop
+        self.repo("z/Solo", memory={"MEMORY.md": b"solo\n"})
+        self.repo("w/a b", memory={"MEMORY.md": b"bad name\n"})  # fails PROJECT_RE, so it shares no key with a-b
+        self.repo("v/a-b", memory={"MEMORY.md": b"ab\n"})
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        solo, ab = self.shop_key("Solo"), self.shop_key("a-b")
+        self.assertEqual(tree(self.sh / ".claude" / "projects"),
+                         {f"{solo}/memory/MEMORY.md": b"solo\n", f"{ab}/memory/MEMORY.md": b"ab\n"})
+
     def test_second_sync_same_files(self):
         self.repo("app.one", memory={"MEMORY.md": b"index\n", "b_note.md": b"b\n"})
         self.shop(*SYNC)

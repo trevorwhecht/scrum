@@ -323,8 +323,8 @@ def memory_key(path: str) -> str:
 
 def _projects() -> dict[str, Path]:
     """{folder name: repo} for each projects.json entry (SCRUM_REGISTRY moves it) with a scrum/ dir whose folder name
-    matches PROJECT_RE and no other such entry shares. Read here as board.read_registry does, since board.py and
-    serve.py will import shop."""
+    matches PROJECT_RE and whose memory_key() no other such entry shares (app.one and app-one would share one shop
+    memory dir). Read here as board.read_registry does, since board.py and serve.py will import shop."""
     try:
         paths = json.loads(Path(os.environ.get("SCRUM_REGISTRY")
                                 or Path.home() / ".claude" / "trevskills-scrum" / "projects.json").read_text())
@@ -332,9 +332,10 @@ def _projects() -> dict[str, Path]:
         return {}
     if not isinstance(paths, list):
         return {}
-    repos = [Path(p) for p in paths if isinstance(p, str) and (Path(p) / "scrum").is_dir()]
-    names = [r.name for r in repos]
-    return {r.name: r for r in repos if names.count(r.name) == 1 and PROJECT_RE.fullmatch(r.name)}
+    repos = [Path(p) for p in paths
+             if isinstance(p, str) and PROJECT_RE.fullmatch(Path(p).name) and (Path(p) / "scrum").is_dir()]
+    keys = [memory_key(r.name) for r in repos]
+    return {r.name: r for r in repos if keys.count(memory_key(r.name)) == 1}
 
 
 def _md_tar() -> bytes:
