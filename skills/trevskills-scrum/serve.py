@@ -1523,6 +1523,25 @@ CLOUD_LAST = {}  # project -> time of its last cloud-sync poll (0 = never, so th
 CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a session
 
 
+def shop_pr_close(project, root, job_id):
+    """Close the open `[scrum <id>]` PR from this repo's own scrum/<id> (board._cloud_trusted) of a shop job cloud_tick
+    just aborted, with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
+    repo = Path(root).parent
+    try:
+        prs = board.gh_api(repo, board.CLOUD_PULLS)
+        if not isinstance(prs, list):
+            raise board.GhError(f"gh api {board.CLOUD_PULLS} did not return a list")
+        pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
+                   and board._cloud_trusted(p, job_id) and p.get("state") == "open"), None)
+        if pr is None:
+            return
+        if not isinstance(pr.get("number"), int):
+            raise board.GhError(f"PR {pr.get('html_url') or ''} has no number")
+        board.gh_api(repo, f"repos/{{owner}}/{{repo}}/pulls/{pr['number']}", "-X", "PATCH", "-f", "state=closed")
+    except board.GhError as e:
+        print(f"cloud-sync: {project}: {job_id}: PR close failed: {e}", file=sys.stderr, flush=True)
+
+
 def cloud_tick(project, root, jobs, now=None):
     """While a job is in stage cloud or awaits its artifacts branch (artifactsPending), run board.py cloud-sync (plain
     Python, no LLM) at most every CLOUD_EVERY seconds, then start a headless `/trevskills-scrum cloud-home <id>` for
@@ -1534,7 +1553,8 @@ def cloud_tick(project, root, jobs, now=None):
     Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
     shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
-    (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit)."""
+    (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit); once
+    that abort took effect, shop_pr_close closes the job's open unlabelled PR, so the rerun opens no duplicate."""
     if board.cooling_down():
         return
     now = time.time() if now is None else now
@@ -1566,6 +1586,8 @@ def cloud_tick(project, root, jobs, now=None):
                     board._cloud_abort(root, job_id, job.get("pr"), True, SHOP_ENDED)
                 except SystemExit as e:
                     print(f"cloud-sync: {project}: {job_id}: {e}", file=sys.stderr, flush=True)
+                    continue
+                shop_pr_close(project, root, job_id)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
         homes += out.get("arrived") or []
         # only these can fetch scrum-artifacts/<id> now; a hard-stop move without it keeps its fresh mark
