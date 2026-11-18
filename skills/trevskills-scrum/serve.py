@@ -1531,12 +1531,13 @@ def shop_tick(project, repo, root) -> bool:
     lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy, setup pending or
     naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md) to
     the shop Mac as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
-    shop.ready(). Account: pick_account preferring owa, then main, the first the shop has ready. A child is claimed
+    shop.ready(). Cool-down counts as a hold (machine_ok refuses), so the shop keeps working through it. Account: the
+    first in pick_account's own order (soonest seven-day reset) the shop has ready, else the other. A child is claimed
     (cmd_ready shop=), then md_sync, setup, clone, env_copy and start run; a failed step puts a claimed child back to
     waiting, prints one `shop: <project>: <id>: ` line and holds every shop call for SHOP_RETRY_EVERY. The job is then
     marked stage cloud with shop=<pid> and account=; a refused mark, or a local run started meanwhile, kills the shop
-    session. Cool-down, a down shop or nothing to send: no output, no change. True when it dispatched."""
-    if time.time() < SHOP_RETRY_AT or board.cooling_down():
+    session. A down shop or nothing to send: no output, no change. True when it dispatched."""
+    if time.time() < SHOP_RETRY_AT:
         return False
     try:
         profile = (Path(root) / "project.md").read_text(errors="replace")
@@ -1567,8 +1568,8 @@ def shop_tick(project, repo, root) -> bool:
     if not ready["ready"]:
         return False
     n_live = board.live_sessions()  # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
-    account = next((name for pref in ("owa", "main") if (name := board.pick_account(time.time(), n_live, prefer=pref)[0])
-                    and ready["accounts"].get(name)), None)
+    account = next((name for pref in (None, "owa", "main")  # pick_account's own order first, then each account as a fallback
+                    if (name := board.pick_account(time.time(), n_live, prefer=pref)[0]) and ready["accounts"].get(name)), None)
     if not account:
         return False
     for job in pool:  # the first that claims; a child held on an overlap tries the next
