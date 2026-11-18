@@ -1297,6 +1297,16 @@ def auto_resume(project, root, jobs):
                 busy = True
                 answer_job(project, root, job, jobs, opt.get("key"))
             continue
+        if job.get("stage") == "needs-human" and not board.stalled(job) and board.is_guard_ask(job.get("reason")) \
+                and GUARD_RETRIED.get(f"{project}/{job['id']}") != job.get("updatedAt") and not running(project, job["id"]):
+            opt = next((o for o in job.get("options") or [] if isinstance(o, dict)
+                        and (option_command(o.get("command")) or ("",))[0] == "resume"), None)
+            if opt and main_guard_clear(root.parent, (job.get("base") or "main").removeprefix("origin/")) \
+                    and resume_refusal(project, root, job) is None and take_room():
+                GUARD_RETRIED[f"{project}/{job['id']}"] = job.get("updatedAt")
+                busy = True
+                answer_job(project, root, job, jobs, opt.get("key"))
+            continue
         if board.queue_waiting(job):  # held on a lock, not stalled: starts once it frees, no try, never parked
             if running(project, job["id"]):
                 continue
@@ -1421,6 +1431,30 @@ def main_ready(repo, branch) -> bool:
             return False
         status = git("status", "--porcelain", "--untracked-files=no")
         return not status.returncode and not status.stdout.strip() and git("pull", "--ff-only").returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+GUARD_RETRIED: dict[str, str] = {}  # "project/id" -> updatedAt of the Main checkout guard ask last auto-resumed
+
+
+def main_guard_clear(repo, branch) -> bool:
+    """The main checkout is on branch, has no tracked changes and is not ahead of origin/branch (Merge's Main checkout
+    guard would pass). Fetches only; a git error, a failed fetch or a 60 s timeout is False."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+    if branch.startswith("-"):
+        return False
+    try:
+        head = git("symbolic-ref", "--short", "HEAD")
+        if head.returncode or head.stdout.strip() != branch:
+            return False
+        status = git("status", "--porcelain", "--untracked-files=no")
+        if status.returncode or status.stdout.strip() or git("fetch", "origin", branch).returncode:
+            return False
+        ahead = git("rev-list", "--count", f"origin/{branch}..{branch}")
+        return not ahead.returncode and ahead.stdout.strip() == "0"
     except (OSError, subprocess.TimeoutExpired):
         return False
 

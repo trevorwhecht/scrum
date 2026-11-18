@@ -328,6 +328,21 @@ class BoardTest(unittest.TestCase):
         p = self.root / "questions.log"
         return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
 
+    def test_guard_ask_logged_auto(self):
+        job_id = board.cmd_new(self.root, "x")
+        opts = [f"Carry on=resume {job_id}", f"Remove=abort {job_id}"]
+        board.cmd_ask(self.root, job_id, "Unpushed commits in repo: x", opts, title="MERGE_BLOCKED")
+        board.cmd_ask(self.root, job_id, "repo main checkout is on dev, not main.", opts, title="WRONG_BRANCH")
+        board.cmd_ask(self.root, job_id, "Ship it?", opts, title="MERGE_CONFLICT")
+        self.assertEqual([l.get("auto") for l in self.log_lines()[-3:]], [True, True, None])
+
+    def test_guard_ask_prefixes_match_skill_md(self):
+        text = (Path(board.__file__).parent / "SKILL.md").read_text()
+        for ask in ("Uncommitted change in <repo name>", "Unpushed commits in <repo name>", "<repo name> main checkout is on <branch>"):
+            self.assertIn(f"'{ask}", text)
+            self.assertTrue(board.is_guard_ask(ask.replace("<repo name>", "r").replace("<branch>", "b")), ask)
+        self.assertFalse(board.is_guard_ask("Build check could not run"))
+
     def test_ask_parks_job_with_question_and_options(self):
         job_id = board.cmd_new(self.root, "x")
         out = board.cmd_ask(self.root, job_id, "Ship it?", [f"Approve=approve {job_id}", f"Abort=abort {job_id} --requeue"], title="MERGE_CONFLICT")

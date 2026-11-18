@@ -7214,7 +7214,7 @@ class AutoResumeTest(unittest.TestCase):
     def setUp(self):
         import serve
         self.serve = serve
-        serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear(); serve.BUILD_CHECK_RETRIED.clear()
+        serve.AUTO_RESUME.clear(); serve.ORPHAN_RESPAWN.clear(); serve.STALL_RESUMED.clear(); serve.BUILD_CHECK_RETRIED.clear(); serve.GUARD_RETRIED.clear()
         self.root = Path(tempfile.mkdtemp()); (self.root / "runs").mkdir()
         reg = mock.patch.dict(os.environ, SCRUM_REGISTRY=str(self.root / "projects.json"))  # no real project's board
         reg.start(); self.addCleanup(reg.stop)
@@ -7335,6 +7335,46 @@ class AutoResumeTest(unittest.TestCase):
         for kw in ({"refusal": "busy"}, {"room": False}):
             self.assertEqual(self.bc_sweep(self.jobs, **kw)[1].call_args_list, [])
         self.assertEqual(len(self.bc_sweep(self.jobs)[1].call_args_list), 1, "not marked spent")
+
+    def mg_job(self, **extra):
+        return {"id": "mg", "stage": "needs-human", "updatedAt": "t1", "reason": "Unpushed commits in p: its main copy has commits",
+                "options": [{"key": "a", "label": "Carry on", "command": "resume mg"},
+                            {"key": "b", "label": "Remove", "command": "abort mg --cascade"}], **extra}
+
+    def mg_sweep(self, jobs, clear=True, **patches):
+        with mock.patch.object(self.serve, "main_guard_clear", return_value=clear) as mgc:
+            busy, ans = self.bc_sweep(jobs, **patches)
+        return busy, ans, mgc
+
+    def test_main_guard_stop_auto_resumes(self):
+        job = self.mg_job(base="origin/dev")
+        busy, ans, mgc = self.mg_sweep([job])
+        self.assertIs(busy, True)
+        self.assertEqual([c.args[4] for c in ans.call_args_list], ["a"])
+        self.assertEqual(mgc.call_args.args, (self.root.parent, "dev"))
+        wrong = self.mg_job(updatedAt="t9", reason="p main checkout is on dev, not main. Run git checkout main")
+        self.assertEqual(len(self.mg_sweep([wrong])[1].call_args_list), 1)
+        self.assertEqual(self.mg_sweep([self.mg_job(updatedAt="t8")])[2].call_args.args[1], "main")
+
+    def test_main_guard_stop_skips_unclear_or_other(self):
+        nores = self.mg_job(); nores["options"] = nores["options"][1:]
+        self.assertEqual(self.mg_sweep([self.mg_job()], clear=False)[1].call_args_list, [])
+        for job, kw in [(self.mg_job(paused=True), {}), (nores, {}), (self.mg_job(reason="Pick one"), {}),
+                        (self.mg_job(), {"running": True})]:
+            self.assertEqual(self.mg_sweep([job], **kw)[1].call_args_list, [])
+
+    def test_main_guard_stop_skips_when_refused_or_no_room(self):
+        job = self.mg_job()
+        for kw in ({"refusal": "busy"}, {"room": False}):
+            self.assertEqual(self.mg_sweep([job], **kw)[1].call_args_list, [])
+        self.assertEqual(len(self.mg_sweep([job])[1].call_args_list), 1, "not marked spent")
+
+    def test_main_guard_stop_retried_once_per_ask(self):
+        job = self.mg_job()
+        self.assertEqual(len(self.mg_sweep([job])[1].call_args_list), 1)
+        self.assertEqual(self.mg_sweep([job])[1].call_args_list, [])
+        job["updatedAt"] = "t2"
+        self.assertEqual(len(self.mg_sweep([job])[1].call_args_list), 1, "a fresh ask")
 
     def test_other_board_with_malformed_jobs_is_skipped(self):
         s = self.serve
@@ -8141,6 +8181,47 @@ class QueueWaitResumeTest(unittest.TestCase):
         self.jobs[0]["reason"] = "waiting: Check queue"
         with mock.patch.object(self.serve, "e2e_queue_free", return_value=True):
             self.assertEqual(self.sweep(True), (True, ["q", "old"]), "a waiting check job holds no lock")
+
+
+class MainGuardClearTest(unittest.TestCase):
+    """main_guard_clear against a real temp repo with a bare origin."""
+
+    def setUp(self):
+        import serve
+        self.serve = serve
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
+        self.origin, self.repo = tmp / "o.git", tmp / "r"
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        p = mock.patch.dict(os.environ, env); p.start(); self.addCleanup(p.stop)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        self.g("remote", "add", "origin", str(self.origin))
+        (self.repo / "f").write_text("1\n")
+        self.g("add", "f"); self.g("commit", "-qm", "one"); self.g("push", "-q", "origin", "main")
+
+    def g(self, *a):
+        subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+
+    def test_main_guard_clear_true_when_clean_and_level(self):
+        self.assertTrue(self.serve.main_guard_clear(self.repo, "main"))
+        (self.repo / "untracked").write_text("x")
+        self.assertTrue(self.serve.main_guard_clear(self.repo, "main"), "untracked files do not count")
+
+    def test_main_guard_clear_false_when_dirty_ahead_or_wrong_branch(self):
+        self.assertFalse(self.serve.main_guard_clear(self.repo, "dev"))
+        (self.repo / "f").write_text("2\n")
+        self.assertFalse(self.serve.main_guard_clear(self.repo, "main"))
+        self.g("commit", "-qam", "two")
+        self.assertFalse(self.serve.main_guard_clear(self.repo, "main"), "ahead of origin")
+        self.g("push", "-q", "origin", "main")
+        self.assertTrue(self.serve.main_guard_clear(self.repo, "main"))
+
+    def test_main_guard_clear_false_on_failed_fetch_or_timeout(self):
+        self.g("remote", "set-url", "origin", str(self.origin) + "-gone")
+        self.assertFalse(self.serve.main_guard_clear(self.repo, "main"))
+        with mock.patch.object(self.serve.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 60)):
+            self.assertFalse(self.serve.main_guard_clear(self.repo, "main"))
+        self.assertFalse(self.serve.main_guard_clear(self.repo, "-x"))
 
 
 class MainFfTickTest(unittest.TestCase):

@@ -5516,6 +5516,16 @@ UNBLOCK_KINDS = ("round-limit", "check-fail", "ci-fail", "conflict", "blocked", 
 UNBLOCK_MAX = 2  # unblocks per job, ever; a kind is unblocked at most once (the loop guard compares kinds, not text)
 
 
+GUARD_ASK_PREFIXES = ("Uncommitted change in", "Unpushed commits in")  # SKILL.md Merge "Main checkout guard" asks
+GUARD_ASK_WRONG_BRANCH = " main checkout is on "  # the WRONG_BRANCH ask opens with the repo name, so it is matched inside
+
+
+def is_guard_ask(reason) -> bool:
+    """True when reason opens like one of Merge's Main checkout guard asks (SKILL.md)."""
+    reason = str(reason or "")
+    return reason.startswith(GUARD_ASK_PREFIXES) or GUARD_ASK_WRONG_BRANCH in reason[:80]
+
+
 def park(root, job, question, parsed, title, recommend=None):
     """The needs-human field update and questions.log line of cmd_ask. Caller holds the board lock and plays the sound."""
     if job.get("reason") != question:
@@ -5527,6 +5537,8 @@ def park(root, job, question, parsed, title, recommend=None):
     entry = {"date": now(), "project": Path(root).resolve().parent.name, "job": job["id"],
              "question": question, "options": parsed, "reason": question, "stopTitle": title,
              "kind": "bigboy" if question.startswith(("bigboy review: main not updated", BLOCKED)) else "ask"}
+    if is_guard_ask(question):
+        entry["auto"] = True  # the scrum resumes it once the checkout is clear: no stop for process_health
     if recommend:
         job["recommend"] = entry["recommend"] = recommend
     else:
