@@ -3204,12 +3204,15 @@ def changed_routes(wt: Path, ui: list[str]) -> dict[str, set[tuple[str, bool]]]:
             except OSError:
                 pass
     index, out = _import_index(sources), {}
+    # app/ folders that hold a route file: a colocated module only maps to its own folder's route when it is one of them
+    route_dirs = {f.rsplit("/", 1)[0] for f in tracked if "app" in f.split("/")[:-1] and APP_ROUTE_FILE_RE.search(f)}
     for f in ui:
         routes, seen, todo = set(), {f}, [f]
         while todo:  # follow importers until they reach route files
             g = todo.pop()
             if (r := _route_of(g)) is not None:
-                routes.add(r)
+                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g) or g.rsplit("/", 1)[0] in route_dirs:
+                    routes.add(r)
                 if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
                     continue  # a route file; a colocated app/ module also maps through its importers
             for imp in _importers(index, g):
