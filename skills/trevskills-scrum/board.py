@@ -435,7 +435,7 @@ def loose_item(line):
     prios = re.findall(r" \{p:([1-5])\}", tail)
     needs = "".join(re.findall(r" \{needs((?: #[a-z0-9]{4})+)\}", tail))
     return (m[1], m[2], text, one(r" \{#([a-z0-9]{4})\}"), min(prios) if prios else None, needs or None,
-            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), one(r" → (\d{3,}-[a-z0-9-]+)"), why[1] if why else None)
+            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{setup: [^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
 
 
 def read_backlog(root):

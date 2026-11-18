@@ -339,6 +339,9 @@ class BacklogTest(unittest.TestCase):
         a, b = board.backlog_items(self.root)
         self.assertEqual((a["text"], a["id"], a["by"], b["text"], b["id"]),
                          ("Merge so a {by:back} item gets p:1 (from 589-x)", "e5a3", None, "Re-checked {#q441} items", "e5a3"))
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Task {#abcd} {setup: wait → 123-example} → 456-real\n")
+        (d,) = board.backlog_items(self.root)
+        self.assertEqual((d["setup"], d["job"]), (["wait → 123-example"], "456-real"))
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] Plain {#k3f9} <!-- replace {p:1} and add {needs #zz99} -->\n")
         (c,) = board.backlog_items(self.root)
