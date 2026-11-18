@@ -2313,7 +2313,8 @@ class ServeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_CPU_LOAD_PCT="12.04"):
             out = self.req("GET", "/api/machine")[1]
         self.assertEqual(out["history"], {"free_ram_pct": [34.6], "cpu_load_pct": [12.0]})
-        self.assertEqual(out["shop"], [{**cached[0], "history": {"free_ram_pct": [41.0], "cpu_load_pct": [150.0]}}])
+        self.assertEqual(out["shop"], [{**cached[0], "cooldown": False,  # job 1185: shopmac's own flag is off
+                                        "history": {"free_ram_pct": [41.0], "cpu_load_pct": [150.0]}}])
         self.assertNotIn("history", s.SHOP_STATS["value"][0], "the cached shop read is never changed")
 
     PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
@@ -2591,6 +2592,18 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.serve.board.machine_ok(self.root, claim=True), "cooling down")
             self.assertEqual(self.raw_post("/api/cooldown", {"on": False}), (200, {"cooldown": False}))
             self.assertIsNone(self.serve.board.machine_ok(self.root, claim=True), "the next tick may start work, no restart")
+            # Job 1185: "worker" sets that shop Mac's own flag (no workers.txt here: shopmac is the one worker).
+            shopmac = flag.with_name("cooldown-shopmac")
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": True, "worker": "shopmac"}),
+                             (200, {"cooldown": True, "worker": "shopmac"}))
+            self.assertEqual((shopmac.is_file(), flag.exists()), (True, False), "only shopmac's flag")
+            self.assertIs(self.req("GET", "/api/machine")[1]["cooldown"], False, "this Mac is not cooling")
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": True, "worker": "newmac"}),
+                             (400, {"error": "worker must be a current shop Mac"}))
+            self.assertFalse(flag.with_name("cooldown-newmac").exists())
+            self.assertEqual(self.raw_post("/api/cooldown", {"on": False, "worker": "shopmac"}),
+                             (200, {"cooldown": False, "worker": "shopmac"}))
+            self.assertFalse(shopmac.exists())
 
     def test_cooldown_chimes_once_at_zero(self):
         s, b = self.serve, self.serve.board

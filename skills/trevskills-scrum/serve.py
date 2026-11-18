@@ -1643,12 +1643,13 @@ SHOP_ENDED = "requeue: shop session ended without a PR"
 
 def shop_worker():
     """Yield (worker, account) for each shop.workers() worker, in file order, that is out of backoff (SHOP_RETRY_AT),
-    runs fewer than its max stage-cloud `shop` jobs on every board (no `worker` field: shopmac), is shop.ready(alias)
+    not cooled (board.cooling_down(alias): its own Cool down button; its started jobs finish), runs fewer than its max
+    stage-cloud `shop` jobs on every board (no `worker` field: shopmac), is shop.ready(alias)
     and has an account: pick_account's own order (soonest seven-day reset), then prefer= each of the worker's accounts
     in its listed order, until one is on the worker's line and ready there. Lazy, so shop_tick, which takes the first,
     never probes a later worker; write_shop_room lists them all."""
     now = time.time()
-    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0)]
+    workers = [w for w in shop.workers() if now >= SHOP_RETRY_AT.get(w.alias, 0) and not board.cooling_down(w.alias)]
     if not workers:
         return
     on = collections.Counter(j.get("worker") or shop.ALIAS for r in board.projects().values()
@@ -3090,22 +3091,26 @@ def cooldown_chime():
         board.play(board.sound("done"))
 
 
-def set_cooldown(on):
+def set_cooldown(on, worker=None):
     """POST /api/cooldown {"on": bool}: create or remove the flag file. An explicit set, so a double click or a stale
-    tab can't flip it the wrong way."""
+    tab can't flip it the wrong way. With "worker" (job 1185), that shop Mac's own flag (board.cooldown_path(worker))
+    instead; a worker that is not a current shop.workers() alias is refused, so no path is built from request text."""
     global COOLDOWN_CHIMED
     if type(on) is not bool:
         return 400, {"error": "on must be true or false"}
-    flag = board.cooldown_path()
-    with MACHINE_LOCK:
-        MACHINE_CACHE.clear()  # the meter shows the new cool-down on its next read
+    if worker is not None and worker not in [w.alias for w in shop.workers()]:
+        return 400, {"error": "worker must be a current shop Mac"}
+    flag = board.cooldown_path(worker)
     if on:
         flag.parent.mkdir(parents=True, exist_ok=True)
         flag.touch()
     else:
         flag.unlink(missing_ok=True)
-        COOLDOWN_CHIMED = False
-    return 200, {"cooldown": on}
+        if worker is None:
+            COOLDOWN_CHIMED = False
+    with MACHINE_LOCK:
+        MACHINE_CACHE.clear()  # after the write, so the meter's next read shows the new cool-down
+    return 200, {"cooldown": on} if worker is None else {"cooldown": on, "worker": worker}
 
 
 def set_volume(level, muted) -> tuple[int, dict]:
@@ -3386,7 +3391,7 @@ def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
     ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
-    machine_history's sparkline readings."""
+    machine_history's sparkline readings, and each shop entry's "cooldown" is that worker's own flag (job 1185)."""
     r = lambda v: None if v is None else round(v, 1)
     now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
     return {"free_ram_pct": ram, "swap_pct": r(board.swap_used_pct()),
@@ -3397,7 +3402,8 @@ def machine_status():
             "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": cpu,
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
             "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
-            "shop": [{**s, "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
+            "shop": [{**s, "cooldown": board.cooling_down(s["name"]),
+                      "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
                      for s in shop_stats()]}
 
 
@@ -6093,7 +6099,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/ai-settings/research":
                 code, obj = ai_research(body.get("id"))
             elif path == "/api/cooldown":
-                code, obj = set_cooldown(body.get("on"))
+                code, obj = set_cooldown(body.get("on"), body.get("worker"))
             elif path == "/api/volume":
                 code, obj = set_volume(body.get("level"), body.get("muted"))
             elif path == "/api/projects/rank":

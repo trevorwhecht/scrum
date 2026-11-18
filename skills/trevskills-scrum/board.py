@@ -5117,16 +5117,18 @@ COOLING = "cooling down"  # machine_ok's reason (claim=True) while Trevor's cool
 COOLING_CLAIM = f"{COOLING}: no new backlog claim. Fix: click Resume work in the header."
 
 
-def cooldown_path():
+def cooldown_path(worker=None):
     """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no new work starts on its own (backlog
     claims, Run-all and BigBoy child claims, wake-waiting, auto-continue, cloud-claim, the next roadmap step, the
     bad-window digest); work already started finishes, and Trevor's own clicks still start work. The shop Mac (serve.shop_tick) is not held: it still claims and
-    launches work while cool-down is on."""
-    return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
+    launches work while cool-down is on. worker= (a shop.workers() alias) names that worker's own flag beside it,
+    cooldown-<alias> (its Cool down button in the meter): while it exists serve.shop_worker sends that worker no new work."""
+    path = Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
+    return path.with_name(f"cooldown-{worker}") if worker else path
 
 
-def cooling_down():
-    return cooldown_path().exists()
+def cooling_down(worker=None):
+    return cooldown_path(worker).exists()
 
 
 def swap_grew(swap):
