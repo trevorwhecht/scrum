@@ -1454,14 +1454,29 @@ def processes_path():
 
 def log_process(process: str, result: str, **fields) -> None:
     """Append one {"t", "process", "result", **fields} JSON line to processes_path(): one PROCESSES entry's run, for
-    the digest's processes.md (write_processes). Never raises: an OSError prints one `processes: ` stderr line. Under
+    the digest's processes.md (write_processes). When the first line is older than PULSE_KEEP_SECS plus a day (or
+    unreadable, or has no numeric t), the file is first rewritten (tmp + os.replace) to the last PULSE_KEEP_SECS, like
+    serve.pulse_tick does pulse.log; no lock, so a line appended during a rotation may be lost. Never raises: an OSError prints one `processes: ` stderr line. Under
     unittest the real default ~/.claude/trevskills-scrum/processes.log is never written (a silent return)."""
     path = processes_path()
     if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
         return  # a test run would add fixture runs to the live log the digest reads
-    line = json.dumps({"t": int(time.time()), "process": process, "result": result, **fields}, default=str)
+    now = int(time.time())
+    line = json.dumps({"t": now, "process": process, "result": result, **fields}, default=str)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                first = json.loads(f.readline() or "{}")
+        except OSError:
+            first = {}  # no file yet: nothing to rotate
+        except ValueError:
+            first = {"t": None}  # a malformed first line never ages out by itself: rotate it away
+        if first and not (isinstance(first, dict) and is_num(first.get("t")) and first["t"] >= now - PULSE_KEEP_SECS - 86400):
+            keep = [l for l in _json_lines(path) if is_num(l.get("t")) and l["t"] >= now - PULSE_KEEP_SECS]
+            tmp = path.with_name("processes.log.tmp")
+            tmp.write_text("".join(json.dumps(l) + "\n" for l in keep))
+            os.replace(tmp, path)
         with open(path, "a") as f:
             f.write(line + "\n")
     except OSError as e:
