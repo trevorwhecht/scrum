@@ -25,7 +25,10 @@ h1{font-size:16px;margin:0}
 .volwrap:hover .volpop,.volwrap:focus-within .volpop{display:flex;align-items:center}#volumeLevel{width:140px;min-height:44px;margin:0;accent-color:var(--accent)}
 #machine .low{color:var(--changes)}#machine .danger,#routing .danger{color:var(--human)}
 #machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:9px;letter-spacing:-.5px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
-#machine .ring.ok{--ring:var(--pass)}#machine .ring.low{--ring:var(--p5)}#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
+#machine .acct.ok,#machine .ring.ok{--ring:var(--pass)}#machine .acct.low,#machine .ring.low{--ring:var(--p5)}#machine .acct.danger,#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
+#machine .grp{display:inline-block;vertical-align:middle}  /* This Mac, each shop Mac, usage: each wraps as a whole */
+#machine .bar{position:relative;display:inline-block;width:40px;height:6px;border-radius:3px;vertical-align:middle;background:linear-gradient(90deg,var(--ring) calc(var(--pct) * 1%),var(--pending) 0)}#machine .bar::after{content:"";position:absolute;top:-2px;bottom:-2px;left:calc(var(--cap) * 1%);width:1px;background:var(--ink)}  /* the tick: the account's reserve */
+#machine .spark{vertical-align:middle}#machine .spark polyline{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}
 #routing{white-space:nowrap;min-height:44px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 #rank{width:min(480px,94vw);overscroll-behavior:contain}#rank .close,#rankBtn,#rankList .btn{min-height:44px;min-width:44px}
@@ -710,15 +713,18 @@ function heldUntilText(epoch) {
   return epoch * 1000 - Date.now() > 86400000 ? `${d.toLocaleDateString([], {weekday: "short"})} ${time}` : time;
 }
 
-// The meter's usage segment: each account's weekly used %, red at its max_pct (its 7d reserve, else the 90% hold), orange
-// within 10 points of it, its reset in the tooltip; then the allowance (red at 0, orange at 1 or more, absent with no taper)
-// and held-until text; then the Fable guard's warning or paused text.
+// The meter's usage segment: each account's weekly used % as a bar (filled to it, capped at 100) with a tick at its
+// max_pct (its 7d reserve, else the 90% hold), red at the tick, amber within 10 points of it, its reset in the tooltip;
+// then the allowance (red at 0, orange at 1 or more, absent with no taper) and held-until text; then the Fable guard's
+// warning or paused text.
 function usagePart(u) {
   if (!u) return "";
   if (u === "unknown") return '<span class="ok">usage: unknown</span>';
   const parts = (u.accounts || []).map(a => {
     const v = a.seven_day_pct, lvl = v == null ? "ok" : v >= a.max_pct ? "danger" : v >= a.max_pct - 10 ? "low" : "ok";
-    return `<span class="${lvl}"${a.resets_at ? ` title="resets ${heldUntilText(a.resets_at)}"` : ""}>${esc(a.name)} ${v == null ? "—" : Math.round(v) + "%"}</span>`;
+    return `<span class="acct ${lvl}"${a.resets_at ? ` title="resets ${heldUntilText(a.resets_at)}"` : ""}>`
+      + `<span class="bar" style="--pct:${v == null ? 0 : Math.min(100, Math.round(v))};--cap:${Number(a.max_pct)}"></span>`
+      + ` ${esc(a.name)} ${v == null ? "—" : Math.round(v) + "%"}</span>`;
   });
   const held = [u.allowance == null ? "" : `allowance ${esc(u.allowance)}`, u.hold_until ? `held until ${heldUntilText(u.hold_until)}` : ""].filter(Boolean).join(" · ");
   if (held) parts.push(`<span class="${u.allowance == null ? "ok" : u.allowance === 0 ? "danger" : "low"}">${held}</span>`);
@@ -758,14 +764,25 @@ function renderMachine(m) {
   // and shows in its tooltip, since free RAM and swap are independent.
   const ram = m.free_ram_pct, levels = [machineLevel(ram, "ram", m), /^swap used/.test(m.verdict || "") ? "danger" : m.swap_pct > m.max_swap_pct ? "low" : "ok"];
   const level = ram == null ? "none" : levels.includes("danger") ? "danger" : levels.includes("low") ? "low" : "ok";
-  // One ring markup for RAM and CPU: the arc fills pct %, text sits inside, label follows.
-  const ring = (lvl, pct, text, label, tip) =>
-    `<span class="ring ${lvl}" role="img" style="--pct:${pct}" aria-label="${tip}" title="${tip}">${text}</span> ${label}`;
+  // A 40x14 line of a ring's readings over the last 30 min (serve.py's history, one a minute, oldest first), scaled 0 to
+  // top; a missing reading is skipped, and fewer than 2 readings draw nothing.
+  const spark = (vals, top) => {
+    const ys = (Array.isArray(vals) ? vals : []).filter(v => v != null), r = v => Math.round(v * 10) / 10;
+    if (ys.length < 2) return "";
+    const pts = ys.map((v, i) => `${r(i * 40 / (ys.length - 1))},${r(13 - Math.min(v, top) * 12 / top)}`).join(" ");
+    return `<svg class="spark" width="40" height="14" viewBox="0 0 40 14" aria-hidden="true"><polyline points="${pts}"/></svg>`;
+  };
+  // RAM plots RAM in use, as its ring's arc does; CPU plots load, scaled to its peak once that passes 100.
+  const ramSpark = h => spark(((h && h.free_ram_pct) || []).map(v => v == null ? null : 100 - v), 100);
+  const cpuSpark = h => { const v = ((h && h.cpu_load_pct) || []).filter(x => x != null); return spark(v, Math.max(100, ...v)); };
+  // One ring markup for RAM and CPU: the arc fills pct %, text sits inside, its sparkline and label follow.
+  const ring = (lvl, pct, text, label, tip, line = "") =>
+    `<span class="ring ${lvl}" role="img" style="--pct:${pct}" aria-label="${tip}" title="${tip}">${text}</span>${line} ${label}`;
   const pctText = v => v == null ? "—" : Math.round(v) + "%";
-  const ramRing = (lvl, v, label, tip) => ring(lvl, v == null ? 0 : Math.round(100 - v), pctText(v), label, tip);
+  const ramRing = (lvl, v, label, tip, line) => ring(lvl, v == null ? 0 : Math.round(100 - v), pctText(v), label, tip, line);
   // At most 3 characters inside the ring: 100% or more shows whole multiples ("2x"); the exact % stays in the title.
-  const cpuRing = (lvl, v, label, tip) =>
-    ring(lvl, v == null ? 0 : Math.min(100, Math.round(v)), v == null || Math.round(v) < 100 ? pctText(v) : Math.round(v / 100) + "x", label, tip);
+  const cpuRing = (lvl, v, label, tip, line) =>
+    ring(lvl, v == null ? 0 : Math.min(100, Math.round(v)), v == null || Math.round(v) < 100 ? pctText(v) : Math.round(v / 100) + "x", label, tip, line);
   const ramFree = v => v == null ? "—" : Math.round(v) + "% free";
   const tip = `RAM ${ramFree(ram)} · swap ${pctText(m.swap_pct)}`;
   // CPU is the 5-minute load average as a percent of all cores; it can pass 100, so the arc caps there. Busy % is tooltip only.
@@ -778,17 +795,19 @@ function renderMachine(m) {
   const shopRings = shops.map(s => {
     const label = shops.length > 1 ? `Shop ${esc(s.name)}` : "Shop", read = ago(s.at);
     if (s.free_ram_pct == null && s.cpu_load_pct == null) return ring("none", 0, "—", label, `${label} unreachable · checked ${read}`);
-    return ramRing(s.free_ram_pct == null ? "none" : machineLevel(s.free_ram_pct, "ram", m), s.free_ram_pct, "", `${label} RAM ${ramFree(s.free_ram_pct)} · read ${read}`)
-      + cpuRing(machineLevel(s.cpu_load_pct, "cpu", m), s.cpu_load_pct, label, `${label} CPU load ${pctText(s.cpu_load_pct)} of ${cores(s.cpu_cores)} cores · read ${read}`);
+    return ramRing(s.free_ram_pct == null ? "none" : machineLevel(s.free_ram_pct, "ram", m), s.free_ram_pct, "", `${label} RAM ${ramFree(s.free_ram_pct)} · read ${read}`, ramSpark(s.history))
+      + cpuRing(machineLevel(s.cpu_load_pct, "cpu", m), s.cpu_load_pct, label, `${label} CPU load ${pctText(s.cpu_load_pct)} of ${cores(s.cpu_cores)} cores · read ${read}`, cpuSpark(s.history));
   });
   // A red reading already says what the verdict says, so the verdict shows only when it names something else (the session ceiling).
   const diskRed = machineLevel(m.free_disk_gb, "disk", m) === "danger";
   const shownRed = level === "danger" || diskRed || cpuLevel === "danger";
   // serve.py's own health over the last 5 min (an older server sends no server key): the worst route's p95, dropped connections.
   const sv = m.server, worst = sv && sv.worst && sv.routes && sv.routes[sv.worst];
-  el.innerHTML = [ramRing(level, ram, "RAM", tip), cpuRing(cpuLevel, cpu, "CPU", cpuTip), ...shopRings,
+  // Groups in order: This Mac (RAM, CPU, disk), each shop Mac, usage; each wraps as a whole on a narrow screen.
+  const thisMac = [ramRing(level, ram, "RAM", tip, ramSpark(m.history)), cpuRing(cpuLevel, cpu, "CPU", cpuTip, cpuSpark(m.history)),
     // A red disk reading says it is why launches wait, and names the limit.
-    part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : "")), usagePart(m.usage)].filter(Boolean).join(" · ")
+    part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : ""))].join(" · ");
+  el.innerHTML = [thisMac, ...shopRings, usagePart(m.usage)].filter(Boolean).map(g => `<span class="grp">${g}</span>`).join(" · ")
     + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "")
     + (sv && sv.slow ? ` · <span class="danger" title="${esc([worst && worst.p95_ms >= 1000 ? `${sv.worst} p95 ${worst.p95_ms} ms` : "",
       sv.disconnects >= 1 ? `${sv.disconnects} dropped` : ""].filter(Boolean).join(" · "))}">server slow</span>` : "");
