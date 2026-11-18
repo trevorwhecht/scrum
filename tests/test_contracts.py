@@ -1501,6 +1501,20 @@ class ContractTest(unittest.TestCase):
                     "stack, even on lines already there")
         self.assertEqual(text.count(rule_500), 1)
 
+    def test_builder_rules_digest_037_p2_p3(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        p2 = ('   - Type a Prisma `data` object you build up across lines as `Prisma.<Model>UpdateInput` (relations set with `connect`/`disconnect`) or `Prisma.<Model>UncheckedUpdateInput` (raw foreign keys such as `venueId`), or the matching `CreateInput` pair, never `any` or `Record<string, unknown>`, and never mix the two kinds in one call: real Prisma rejects the mix with a 500 that a mocked `prisma` test never sees, and only the type makes Typecheck catch it.')
+        p3 = ('   - A control that saves on every click or change (a cycling wheel, a select, a toggle) applies only the response to its newest request: number each request or abort the one before, and drop an older response, so a slow earlier PATCH never overwrites a newer click; add a test that resolves two saves out of order.')
+        self.assertEqual(text.count(p2 + "\n"), 1)
+        self.assertEqual(text.count(p3 + "\n"), 1)
+        self.assertIn("add a route test for it.\n" + p2 + "\n   - In every route file your diff touches, a malformed JSON body", text)
+        self.assertIn("in a headless render of the touched component.\n" + p3 + "\n   - **Next.js UI rules.**", text)
+        step2 = self.section(text, "2. Implement the spec.", "3. For each acceptance criterion:")
+        self.assertIn(p2, step2)
+        self.assertIn(p3, step2)
+        for phrase in ("never mix the two kinds in one call", "so a slow earlier PATCH never overwrites a newer click"):
+            self.assertEqual(text.count(phrase), 1, phrase)
+
     def test_builder_no_base_behind_ruling(self):
         text = (ROOT / "agents" / "scrum-builder.md").read_text()
         self.assertNotIn("When it is behind `BASE`, say so in build.md", text)
