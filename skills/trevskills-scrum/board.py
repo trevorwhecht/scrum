@@ -5562,6 +5562,13 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
             msg = merge_refusal(job)
             if msg:
                 raise SystemExit(msg)
+    if given.get("stage") == "merging":
+        job = live(read_board(root), job_id, unpause)
+        lane = given.get("lane") or job.get("lane")
+        if lane in ("fast", "standard") and not any((d / f).exists() for f in ("decision.md", "human-approval.md")) \
+                and not list(d.glob("round-*/review-code.md")):
+            raise SystemExit(f"not merging: {lane} job {job_id} has no round-N/review-code.md, decision.md or "
+                             "human-approval.md; run the code review (Fast lane step 2 / Review) first")
     with locked_board(root) as board:
         job = live(board, check_id(job_id), unpause)
         was = job["stage"]
