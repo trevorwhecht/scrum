@@ -5625,6 +5625,13 @@ class BoardTest(unittest.TestCase):
         plain = self.aged("Plain review", 120, stage="review")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
 
+    def test_watchdog_skips_play_queued_job(self):
+        queued = self.aged("Queued launch", 120, stage="build", play_queued=True)
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
+        self.assertNotIn("stalled", self.get(queued))
+        plain = self.aged("Plain build", 120, stage="build")
+        self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [plain])
+
     def test_watchdog_skips_queue_wait(self):
         waiting = self.aged("Queued check", 24 * 60, stage="check", reason="waiting: E2E queue")
         self.assertEqual(board.cmd_watchdog(self.root, alive=lambda job: False), [])
