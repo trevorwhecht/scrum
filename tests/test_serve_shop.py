@@ -24,7 +24,7 @@ SPEC = "# Spec\n## Likely files\n- `src/a.py`\n"
 READY = {"ready": True, "up": True, "gh": True, "node": True, "claude": True, "accounts": {"main": True, "owa": True}}
 SETUP = {"node": "ok", "gh": "ok", "gh login": "ok", "gh git": "ok", "owa links": "ok", "permissions": "ok",
          "account main": "ok", "account owa": "ok"}
-SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "project_copy", "env_copy", "start", "run", "ended")
+SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start", "run", "ended")
 PAR = "041-run-all"
 
 
@@ -56,8 +56,8 @@ class ShopTickTest(unittest.TestCase):
         self.sh.md_sync.return_value = True
         self.sh.setup.return_value = dict(SETUP)
         self.sh.clone.return_value = True
-        self.sh.project_copy.return_value = True
         self.sh.env_copy.return_value = "copied"
+        self.sh.profile_copy.return_value = "copied"
         self.sh.start.return_value = 4242
         self.sh.run.return_value = subprocess.CompletedProcess(["ssh"], 0, "", "")
         self.sh.ended.return_value = None
@@ -272,8 +272,8 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual(self.sh.mock_calls, [
                 mock.call.ready(), mock.call.md_sync(), mock.call.setup(),
                 mock.call.clone("mm", "https://github.com/trevorwhecht/mm.git"),
-                mock.call.project_copy("mm", str(repo)),
                 mock.call.env_copy("mm", str(repo)),
+                mock.call.profile_copy("mm", str(repo)),
                 mock.call.start("mm", "043-a", "/trevskills-scrum cloud-job 043-a Fix the widget\n\n\n## Pre-written spec"
                                 "\n\n# Spec\n## Likely files\n- `src/a.py`\n", "owa", model="sonnet")])
             job = self.job(root, "043-a")
@@ -282,9 +282,10 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual((root / "jobs" / "043-a" / "feature.md").read_text(), FEATURE)
             self.assertEqual(self.job(root, "044-b")["stage"], "waiting", "one dispatch per call")
             self.assertEqual(self.job(root, PAR)["stage"], "running")
-        with self.subTest("queued launch, no spec.md, no .env.local"):
+        with self.subTest("queued launch, no spec.md, no .env.local, no project.md"):
             self.sh.reset_mock()
             self.sh.env_copy.return_value = "none"
+            self.sh.profile_copy.return_value = "none"
             root = self.project("nn", [self.queued()])
             self.assertIs(self.tick("nn")[0], True)
             self.assertEqual(self.sh.start.call_args, mock.call(
@@ -312,16 +313,16 @@ class ShopTickTest(unittest.TestCase):
     def test_failed_step_leaves_job_held(self):
         cases = {"md-sync": ("md_sync", False), "setup": ("setup", dict(SETUP, gh="failed")),
                  "setup account": ("setup", dict(SETUP, **{"account owa": "not ready"})),
-                 "clone": ("clone", False), "project copy": ("project_copy", False), "env copy": ("env_copy", "failed"),
-                 "feature.md": (None, None), "start": ("start", None)}
+                 "clone": ("clone", False), "env copy": ("env_copy", "failed"),
+                 "profile copy": ("profile_copy", "failed"), "feature.md": (None, None), "start": ("start", None)}
         for why, (fn, value) in cases.items():
             for kind in ("child", "launch"):
                 with self.subTest(why, kind=kind):
                     self.serve.SHOP_RETRY_AT = 0.0
                     self.sh.reset_mock()
                     self.sh.configure_mock(**{"md_sync.return_value": True, "setup.return_value": dict(SETUP),
-                                              "clone.return_value": True, "project_copy.return_value": True,
-                                              "env_copy.return_value": "copied",
+                                              "clone.return_value": True, "env_copy.return_value": "copied",
+                                              "profile_copy.return_value": "copied",
                                               "start.return_value": 4242})
                     if fn:
                         getattr(self.sh, fn).return_value = value
