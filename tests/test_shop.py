@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "trevskills-scrum"
 WRAPPER = ROOT / "skills" / "trevskills-e2e" / "channel.config.mjs"
 sys.path.insert(0, str(SKILL))
+os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # workers.txt never the real one
 import shop  # noqa: E402
 
 REAL_RUN = subprocess.run  # ShopCase patches the subprocess module's run; local-shell checks use this one
@@ -106,6 +107,68 @@ class UnittestGuardTest(unittest.TestCase):
                 r = shop.run("true", 5)
             self.assertEqual(r.returncode, 127)
             self.assertFalse(marker.exists(), "ssh started under unittest")
+
+
+class WorkersTest(unittest.TestCase):
+    def workers(self, text=None, registry=None):
+        """shop.workers() with SCRUM_REGISTRY in a temp dir whose workers.txt holds `text` (None: no file)."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        reg = tmp / "sub" / "projects.json"
+        reg.parent.mkdir()
+        if isinstance(text, bytes):
+            (reg.parent / "workers.txt").write_bytes(text)
+        elif text is not None:
+            (reg.parent / "workers.txt").write_text(text)
+        with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
+            return shop.workers()
+
+    def test_missing_file_is_shopmac_default(self):
+        got = self.workers()
+        self.assertEqual(got, [("shopmac", 2, ("owa", "main"))])
+        self.assertEqual((got[0].alias, got[0].max, got[0].accounts), ("shopmac", 2, ("owa", "main")))
+
+    def test_lines_parsed_and_bad_lines_skipped(self):
+        text = ("# alias max accounts\n"
+                "shopmac 2 owa,main\n"
+                "newmac\t1   main   # the second Mac\n"
+                "\n   \n"
+                "too few\n"
+                "one two three four\n"
+                "-oProxyCommand=x 1 main\n"
+                "user@host 1 main\n"
+                "zero 0 main\n"
+                "neg -1 main\n"
+                "half 2.5 main\n"
+                "lead 02 main\n"
+                "empty 1 main,,owa\n"
+                "trail 1 main,\n"
+                "twice 1 main,main\n"
+                "work 1 main,work\n"
+                "newmac 3 owa\n"
+                "third 10 owa\n")
+        self.assertEqual(self.workers(text), [("shopmac", 2, ("owa", "main")), ("newmac", 1, ("main",)),
+                                              ("third", 10, ("owa",))])
+        with self.subTest("default path: ~/.claude/trevskills-scrum/workers.txt"):
+            home = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, home, True)
+            (home / ".claude" / "trevskills-scrum").mkdir(parents=True)
+            (home / ".claude" / "trevskills-scrum" / "workers.txt").write_text("homemac 3 main\n")
+            with mock.patch.dict(os.environ, HOME=str(home)):
+                os.environ.pop("SCRUM_REGISTRY")
+                self.assertEqual(shop.workers(), [("homemac", 3, ("main",))])
+
+    def test_no_valid_line_no_workers(self):
+        for why, text in (("empty", ""), ("comments and bad lines", "# none yet\n\nzero 0 main\n-x 1 main\n"),
+                          ("not UTF-8", b"newmac 1 main\n\xff\xfe\n")):
+            with self.subTest(why):
+                self.assertEqual(self.workers(text), [])
+        with self.subTest("a folder, not a file"):
+            tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, tmp, True)
+            (tmp / "workers.txt").mkdir()
+            with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(tmp / "projects.json")):
+                self.assertEqual(shop.workers(), [])
 
 
 class ProbeTest(ShopCase):

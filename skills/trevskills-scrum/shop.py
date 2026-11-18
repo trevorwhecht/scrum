@@ -15,6 +15,7 @@ Render auth file, start() to launch a headless cloud-job session there (the prom
 finished session's log tail. See lanes/shop.md.
 """
 import argparse, io, json, os, posixpath, re, shlex, subprocess, sys, tarfile, time
+from collections import namedtuple
 from pathlib import Path
 
 ALIAS = "shopmac"
@@ -108,7 +109,9 @@ print("changed" if changed else "same")
 # ponytail: a gh logout or a revoked token stays unseen for up to 10 min of an up shop; setup() clears it, and a
 # dispatch that fails on it is the upgrade trigger for a shorter TTL.
 READY_TTL = 600
-PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # also every ssh alias: never `-`-led, never user@host
+MAX_RE = re.compile(r"[1-9][0-9]*")  # a workers.txt max jobs; fullmatch
+Worker = namedtuple("Worker", "alias max accounts")  # a workers.txt line; accounts: SHOP_ACCOUNTS names, dispatch order
 ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.env.local.tmp"
             " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
 # profile_copy() writes HOME_TOKEN for this Mac's home; the shop's sed puts its own $HOME there.
@@ -453,13 +456,40 @@ def memory_key(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def _registry() -> Path:
+    """projects.json's path: SCRUM_REGISTRY, else ~/.claude/trevskills-scrum/projects.json (board.read_registry's rule)."""
+    return Path(os.environ.get("SCRUM_REGISTRY") or Path.home() / ".claude" / "trevskills-scrum" / "projects.json")
+
+
+def workers() -> list[Worker]:
+    """One Worker(alias, max, accounts) per valid line of workers.txt beside projects.json, in file order. A line is
+    `<alias> <max jobs> <account>[,<account>...]`; `#` starts a comment. A line without 3 fields, an alias off
+    PROJECT_RE (never an ssh option) or already listed, a max off MAX_RE, or an empty, repeated or unknown
+    (SHOP_ACCOUNTS) account is skipped. No file: today's one shop Mac; an unreadable file or no valid line: []."""
+    try:
+        text = (_registry().parent / "workers.txt").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [Worker(ALIAS, 2, ("owa", "main"))]
+    except (OSError, ValueError):
+        return []
+    out = []
+    for line in text.splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) != 3:
+            continue
+        alias, most, names = fields[0], fields[1], fields[2].split(",")
+        if PROJECT_RE.fullmatch(alias) and MAX_RE.fullmatch(most) and len(set(names)) == len(names) \
+                and all(n in SHOP_ACCOUNTS for n in names) and alias not in (w.alias for w in out):
+            out.append(Worker(alias, int(most), tuple(names)))
+    return out
+
+
 def _projects() -> dict[str, Path]:
     """{folder name: repo} for each projects.json entry (SCRUM_REGISTRY moves it) with a scrum/ dir whose folder name
     matches PROJECT_RE and whose memory_key() no other such entry shares (app.one and app-one would share one shop
     memory dir). Read here as board.read_registry does, since board.py and serve.py will import shop."""
     try:
-        paths = json.loads(Path(os.environ.get("SCRUM_REGISTRY")
-                                or Path.home() / ".claude" / "trevskills-scrum" / "projects.json").read_text())
+        paths = json.loads(_registry().read_text())
     except (OSError, ValueError):
         return {}
     if not isinstance(paths, list):
