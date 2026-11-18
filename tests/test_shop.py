@@ -753,7 +753,10 @@ class PermissionsMergeTest(unittest.TestCase):
         h = str(self.home)
         r = self.merge()  # no settings.json at all: {}
         self.assertEqual((r.returncode, r.stdout), (0, "changed\n"), r.stderr)
-        self.assertEqual(json.loads(self.file.read_text()), {"permissions": {
+        self.assertEqual(json.loads(self.file.read_text()), {"hooks": {"PostToolUse": [{
+            "matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "timeout": 60, "command":
+                "if [ -f skills/trevskills-scrum/edit-check.py ]; then python3 skills/trevskills-scrum/edit-check.py; fi"}]}]},
+            "permissions": {
             "allow": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebSearch", "WebFetch", "Skill",
                       f"Read(/{h}/**)", "Read(//tmp/**)", "Read(//private/tmp/**)", f"Edit(/{h}/.claude/**/*.md)",
                       f"Edit(/{h}/.claude-owa/**/*.md)"],
@@ -781,11 +784,37 @@ class PermissionsMergeTest(unittest.TestCase):
         self.assertEqual((self.file.read_bytes(), after.st_ino, after.st_mtime_ns), (before, st.st_ino, st.st_mtime_ns))
         self.assertEqual(os.listdir(self.file.parent), ["settings.json"])
 
-    def test_keeps_other_keys(self):
-        other = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo é"}]}]},
-                 "statusLine": {"type": "command", "command": "~/s.sh"}, "env": {"A": "1"}, "theme": "dark"}
+    def test_merge_adds_edit_check_hook(self):
+        self.assertEqual(self.merge().stdout, "changed\n")
+        post = json.loads(self.file.read_text())["hooks"]["PostToolUse"]
+        self.assertEqual(len(post), 1)
+        self.assertEqual(post[0]["matcher"], "Edit|Write|MultiEdit")
+        self.assertEqual(post[0]["hooks"], [{"type": "command", "command": shop.EDIT_CHECK_CMD, "timeout": 60}])
+        before = self.file.read_bytes()
+        r = self.merge()
+        self.assertEqual((r.returncode, r.stdout, self.file.read_bytes()), (0, "same\n", before))
+
+    def test_merge_keeps_existing_post_hooks(self):
+        other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}
         self.file.parent.mkdir()
-        self.file.write_text(json.dumps({**other, "permissions": {"defaultMode": "acceptEdits", "allow": ["Read"]}},
+        self.file.write_text(json.dumps({"hooks": {"PostToolUse": [other]}}))
+        self.merge()
+        self.assertEqual(json.loads(self.file.read_text())["hooks"]["PostToolUse"][0], other)
+        self.assertEqual(len(json.loads(self.file.read_text())["hooks"]["PostToolUse"]), 2)
+        mine = {"hooks": [{"type": "command", "command": "python3 x/edit-check.py"}]}
+        self.file.write_text(json.dumps({"hooks": {"PostToolUse": [other, mine]}}))
+        self.merge()
+        self.assertEqual(json.loads(self.file.read_text())["hooks"]["PostToolUse"], [other, mine])
+
+    def test_edit_check_cmd_noop_without_script(self):
+        r = REAL_RUN(["sh", "-c", shop.EDIT_CHECK_CMD], cwd=self.home, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    def test_keeps_other_keys(self):
+        stop = {"Stop": [{"hooks": [{"type": "command", "command": "echo é"}]}]}
+        other = {"statusLine": {"type": "command", "command": "~/s.sh"}, "env": {"A": "1"}, "theme": "dark"}
+        self.file.parent.mkdir()
+        self.file.write_text(json.dumps({**other, "hooks": stop, "permissions": {"defaultMode": "acceptEdits", "allow": ["Read"]}},
                                         indent=2, ensure_ascii=False) + "\n")
         before = self.file.read_text()
         self.assertEqual(self.merge().stdout, "changed\n")
@@ -794,12 +823,14 @@ class PermissionsMergeTest(unittest.TestCase):
             block = json.dumps({key: value}, indent=2, ensure_ascii=False)[2:-2]
             self.assertIn(block, before, key)
             self.assertIn(block, after, key)
+        self.assertEqual(json.loads(after)["hooks"]["Stop"], stop["Stop"])  # the hooks key gains PostToolUse beside it
         self.assertIn('    "defaultMode": "acceptEdits",\n', after)
         self.assertIn('"command": "echo é"', after)
 
     def test_malformed_json_not_written(self):
         self.file.parent.mkdir()
-        for bad in ("{ not json", '{"permissions": []}', '{"permissions": {"allow": "Bash"}}', "[]", ""):
+        for bad in ("{ not json", '{"permissions": []}', '{"permissions": {"allow": "Bash"}}', "[]", "",
+                    '{"hooks": []}', '{"hooks": {"PostToolUse": {}}}'):
             with self.subTest(bad=bad):
                 self.file.write_text(bad)
                 r = self.merge()
