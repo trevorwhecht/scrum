@@ -43,6 +43,7 @@ class ShopTickTest(unittest.TestCase):
             GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")  # no insteadOf rewrites the origin URL
         env.start()
         self.addCleanup(env.stop)
+        self.week(self.owa, 3600)  # owa's week resets first: pick_account's order puts it first unless a test says otherwise
         serve.SHOP_RETRY_AT = 0.0
         self.addCleanup(setattr, serve, "SHOP_RETRY_AT", 0.0)
         for s in (serve.CLOUD_LAST, serve.RUNS, serve.IDLE_SINCE):
@@ -67,6 +68,11 @@ class ShopTickTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     # --- fixtures ---
+    def week(self, acct, secs):
+        """acct's seven-day window resets `secs` from now, nothing else used."""
+        (acct / "usage.json").write_text(json.dumps({"rate_limits": {"seven_day": {
+            "used_percentage": 10, "resets_at": int(time.time()) + secs}}}))
+
     def project(self, name, jobs, profile="# Project\n- Test: x\n"):
         """A registered repo `name` (git, origin https://github.com/trevorwhecht/<name>.git) whose board holds `jobs`.
         A job's "feature" key is its feature.md (None: no file; default FEATURE), "likely" its spec.md Likely files."""
@@ -138,11 +144,9 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
         flag = self.base / "cooldown"
         flag.write_text("")
-        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag)):
-            self.assertEqual(self.tick(), (False, "", ""))
-        self.assertEqual(self.calls(), [], "cool-down holds every new start, the shop's too")
-        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
-        got, out, err = self.tick()  # free RAM 5%: the guard holds the job here
+        with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag), SCRUM_FREE_RAM=str(self.board.MIN_FREE_RAM_PCT),
+                             SCRUM_CPU_LOAD_PCT="1"):
+            got, out, err = self.tick()  # cool-down holds work here, so the shop takes it though the sensors pass
         self.assertEqual((got, err), (True, ""))
         self.assertEqual(out, "shop: mm: 043-a: started on the shop Mac (pid 4242, account owa)\n")
         self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
@@ -220,16 +224,22 @@ class ShopTickTest(unittest.TestCase):
         self.assertEqual([j["id"] for j in self.board.read_board(root)["jobs"] if j["stage"] == "cloud"], ["998-a"])
 
     # --- criterion 3: the account ---
-    def test_owa_then_main_with_reserve_and_limit(self):
+    def test_account_follows_pick_account_order_with_reserve_and_limit(self):
         ahead = int(time.time()) + 3600
         reserve = {"rate_limits": {"five_hour": {"used_percentage": 85, "resets_at": ahead},
                                    "seven_day": {"used_percentage": 10, "resets_at": ahead + 86400}}}
-        cases = [("owa free", {}, READY, "owa"),
-                 ("owa limited", {self.owa / "limit_until": f"{ahead}\n"}, READY, "main"),
+        sooner = lambda acct: {acct / "usage.json": json.dumps({"rate_limits": {"seven_day": {
+            "used_percentage": 10, "resets_at": ahead - 60}}})}
+        cases = [("owa resets first", sooner(self.owa), READY, "owa"),
+                 ("main resets first", sooner(self.main), READY, "main"),
+                 ("main resets first, shop lacks main", sooner(self.main),
+                  dict(READY, accounts={"main": False, "owa": True}), "owa"),
+                 ("no usage: account order", {}, READY, "main"),
+                 ("owa limited", {self.owa / "limit_until": f"{ahead}\n", **sooner(self.owa)}, READY, "main"),
                  ("owa at reserve", {self.owa / "usage.json": json.dumps(reserve)}, READY, "main"),
                  ("both limited", {self.owa / "limit_until": f"{ahead}\n", self.main / "limit_until": f"{ahead}\n"},
                   READY, None),
-                 ("shop owa not ready", {}, dict(READY, accounts={"main": True, "owa": False}), "main")]
+                 ("shop owa not ready", sooner(self.owa), dict(READY, accounts={"main": True, "owa": False}), "main")]
         for why, files, ready, account in cases:
             with self.subTest(why):
                 for d in (self.main, self.owa):
