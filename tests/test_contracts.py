@@ -1494,7 +1494,8 @@ class ContractTest(unittest.TestCase):
                  "engine input and the stored copy), compute it once, pass both the same normalised value, "
                  "and add a test that asserts the two match.")
         self.assertEqual(text.count(agree), 1)
-        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + look + "\n" + step3, text)
+        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n", text)
+        self.assertIn(look + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
@@ -1514,6 +1515,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn(p3, step2)
         for phrase in ("never mix the two kinds in one call", "so a slow earlier PATCH never overwrites a newer click"):
             self.assertEqual(text.count(phrase), 1, phrase)
+
+    def test_builder_rules_digest_064_p1(self):
+        text = (ROOT / "agents" / "scrum-builder.md").read_text()
+        p1 = ("   - When you add a new way to do, offer or message about an action the product already has (a payment ask or reminder, a stage move, a customer message), grep for the route or service guard that already allows or refuses it and call that same check, so the new path never offers the action where the guard refuses it.")
+        self.assertEqual(text.count(p1 + "\n"), 1)
+        self.assertIn("never trusting a snapshot taken earlier.\n" + p1 + "\n   - When you change how an existing element looks", text)
+        self.assertIn(p1, self.section(text, "2. Implement the spec.", "3. For each acceptance criterion:"))
+        self.assertEqual(text.count("never offers the action where the guard refuses it"), 1)
 
     def test_builder_no_base_behind_ruling(self):
         text = (ROOT / "agents" / "scrum-builder.md").read_text()
