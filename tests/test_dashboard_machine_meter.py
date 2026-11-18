@@ -173,7 +173,7 @@ class MachineMeter(unittest.TestCase):
         css = re.findall(r"#machine[^{]*\{[^}]*\}", text)
         self.assertTrue(css)
         self.assertIn("var(--human)", " ".join(css))
-        self.assertNotRegex(" ".join(css), r"#[0-9a-fA-F]{3,6}\b|\bwhite\b")
+        self.assertNotRegex(" ".join(css), r"#[0-9a-fA-F]{3,6}\b|\bwhite\b(?!-space)")  # white-space is not a colour
         ring = " ".join(c for c in css if ".ring" in c)
         self.assertIn("conic-gradient(", ring)
         self.assertIn("var(--pct)", ring)

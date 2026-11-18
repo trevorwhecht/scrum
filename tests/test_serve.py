@@ -12243,7 +12243,23 @@ class UiSweepTickTest(unittest.TestCase):
         self.assertIsNone(self.serve.board_with_activity(self.root, "repo")["uiSweep"])
         self.record(at=5, head="abc", since="s", result="fail", findings=2, dir="d")
         self.assertEqual(self.serve.board_with_activity(self.root, "repo")["uiSweep"],
-                         {"at": 5, "head": "abc", "result": "fail", "findings": 2})
+                         {"at": 5, "head": "abc", "result": "fail", "findings": 2, "open": 0})
+
+    def test_board_ui_sweep_open_counts_open_sweep_items(self):
+        """Job 977: uiSweep.open is the count of open `- [ ]` backlog lines starting `UI sweep`; done ones never count."""
+        (self.root / "board.json").write_text('{"jobs": []}')
+        self.record(at=5, head="abc", since="s", result="fail", findings=2, dir="d")
+        backlog = self.root / "backlog.md"
+        backlog.write_text("# Backlog\n- [ ] UI sweep: src/app/a: tiny button (merged job 1; screenshot a.png)\n"
+                           "- [ ] UI sweep could not render src/app/b (merged job 2): timeout\n"
+                           "- [x] UI sweep: src/app/c: old finding\n- [ ] Fix the UI sweep tick\n")
+        open_ = lambda: self.serve.board_with_activity(self.root, "repo")["uiSweep"]["open"]
+        self.assertEqual(open_(), 2)
+        backlog.write_text("# Backlog\n- [x] UI sweep: src/app/a: tiny button (merged job 1; screenshot a.png)\n"
+                           "- [ ] Fix the UI sweep tick\n")
+        self.assertEqual(open_(), 0)
+        backlog.unlink()
+        self.assertEqual(open_(), 0)
 
 
 class PulseTest(unittest.TestCase):

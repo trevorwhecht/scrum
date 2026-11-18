@@ -4168,7 +4168,8 @@ def board_with_activity(root, project):
     (e2e_wait_info). A job with transcript rows in the last JOB_COST_DAYS days gets `costUsd` and `costTokens`
     (job_costs). The board gets a top-level `checkoutAlert` (checkout_alert: the live checkout
     cannot go live, or None), `actionsAlert` (actions_alert's last result from the watchdog's ACTIONS_ALERT cache, or
-    None), `e2eFull` (the full-E2E record's at, head, result, failed, or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
+    None), `e2eFull` (the full-E2E record's at, head, result, failed, or None), `uiSweep` (the UI sweep record's at,
+    head, result, findings, and `open`: open backlog lines starting `UI sweep`; or None) and `autoOff` (auto_off). board.json comes from cached_board, and each job is a fresh shallow copy, so
     no live field outlives the poll that computed it."""
     cached = cached_board(root)
     stage = {j.get("id"): j.get("stage") for j in cached.get("jobs", [])}
@@ -4218,6 +4219,9 @@ def board_with_activity(root, project):
     data["e2eFull"] = {k: rec.get(k) for k in ("at", "head", "result", "failed")} if rec else None
     rec = ui_sweep_record(root)  # the same line's "UI sweep" part
     data["uiSweep"] = {k: rec.get(k) for k in ("at", "head", "result", "findings")} if rec else None
+    if rec:  # open: the sweep's backlog items still open; 0 once all were retired, so a fail sweep is not red
+        data["uiSweep"]["open"] = sum(1 for i in board.read_backlog(root)[1]
+                                      if not i["done"] and i["text"].startswith("UI sweep"))
     data["autoOff"] = auto_off(project, root)  # the dashboard's "Auto continue off since" header line
     return data
 
