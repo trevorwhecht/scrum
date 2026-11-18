@@ -43,6 +43,7 @@ sys.path.insert(0, str(HERE.parent.parent / "local"))  # HERE is resolved, so th
 import board  # noqa: E402
 import buildlock  # noqa: E402
 import route  # noqa: E402
+import shop  # noqa: E402
 
 CLAUDE = board.CLAUDE  # the cloud estimate and terminal launches; board.spawn reads board.CLAUDE
 LOCAL = {"localhost", "127.0.0.1"}
@@ -598,22 +599,10 @@ def play_queue_tick(project, root, jobs) -> bool:
     return started
 
 
-IDLE_CLAIM_SECS = 0  # idle_claim: a free slot with held work this long starts one held job (0: the first tick that sees both)
-IDLE_SINCE: dict[str, float] = {}  # project -> when its free slot with held work began (epoch s); a restart drops it
-
-
-def idle_claim(project, root, jobs) -> bool:
-    """Start one held job once the project has had held work and a free slot for IDLE_CLAIM_SECS (IDLE_SINCE).
-    Held work: a queued launch (queued_launch, not running, still in its stage) or a waiting child of a running,
-    unpaused Run-all/BigBoy parent (setup not pending, no wake, every depends_on done). A free slot: fewer than
-    MAX_SESSIONS sessions and machine_ok(claim=True) passes. Either failing, or any launch of the project meanwhile
-    (a RUNS start), restarts the timer. The claim takes one session of the tick's budget (take_room) and starts the
-    held job with the fewest Likely files (child_files; ties: lowest id) whose files share none with a running job (a
-    live_ids run, or a WATCHED leaf job whose session is alive); a running job with unreadable files blocks all, and
-    a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
-    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
-    limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing
-    and keeps the pick held. True when one started."""
+def held_work(project, jobs) -> list[dict]:
+    """The project's held work: a queued launch (queued_launch, not running, still in its stage) or a waiting child of
+    a running, unpaused Run-all/BigBoy parent (setup not pending, no wake, every depends_on done). idle_claim starts
+    one here; shop_tick sends one to the shop Mac."""
     by_id = {j["id"]: j for j in jobs}
 
     def waiting_child(k):
@@ -622,8 +611,27 @@ def idle_claim(project, root, jobs) -> bool:
             and p.get("lane") in ("runall", "bigboy") and k.get("setup") != "pending" and not k.get("wake") \
             and all(by_id.get(d, {}).get("stage") == "done" for d in k.get("depends_on") or [])
 
-    held = [j for j in jobs if (launch := j.get("queued_launch")) and j.get("stage") == launch.get("stage")
+    return [j for j in jobs if (launch := j.get("queued_launch")) and j.get("stage") == launch.get("stage")
             and not running(project, j["id"]) or waiting_child(j)]
+
+
+IDLE_CLAIM_SECS = 0  # idle_claim: a free slot with held work this long starts one held job (0: the first tick that sees both)
+IDLE_SINCE: dict[str, float] = {}  # project -> when its free slot with held work began (epoch s); a restart drops it
+
+
+def idle_claim(project, root, jobs) -> bool:
+    """Start one held job once the project has had held work (held_work) and a free slot for IDLE_CLAIM_SECS
+    (IDLE_SINCE). A free slot: fewer than
+    MAX_SESSIONS sessions and machine_ok(claim=True) passes. Either failing, or any launch of the project meanwhile
+    (a RUNS start), restarts the timer. The claim takes one session of the tick's budget (take_room) and starts the
+    held job with the fewest Likely files (child_files; ties: lowest id) whose files share none with a running job (a
+    live_ids run, a WATCHED leaf job whose session is alive, or a stage-cloud leaf job: a claude.ai or shop Mac
+    session); a running job with unreadable files blocks all, and
+    a held job with unreadable files goes only while nothing runs. A queued launch re-runs through spawn(idle=True);
+    a waiting child is claimed by cmd_ready(only=) under the board lock, then spawned start. CPU load over the launch
+    limit (cpu_hot, re-read just before the claim; a manual queued launch skips it) claims nothing
+    and keeps the pick held. True when one started."""
+    held = held_work(project, jobs)
     if not held or board.live_sessions() >= board.MAX_SESSIONS or board.machine_ok(root, claim=True):
         IDLE_SINCE.pop(project, None)
         return False
@@ -638,7 +646,7 @@ def idle_claim(project, root, jobs) -> bool:
     watched = [j for j in jobs if not j.get("children") and j["id"] not in live and j.get("stage") in board.WATCHED]
     alive = board.session_alive_fn() if watched else None  # ps only when needed
     busy = [board.child_files(jobs_dir, j["id"]) for j in jobs
-            if not j.get("children") and (j["id"] in live or j in watched and alive(j))]
+            if not j.get("children") and (j["id"] in live or j.get("stage") == "cloud" or j in watched and alive(j))]
     files = {j["id"]: board.child_files(jobs_dir, j["id"]) for j in held}
     ok = [j for j in held if (all(b and not board.shared_files(files[j["id"]], b) for b in busy) if files[j["id"]]
                               else not busy)]
@@ -867,12 +875,16 @@ def net_error(root, job):
 
 
 def limit_reset(root, job):
-    """(limit hit?, reset epoch or None, fixed?) from the tail of the job's run log: the line Claude Code prints when
-    the account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at 6pm"). fixed is
-    True for an epoch or a dated reset, False for a bare clock time (a session limit) or none. A clock time is the
-    next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever; one more
-    than SESSION_WINDOW after it is the same time that day (the limit line predates the log's last write)."""
-    tail, written = run_log_tail(root, job)
+    """(limit hit?, reset epoch or None, fixed?) from the tail of the job's run log (limit_in)."""
+    return limit_in(*run_log_tail(root, job))
+
+
+def limit_in(tail: str, written: datetime) -> tuple[bool, float | None, bool]:
+    """(limit hit?, reset epoch or None, fixed?) from a session log's tail written at `written`: the line Claude Code
+    prints when the account's usage limit refuses a request names when it resets ("resets 2am", "resets Oct 17 at
+    6pm"). fixed is True for an epoch or a dated reset, False for a bare clock time (a session limit) or none. A clock
+    time is the next one after the log was written, not after now, or at 2:01 "resets 2am" would mean tomorrow forever;
+    one more than SESSION_WINDOW after it is the same time that day (the limit line predates the log's last write)."""
     if not LIMIT_RE.search(tail):
         return False, None, False
     m = RESET_EPOCH_RE.search(tail)
@@ -1457,7 +1469,10 @@ def cloud_tick(project, root, jobs, now=None):
     late. Once spawn returns for an id whose artifacts branch exists (arrived, or moved with artifacts), clear its
     artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
     spawn keeps the mark, so a later poll reports the id again. Held during cool-down (no sync, no spawn, CLOUD_LAST
-    unstamped, so the first tick after it polls at once). Errors are printed, never raised."""
+    unstamped, so the first tick after it polls at once). Errors are printed, never raised.
+    Before the sync, each stage-cloud job with a `shop` pid asks shop.ended; after a sync with no error, one whose
+    session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
+    (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit)."""
     if board.cooling_down():
         return
     now = time.time() if now is None else now
@@ -1466,9 +1481,25 @@ def cloud_tick(project, root, jobs, now=None):
         return
     CLOUD_LAST[project] = now
     try:
+        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]))
+                 for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
         out = board.cmd_cloud_sync(root)
         if out.get("error"):
             print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
+        elif ended:
+            live = {j["id"]: j for j in board.read_board(root)["jobs"]}
+            for job_id, tail in ended.items():
+                job = live.get(job_id) or {}
+                if tail is None or job.get("stage") != "cloud":  # a PR the sync just moved wins
+                    continue
+                if LIMIT_RE.search(tail):
+                    reset = limit_in(tail, datetime.now())[1]
+                    board.note_limit(job.get("account") or board.accounts()[0].name,
+                                     reset if reset and reset > now else now + AUTO_RESUME_EVERY)
+                try:  # re-checks stage cloud under the lock
+                    board._cloud_abort(root, job_id, job.get("pr"), True, SHOP_ENDED)
+                except SystemExit as e:
+                    print(f"cloud-sync: {project}: {job_id}: {e}", file=sys.stderr, flush=True)
         homes = [m["id"] for m in out["moved"] if m.get("artifacts") or (m.get("reason") or "").startswith(CLOUD_HOME)]
         homes += out.get("arrived") or []
         # only these can fetch scrum-artifacts/<id> now; a hard-stop move without it keeps its fresh mark
@@ -1480,6 +1511,115 @@ def cloud_tick(project, root, jobs, now=None):
                     board.cloud_pending_clear(root, job_id)
     except (Exception, SystemExit) as e:
         print(f"cloud-sync: {project}: {e}", file=sys.stderr, flush=True)
+
+
+SHOP_MAX = 2  # shop Mac sessions at once across every project's board (stage cloud with a `shop` pid)
+SHOP_RETRY_EVERY = 600  # seconds shop_tick calls no shop function after a failed dispatch step
+# ponytail: one global backoff; make it per-step or per-project if one project's clone failure stalls the others
+SHOP_RETRY_AT = 0.0  # time.time() before which shop_tick dispatches nothing
+SHOP_ENDED = "requeue: shop session ended without a PR"
+DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md expands these; shop dispatch does not
+
+
+def shop_tick(project, repo, root) -> bool:
+    """While this Mac's machine guard holds work (machine_ok(claim=True) refuses or cpu_hot), send the project's
+    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy, setup pending or
+    naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md) to
+    the shop Mac as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
+    shop.ready(). Account: pick_account preferring owa, then main, the first the shop has ready. A child is claimed
+    (cmd_ready shop=), then md_sync, setup, clone, env_copy and start run; a failed step puts a claimed child back to
+    waiting, prints one `shop: <project>: <id>: ` line and holds every shop call for SHOP_RETRY_EVERY. The job is then
+    marked stage cloud with shop=<pid> and account=; a refused mark, or a local run started meanwhile, kills the shop
+    session. Cool-down, a down shop or nothing to send: no output, no change. True when it dispatched."""
+    if time.time() < SHOP_RETRY_AT or board.cooling_down():
+        return False
+    try:
+        profile = (Path(root) / "project.md").read_text(errors="replace")
+    except OSError:
+        profile = ""
+    if re.search(r"^- Base branch:", profile, re.M) or "docker" in profile.lower():  # docker: as docker_projects reads it
+        return False
+    jobs_dir = Path(root) / "jobs"
+    is_child = lambda j: j["stage"] == "waiting" and bool(j.get("parent"))  # held_work's other kind is a launch
+
+    def feature(job_id):
+        try:
+            return (jobs_dir / job_id / "feature.md").read_text(errors="replace")
+        except OSError:
+            return ""  # dispatched, then failed as a step: the claim is put back
+
+    pool = sorted((j for j in held_work(project, board.read_board(root)["jobs"])
+                   if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
+                   and j.get("setup") != "pending" and board.job_lane(root, j) != "lilguy"
+                   and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
+                  key=lambda j: (int(j["id"].split("-")[0]), j["id"]))  # numeric: 1000- sorts after 999-
+    # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
+    if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()) \
+            or sum(j.get("stage") == "cloud" and bool(j.get("shop")) for r in board.projects().values()
+                   for j in board.read_board(r / "scrum")["jobs"]) >= SHOP_MAX:
+        return False
+    ready = shop.ready()
+    if not ready["ready"]:
+        return False
+    n_live = board.live_sessions()  # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
+    account = next((name for pref in ("owa", "main") if (name := board.pick_account(time.time(), n_live, prefer=pref)[0])
+                    and ready["accounts"].get(name)), None)
+    if not account:
+        return False
+    for job in pool:  # the first that claims; a child held on an overlap tries the next
+        child = is_child(job)
+        if not child or job["id"] in board.cmd_ready(root, job["parent"], live_ids(project), shop=job["id"])["ready"]:
+            break
+    else:
+        return False
+    job_id, claimed = job["id"], "spec" if child else job["stage"]
+
+    def fail(step):
+        global SHOP_RETRY_AT
+        if child:
+            try:
+                board.cmd_set(root, job_id, ["stage=waiting"], expect="spec")
+                (jobs_dir / job_id / "claimed-at.txt").unlink(missing_ok=True)
+            except SystemExit:
+                pass  # moved meanwhile: its new owner keeps it
+        print(f"shop: {project}: {job_id}: {step} failed", file=sys.stderr, flush=True)
+        SHOP_RETRY_AT = time.time() + SHOP_RETRY_EVERY
+        return False
+
+    if not shop.md_sync():
+        return fail("md-sync")
+    steps = shop.setup()
+    if "failed" in steps.values() or steps.get(f"account {account}") != "ok":
+        return fail("setup")
+    try:
+        url = board._git(repo, "remote", "get-url", "origin").decode().strip()
+    except (ValueError, OSError, subprocess.SubprocessError):
+        url = ""
+    if not shop.clone(repo.name, url):
+        return fail("clone")
+    if shop.env_copy(repo.name, str(repo)) == "failed":
+        return fail("env copy")
+    try:
+        prompt = f"/trevskills-scrum cloud-job {job_id} " + (jobs_dir / job_id / "feature.md").read_text()
+        if (jobs_dir / job_id / "spec.md").is_file():
+            prompt += "\n\n## Pre-written spec\n\n" + (jobs_dir / job_id / "spec.md").read_text()
+    except (OSError, ValueError):
+        return fail("feature.md")
+    pid = shop.start(repo.name, job_id, prompt, account, model=board.orchestrator_model(root, job_id))
+    if pid is None:
+        return fail("start")
+    try:
+        if running(project, job_id):
+            raise SystemExit("a local session started it meanwhile")
+        board.cmd_set(root, job_id, ["stage=cloud", f"shop={pid}", f"account={account}"], expect=claimed)
+    except SystemExit as e:
+        shop.run(f"kill {pid}", shop.STEP_TIMEOUT)
+        print(f"shop: {project}: {job_id}: not marked ({e}); stopped shop pid {pid}", file=sys.stderr, flush=True)
+        return False
+    if not child:
+        unqueue(root, job)
+    print(f"shop: {project}: {job_id}: started on the shop Mac (pid {pid}, account {account})", flush=True)
+    return True
 
 
 EXITED = "session exited while the job was still in {stage}."
@@ -2376,7 +2516,8 @@ def watchdog_tick():
     3. Claim: only when passes 1 and 2 started nothing and nothing waits, start the ready siblings of flagged children,
        start parentless jobs whose wait-on blocker merged (wake_waiting), let sweep_parents claim, and run
        auto_continue_tick. sweep_parents' respawns, closes and parked marks, cloud_tick and prune_worktrees run every
-       tick, and actions_alert refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
+       tick, with shop_tick (one held job to the shop Mac) between the last two in its own guard, and actions_alert
+       refreshes the ACTIONS_ALERT cache once every ACTIONS_ALERT_EVERY seconds per project.
        Before it, prod_errors_tick sweeps an opted-in project's Vercel production errors into its backlog once a day.
     Then idle_cleanup stops leaked dev servers of idle projects and quits Docker Desktop once its projects idle 10 min.
     4. Window report: window_tick scores every project's closed usage windows and starts an early digest on a bad one.
@@ -2475,6 +2616,10 @@ def watchdog_tick():
             except (Exception, SystemExit) as e:
                 print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
             cloud_tick(project, root, jobs)
+            try:  # its own guard: a shop failure must not skip prune_worktrees or the next project
+                shop_tick(project, repo, root)
+            except (Exception, SystemExit) as e:
+                print(f"watchdog: {project}: shop: {e}", file=sys.stderr, flush=True)
             prune_worktrees(repo, jobs, project, alive)
             try:  # its own guard: a vercel failure must not skip actions_alert or the next project
                 prod_errors_tick(project, repo, root)

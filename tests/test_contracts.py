@@ -3997,7 +3997,8 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
                        "this cloud session is running an old copy of the scrum instructions; rerunning cloud setup refreshes it.",
                        "reports to GitHub as **Needs-human** does",
                        "`git -C ~/scrum rev-parse HEAD`", "`git -C ~/scrum ls-remote origin refs/heads/main`",
-                       "`grep -q scrum-artifacts/ ~/.claude/skills/trevskills-scrum/lanes/cloud.md`"):
+                       "`grep -q scrum-artifacts/ ~/.claude/skills/trevskills-scrum/lanes/cloud.md`",
+                       "`SCRUM_SHOP`", "`~/code/scrum`"):
             self.assertIn(phrase, setup, phrase)
         readme = self.h2((ROOT / "README.md").read_text(), "## Cloud lane")
         intro = readme.split("\n\n")[1]  # the first paragraph after the heading
