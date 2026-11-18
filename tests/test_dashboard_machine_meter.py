@@ -111,35 +111,35 @@ class MachineMeter(unittest.TestCase):
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         self.assertEqual(out["levels"], ["danger", "low", "ok", "danger", "low", "ok", "danger", "low", "ok", "ok",
                                          "danger", "low", "low", "ok", "ok", "none"])
-        self.assertEqual(out["ok"], [False, G('<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free · swap —" title="RAM 34% free · swap —">34%</span><span class="lbl">RAM</span> · '
-                                              + CPU_NONE + ' · <span class="ok">disk 120 GB</span>')])
-        self.assertEqual(out["bad"], G('<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 3%" title="RAM 14% free · swap 3%">14%</span><span class="lbl">RAM</span> · '
-                                       + CPU_NONE + ' · <span class="ok">disk 50 GB</span>'), "the red ring already shows the RAM verdict")
+        self.assertEqual(out["ok"], [False, G('<span class="ring ok" role="img" style="--pct:66" aria-label="RAM 34% free · swap —" title="RAM 34% free · swap —">34%</span><span class="lbl">RAM</span> '
+                                              + CPU_NONE + ' <span class="ok">disk 120 GB</span>')])
+        self.assertEqual(out["bad"], G('<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 3%" title="RAM 14% free · swap 3%">14%</span><span class="lbl">RAM</span> '
+                                       + CPU_NONE + ' <span class="ok">disk 50 GB</span>'), "the red ring already shows the RAM verdict")
         self.assertEqual(out["gone"], [False, '<span class="danger" title="Couldn\'t load machine status.">—</span>'])
-        base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>')
+        base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
         self.assertEqual(out["use"], [base + G(acct("ok", 40, "main 40%") + ' · <span class="low">allowance 1</span>'),
                                       base + G(acct("ok", 0, "main —") + ' · <span class="danger">allowance 0</span>'),
                                       base + G(acct("ok", 12, "main 12%")),
                                       base + G('<span class="ok">usage: unknown</span>')])
-        self.assertEqual(out["order"], G('<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 1%" title="RAM 14% free · swap 1%">14%</span><span class="lbl">RAM</span> · '
-                                         + CPU_NONE + ' · <span class="ok">disk 100 GB</span>') + G('<span class="ok">usage: unknown</span>'))
-        tail = ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>'
+        self.assertEqual(out["order"], G('<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 1%" title="RAM 14% free · swap 1%">14%</span><span class="lbl">RAM</span> '
+                                         + CPU_NONE + ' <span class="ok">disk 100 GB</span>') + G('<span class="ok">usage: unknown</span>'))
+        tail = ' ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>'
         self.assertEqual(out["rings"], [G('<span class="ring low" role="img" style="--pct:75" aria-label="RAM 25% free · swap 1%" title="RAM 25% free · swap 1%">25%</span><span class="lbl">RAM</span>' + tail),
                                         G('<span class="ring none" role="img" style="--pct:0" aria-label="RAM — · swap 1%" title="RAM — · swap 1%">—</span><span class="lbl">RAM</span>' + tail)])
-        self.assertEqual(out["sessions"], base + ' · <span class="danger">15 sessions running (ceiling 14)</span>',
+        self.assertEqual(out["sessions"], base + G('<span class="danger">15 sessions running (ceiling 14)</span>'),
                          "a verdict that repeats no shown reading stays, after the usage segment")
         self.assertEqual(out["swap"], G('<span class="ring danger" role="img" style="--pct:60" aria-label="RAM 40% free · swap 29%" title="RAM 40% free · swap 29%">40%</span><span class="lbl">RAM</span>'
-                                        + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>'), "swap has no text: it turns the ring red and sits in its tooltip")
+                                        + ' ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>'), "swap has no text: it turns the ring red and sits in its tooltip")
         self.assertEqual(out["stale"], G('<span class="ring low" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span><span class="lbl">RAM</span>'
-                                         + ' · ' + CPU_NONE + ' · <span class="ok">disk 100 GB</span>'), "stale swap past 25% with no swap verdict turns the ring yellow, not red")
+                                         + ' ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>'), "stale swap past 25% with no swap verdict turns the ring yellow, not red")
         ring40 = '<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span>'
-        self.assertEqual(out["cpu"], G(ring40 + ' · <span class="ring danger" role="img" style="--pct:100" aria-label="CPU load 168% of 8 cores · busy 51% · limit 150%" '
-                                       'title="CPU load 168% of 8 cores · busy 51% · limit 150%">2x</span><span class="lbl">CPU</span> · <span class="ok">disk 100 GB</span>'),
+        self.assertEqual(out["cpu"], G(ring40 + ' <span class="ring danger" role="img" style="--pct:100" aria-label="CPU load 168% of 8 cores · busy 51% · limit 150%" '
+                                       'title="CPU load 168% of 8 cores · busy 51% · limit 150%">2x</span><span class="lbl">CPU</span> <span class="ok">disk 100 GB</span>'),
                          "the red CPU ring already shows the CPU verdict")
-        self.assertEqual(out["cpuNear"], G(ring40 + ' · <span class="ring low" role="img" style="--pct:100" aria-label="CPU load 145% of 8 cores · busy — · limit 150%" '
-                                           'title="CPU load 145% of 8 cores · busy — · limit 150%">1x</span><span class="lbl">CPU</span> · <span class="ok">disk 100 GB</span>'))
+        self.assertEqual(out["cpuNear"], G(ring40 + ' <span class="ring low" role="img" style="--pct:100" aria-label="CPU load 145% of 8 cores · busy — · limit 150%" '
+                                           'title="CPU load 145% of 8 cores · busy — · limit 150%">1x</span><span class="lbl">CPU</span> <span class="ok">disk 100 GB</span>'))
 
-        self.assertEqual(out["disk"], G(ring40 + ' · ' + CPU_NONE + ' · <span class="danger">disk 8 GB, launches wait for 10 GB free</span>'),
+        self.assertEqual(out["disk"], G(ring40 + ' ' + CPU_NONE + ' <span class="danger">disk 8 GB, launches wait for 10 GB free</span>'),
                          "a red disk reading says launches wait on it and names the limit")
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
         self.assertIn("launches wait for 10 GB free", meter, "the hint names the disk segment's wait text")
@@ -169,11 +169,11 @@ class MachineMeter(unittest.TestCase):
                   "  if (sv) m.server = sv;\n"
                   "  renderMachine(m); return el.innerHTML; })));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
-        base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> · '
-                 + CPU_NONE + ' · <span class="ok">disk 100 GB</span>')
-        self.assertEqual(out, [base + ' · <span class="danger" title="GET /p/*/board.json p95 2400 ms">server slow</span>',
-                               base + ' · <span class="danger" title="3 dropped">server slow</span>',
-                               base + ' · <span class="danger" title="GET /&lt;b&gt; p95 1500 ms · 1 dropped">server slow</span>',
+        base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> '
+                 + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
+        self.assertEqual(out, [base + G('<span class="danger" title="GET /p/*/board.json p95 2400 ms">server slow</span>'),
+                               base + G('<span class="danger" title="3 dropped">server slow</span>'),
+                               base + G('<span class="danger" title="GET /&lt;b&gt; p95 1500 ms · 1 dropped">server slow</span>'),
                                base, base])
 
     def test_machine_meter_fable_text(self):
@@ -239,7 +239,7 @@ class MachineMeter(unittest.TestCase):
                               "  if (shop) m.shop = shop;\n"
                               "  renderMachine(m); return el.innerHTML; })));")
         ring = lambda lvl, pct, text, tip: f'<span class="ring {lvl}" role="img" style="--pct:{pct}" aria-label="{tip}" title="{tip}">{text}</span>'
-        mac = G(ring("ok", 60, "40%", "RAM 40% free · swap 1%") + L("RAM") + " · " + CPU_NONE + ' · <span class="ok">disk 100 GB</span>')
+        mac = G(ring("ok", 60, "40%", "RAM 40% free · swap 1%") + L("RAM") + " " + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
         shop = (ring("ok", 59, "41%", "Shop RAM 41% free · read 40s ago") + L()
                 + ring("ok", 63, "63%", "Shop CPU load 63% of 4 cores · read 40s ago") + L("Shop"))
         self.assertEqual(out, [
@@ -268,10 +268,10 @@ class MachineMeter(unittest.TestCase):
         ring = lambda lvl, pct, text, tip: f'<span class="ring {lvl}" role="img" style="--pct:{pct}" aria-label="{tip}" title="{tip}">{text}</span>'
         ram = ring("ok", 60, "40%", "RAM 40% free · swap 1%")
         cpu = ring("ok", 50, "50%", "CPU load 50% of 8 cores · busy — · limit 150%")
-        disk = ' · <span class="ok">disk 100 GB</span>'
-        plain = G(ram + L("RAM") + " · " + cpu + L("CPU") + disk)
+        disk = ' <span class="ok">disk 100 GB</span>'
+        plain = G(ram + L("RAM") + " " + cpu + L("CPU") + disk)
         self.assertEqual(out, [
-            G(ram + L("RAM", spark("0,8.2 20,5.8 40,3.4")) + " · " + cpu + L("CPU", spark("0,10.6 40,1")) + disk)
+            G(ram + L("RAM", spark("0,8.2 20,5.8 40,3.4")) + " " + cpu + L("CPU", spark("0,10.6 40,1")) + disk)
             + G(ring("ok", 50, "50%", "Shop RAM 50% free · read 40s ago") + L("", spark("0,7 40,7"))
                 + ring("ok", 10, "10%", "Shop CPU load 10% of 4 cores · read 40s ago") + L("Shop")),
             plain, plain, plain])
@@ -298,6 +298,8 @@ class MachineMeter(unittest.TestCase):
         self.assertIn("left:calc(var(--cap) * 1%)", tick.group(0))
         self.assertIn("var(--ink)", tick.group(0))
         self.assertIn("#machine .spark polyline{fill:none;stroke:currentColor", text, "the sparkline takes the meter's text colour")
+        self.assertIn("#machine .grp>span:not(.ring,.lbl){display:inline-block}", text,
+                      "a reading such as disk 35 GB or an account's bar and label wraps as a whole, never mid-text")
         lbl = re.search(r"#machine \.lbl\{[^}]*\}", text)
         self.assertIsNotNone(lbl)
         self.assertIn("display:inline-grid", lbl.group(0), "the label sits over the sparkline")

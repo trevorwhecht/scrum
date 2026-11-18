@@ -183,6 +183,10 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         history.start()
         self.addCleanup(history.stop)
         (repo / "scrum" / "e2e-full.json").write_text(json.dumps({"at": t, "head": "abc1234def", "result": "pass"}))
+        # ... and no live verdict, so this Mac's own memory pressure never adds a meter group to the measured header.
+        verdict = mock.patch.object(serve.board, "machine_ok", return_value=None)
+        verdict.start()
+        self.addCleanup(verdict.stop)
         serve.MACHINE_CACHE.clear()
         self.server = serve.make_server(0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

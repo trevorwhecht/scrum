@@ -26,7 +26,7 @@ h1{font-size:16px;margin:0}
 #machine .low{color:var(--changes)}#machine .danger,#routing .danger{color:var(--human)}
 #machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:9px;letter-spacing:-.5px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
 #machine .acct.ok,#machine .ring.ok{--ring:var(--pass)}#machine .acct.low,#machine .ring.low{--ring:var(--p5)}#machine .acct.danger,#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
-#machine .grp{display:inline-block;vertical-align:middle;margin-right:14px}  /* This Mac, each shop Mac, usage: each wraps as a whole */
+#machine .grp{display:inline-block;vertical-align:middle;margin-right:14px}#machine .grp>span:not(.ring,.lbl){display:inline-block}  /* This Mac, each shop Mac, usage: each wraps as a whole, and a reading inside one never breaks mid-text */
 #machine .lbl{display:inline-grid;vertical-align:middle;margin:0 4px;line-height:14px}  /* a ring's label over its sparkline */
 #machine .bar{position:relative;display:inline-block;width:40px;height:6px;border-radius:3px;vertical-align:middle;background:linear-gradient(90deg,var(--ring) calc(var(--pct) * 1%),var(--pending) 0)}#machine .bar::after{content:"";position:absolute;top:-2px;bottom:-2px;left:calc(var(--cap) * 1%);width:1px;background:var(--ink)}  /* the tick: the account's reserve */
 #machine .spark{vertical-align:middle}#machine .spark polyline{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}
@@ -804,14 +804,16 @@ function renderMachine(m) {
   const shownRed = level === "danger" || diskRed || cpuLevel === "danger";
   // serve.py's own health over the last 5 min (an older server sends no server key): the worst route's p95, dropped connections.
   const sv = m.server, worst = sv && sv.worst && sv.routes && sv.routes[sv.worst];
-  // Groups in order: This Mac (RAM, CPU, disk), each shop Mac, usage; spaced apart, each wraps as a whole when the meter is narrow.
+  // Groups in order: This Mac (RAM, CPU, disk), each shop Mac, usage, then the verdict and server slow; spaced apart, each
+  // wraps as a whole when the meter is narrow.
   const thisMac = [ramRing(level, ram, "RAM", tip, ramSpark(m.history)), cpuRing(cpuLevel, cpu, "CPU", cpuTip, cpuSpark(m.history)),
     // A red disk reading says it is why launches wait, and names the limit.
-    part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : ""))].join(" · ");
-  el.innerHTML = [thisMac, ...shopRings, usagePart(m.usage)].filter(Boolean).map(g => `<span class="grp">${g}</span>`).join("")
-    + (m.verdict && !shownRed ? ` · <span class="danger">${esc(m.verdict)}</span>` : "")
-    + (sv && sv.slow ? ` · <span class="danger" title="${esc([worst && worst.p95_ms >= 1000 ? `${sv.worst} p95 ${worst.p95_ms} ms` : "",
-      sv.disconnects >= 1 ? `${sv.disconnects} dropped` : ""].filter(Boolean).join(" · "))}">server slow</span>` : "");
+    part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : ""))].join(" ");
+  el.innerHTML = [thisMac, ...shopRings, usagePart(m.usage),
+    m.verdict && !shownRed ? `<span class="danger">${esc(m.verdict)}</span>` : "",
+    sv && sv.slow ? `<span class="danger" title="${esc([worst && worst.p95_ms >= 1000 ? `${sv.worst} p95 ${worst.p95_ms} ms` : "",
+      sv.disconnects >= 1 ? `${sv.disconnects} dropped` : ""].filter(Boolean).join(" · "))}">server slow</span>` : ""]
+    .filter(Boolean).map(g => `<span class="grp">${g}</span>`).join("");
 }
 
 // Every project's board.checkoutAlert (its live checkout cannot go live) and board.actionsAlert (GitHub refused to start
