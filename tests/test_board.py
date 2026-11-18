@@ -5179,6 +5179,15 @@ class BoardTest(unittest.TestCase):
                             {"id": "012-b", "stage": "spec", "started_by": "runall"}]})
         self.assertIn("Claims during cool down: 1 — app 12\n", text)
 
+    def test_pulse_cool_down_skips_shop_claims(self):
+        """Job 1141: cool-down never stops the shop, so its new-work claim (started_by shop) is no cool-down claim, and
+        no Other start while this Mac's CPU is hot (it never ran here)."""
+        text = self.claim_pulse(60, {"app": [{"id": "011-a", "started_by": "shop", "worker": "shopmac"},
+                                             {"id": "012-b", "started_by": "runall"},
+                                             {"id": "013-c", "started_by": "shop", "worker": "shopmac"}]}, cpu=600)
+        self.assertIn("Claims during cool down: 1 — app 12\nHand-started during cool down: 0\n"
+                      "Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 0\n", text)
+
     def test_pulse_missing_log(self):
         empty = "# Pulse: digest 001\n\nNo pulse lines since the last digest.\n"
         self.assertEqual(self.pulse_digest(None)[0], empty)

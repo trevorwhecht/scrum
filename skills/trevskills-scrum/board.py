@@ -366,7 +366,7 @@ def short_title(text, n=60) -> str:
     return (cut or head) + "…"
 
 
-STARTED_BY = ("serve", "runall", "wake", "hand")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand)
+STARTED_BY = ("serve", "runall", "wake", "hand", "shop")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand and shop)
 
 
 def add_job(root, board, title, job_id=None, started_by="hand"):
@@ -735,18 +735,20 @@ def claim_item(lines, item, job_id):
     lines[item["line"]] = format_item(item)
 
 
-def cmd_next(root, index=None):
+def cmd_next(root, index=None, shop=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
     Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
-    and still claims."""
-    if index is None and cooling_down():
+    and still claims. `shop` (serve.py's shop_tick, a claim for the shop Mac) is a predicate the automatic pick must
+    also pass; cool-down never refuses it, finish_first still does, and the job is started_by shop."""
+    if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
     if index is None and (hold := finish_first(root)):
         raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)), None)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)
+                         and (shop is None or shop(i))), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
@@ -759,7 +761,8 @@ def cmd_next(root, index=None):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
             if origin := origin_open(item, board):
                 raise SystemExit(f"backlog item {index} waits on job {origin}")
-        job_id = add_job(root, board, short_title(item["text"]), started_by="runall" if index is None else "hand")
+        job_id = add_job(root, board, short_title(item["text"]),
+                         started_by="hand" if index is not None else "runall" if shop is None else "shop")
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
@@ -1574,10 +1577,11 @@ def write_pulse(root, digest_id):
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
     as before), peaks, claims during cool-down (each job number in a rise of a project's numeric top job number
     between two lines at most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it
-    rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started), claims while
+    rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started, started_by shop
+    skipped: cool-down never stops the shop), claims while
     CPU load over 500% (only the lines' `started` entries, serve.py's own non-manual starts, whose launch-time `cpu`
     is a number over 500; a missing or malformed `started` adds nothing), other starts while CPU load over 500% (rise
-    jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall skipped): hand, unregistered (project not in
+    jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall and shop skipped): hand, unregistered (project not in
     projects()) or other; a registered project's job off the board is skipped), minutes the focus project had
     claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board
     job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
@@ -1657,14 +1661,15 @@ def write_pulse(root, digest_id):
                 for n in range(int(was) + 1, int(top) + 1):
                     job = _board_job(boards, name, n)
                     hand = (job or {}).get("started_by") == "hand"
+                    shop = (job or {}).get("started_by") == "shop"  # a shop Mac claim: cool-down and this Mac's CPU never hold the shop
                     if (is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started
-                            and (job or {}).get("started_by") != "runall"):  # a run-all job creation is no start: its launch is a later serve.py start
+                            and (job or {}).get("started_by") != "runall" and not shop):  # a run-all job creation is no start: its launch is a later serve.py start
                         group = "unregistered" if name not in known else None if job is None else "hand" if hand else "other"
                         if group:  # a registered project's job off the board: pruned or reset, no start to name
                             others[group].setdefault(name, []).append(str(n))
                     if known and name not in known:
                         continue  # an unregistered project's rise is no claim
-                    if job is not None and b.get("cooldown") is True:
+                    if job is not None and b.get("cooldown") is True and not shop:
                         (handed if hand else claimed).setdefault(name, []).append(str(n))
                     if hand:
                         continue
@@ -4563,21 +4568,27 @@ def child_files(jobs_dir, job_id):
     """A child's Likely files: from spec.md, or from feature.md (plan-apply's Parallel: paths) while it has no spec."""
     for name in ("spec.md", "feature.md"):
         if (f := Path(jobs_dir) / job_id / name).is_file():
-            text = f.read_text(encoding="utf-8", errors="replace")
-            if name == "feature.md" and TERMINAL_BATCH_TITLE in text:
-                # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
-                return {p for p in re.findall(r"`([^`\s]+)`", text)
-                        if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
-            found = likely_files(text)
-            if found or name == "spec.md" and re.search(r"^#+\s*Likely files", text, re.M | re.I):
-                return found  # a Likely files heading that names no path still means "files unknown"
-            # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
-            root = Path(jobs_dir).parent.parent
-            tracked = git_tracked(root)
-            # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
-            return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
-                    for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
+            return text_files(Path(jobs_dir).parent.parent, f.read_text(encoding="utf-8", errors="replace"),
+                              spec=name == "spec.md")
     return set()
+
+
+def text_files(root, text, spec=False):
+    """child_files for one text in repo `root`: a spec.md's when `spec`, else a feature.md's (serve.py's shop_tick also
+    reads a backlog item not claimed yet this way)."""
+    if not spec and TERMINAL_BATCH_TITLE in text:
+        # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
+        return {p for p in re.findall(r"`([^`\s]+)`", text)
+                if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
+    found = likely_files(text)
+    if found or spec and re.search(r"^#+\s*Likely files", text, re.M | re.I):
+        return found  # a Likely files heading that names no path still means "files unknown"
+    # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
+    root = Path(root)
+    tracked = git_tracked(root)
+    # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
+    return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
+            for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
 
 
 def holder_files(jobs_dir, job):

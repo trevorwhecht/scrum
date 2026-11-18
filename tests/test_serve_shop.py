@@ -26,6 +26,7 @@ SETUP = {"node": "ok", "gh": "ok", "gh login": "ok", "gh git": "ok", "owa links"
          "account main": "ok", "account owa": "ok", "jev key": "ok"}
 SHOP_FNS = ("probe", "ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start", "run", "ended")
 PAR = "041-run-all"
+AUTO = "# Project\n- Test: x\n- Auto continue: 1\n"
 
 
 class ShopTickTest(unittest.TestCase):
@@ -855,6 +856,150 @@ class ShopTickTest(unittest.TestCase):
                                 + [self.holder("cloud")])
             self.assertIs(self.tick()[0], True, "a child only: cmd_ready checks it, no busy list")
             self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+
+    # --- job 1141: with nothing held, the shop claims new work the way auto-continue's `next` does ---
+    def backlog(self, root, *lines, specs=None):
+        """root's backlog.md with these open item lines; specs maps an item's text to its pre-written spec."""
+        (root / "backlog.md").write_text("# Backlog\n" + "".join(f"- [ ] {line}\n" for line in lines))
+        for text, spec in (specs or {}).items():
+            path = self.board.spec_path(root, text)
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(spec)
+
+    def test_new_work_claimed_when_nothing_held(self):
+        flag = self.base / "cooldown"
+        for why, env in (("this Mac's guard holds", {}), ("cool down", {"SCRUM_COOLDOWN": str(flag)})):
+            with self.subTest(why):
+                flag.write_text("")
+                self.sh.reset_mock()
+                root = self.project("mm", [], AUTO)
+                self.backlog(root, "Fix the gadget {p:3}", "Polish the knob {p:5}",
+                             specs={"Polish the knob": SPEC, "Fix the gadget": SPEC.replace("a.py", "b.py")})
+                with mock.patch.dict(os.environ, env):
+                    got, out, err = self.tick()
+                self.assertEqual((got, out, err),
+                                 (True, "shop: mm: 001-polish-the-knob: started on shopmac (pid 4242, account owa)\n", ""))
+                self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start"])
+                self.assertEqual(self.sh.start.call_args.args[1:], (
+                    "001-polish-the-knob", "/trevskills-scrum cloud-job 001-polish-the-knob Polish the knob\n\n\n"
+                    "## Pre-written spec\n\n# Spec\n## Likely files\n- `src/a.py`\n", "owa"))
+                job = self.job(root, "001-polish-the-knob")
+                self.assertEqual((job["stage"], job["shop"], job["account"], job["worker"], job["started_by"]),
+                                 ("cloud", "4242", "owa", "shopmac", "shop"))
+                self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [ ] Fix the gadget {p:3}\n"
+                                 "- [x] Polish the knob {p:5} → 001-polish-the-knob\n", "one claim per tick")
+                self.assertEqual((root / "jobs" / "001-polish-the-knob" / "feature.md").read_text(), "Polish the knob\n")
+        with self.subTest("the next tick claims the next item, then the worker is full"):
+            self.assertEqual(self.tick(), (True, "shop: mm: 002-fix-the-gadget: started on shopmac (pid 4242, account owa)\n", ""))
+            self.backlog(root, "Sand the lid")
+            self.sh.reset_mock()
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(self.calls(), [], "two shop jobs run: not even ready() is asked")
+            self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [ ] Sand the lid\n")
+
+    def test_held_work_goes_before_new_work(self):
+        root = self.project("mm", self.runall({"id": "043-a"}), AUTO)
+        self.backlog(root, "Polish the knob")
+        self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [ ] Polish the knob\n")
+        with self.subTest("a held child waiting on files still holds new work"):
+            root = self.project("mm", self.runall({"id": "043-a", "parallel": True, "likely": ["src/a.py"]},
+                                                  {"id": "045-c", "stage": "build", "parallel": True,
+                                                   "likely": ["src/a.py"]}), AUTO)
+            self.backlog(root, "Polish the knob")
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [ ] Polish the knob\n")
+            self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+        with self.subTest("held work the shop never takes does not hold new work"):
+            root = self.project("mm", self.runall({"id": "043-a", "paused": True}), AUTO)
+            self.backlog(root, "Polish the knob")
+            self.assertEqual(self.tick(), (True, "shop: mm: 044-polish-the-knob: started on shopmac (pid 4242, account owa)\n", ""))
+            self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+
+    def test_new_work_follows_auto_continue_rules(self):
+        def run_all():
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            self.serve.RUNS["mm/run-all"] = {"action": "run-all", "started": time.time(), "proc": proc, "log": "x"}
+
+        check = {"id": "010-x", "stage": "check", "reason": "waiting: Check queue (held)"}
+        cases = {  # why: (profile, backlog line, other board's jobs, setup)
+            "no Auto continue line": ("# Project\n- Test: x\n", "Polish the knob", [], None),
+            "its run-all session runs": (AUTO, "Polish the knob", [], run_all),
+            "finish_first: a job waits on the Check queue": (AUTO, "Polish the knob", [check], None),
+            "only a Human setup item": (AUTO, "Polish the knob {setup: buy a knob}", [], None),
+        }
+        for why, (profile, line, other, setup) in cases.items():
+            with self.subTest(why):
+                self.serve.RUNS.clear()
+                self.sh.reset_mock()
+                root = self.project("mm", [], profile)
+                self.backlog(root, line)
+                self.project("aa", other)
+                if setup:
+                    setup()
+                before = [(root / f).read_bytes() for f in ("board.json", "backlog.md")]
+                self.assertEqual(self.tick(), (False, "", ""))
+                self.assertEqual(self.calls(), [])
+                self.assertEqual([(root / f).read_bytes() for f in ("board.json", "backlog.md")], before)
+        with self.subTest("control: the same board with none of them"):
+            self.serve.RUNS.clear()
+            root = self.project("mm", [], AUTO)
+            self.backlog(root, "Polish the knob")
+            self.project("aa", [])
+            self.assertIs(self.tick()[0], True)
+
+    def test_new_work_skips_items_the_shop_never_takes(self):
+        root = self.project("mm", [], AUTO)
+        skipped = ["Lane: lilguy, fix the typo {p:5}", "Apply scrum/digests/012/proposals.json {p:5}",
+                   "Tiny spec fix {p:5}"]
+        self.backlog(root, *skipped, "Fix the gadget {p:3}",
+                     specs={"Tiny spec fix": "# Spec\nLane: lilguy\n\n## Likely files\n- `src/z.py`\n"})
+        self.assertEqual(self.tick(), (True, "shop: mm: 001-fix-the-gadget: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n" + "".join(f"- [ ] {s}\n" for s in skipped)
+                         + "- [x] Fix the gadget {p:3} → 001-fix-the-gadget\n")
+        self.sh.reset_mock()
+        self.assertEqual(self.tick(), (False, "", ""), "only items the shop never takes are left")
+        self.sh.start.assert_not_called()
+
+    def test_new_work_skips_items_overlapping_busy_jobs(self):
+        root = self.project("mm", [self.holder("cloud")], AUTO)  # 060-o holds src/a.py
+        held = ["Touch a {p:5}", "Touch `src/a.py` again {p:4}", "Vague fix {p:4}"]
+        self.backlog(root, *held, "Touch b {p:3}", specs={"Touch a": SPEC, "Touch b": SPEC.replace("a.py", "b.py")})
+        self.assertEqual(self.tick(), (True, "shop: mm: 061-touch-b: started on shopmac (pid 4242, account owa)\n", ""))
+        self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n" + "".join(f"- [ ] {s}\n" for s in held)
+                         + "- [x] Touch b {p:3} → 061-touch-b\n")
+        with self.subTest("control: nothing busy, the top item goes"):
+            root = self.project("mm", [self.holder("done")], AUTO)
+            self.backlog(root, *held, specs={"Touch a": SPEC})
+            self.assertEqual(self.tick()[1], "shop: mm: 061-touch-a: started on shopmac (pid 4242, account owa)\n")
+
+    def test_failed_new_work_dispatch_becomes_held_launch(self):
+        for fn, value, step in (("clone", False, "clone"), ("start", None, "start")):
+            with self.subTest(step):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.reset_mock()
+                self.sh.configure_mock(**{"clone.return_value": True, "start.return_value": 4242})
+                getattr(self.sh, fn).return_value = value
+                root = self.project("mm", [], AUTO)
+                self.backlog(root, "Polish the knob")
+                self.assertEqual(self.tick(), (False, "", f"shop: mm: 001-polish-the-knob: {step} failed on shopmac\n"))
+                job = self.job(root, "001-polish-the-knob")
+                self.assertEqual((job["stage"], job["queued_launch"]),
+                                 ("spec", {"action": "start", "prompt": "/trevskills-scrum start 001-polish-the-knob",
+                                           "stage": "spec"}))
+                self.assertTrue(job["play_queued"])
+                self.assertNotIn("shop", job)
+                self.assertEqual((root / "backlog.md").read_text(),
+                                 "# Backlog\n- [x] Polish the knob → 001-polish-the-knob\n", "the claim is kept")
+                self.assertEqual([j["id"] for j in self.serve.held_work("mm", self.board.read_board(root)["jobs"])],
+                                 ["001-polish-the-knob"])
+                self.serve.SHOP_RETRY_AT.clear()  # the backoff is over: the shop sends it as held work
+                self.sh.configure_mock(**{"clone.return_value": True, "start.return_value": 4242})
+                self.assertEqual(self.tick(), (True, "shop: mm: 001-polish-the-knob: started on shopmac (pid 4242, account owa)\n", ""))
+                job = self.job(root, "001-polish-the-knob")
+                self.assertEqual(job["stage"], "cloud")
+                self.assertNotIn("queued_launch", job)
 
 
 if __name__ == "__main__":
