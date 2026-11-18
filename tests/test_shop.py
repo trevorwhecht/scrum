@@ -1076,7 +1076,8 @@ START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop 
          '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
          '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
 CLONE = ('d="$HOME/scrum-work/onewitharts"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" '
-         '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch origin && git -C "$d" merge '
+         '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch origin && git -C "$d" checkout '
+         '-q "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD | sed "s,^origin/,,")" && git -C "$d" merge '
          '--ff-only refs/remotes/origin/HEAD; else mkdir -p "$HOME/scrum-work" && git clone -- '
          'https://github.com/trevorwhecht/onewitharts.git "$d"; fi && ' + shop.TRUST)
 ENDED = ('ps -p 4242 -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/onewitharts/.git/scrum-shop/964-shop-x.log";'
@@ -1184,6 +1185,17 @@ class DispatchTest(SetupCase):
         self.assertFalse(shop.clone("onewitharts", URL))
         self.assertEqual((self.head(dest), self.head(dest, "refs/remotes/origin/main")), (mine, self.head(work)))
         self.assertEqual(self.calls, [(CLONE, 600, None)] * 3)
+
+    def test_clone_returns_to_default_branch(self):
+        work, bare = self.origin()
+        dest = Path(self.home) / "scrum-work" / "onewitharts"
+        self.shop(("scrum-work", LOCAL, ""))
+        self.assertTrue(shop.clone("onewitharts", URL))
+        self.git("checkout", "-q", "-b", "scrum/081-x", cwd=dest)  # a lilguy job's branch, squash-merged so not an ancestor
+        self.git("commit", "-q", "--allow-empty", "-m", "branch work", cwd=dest)
+        self.commit(work, bare, "two")
+        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertEqual((self.git("symbolic-ref", "--short", "HEAD", cwd=dest), self.head(dest)), ("main", self.head(work)))
 
     def test_clone_marks_work_folder_trusted(self):
         h = Path(self.home)
