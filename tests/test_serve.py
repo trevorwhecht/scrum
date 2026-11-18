@@ -2280,7 +2280,8 @@ class ServeTest(unittest.TestCase):
                 if refresh.called:
                     break
                 time.sleep(0.01)
-        self.assertEqual((code, [{k: v for k, v in e.items() if k != "history"} for e in out["shop"]]), (200, cached))
+        self.assertEqual((code, [{k: v for k, v in e.items() if k != "history"} for e in out["shop"]]),
+                         (200, [{**e, "cooldown": False} for e in cached]))
         self.assertEqual((run.called, refresh.call_count), (False, 1), "the refresh runs on its own thread")
 
     def history_state(self):

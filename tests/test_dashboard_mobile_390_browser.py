@@ -53,6 +53,8 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         sparks: [...document.querySelectorAll("#machine .spark")].filter(s => s.checkVisibility()).length,
         bars: [...document.querySelectorAll("#machine .bar")].filter(s => s.checkVisibility()).length,
         usage: document.getElementById("machine").textContent,
+        shopBtns: [...document.querySelectorAll("#machine button[data-worker]")].map(b => { const r = b.getBoundingClientRect();
+          return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height}; }),  // job 1185
         selects: Object.fromEntries(["filter", "laneFilter"].map(i => { const el = document.getElementById(i), c = document.createElement("span");
           c.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font:" + getComputedStyle(el).font;
           c.textContent = el.selectedOptions[0].textContent; document.body.append(c); const w = c.getBoundingClientRect().width; c.remove();
@@ -165,7 +167,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         registry = Path(self.tmp.name) / "projects.json"
         registry.write_text(json.dumps([str(repo)]))
         patcher = mock.patch.dict(os.environ, CLAUDE_HOME=str(user), CLAUDE_MANAGED_DIR=str(managed), SCRUM_REGISTRY=str(registry),
-                                  SCRUM_USAGE=str(home / "no-usage.json"))
+                                  SCRUM_USAGE=str(home / "no-usage.json"), SCRUM_COOLDOWN=str(home / "no-cooldown"))
         patcher.start()
         self.addCleanup(patcher.stop)
         import serve  # noqa: E402
@@ -229,8 +231,9 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
     def test_header_compact_390px(self):
         got = self.browse("header")
         # 358 before job 550; 204 after; 215 with job 648's 44 px controls; 233 with job 1116's shop rings (a 2nd meter line),
-        # still 235 with its usage bars, sparklines and the Checks button
-        self.assertLessEqual(got["height"], 235, got)
+        # still 235 with its usage bars, sparklines and the Checks button; 279 (+44, measured 230 -> 274) with job 1185's
+        # 44 px Cool down button per shop Mac: the shop group no longer fits beside This Mac or usage, so it takes a row
+        self.assertLessEqual(got["height"], 279, got)
         by = {c["id"]: c for c in got["children"]}
         self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
         for i in ("rankBtn", "cooldown"):
@@ -238,7 +241,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_held_and_fable_390px(self):
         """Job 1136: with the usage group at its longest (allowance 0, held until, Fable near limit) the header stays
-        within the 235 px phone cap, and both selects are wide enough for their label."""
+        within the 279 px phone cap (235 before job 1185's per-shop-Mac Cool down button), and both selects are wide
+        enough for their label."""
         import serve
         held = {"accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": time.time() + 86400, "max_pct": 90},
                              {"name": "owa", "seven_day_pct": 90, "resets_at": time.time() + 86400, "max_pct": 90}],
@@ -246,7 +250,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         with mock.patch.object(serve, "machine_usage", return_value=held):
             serve.MACHINE_CACHE.clear()
             got = self.browse("header")
-        self.assertLessEqual(got["height"], 235, got)
+        self.assertLessEqual(got["height"], 279, got)
         self.assertIn("held until", got["usage"], got)
         for i in ("filter", "laneFilter"):
             self.assertGreaterEqual(got["selects"][i]["clientWidth"], got["selects"][i]["labelWidth"], got)
@@ -276,7 +280,16 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertAlmostEqual(by["H1"]["top"] + by["H1"]["height"] / 2, by["machine"]["top"] + by["machine"]["height"] / 2, delta=1, msg=got)
         self.assertLessEqual(by["machine"]["height"], 40, got)  # one line of rings
         self.assertGreaterEqual(controls[0]["top"], by["machine"]["bottom"], got)
+        self.shop_button_fits(got, controls)
         self.assertLessEqual(got["height"], 120, got)
+
+    def shop_button_fits(self, got, controls):
+        """Job 1185: the shop Mac's own Cool down button is a 44x44 tap target that stays on screen and above the buttons row."""
+        self.assertEqual(len(got["shopBtns"]), 1, got)
+        for b in got["shopBtns"]:
+            self.assertGreaterEqual(min(b["width"], b["height"]), 44, b)
+            self.assertGreaterEqual(b["top"], 0, b)
+            self.assertLessEqual(b["bottom"], min(c["top"] for c in controls), (b, got))
 
     def test_header_one_row_wide(self):
         """Job 1116 rework round 1: where everything fits (2200 px), the header is one row: the title and the meters on
@@ -307,6 +320,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         for c in controls:
             self.assertGreaterEqual(c["height"], 44, c)
             self.assertLessEqual(c["right"], 390 - 12 + 0.5, c)
+        self.shop_button_fits(got, controls)
+        self.assertLessEqual(got["shopBtns"][0]["right"], 390 - 12 + 0.5, got)
 
     def test_viewer_tabs_close_44_flush_right(self):
         got = self.browse("tabs")
