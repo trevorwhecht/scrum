@@ -2910,10 +2910,22 @@ class ContractTest(unittest.TestCase):
 
     def test_builder_never_edits_applied_migration(self):
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
-        line = next(l for l in builder.splitlines() if l.startswith("- Never run `prisma migrate` or `prisma db push`."))
+        lines = builder.splitlines()
+        i = next(i for i, l in enumerate(lines) if l.startswith("- Never run `prisma migrate` or `prisma db push`."))
+        line = lines[i] + "\n" + lines[i + 1]  # digest 112 p1 split the rule after "pipeline passes."
         for phrase in ("MIGRATION NEEDED", "applied migration folder", "migrated.md", "migrate-stop.md",
                        "new migration folder", "on `BASE`", "ls-tree --name-only"):
             self.assertIn(phrase, line)
+
+    def test_builder_never_retimestamps_applied_migration_on_rework(self):
+        lines = (ROOT / "agents" / "scrum-builder.md").read_text().splitlines()
+        i = next(i for i, l in enumerate(lines) if l.startswith("- Never run `prisma migrate` or `prisma db push`."))
+        self.assertTrue(lines[i].endswith("at merge, once the pipeline passes."))
+        self.assertTrue(lines[i + 1].startswith("- Never edit, rename or re-timestamp a `prisma/migrations/<folder>` "
+                                                "that is on origin/main or already applied to dev or prod"))
+        for phrase in ("even when a rework note asks you to", "undo its columns in a new migration folder "
+                       "timestamped after the newest one on origin/main"):
+            self.assertIn(phrase, lines[i + 1])
 
     def test_approver_rework_never_edits_applied_migration(self):
         approver = (ROOT / "agents" / "scrum-approver.md").read_text()
