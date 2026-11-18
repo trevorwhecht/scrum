@@ -10447,7 +10447,8 @@ class ProcessHealthTest(unittest.TestCase):
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
         (self.root / "project.md").write_text("- UI globs: skills/trevskills-scrum/dashboard.html\n")
-        p = mock.patch.dict(os.environ, SCRUM_PULSE=str(Path(self.tmp.name) / "pulse.log"))  # never the real pulse.log
+        p = mock.patch.dict(os.environ, SCRUM_PULSE=str(Path(self.tmp.name) / "pulse.log"),
+                                  SCRUM_WINDOWS_FLAGGED=str(Path(self.tmp.name) / "flagged.json"))  # never the real files
         p.start()
         self.addCleanup(p.stop)
 
@@ -10667,6 +10668,28 @@ class ProcessHealthTest(unittest.TestCase):
             card(1, {"total": 385000000, "by_job": {}}), card(2, None), card(3, {"total": 0, "by_job": {}})]))
         m = self.run_health("001")["metrics"]["unused_windows"]
         self.assertEqual(m["jobs"], ["five_hour-2", "five_hour-3"])
+
+    def test_window_counts_only_in_first_digest_across_projects(self):
+        card = self.unused_card("five_hour", 100000)
+        over = {"window": "seven_day", "resets_at": 200000,
+                "budget": {"left_at_reset_pct": 0, "cap_idle_secs": 60, "hit_90_at": None}}
+        self.board()
+        self.digest("001")
+        self.put("digests/001/windows.json", json.dumps([card, over]))
+        first = self.run_health("001")["metrics"]
+        self.assertEqual((first["unused_windows"]["jobs"], first["overburned_windows"]["jobs"]),
+                         (["five_hour-100000"], ["seven_day-200000"]))
+        self.assertEqual(self.run_health("001")["metrics"]["unused_windows"]["jobs"], ["five_hour-100000"], "rerun")
+        other = self.root.parent / "other"  # a second project's digest 001 sees the same windows
+        (other / "digests/001").mkdir(parents=True)
+        (other / "digests/001/jobs.txt").write_text("")
+        (other / "digests/001/windows.json").write_text(json.dumps([card, over]))
+        (other / "board.json").write_text((self.root / "board.json").read_text())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            board.main(["--dir", str(other), "process-health", "001"])
+        m = json.loads(out.getvalue())["metrics"]
+        self.assertEqual((m["unused_windows"]["jobs"], m["overburned_windows"]["jobs"]), ([], []))
 
     def unused_with_pulse(self, cards, rows):
         """unused_windows' jobs for windows.json `cards` with pulse.log rows (t, {project: auto})."""
