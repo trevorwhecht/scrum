@@ -4981,7 +4981,8 @@ COOLING_CLAIM = f"{COOLING}: no new backlog claim. Fix: click Resume work in the
 def cooldown_path():
     """Trevor's cool-down flag (the dashboard's Cool down button): while it exists no new work starts on its own (backlog
     claims, Run-all and BigBoy child claims, wake-waiting, auto-continue, cloud-claim, the next roadmap step, the
-    bad-window digest); work already started finishes, and Trevor's own clicks still start work."""
+    bad-window digest); work already started finishes, and Trevor's own clicks still start work. The shop Mac (serve.shop_tick) is not held: it still claims and
+    launches work while cool-down is on."""
     return Path(os.environ.get("SCRUM_COOLDOWN") or Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
 
