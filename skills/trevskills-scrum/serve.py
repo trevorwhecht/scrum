@@ -2063,8 +2063,10 @@ def set_colour(root: Path, value) -> tuple[int, dict]:
 
 
 def claimable_count(root: Path) -> int:
-    """Backlog lines `next` could claim: open, no Human setup, no open prerequisite."""
-    return sum(not i["done"] and not i["setup"] and not i["waits"] for i in board.backlog_items(root))
+    """Backlog lines `next` could claim: open, no Human setup, no open prerequisite, no open origin job."""
+    state = board.read_board(root)
+    return sum(not i["done"] and not i["setup"] and not i["waits"] and not board.origin_open(i, state)
+               for i in board.backlog_items(root))
 
 
 def claimable(root: Path) -> bool:
