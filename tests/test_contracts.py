@@ -2980,7 +2980,8 @@ class ContractTest(unittest.TestCase):
         stops = self.lane("stops")
         self.assertLessEqual(len(stops.splitlines()), 15)
         for phrase in ("say what happened and why it needs Trevor", "say what each button does",
-                       "must read on its own", "a rule number or an internal term",
+                       "must read on its own", "never use a file path or a rule number, even with an explanation",
+                       "or an internal term (`human-only`",
                        "rewrites any templated or passed-through text", "before calling `B ask`, keeping its prefix",
                        "decision.md line 2", "`## For Trevor` line",
                        "`This change adds a database column, which agents aren't allowed to apply on their own. Reviews "
