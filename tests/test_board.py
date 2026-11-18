@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
@@ -2815,18 +2816,21 @@ class BoardTest(unittest.TestCase):
 
     def test_ram_room(self):
         self.assertEqual(board.SESSION_RAM_PCT, 5)
-        for ram, room in (("66", 9), ("100", 14), ("41", 4), ("40", 2), ("26", 1), ("20", 1)):  # 41+: no young cap; 40: the ramp
+        for ram, room in (("66", 2), ("100", 2), ("41", 2), ("40", 2), ("26", 1), ("20", 1)):  # 40+: the young-session ramp
             with self.subTest(ram=ram), self.machine(ram, "1000"):
                 self.assertEqual(board.ram_room(), room)
         with mock.patch.object(board, "free_ram_pct", return_value=None):
             self.assertEqual(board.ram_room(), 1, "unknown RAM: one claim per call")
 
-    def test_ram_room_young_cap_passes_at_ample_ram(self):
+    def test_ram_room_young_cap_holds_at_any_ram(self):
+        """Job 966: one tick at "53% free" started 7 children; the young-session cap holds whatever free RAM reads."""
         ps = Path(self.tmp.name) / "ps.txt"
         ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n" * 2)
         with self.machine("53", "1000"), mock.patch.dict(os.environ, SCRUM_PS=str(ps)):
-            # standard: 33 // 5 - 2 young = 4; light: (33 - 2 * 5) // 3 = 7
-            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (4, 7))
+            self.assertEqual((board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (0, 0))
+        for ram in ("66", "100", "41"):
+            with self.subTest(ram=ram), self.machine(ram, "1000"):
+                self.assertEqual(board.ram_room(), 2)
 
     def test_ram_room_young_cap_holds_at_low_ram(self):
         ps = Path(self.tmp.name) / "ps.txt"
@@ -3075,6 +3079,52 @@ class BoardTest(unittest.TestCase):
             board.machine_ok(self.tmp.name)
             kept = json.loads((Path(self.tmp.name) / "swap.json").read_text())
             self.assertEqual([v for _, v in kept], [50.0, 56.4], "pruned to 10 min, current appended")
+
+    def test_vm_pressure_level_reads_sysctl(self):
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE=""):
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout="2\n")) as run:
+                self.assertEqual(board.vm_pressure_level(), 2)
+            self.assertEqual(run.call_args.args[0], ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+            self.assertEqual(run.call_args.kwargs, {"capture_output": True, "text": True, "timeout": 10})
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout="")):
+                self.assertIsNone(board.vm_pressure_level(), "unknown sysctl name: empty stdout")
+            with mock.patch.object(board.subprocess, "run", return_value=mock.Mock(stdout="warn\n")):
+                self.assertIsNone(board.vm_pressure_level())
+            with mock.patch.object(board.subprocess, "run", side_effect=FileNotFoundError("sysctl")):
+                self.assertIsNone(board.vm_pressure_level())
+            with mock.patch.object(board.subprocess, "run", side_effect=subprocess.TimeoutExpired("sysctl", 10)):
+                self.assertIsNone(board.vm_pressure_level())
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="4"):
+            self.assertEqual(board.vm_pressure_level(), 4)
+
+    def test_machine_ok_memory_pressure(self):
+        """Job 966: free RAM read 32-61% on a full machine while the kernel said memory pressure WARN (level 2)."""
+        warn = "memory pressure warn (kernel level 2)"
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(board.machine_ok(self.tmp.name), warn)
+            self.assertEqual(board.machine_ok(self.tmp.name, manual=True), warn)
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="3"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "memory pressure warn (kernel level 3)")
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="4"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "memory pressure critical (kernel level 4)")
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="1"):
+            self.assertIsNone(board.machine_ok(self.tmp.name))
+        with self.machine("60", "1000"), mock.patch.object(board, "vm_pressure_level", return_value=None):
+            self.assertIsNone(board.machine_ok(self.tmp.name), "unknown reading passes")
+        with self.machine("14", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(board.machine_ok(self.tmp.name), "free RAM 14% (< 20%)", "free RAM first")
+        with self.machine("30", "1000"), mock.patch.dict(os.environ, SCRUM_SWAP_PCT="40", SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(board.machine_ok(self.tmp.name), warn, "before the swap line")
+
+    def test_ram_room_memory_pressure_floor(self):
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=os.devnull):
+            self.assertEqual((board.ram_room(), board.ram_room(floor=0), board.ram_room(floor=0, light=True)), (1, 1, 1))
+        ps = Path(self.tmp.name) / "ps.txt"
+        ps.write_text("   00:30 claude -p /trevskills-scrum start 1-a\n")
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2", SCRUM_PS=str(ps)):
+            self.assertEqual((board.ram_room(floor=0), board.ram_room()), (0, 1))
+        with self.machine("60", "1000"), mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="1", SCRUM_PS=os.devnull):
+            self.assertEqual(board.ram_room(floor=0), 2)
 
     def test_swap_used_pct_reads_sysctl(self):
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT=""):

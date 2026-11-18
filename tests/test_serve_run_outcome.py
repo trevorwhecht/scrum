@@ -15,6 +15,7 @@ os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # watchdog_tick never runs top or writes
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ.setdefault("SCRUM_PS", os.devnull)  # the spawn RAM gate counts no real local claude sessions
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 import serve  # noqa: E402
 
 board = serve.board
