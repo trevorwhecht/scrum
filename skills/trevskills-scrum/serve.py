@@ -1705,8 +1705,8 @@ def shop_tick(project, repo, root) -> bool:
     digest proposals.json), setup pending, nor any job of a board.shop_project_excluded project (a `- Base branch:` line
     or docker in project.md), nor a launch whose files are not clear_of_busy(busy_files), checked only when the pool
     holds a launch) to the first shop_worker() worker (out of backoff, room, ready, an account; later workers are not
-    probed). Cool-down does not stop the shop. A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all,
-    only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
+    probed). This Mac's cool-down does not stop the shop; a worker's own does (shop_worker).
+    A job tagged Runs on main (board.tag_runs_on; Jev is asked, if at all, only here, with a worker free) is never sent: it is skipped and the next one is tried (job 1155). A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
     that pool but main jobs (job 1141), new work goes instead, by auto_continue_tick's rules: a project with an `- Auto continue:`
