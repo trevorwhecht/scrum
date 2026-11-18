@@ -99,15 +99,22 @@ class ChecksRed(unittest.TestCase):
         el = render([{"e2eFull": PASS, "uiSweep": sweep}])
         self.assertFalse(el["btn"]["danger"])
         self.assertEqual(el["rows"], "<li><span>E2E main pass fffffff 1m ago</span>"
-                         " · <span>UI sweep fail abcdefg 2m ago · 3 findings</span></li>")
+                         " · <span>UI sweep handled · 3 findings filed</span></li>")
+
+    def test_retired_sweep_without_findings_count_has_no_suffix(self):
+        for findings in (None, "3"):
+            sweep = {"at": NOW - 120, "head": "abcdefgh", "result": "fail", "findings": findings, "open": 0}
+            el = render([{"uiSweep": sweep}])
+            self.assertFalse(el["btn"]["danger"], findings)
+            self.assertEqual(el["rows"], "<li><span>UI sweep handled</span></li>", findings)
 
     def test_sweep_fail_with_open_items_or_no_count_stays_red(self):
-        for extra in ({"open": 1}, {"open": 2}, {}):
+        for extra, tail in (({"open": 1}, " · 1 open in backlog"), ({"open": 2}, " · 2 open in backlog"), ({}, "")):
             sweep = {"at": NOW - 120, "head": "abcdefgh", "result": "fail", "findings": 3, **extra}
             el = render([{"e2eFull": PASS, "uiSweep": sweep}, {"e2eFull": None, "uiSweep": None}])
             self.assertTrue(el["btn"]["danger"], extra)
             self.assertEqual(el["rows"], "<li><span>E2E main pass fffffff 1m ago</span>"
-                             ' · <span class="danger">UI sweep fail abcdefg 2m ago · 3 findings</span></li>', extra)
+                             f' · <span class="danger">UI sweep fail abcdefg 2m ago · 3 findings{tail}</span></li>', extra)
 
     def test_e2e_fail_still_red_next_to_retired_sweep(self):
         sweep = {"at": NOW - 120, "head": "abcdefgh", "result": "fail", "findings": 3, "open": 0}
