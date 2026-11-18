@@ -1490,8 +1490,8 @@ def main_guard_clear(repo, branch) -> bool:
 
 def main_ff_tick(project, repo, root, jobs) -> bool:
     """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and whose family has no live session or chain
-    lock (family_live), once main is
-    ready (main_ready) and resume_refusal and take_room let it: once per job and updatedAt (MAIN_FF_TRIED), so a
+    lock (family_live), once main is ready (main_ready) and resume_refusal and take_room let it: once per job and
+    updatedAt (MAIN_FF_TRIED), so a
     resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned."""
     spawned, by_id, alive = False, {j["id"]: j for j in jobs}, once(lambda: board.session_alive_fn())
     for job in jobs:
