@@ -93,7 +93,7 @@ For `## Builder model`, use the `jev.log` of every job read:
 - Fix rounds of a job: its highest `round-N` directory number minus 1, floored at 0 (no `round-*` directory counts as 0). avg fix rounds is the mean over the group, to one decimal; a group with 0 jobs shows avg `-` and no job ids.
 - This section is exempt from the 2 or more different jobs rule. Write `None` when no job read has a `model` line.
 
-For `## Repeated questions`, read the whole `JOBS_DIR/../questions.log`, not only the jobs in `jobs.txt`:
+For `## Repeated questions`, read every `JOBS_DIR/../questions.log` line inside the 7-day cutoff above, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
 - Join each ask line to the next pick line for the same job that comes after it in the file, unless that job asks a different normalised question first: a pick never answers an earlier, different question. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
 - Group picks by label after trimming and lowercasing.
