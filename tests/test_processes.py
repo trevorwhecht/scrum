@@ -52,6 +52,184 @@ class ProcessesLogTest(unittest.TestCase):
         self.assertFalse(home.exists())
 
 
+S = 1_700_000_000  # 2023-11-14T22:13:20Z
+SESSION_CODE = ("Code: spawn, auto_continue_tick, play_queue_tick, auto_resume, auto_play, idle_claim, start_ready, "
+                "wake_waiting, sweep_parents, main_ff_tick, terminal_batch_tick\n")
+
+
+class ProcessesDigestTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "app"
+        self.root = self.repo / "scrum"
+        (self.root / "digests").mkdir(parents=True)
+        self.log = Path(self.tmp.name) / "machine" / "processes.log"
+        self.log.parent.mkdir()
+        env = mock.patch.dict(os.environ, {"SCRUM_PULSE": str(self.log.with_name("pulse.log")),
+                                           "SCRUM_REGISTRY": str(self.log.with_name("projects.json"))})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def digest(self, name, at, error=False):
+        d = self.root / "digests" / name
+        d.mkdir()
+        (d / "jobs.txt").write_text("")
+        os.utime(d / "jobs.txt", (at, at))
+        if error:
+            (d / "error.md").write_text("failed\n")
+
+    def write_log(self, *lines):
+        self.log.write_text("".join((l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
+
+    def processes(self, digest_id="002"):
+        (self.root / "digests" / digest_id).mkdir(exist_ok=True)
+        board.write_processes(self.root, digest_id)
+        return (self.root / "digests" / digest_id / "processes.md").read_text()
+
+    def section(self, text, name):
+        start = text.index(f"## {name}\n")
+        end = text.find("\n## ", start + 1)
+        return text[start:] if end < 0 else text[start:end + 1]
+
+    def test_writes_sections_since_last_digest(self):
+        self.digest("001", S)
+        repo = str(self.repo)
+        self.write_log(
+            {"t": S - 60, "process": "Session starts", "result": "start", "repo": repo, "job": "1-old"},  # before
+            {"t": S, "process": "Session starts", "result": "start", "repo": repo, "job": "2-a", "manual": False},
+            {"t": S + 60, "process": "Session starts", "result": "resume", "repo": repo, "job": "3-b", "manual": True},
+            {"t": S + 120, "process": "Session starts", "result": "start", "repo": repo, "job": "4-c", "manual": False},
+            {"t": S + 120, "process": "E2E lock reaps", "result": "freed", "slot": "e2e.lock.0", "pid": 42, "dead": True})
+        text = self.processes()
+        self.assertTrue(text.startswith("# Processes: digest 002\n\nSince: 2023-11-14T22:13+00:00\n\n## Session starts\n"), text)
+        self.assertEqual(self.section(text, "Session starts"),
+                         "## Session starts\n" + SESSION_CODE +
+                         "Runs: 3 (start 2, resume 1)\n"
+                         f"- 2023-11-14T22:15+00:00 start repo={repo} job=4-c manual=false\n"
+                         f"- 2023-11-14T22:14+00:00 resume repo={repo} job=3-b manual=true\n"
+                         f"- 2023-11-14T22:13+00:00 start repo={repo} job=2-a manual=false\n"
+                         "Files: none\n\n")
+        self.assertEqual(self.section(text, "E2E lock reaps"),
+                         "## E2E lock reaps\nCode: e2e_lock_reap\nRuns: 1 (freed 1)\n"
+                         "- 2023-11-14T22:15+00:00 freed slot=e2e.lock.0 pid=42 dead=true\nFiles: none\n\n")
+        self.assertEqual(self.section(text, "Held items"),
+                         "## Held items\nCode: none\nRuns: none logged since the last digest\nFiles:\n- held.md: missing\n\n")
+        self.assertEqual(text.count("\n## "), 19)
+        names = [l[3:] for l in text.splitlines() if l.startswith("## ")]
+        self.assertEqual(names[0], "Session starts")
+        self.assertEqual(names[-1], "Manual checks")
+
+    def test_newest_ten_lines(self):
+        self.write_log(*({"t": S + i, "process": "Disk reclaim", "result": "freed", "removed": i} for i in range(12)))
+        sec = self.section(self.processes(), "Disk reclaim")
+        self.assertIn("Runs: 12 (freed 12)\n", sec)
+        self.assertEqual(sec.count("\n- "), 10)
+        self.assertIn("freed removed=11\n", sec)
+        self.assertNotIn("removed=1\n", sec)
+
+    def test_other_repo_lines_left_out(self):
+        other = Path(self.tmp.name) / "lib"
+        other.mkdir()
+        link = Path(self.tmp.name) / "app-link"
+        link.symlink_to(self.repo)
+        self.write_log(
+            {"t": S, "process": "Disk reclaim", "result": "freed", "repo": str(other), "removed": 9},
+            {"t": S + 1, "process": "Disk reclaim", "result": "freed", "repo": str(link), "removed": 2},
+            {"t": S + 2, "process": "Disk reclaim", "result": "freed", "removed": 3})
+        sec = self.section(self.processes(), "Disk reclaim")
+        self.assertIn("Runs: 2 (freed 2)\n", sec)
+        self.assertNotIn("removed=9", sec)
+        self.assertIn("removed=2", sec)
+        self.assertIn("removed=3", sec)
+
+    def test_false_alarms_and_time(self):
+        line = lambda t, result, head, secs: {"t": S + t, "process": "Full E2E on main", "result": result,
+                                              "head": head, "secs": secs}
+        self.write_log(line(0, "fail", "aaa", 600), line(10, "fail", "bbb", 1200), line(20, "pass", "aaa", 300),
+                       line(30, "loaded", "ccc", None), line(40, "fail", "ccc", 30))
+        sec = self.section(self.processes(), "Full E2E on main")
+        self.assertIn("Runs: 5 (fail 3, loaded 1, pass 1) · false alarms: 1 · time: 36 min total, longest 20 min\n", sec)
+        self.write_log(line(0, "pass", "aaa", None), line(10, "fail", "aaa", None))  # the pass came first: no alarm
+        sec = self.section(self.processes(), "Full E2E on main")
+        self.assertIn("Runs: 2 (fail 1, pass 1)\n", sec)
+
+    def test_files_lines(self):
+        self.digest("001", S)
+        for rel, at in (("e2e-full.json", S + 10), ("e2e-full.log", S - 10), ("ui-sweep/a/review.md", S + 5),
+                        ("ui-sweep/b/review.md", S - 5), ("ui-sweep/c/review.md", S + 1)):
+            p = self.root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x\n")
+            os.utime(p, (at, at))
+        for i in range(12):
+            p = self.root / "triage" / f"{i:02d}.md"
+            p.parent.mkdir(exist_ok=True)
+            p.write_text("x\n")
+            os.utime(p, (S + 1, S + 1))
+        text = self.processes()
+        self.assertIn("Files:\n- e2e-full.json: changed since the last digest\n- e2e-full.log: unchanged\n",
+                      self.section(text, "Full E2E on main"))
+        self.assertIn("Files:\n- ui-sweep.json: missing\n"
+                      "- ui-sweep/*/review.md: ui-sweep/a/review.md, ui-sweep/c/review.md\n",
+                      self.section(text, "UI sweep"))
+        self.assertIn("Files:\n- triage/*: " + ", ".join(f"triage/{i:02d}.md" for i in range(10)) + " (+2 more)\n",
+                      self.section(text, "Run all and triage"))
+        self.assertIn("- jobs/*/bigboy-review.md: none changed since the last digest\n",
+                      self.section(text, "Roadmap and BigBoy"))
+
+    def test_malformed_and_missing_log(self):
+        text = self.processes()  # no processes.log at all
+        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 19)
+        self.write_log("junk", "[1, 2]", {"t": "x", "process": "Disk reclaim", "result": "freed"},
+                       {"t": True, "process": "Disk reclaim", "result": "freed"},
+                       {"t": S, "process": 5, "result": "freed"}, {"t": S, "process": "Disk reclaim", "result": None},
+                       {"t": S, "process": "Disk reclaim"})
+        text = self.processes()
+        self.assertEqual(text.count("Runs: none logged since the last digest\n"), 19)
+
+    def test_since_the_start(self):
+        self.write_log({"t": 5, "process": "Disk reclaim", "result": "freed", "removed": 1})
+        text = self.processes("001")
+        self.assertIn("\nSince: the start\n", text)
+        self.assertIn("Runs: 1 (freed 1)\n", self.section(text, "Disk reclaim"))
+
+    def test_failed_digest_keeps_cutoff(self):
+        self.digest("001", S)
+        self.digest("002", S + 100, error=True)
+        self.write_log({"t": S + 50, "process": "Disk reclaim", "result": "freed", "removed": 1})
+        text = self.processes("003")
+        self.assertIn("\nSince: 2023-11-14T22:13+00:00\n", text)
+        self.assertIn("Runs: 1 (freed 1)\n", self.section(text, "Disk reclaim"))
+
+    def start(self):
+        guard = mock.patch.object(board, "merge_refusal", return_value=None)  # PR-less fixture jobs may go done
+        guard.start()
+        self.addCleanup(guard.stop)
+        job_id = board.cmd_new(self.root, "done 0")
+        board.cmd_set(self.root, job_id, ["stage=done"], internal=True)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            out = board.cmd_digest_start(self.root)
+        return job_id, out, err.getvalue()
+
+    def test_digest_start_writes_processes_md(self):
+        self.write_log({"t": S, "process": "Weekly digest", "result": "started", "digest": "004"})
+        job_id, out, _ = self.start()
+        self.assertEqual(out, {"id": "001", "jobs": [job_id], "windows": []})
+        text = (self.root / "digests" / "001" / "processes.md").read_text()
+        self.assertIn("## Weekly digest\nCode: weekly_tick\nRuns: 1 (started 1)\n", text)
+
+    def test_processes_failure_never_stops_digest_start(self):
+        with mock.patch.object(board, "write_processes", side_effect=OSError("boom")):
+            job_id, out, err = self.start()
+        self.assertEqual(out, {"id": "001", "jobs": [job_id], "windows": []})
+        self.assertIn("digest-start: processes: boom\n", err)
+        self.assertTrue((self.root / "digests" / "001" / "pulse.md").exists())
+        self.assertTrue((self.root / "digests" / "001" / "jobs.txt").exists())
+        self.assertFalse((self.root / "digests" / "001" / "processes.md").exists())
+
+
 IGNORED_CALLS = {"live_sessions", "machine_ok", "projects", "ram_room", "session_alive_fn", "board_busy",
                  "launched_since", "once", "run_exits", "running"}  # watchdog_tick helpers, no process of their own
 EXEMPT_FILES = {"jobs", "board.json", "project.md", "digests", "backlog.md", ".board.lock", "backlog-specs",
