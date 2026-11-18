@@ -117,6 +117,18 @@ class CloudArtifactsBlockTest(unittest.TestCase):
                 self.assertEqual(self.count(self.pushes), 0)
                 self.assertEqual(self.git("ls-remote", "origin"), "")
 
+    def test_nothing_staged_pushes_no_empty_branch(self):
+        shutil.rmtree(self.job)
+        self.job.mkdir()  # a job folder with no file: board.py lists nothing
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                if not shutil.which(shell):
+                    self.skipTest(f"{shell} not installed")
+                last, out = self.run_block(shell, self.wt)
+                self.assertEqual(last, "artifacts: nothing staged", out.stdout + out.stderr)
+                self.assertEqual(self.count(self.pushes), 0)
+                self.assertEqual(self.git("ls-remote", "origin"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
