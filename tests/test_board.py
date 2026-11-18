@@ -8254,6 +8254,10 @@ class E2eSpecsTest(unittest.TestCase):
         out = self.change("src/app/admin/views/Grid.tsx")  # no spec names /admin/views; the pricing page imports it
         self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/pricing.spec.ts"], []))
 
+    def test_colocated_folder_without_page_is_no_route(self):
+        out = board.changed_routes(self.repo, ["src/app/admin/views/Grid.tsx"])
+        self.assertEqual(out, {"src/app/admin/views/Grid.tsx": {("/pricing", False)}})  # never ("/admin/views", False)
+
     def test_param_route_matches_template_literal(self):
         out = self.change("src/app/order/[id]/page.tsx")
         self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/order.spec.ts"], []))
@@ -8350,11 +8354,11 @@ class RenderPathsTest(unittest.TestCase):
     def test_render_paths_maps_routes_and_skips_dynamic(self):
         self.assertEqual(self.commit("src/app/admin/views/Grid.tsx", "src/app/order/[id]/page.tsx",
                                      "src/components/Price.tsx"),
-                         {"paths": ["/admin/views", "/pricing"], "skipped": ["/order/[id]: dynamic route"]})
+                         {"paths": ["/pricing"], "skipped": ["/order/[id]: dynamic route"]})
         out = self.commit(*[f"src/app/p{i}/page.tsx" for i in range(1, 10)])
-        self.assertEqual(out["paths"], ["/admin/views", "/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7"])
-        self.assertEqual(out["skipped"], ["/order/[id]: dynamic route", "/p8: over the 8-page cap",
-                                          "/p9: over the 8-page cap", "/pricing: over the 8-page cap"])
+        self.assertEqual(out["paths"], ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7", "/p8"])
+        self.assertEqual(out["skipped"], ["/order/[id]: dynamic route", "/p9: over the 8-page cap",
+                                          "/pricing: over the 8-page cap"])
         with self.assertRaises(SystemExit):
             board.render_paths(self.repo, "-x", self.pfile)
 
