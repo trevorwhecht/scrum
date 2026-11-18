@@ -2945,6 +2945,10 @@ class BoardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=""):
             self.assertEqual(board.cooldown_path(), Path.home() / ".claude" / "trevskills-scrum" / "cooldown")
 
+    def test_cooldown_path_docstring_names_shop(self):
+        self.assertIn("shop Mac", board.cooldown_path.__doc__)
+        self.assertIn("not held", board.cooldown_path.__doc__)
+
     def test_cooldown_park_no_park_keeps_play_queue(self):
         queued = {"action": "start", "prompt": "p", "stage": "spec"}
         for name, edits in (("not cooling", None), ("paused", {"paused": True}), ("stalled", {"stalled": True}),
