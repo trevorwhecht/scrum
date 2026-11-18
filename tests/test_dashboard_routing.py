@@ -51,19 +51,23 @@ class RouteTags(unittest.TestCase):
 
 
 class RoutingText(unittest.TestCase):
-    def test_readout(self):
-        self.assertEqual(node_eval("routingText", [
-            {"claude": {"5h": 12.6, "weekly": None}, "codex": {"5h": 42, "weekly": 61.4}, OLL: "up"},
-            {"codex": {"5h": None, "weekly": None}, OLL: "down"},
-            {OLL: "up"}]), [
-            "Codex 5h 42% · wk 61%",
-            "Codex 5h — · wk —",
-            "Codex 5h — · wk —"])
-        self.assertEqual(node_eval("routingText", [{"claude": {"5h": 12.6, "weekly": 49.4}}]), ["Codex 5h — · wk —"],
-                         "Claude's weekly use shows once in the header, as the meter's per-account bars (job 1116)")
-        hint = re.search(r'<button class="btn" id="routing"[^>]*>', DASHBOARD.read_text()).group(0)
-        self.assertIn('data-agent-hint="Codex 5h and weekly quota used, from', hint)
-        self.assertIn("each Claude account's weekly use is the meter's usage bars", hint)
+    def test_ai_usage_button_hint_and_click(self):
+        """Row 2 replaces the Codex header button: one static #aiUsage button whose click (Enter and Space too, as a
+        button) opens the Usage dialog once a routing status has loaded."""
+        text = DASHBOARD.read_text()
+        self.assertNotIn('id="routing"', text)
+        self.assertNotIn("function routingText(", text)
+        self.assertNotIn("#routing", text)
+        hint = re.search(r'<button class="btn" id="aiUsage" type="button" hidden aria-haspopup="dialog"[^>]*>', text).group(0)
+        self.assertIn("Codex 5h and weekly used % and reset time, from the newest Codex rollout file", hint)
+        self.assertIn("refreshed every 60 s", hint)
+        self.assertIn("Claude is each account's weekly used %", hint)
+        self.assertIn("Opens the Usage dialog", hint)
+        self.assertIn('$("aiUsage").addEventListener("click", () => { if (usage) { $("usage").showModal(); loadWindows(); } });', text)
+        load = text[text.index("async function loadRouting()"):]
+        load = load[:load.index("\n}\n")]
+        self.assertIn('$("usageRows").innerHTML = usageRows(s)', load, "the Usage dialog's rows still come from the 60 s poll")
+        self.assertIn("renderAiUsage(", load, "a new status re-renders row 2 with the stored Claude part")
 
     def test_dashboard_never_mentions_local_model(self):
         self.assertNotIn(OLL, DASHBOARD.read_text().lower())

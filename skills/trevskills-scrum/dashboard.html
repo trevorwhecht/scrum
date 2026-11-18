@@ -15,7 +15,7 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:baseline;gap:12px;padding:16px}
 h1{font-size:16px;margin:0}
-#status,#routing,#machine,#cooldownState,#autoOff{color:var(--muted);font-size:12px}
+#status,#machine,#aiUsage,#cooldownState,#autoOff{color:var(--muted);font-size:12px}
 #status{display:inline-block;flex:0 0 26ch;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}  /* a fixed track: its text never moves the controls */
 #cooldown{min-height:44px;min-width:44px}#cooldownState{overflow-wrap:anywhere}
 .volwrap{position:relative;display:inline-flex;align-self:center}
@@ -23,14 +23,15 @@ h1{font-size:16px;margin:0}
 #volume[aria-pressed="true"] .waves{display:none}#volume[aria-pressed="false"] .cross{display:none}
 .volpop{display:none;position:absolute;top:100%;left:0;z-index:5;padding:0 10px;background:var(--card);border:1px solid var(--line);border-radius:6px}
 .volwrap:hover .volpop,.volwrap:focus-within .volpop{display:flex;align-items:center}#volumeLevel{width:140px;min-height:44px;margin:0;accent-color:var(--accent)}
-#machine .low{color:var(--changes)}#machine .danger,#routing .danger{color:var(--human)}
-#machine .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:9px;letter-spacing:-.5px;font-weight:600;color:var(--ink)}#machine .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
-#machine .acct.ok,#machine .ring.ok{--ring:var(--pass)}#machine .acct.low,#machine .ring.low{--ring:var(--p5)}#machine .acct.danger,#machine .ring.danger{--ring:var(--human)}#machine .ring.none{--ring:var(--pending)}
-#machine .grp{display:inline-block;vertical-align:middle;margin-right:14px}#machine .grp>span:not(.ring,.lbl){display:inline-block}  /* This Mac, each shop Mac, usage: each wraps as a whole, and a reading inside one never breaks mid-text */
-#machine .lbl{display:inline-grid;vertical-align:middle;margin:0 4px;line-height:14px}  /* a ring's label over its sparkline */
-#machine .bar{position:relative;display:inline-block;width:40px;height:6px;border-radius:3px;vertical-align:middle;background:linear-gradient(90deg,var(--ring) calc(var(--pct) * 1%),var(--pending) 0)}#machine .bar::after{content:"";position:absolute;top:-2px;bottom:-2px;left:calc(var(--cap) * 1%);width:1px;background:var(--ink)}  /* the tick: the account's reserve */
-#machine .spark{vertical-align:middle}#machine .spark polyline{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}
-#routing{white-space:nowrap;min-height:44px}
+#meters .low{color:var(--changes)}#meters .danger{color:var(--human)}
+#meters .ring{position:relative;display:inline-grid;place-items:center;width:32px;height:32px;vertical-align:middle;font-size:9px;letter-spacing:-.5px;font-weight:600;color:var(--ink)}#meters .ring::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(var(--ring) calc(var(--pct) * 1%),var(--pending) 0);mask:radial-gradient(circle,transparent 12px,black 12.5px)}
+#meters .acct.ok,#meters .ring.ok{--ring:var(--pass)}#meters .acct.low,#meters .ring.low{--ring:var(--p5)}#meters .acct.danger,#meters .ring.danger{--ring:var(--human)}#meters .ring.none{--ring:var(--pending)}
+#meters .grp{display:inline-block;vertical-align:middle;margin-right:14px}#meters .grp>span:not(.ring,.lbl){display:inline-block}  /* This Mac, each shop Mac, Claude, Codex: each wraps as a whole, and a reading inside one never breaks mid-text */
+#meters{display:flex;flex-direction:column;align-items:flex-start}#meters .ttl{text-transform:uppercase;color:var(--muted);font-weight:600;letter-spacing:.03em}  /* row 1 (#machine) over row 2 (#aiUsage); each group starts with its plain title */
+#meters .lbl{display:inline-grid;vertical-align:middle;margin:0 4px;line-height:14px}  /* a ring's label over its sparkline */
+#meters .bar{position:relative;display:inline-block;width:40px;height:6px;border-radius:3px;vertical-align:middle;background:linear-gradient(90deg,var(--ring) calc(var(--pct) * 1%),var(--pending) 0)}#meters .bar::after{content:"";position:absolute;top:-2px;bottom:-2px;left:calc(var(--cap) * 1%);width:1px;background:var(--ink)}  /* the tick: the account's reserve */
+#meters .spark{vertical-align:middle}#meters .spark polyline{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round}
+#aiUsage{min-height:44px;text-align:left;padding:4px 10px}
 #usage{width:min(640px,94vw);overscroll-behavior:contain}#usage .close{min-height:44px;min-width:44px}
 #rank{width:min(480px,94vw);overscroll-behavior:contain}#rank .close,#rankBtn,#rankList .btn{min-height:44px;min-width:44px}
 #checks{width:min(560px,94vw);overscroll-behavior:contain}#checks .close,#checksBtn{min-height:44px;min-width:44px}
@@ -117,7 +118,7 @@ body:has(dialog[open]){overflow:hidden}
 .tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 header{flex-wrap:wrap}header .btn,#filter,#laneFilter{min-height:44px}  /* every header control the same height */
 #controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;flex:1 1 auto}  /* the buttons, flush right; when they do not fit beside the meters the header breaks before the whole row, never between buttons */
-@media (min-width:1400px){header{gap:8px;align-items:center}h1,#controls>*{flex-shrink:0}#status:empty{flex-basis:0}#machine,#routing{flex-shrink:1;white-space:normal}#cooldownState,#autoOff{flex-shrink:1;min-width:16ch}#cooldownState:empty,#autoOff:empty{min-width:0}#machine{flex:1 1 auto}#filter,#laneFilter{field-sizing:content}#status:empty,#cooldownState:empty,#autoOff:empty{position:absolute}}  /* desktop: one row where everything fits, else the meters on one line and the buttons as one row under them; the readouts wrap in their own box, never cut off; the buttons keep their size. The meter is measured at its one-line width and takes the free width, so the buttons sit right; a select is as wide as its chosen option; an empty state text takes no gap */
+@media (min-width:1400px){header{gap:8px;align-items:center}h1,#controls>*{flex-shrink:0}#status:empty{flex-basis:0}#meters,#aiUsage{flex-shrink:1;white-space:normal}#cooldownState,#autoOff{flex-shrink:1;min-width:16ch}#cooldownState:empty,#autoOff:empty{min-width:0}#meters{flex:1 1 auto}#filter,#laneFilter{field-sizing:content}#status:empty,#cooldownState:empty,#autoOff:empty{position:absolute}}  /* desktop: one row where everything fits, else the meters on one line and the buttons as one row under them; the readouts wrap in their own box, never cut off; the buttons keep their size. The meter is measured at its one-line width and takes the free width, so the buttons sit right; a select is as wide as its chosen option; an empty state text takes no gap */
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
 .sentback:empty{display:none}.sentback h3{font-size:13px;margin:8px 0 4px}.sentback ul{margin:0;padding-left:18px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -244,8 +245,8 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 @media (max-width:640px){#colour,#agents,#aiSettings,#digest,#backlog,#viewer,#checks,#usage,#rank{width:100%;max-width:none;max-height:100dvh;border-radius:0;border-inline:0}#viewer{height:100dvh}#agents article,#aiSettings article,#digest article,#backlog article,#viewer article,#usage article,#rank article,#checks article,#colour article{padding-inline:12px}
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
-  header>*,#controls>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}#filter{margin-left:0}
-  header{gap:4px 6px;padding:6px 12px;align-items:center}#controls{gap:4px 6px}#routing{flex:1 1 auto;padding-block:0}#machine .spark,#machine .grp:has(.acct~span:not(.acct)) .bar{display:none}  /* a held or Fable note after the accounts: bars dropped (the text keeps the level colour) */#machine{line-height:14px}#filter,#laneFilter{flex:1 0 auto;field-sizing:content}#backlogBtn,#digestBtn,#agentsBtn,#aiBtn,#checksBtn{flex:1 1 70px;white-space:nowrap}
+  header>*,#controls>*{min-width:0}#filter,#laneFilter{max-width:100%}#filter{margin-left:0}
+  header{gap:4px 6px;padding:6px 12px;align-items:center}#controls{gap:4px 6px}#meters{flex:1 1 100%}#aiUsage{padding-block:0}#meters .spark,#aiUsage .grp:has(.acct~span:not(.acct)) .bar{display:none}  /* a held or Fable note after the Claude accounts: their bars dropped (the text keeps the level colour) */#machine,#aiUsage{line-height:14px}#filter,#laneFilter{flex:1 0 auto;field-sizing:content}#backlogBtn,#digestBtn,#agentsBtn,#aiBtn,#checksBtn{flex:1 1 70px;white-space:nowrap}
   #colPick{display:block;width:calc(100% - 32px);margin:0 16px 12px;min-height:44px;font-size:16px}#colPick:empty{display:none}.col:not(.pick){display:none}
   #filter,#laneFilter,#rankBtn,#volume,#cooldown,#backlogBtn,#digestBtn,#agentsBtn,#aiBtn{min-height:44px}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
@@ -260,9 +261,9 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </head>
 <body>
 <header><h1>Trevskills Scrum</h1><span id="status" aria-live="polite" title="loading…" data-agent-hint="Can't reach the server: open the Trevskills Scrum app, or run python3 ~/.claude/skills/trevskills-scrum/serve.py. No projects yet: run /trevskills-scrum in a repo and it shows up here.">loading…</span>
-  <span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, CPU load and free disk, from GET /api/machine on every 2 s poll. RAM is the first ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it, and while it is red the disk segment adds the wait, as in disk 8 GB, launches wait for 10 GB free; the watchdog then removes done and aborted jobs' worktrees (serve.py reclaim_disk) and checks again. CPU is a second ring right after RAM: the 5-minute load average as a percent of all cores (a full arc is 100%, every core with one runnable thread), with the % inside, which can pass 100; new claims, resumes and auto-continue starts also wait above 300%, the ring is yellow within 10 points of that and red past it, grey with — when there is no reading, its tooltip gives the reading, the core count, busy % (CPU time busy, which also blocks above 90%) and the 300% limit, and Trevor's own Play, Resume and Run skip it. Every job launch (auto-resume, queued Plays, approve, rework) also waits above 500% CPU load; Trevor's Play and Resume skip that too. Shop is the shop Mac's own RAM and CPU rings (one pair per workers.txt worker, then named), read over ssh in the background at most every 30 s and never on this poll, coloured against this Mac's limits; its tooltips say how long ago the reading is; grey Shop — means the shop Mac did not answer (it is re-tried every 5 min). Each RAM and CPU ring, this Mac's and the shop's, has a sparkline of its last 30 minutes under its label (serve.py keeps one reading a minute in memory and sends it as history in /api/machine; RAM plots RAM in use, CPU is scaled to its peak once that passes 100%); it needs 2 readings, so a server started under a minute ago shows none, and it is hidden at 640 px wide or less. The meter's groups are This Mac (RAM, CPU, disk), Shop and usage, side by side on one line left of the buttons; where the meter and the buttons do not fit on one line (under about 1900 px wide) the buttons move under it as one row of their own, and a group only wraps as a whole. The usage segment is each Claude account's weekly used %: a bar filled to its weekly used %, with a tick at its reserve, then the account and the %, as in main 49% owa 90%, each account's bar starting its reading with no · between (so none dangles at a wrap), from its usage.json whatever its age (~/.claude/usage.json for main), orange within 10 points of its cap and red at it (its 7d reserve, 90% for owa, else the 90% hold), with its reset time in its tooltip; then the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); a window at 90% used or more holds every automated claim until it resets, so the segment adds held until HH:MM (the later reset when both windows are held, with a weekday such as Thu 14:05 when it is over 24 h away); the allowance, the hold and the Fable text need this session's file under 5 min old; usage: unknown means no account's file has a weekly reading. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered. Fable near limit means 5h use reached 65% or 7d 75%, so new planner and spec-writer spawns use Opus and only the weekly digest still runs on Fable (Fable goes only to complex jobs); Fable paused, using Opus means 5h reached 80% or 7d 85%, so new spawns use Opus until the window resets."></span>
+  <div id="meters"><span id="machine" hidden data-agent-hint="This Mac's RAM, swap in use as a share of physical RAM, CPU load and free disk, from GET /api/machine on every 2 s poll. RAM is the first ring: its filled arc is RAM in use and the free % sits inside it; swap has no text: it turns the ring red when the swap verdict blocks starts and yellow when swap is past its limit but blocks nothing and shows in the ring's tooltip. New claims, resumes and auto-continue starts wait (board.machine_ok) below 20% free RAM, above 25% swap or below 10 GB free disk; the ring is green when RAM is fine, yellow within 10 points of its limit and red past it; swap adds yellow (past its limit) or red (its verdict), and the ring shows the worse (grey with no RAM reading); disk turns orange within 10 points (10 GB) of their limit and red past it, and while it is red the disk segment adds the wait, as in disk 8 GB, launches wait for 10 GB free; the watchdog then removes done and aborted jobs' worktrees (serve.py reclaim_disk) and checks again. CPU is a second ring right after RAM: the 5-minute load average as a percent of all cores (a full arc is 100%, every core with one runnable thread), with the % inside, which can pass 100; new claims, resumes and auto-continue starts also wait above 300%, the ring is yellow within 10 points of that and red past it, grey with — when there is no reading, its tooltip gives the reading, the core count, busy % (CPU time busy, which also blocks above 90%) and the 300% limit, and Trevor's own Play, Resume and Run skip it. Every job launch (auto-resume, queued Plays, approve, rework) also waits above 500% CPU load; Trevor's Play and Resume skip that too. Shop is the shop Mac's own RAM and CPU rings (one Shop group per workers.txt worker, always titled with its name), read over ssh in the background at most every 30 s and never on this poll, coloured against this Mac's limits; its tooltips say how long ago the reading is; a grey — ring after a Shop title means that shop Mac did not answer (it is re-tried every 5 min). Each RAM and CPU ring, this Mac's and the shop's, has a sparkline of its last 30 minutes under its label (serve.py keeps one reading a minute in memory and sends it as history in /api/machine; RAM plots RAM in use, CPU is scaled to its peak once that passes 100%); it needs 2 readings, so a server started under a minute ago shows none, and it is hidden at 640 px wide or less. This is row 1 of the meters: the This Mac group (RAM, CPU, disk) then the Shop groups, side by side, each group titled (This Mac, then Shop and the worker's name) and every ring labelled RAM or CPU; row 2, Claude and Codex usage, sits under it. Where the meters and the buttons do not fit on one line the buttons move under them as one row of their own, and a group only wraps as a whole."></span>
+  <button class="btn" id="aiUsage" type="button" hidden aria-haspopup="dialog" data-agent-hint="Row 2 of the meters: AI usage, a Claude group then a Codex group. Claude is each account's weekly used %: a bar filled to its weekly used %, with a tick at its reserve, then the account and the %, then its reset day and time, as in main 49% resets Sat 5 PM, each account's bar starting its reading with no · between (so none dangles at a wrap), from its usage.json whatever its age (~/.claude/usage.json for main), orange within 10 points of its cap and red at it (its 7d reserve, 90% for owa, else the 90% hold), with its reset time also in its tooltip; then the live-session allowance board.usage_allowance gives automated claims (red at 0, orange above it, absent when there is no taper); a window at 90% used or more holds every automated claim until it resets, so the Claude group adds held until HH:MM (the later reset when both windows are held, with a weekday such as Thu 14:05 when it is over 24 h away); the allowance, the hold and the Fable text need this session's file under 5 min old; usage: unknown means no account's file has a weekly reading. The allowance tapers only automated claims: Trevor's Play and Resume are never tapered. Fable near limit means 5h use reached 65% or 7d 75%, so new planner and spec-writer spawns use Opus and only the weekly digest still runs on Fable (Fable goes only to complex jobs); Fable paused, using Opus means 5h reached 80% or 7d 85%, so new spawns use Opus until the window resets. Codex is the 5h and week bars in the same style: Codex 5h and weekly used % and reset time, from the newest Codex rollout file that has rate_limits, refreshed every 60 s (GET /api/routing-status), each bar ticked at routing.json's limit (codex_5h, codex_weekly), the points where route.py skips the Codex review step: red at it, orange within 10 points of it; — when a window has no reading. Before the first status arrives there is no Codex group; a failed status shows a red —. Opens the Usage dialog once a status has loaded."></button></div>
   <div id="controls"><button class="btn" id="cooldown" type="button" hidden data-agent-hint="Cool down: POST /api/cooldown creates ~/.claude/trevskills-scrum/cooldown (SCRUM_COOLDOWN), and while it exists cool-down holds only new work, every automatic start of it: backlog claims (next, Run all, cloud-claim), Run-all and BigBoy parents' child claims (FIX tickets too), wake-waiting jobs and --then retries, auto continue, the next roadmap step and the bad-window digest (board.machine_ok with claim=True), and chat hand-offs go to the top of the backlog. Work already started finishes: auto-resumes, queued Plays, orphan respawns, a BigBoy parent's final review, and continue.py's Resume POSTs; nothing is stopped. Trevor's own Play, Resume, Setup done, closed-question answers, Run now and Digest still start work. The shop Mac is not held by cool-down: it still claims and starts work. While it is on, build and E2E lock waiters go nearest-the-finish-line first (board.lock_rank), a round-0 spec or build job parks at its next checkpoint (board.py cooldown-park; auto_resume restarts it after cool down), and once no job blocks a restart one full E2E run starts on each project's new main HEAD. The state text counts the headless sessions still running (board.live_sessions) and says Safe to restart: yes, or no with the jobs it waits on (serve.py restart_blockers: active, not paused, stalled, parked or limit-held). Resume work removes the file.">Cool down</button><span id="cooldownState" hidden aria-live="polite"></span><span id="autoOff" hidden data-agent-hint="A project with claimable backlog work idle because Auto continue is off, from board.autoOff (serve.py auto_off): scrum/project.md has no - Auto continue: line, pulse.log once showed it on, and claimable_count is over 0. The date is the UTC day of the first pulse line after it was last on."></span>
-  <button class="btn" id="routing" type="button" hidden data-agent-hint="Codex 5h and weekly quota used, from the newest Codex rollout file; each Claude account's weekly use is the meter's usage bars, so it is not repeated here. Refreshed every 60 s. Opens the Usage dialog, whose rows include Claude's weekly use from ~/.claude/usage.json (written by board.py statusline)."></button>
   <button class="btn" id="checksBtn" type="button" hidden data-agent-hint="The last full E2E run on main per project, from board.e2eFull (serve.py e2e_full_record: scrum/e2e-full.json), and the last UI sweep on main per project, from board.uiSweep (serve.py ui_sweep_record: scrum/ui-sweep.json; lanes/uisweep.md). Checks · N counts the projects with either record; it opens the Checks dialog, one row per project: result, first 7 chars of the head and age, plus the sweep&#39;s findings count. A row is red when a result is fail, failed or error, or a running record is older than E2E_FULL_STALE (shown as stale), and then the button is red too. A fail sweep whose backlog items were all retired (uiSweep.open, the open backlog lines starting UI sweep, is 0) is not red and reads UI sweep handled · N findings filed; a red sweep with open items adds · M open in backlog. A Check card that has waited over 2 h on the E2E lock reads Waiting for the E2E queue, with the job holding the lock and for how long (serve.py e2e_wait_info, from buildlock.py&#39;s e2e.lock.holder file); the watchdog (e2e_lock_reap) frees the lock when that holder&#39;s pid is dead or its job has left check.">Checks</button>
   <select id="filter" aria-label="Show project"><option value="">All projects</option></select>
   <button class="btn" id="rankBtn" type="button" data-agent-hint="Opens the Rank dialog. Rank is the order of ~/.claude/trevskills-scrum/projects.json: auto continue starts opted-in projects in this order, and the project lists follow it. POST /api/projects/rank moves one project.">Rank</button>
@@ -716,10 +717,20 @@ function heldUntilText(epoch) {
   return epoch * 1000 - Date.now() > 86400000 ? `${d.toLocaleDateString([], {weekday: "short"})} ${time}` : time;
 }
 
-// The meter's usage segment: each account's weekly used % as a bar (filled to it, capped at 100) with a tick at its
-// max_pct (its 7d reserve, else the 90% hold), red at the tick, amber within 10 points of it, its reset in the tooltip;
-// then the allowance (red at 0, orange at 1 or more, absent with no taper) and held-until text; then the Fable guard's
-// warning or paused text. Parts are joined by a space, never a "·", so nothing dangles at a line end when the group wraps.
+// "Sat 5 PM", "Tue 2:05 PM": a reset's weekday and 12-hour time (minutes only off the hour) from the local Date getters,
+// so node and every browser locale agree; "" for no reset.
+function resetText(epoch) {
+  if (typeof epoch !== "number" || !Number.isFinite(epoch)) return "";
+  const d = new Date(epoch * 1000), h = d.getHours(), m = d.getMinutes();
+  const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+  return `${day} ${h % 12 || 12}${m ? ":" + String(m).padStart(2, "0") : ""} ${h < 12 ? "AM" : "PM"}`;
+}
+
+// Row 2's Claude group: each account's weekly used % as a bar (filled to it, capped at 100) with a tick at its
+// max_pct (its 7d reserve, else the 90% hold), red at the tick, amber within 10 points of it, then its name, % and reset
+// (also in the tooltip); then the allowance (red at 0, orange at 1 or more, absent with no taper) and held-until text;
+// then the Fable guard's warning or paused text. Parts are joined by a space, never a "·", so nothing dangles at a line
+// end when the group wraps.
 function usagePart(u) {
   if (!u) return "";
   if (u === "unknown") return '<span class="ok">usage: unknown</span>';
@@ -727,7 +738,7 @@ function usagePart(u) {
     const v = a.seven_day_pct, lvl = v == null ? "ok" : v >= a.max_pct ? "danger" : v >= a.max_pct - 10 ? "low" : "ok";
     return `<span class="acct ${lvl}"${a.resets_at ? ` title="resets ${heldUntilText(a.resets_at)}"` : ""}>`
       + `<span class="bar" style="--pct:${v == null ? 0 : Math.min(100, Math.round(v))};--cap:${Number(a.max_pct)}"></span>`
-      + ` ${esc(a.name)} ${v == null ? "—" : Math.round(v) + "%"}</span>`;
+      + ` ${esc(a.name)} ${v == null ? "—" : Math.round(v) + "%"}${a.resets_at ? ` resets ${resetText(a.resets_at)}` : ""}</span>`;
   });
   // Allowance 0 with a hold is "held until", in red: the 0 is implied, and the group stays one phone line.
   const held = [u.allowance == null || (u.allowance === 0 && u.hold_until) ? "" : `allowance ${esc(u.allowance)}`, u.hold_until ? `held until ${heldUntilText(u.hold_until)}` : ""].filter(Boolean).join(" · ");
@@ -735,6 +746,27 @@ function usagePart(u) {
   if (u.fable === "warn") parts.push('<span class="low">Fable near limit</span>');
   if (u.fable === "paused") parts.push('<span class="danger">Fable paused, using Opus</span>');
   return parts.join(" ");
+}
+
+// Row 2 of the meters: the Claude group (usagePart; none while claude is falsy) then the Codex group, its 5h and week
+// windows in the Claude bars' markup, each ticked at routing.json's limit (100 with none): red at it, amber within 10
+// points. status undefined (the first routing poll is not back) has no Codex group; null (it failed) shows a red —.
+function aiUsageHtml(claude, status) {
+  const groups = [];
+  if (claude) groups.push(`<span class="ttl">Claude</span> ${usagePart(claude)}`);
+  if (status === null) groups.push('<span class="ttl">Codex</span> <span class="danger" title="Couldn\'t load usage.">—</span>');
+  else if (status) {
+    const x = status.codex || {}, lim = status.codex_limits || {};
+    const bar = (label, v, reset, cap) => {
+      const has = typeof v === "number", top = typeof cap === "number" ? cap : 100;
+      const lvl = !has || typeof cap !== "number" ? "ok" : v >= cap ? "danger" : v >= cap - 10 ? "low" : "ok";
+      const when = has ? resetText(reset) : "";
+      return `<span class="acct ${lvl}"><span class="bar" style="--pct:${has ? Math.min(100, Math.round(v)) : 0};--cap:${esc(top)}"></span>`
+        + ` ${label} ${has ? Math.round(v) + "%" : "—"}${when ? ` resets ${when}` : ""}</span>`;
+    };
+    groups.push(`<span class="ttl">Codex</span> ${bar("5h", x["5h"], x["5h_resets_at"], lim["5h"])} ${bar("week", x.weekly, x.weekly_resets_at, lim.weekly)}`);
+  }
+  return groups.map(g => `<span class="grp">${g}</span>`).join("");
 }
 
 // The Cool down button and its state text, from the same api/machine poll; a click's pending (disabled) state survives it.
@@ -793,22 +825,23 @@ function renderMachine(m) {
   const cpu = m.cpu_load_pct, cpuLevel = machineLevel(cpu, "cpu", m);
   const cores = n => n == null ? "—" : esc(n);
   const cpuTip = `CPU load ${pctText(cpu)} of ${cores(m.cpu_cores)} cores · busy ${pctText(m.cpu_busy_pct)} · limit ${esc(m.max_cpu_load_pct)}%`;
-  // Each shop Mac's RAM and CPU rings, from serve.py's background ssh read (never this poll), coloured against this Mac's
-  // limits; one grey "Shop —" ring when it has neither reading. "Shop <name>" only when there are several.
+  // Each shop Mac's group, titled "Shop <name>": its RAM and CPU rings, from serve.py's background ssh read (never this
+  // poll), coloured against this Mac's limits; one grey unlabelled — ring when it has neither reading.
   const shops = Array.isArray(m.shop) ? m.shop : [];
+  const title = t => `<span class="ttl">${t}</span> `;
   const shopRings = shops.map(s => {
-    const label = shops.length > 1 ? `Shop ${esc(s.name)}` : "Shop", read = ago(s.at);
-    if (s.free_ram_pct == null && s.cpu_load_pct == null) return ring("none", 0, "—", label, `${label} unreachable · checked ${read}`);
-    return ramRing(s.free_ram_pct == null ? "none" : machineLevel(s.free_ram_pct, "ram", m), s.free_ram_pct, "", `${label} RAM ${ramFree(s.free_ram_pct)} · read ${read}`, ramSpark(s.history))
-      + cpuRing(machineLevel(s.cpu_load_pct, "cpu", m), s.cpu_load_pct, label, `${label} CPU load ${pctText(s.cpu_load_pct)} of ${cores(s.cpu_cores)} cores · read ${read}`, cpuSpark(s.history));
+    const label = `Shop ${esc(s.name)}`, read = ago(s.at);
+    if (s.free_ram_pct == null && s.cpu_load_pct == null) return title(label) + ring("none", 0, "—", "", `${label} unreachable · checked ${read}`);
+    return title(label) + ramRing(s.free_ram_pct == null ? "none" : machineLevel(s.free_ram_pct, "ram", m), s.free_ram_pct, "RAM", `${label} RAM ${ramFree(s.free_ram_pct)} · read ${read}`, ramSpark(s.history))
+      + " " + cpuRing(machineLevel(s.cpu_load_pct, "cpu", m), s.cpu_load_pct, "CPU", `${label} CPU load ${pctText(s.cpu_load_pct)} of ${cores(s.cpu_cores)} cores · read ${read}`, cpuSpark(s.history));
   });
   const diskRed = machineLevel(m.free_disk_gb, "disk", m) === "danger";
-  // Groups in order: This Mac (RAM, CPU, disk), each shop Mac, usage; spaced apart, each wraps as a whole when the meter
-  // is narrow. No trailing verdict or server slow text (Trevor 2026-11-18: it pushed the meter onto two lines).
-  const thisMac = [ramRing(level, ram, "RAM", tip, ramSpark(m.history)), cpuRing(cpuLevel, cpu, "CPU", cpuTip, cpuSpark(m.history)),
+  // Row 1's groups in order: This Mac (RAM, CPU, disk), each shop Mac; spaced apart, each wraps as a whole when the row
+  // is narrow. Claude usage is row 2 (aiUsageHtml). No trailing verdict or server slow text (Trevor 2026-11-18).
+  const thisMac = title("This Mac") + [ramRing(level, ram, "RAM", tip, ramSpark(m.history)), cpuRing(cpuLevel, cpu, "CPU", cpuTip, cpuSpark(m.history)),
     // A red disk reading says it is why launches wait, and names the limit.
     part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : ""))].join(" ");
-  el.innerHTML = [thisMac, ...shopRings, usagePart(m.usage)].filter(Boolean).map(g => `<span class="grp">${g}</span>`).join("");
+  el.innerHTML = [thisMac, ...shopRings].map(g => `<span class="grp">${g}</span>`).join("");
 }
 
 // Every project's board.checkoutAlert (its live checkout cannot go live) and board.actionsAlert (GitHub refused to start
@@ -873,7 +906,7 @@ function renderAutoOff(boards, names = []) {
 }
 
 async function poll() {
-  getJson("api/machine", null).then(m => { renderMachine(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
+  getJson("api/machine", null).then(m => { renderMachine(m); renderAiUsage(m); renderCooldown(m); });  // not awaited: memory_pressure never delays the board
   missed = 0;
   try {
     const res = await timed("api/projects", {cache: "no-store"});
@@ -2170,10 +2203,6 @@ $("colourSwatches").addEventListener("click", e => { const b = e.target.closest(
 $("colourInput").addEventListener("change", e => saveColour(e.target.value));
 $("colourReset").addEventListener("click", () => saveColour(null));
 
-// Pinned by test_dashboard_routing.
-function routingText(s) {
-  return `Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)}`;  // Claude's weekly use is the meter's usage bars
-}
 // The Usage dialog's rows, one per AI the scrum calls. Pinned by test_dashboard_routing.
 function usageRows(s) {
   const c = s.claude || {}, x = s.codex || {}, j = s.jev || {};
@@ -2195,18 +2224,25 @@ function windowRows(list) {
     return `${head}<td title="ended ${esc(when(c.resets_at))}">${esc(text)}</td></tr>`;
   }).join("")).join("");
 }
-// Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. A 404 (older
-// serve.py) or an error shows "Usage —" in red; an open Usage dialog keeps its last rows until a status arrives.
-let usage = null;
-async function loadRouting() {
-  const s = await getJson("api/routing-status", null), el = $("routing");
+// Status reads a rollout file, usage.json and every jev.log: too much for the 2 s poll. usage is undefined until the
+// first status, null when it failed (a 404 from an older serve.py too): row 2's Codex group then shows a red —, and an
+// open Usage dialog keeps its last rows until a status arrives. aiClaude is the last machine poll's Claude usage.
+let usage, aiClaude, aiHtml;
+// Row 2 (#aiUsage) from the 2 s machine poll's Claude part and the 60 s routing status; its HTML is set only when it
+// changed, so a focused button keeps focus and is not re-announced across polls.
+function renderAiUsage(m) {
+  aiClaude = m?.usage;
+  const el = $("aiUsage");
   if (!el) return;
-  el.hidden = false;
-  if (!s) { usage = null; el.title = "Couldn't load usage."; return el.innerHTML = '<span class="danger">Usage —</span>'; }
-  usage = s;
-  el.removeAttribute("title");
-  el.textContent = routingText(s);
-  $("usageRows").innerHTML = usageRows(s);
+  const html = aiUsageHtml(aiClaude, usage);
+  el.hidden = !html;
+  if (html !== aiHtml) { aiHtml = html; el.innerHTML = html; }
+}
+async function loadRouting() {
+  const s = await getJson("api/routing-status", null);
+  usage = s || null;
+  renderAiUsage({usage: aiClaude});
+  if (s && $("usageRows")) $("usageRows").innerHTML = usageRows(s);
 }
 // Scorecards change once per window, so they are fetched only when the dialog opens. A reply that lands after the
 // dialog closed, the filter changed or a newer open started is dropped.
@@ -2220,7 +2256,7 @@ async function loadWindows() {
   if (!body || seq !== windowsSeq || filter !== f || !$("usage").open) return;
   body.innerHTML = windowRows(list.map((project, i) => ({project, windows: res[i]})));
 }
-$("routing").addEventListener("click", () => { if (usage) { $("usage").showModal(); loadWindows(); } });
+$("aiUsage").addEventListener("click", () => { if (usage) { $("usage").showModal(); loadWindows(); } });
 // The Rank dialog: one row per project in projects (rank) order. A poll re-renders it only when the order changed, and
 // keeps keyboard focus on the same project's button.
 function renderRank(keep) {
