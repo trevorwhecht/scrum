@@ -217,7 +217,7 @@ HAVE_ALL = "{ 1.00 0.50 0.25 }\n4\n/u/.local/bin/node\n/u/.local/bin/gh\n/u/.loc
 DONE = (("sysctl", 0, HAVE_ALL), ("gh auth status", 0, ""),
         ("credential.https://github.com.helper", 0, "\n!/u/.local/bin/gh auth git-credential\n"),
         ('mkdir -p "$HOME/.claude-owa"', 0, ""), ("python3 -", 0, "same\n"), ("claude -p", 0, "ok\n"))
-ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "owa links: ok", "permissions: ok", "account main: ok",
+ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok", "account main: ok",
           "account owa: ok"]
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
@@ -291,21 +291,21 @@ class SetupTest(SetupCase):
         self.shop(*answers)
         got, lines = self.setup_out()
         self.assertEqual(lines, ["node: ok (changed)", "gh: ok", "gh login: ok", "gh git: failed (exit 1)",
-                                 "owa links: ok (changed)", "permissions: ok (changed)", "account main: ok",
+                                 "permissions: ok (changed)", "owa links: ok (changed)", "account main: ok",
                                  "account owa: not ready (run claude setup-token in the shop GUI)"])
         self.assertEqual(got, {"node": "changed", "gh": "ok", "gh login": "ok", "gh git": "failed",
-                               "owa links": "changed", "permissions": "changed", "account main": "ok",
+                               "permissions": "changed", "owa links": "changed", "account main": "ok",
                                "account owa": "not ready"})
-        self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "owa links", "permissions", "account main",
+        self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "permissions", "owa links", "account main",
                                      "account owa"])
         self.assertEqual([(c[0].split()[0], c[1]) for c in self.calls[1:]],
-                         [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("mkdir", 60), ("ln", 60),
-                          ("python3", 60), ("[", 120), ("[", 120)])
+                         [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("python3", 60), ("mkdir", 60),
+                          ("ln", 60), ("[", 120), ("[", 120)])
         self.assertEqual(self.setup_out(cli=True)[0], 1)
         self.shop(("setup-git", 0, ""), *answers)
         self.assertEqual(self.setup_out(cli=True), (0, [
-            "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "owa links: ok (changed)",
-            "permissions: ok (changed)", "account main: ok",
+            "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
+            "owa links: ok (changed)", "account main: ok",
             "account owa: not ready (run claude setup-token in the shop GUI)"]))
 
     def test_second_run_unchanged(self):
@@ -454,7 +454,7 @@ class SetupTest(SetupCase):
         (owa / ".claude.json").write_text('{"oauthAccount": 1}\n')
         (owa / ".credentials.json").write_text("{}\n")
         self.shop(('mkdir -p "$HOME/.claude-owa"', LOCAL, ""), ("ln -s", LOCAL, ""), *DONE)
-        self.assertEqual(self.setup_out()[1][4], "owa links: ok (changed)")
+        self.assertEqual(self.setup_out()[1][5], "owa links: ok (changed)")
         self.assertEqual(self.cmds("ln -s")[0][0], 'ln -s "$HOME/.claude/CLAUDE.md" "$HOME/.claude-owa/CLAUDE.md" && '
                          'ln -s "$HOME/.claude/rules" "$HOME/.claude-owa/rules" && ln -s "$HOME/.claude/settings.json" '
                          '"$HOME/.claude-owa/settings.json"')
@@ -464,11 +464,11 @@ class SetupTest(SetupCase):
                                  "settings.json": f"{h}/.claude/settings.json"})
         self.assertEqual(((owa / "commands").read_text(), (owa / ".claude.json").read_text(),
                           (owa / ".credentials.json").read_text()), ("a file\n", '{"oauthAccount": 1}\n', "{}\n"))
-        self.assertEqual(self.setup_out()[1][4], "owa links: ok")
+        self.assertEqual(self.setup_out()[1][5], "owa links: ok")
         self.assertEqual(len(self.cmds("ln -s")), 1)  # the second run linked nothing
         shutil.rmtree(owa)
         self.shop(('mkdir -p "$HOME/.claude-owa"', LOCAL, ""), ("ln -s", LOCAL, ""), *DONE)
-        self.assertEqual(self.setup_out()[1][4], "owa links: ok (changed)")  # mkdir -p made it first
+        self.assertEqual(self.setup_out()[1][5], "owa links: ok (changed)")  # mkdir -p made it first
         self.assertEqual(sorted(p.name for p in owa.iterdir()),
                          ["CLAUDE.md", "agents", "commands", "rules", "settings.json", "skills"])
 
@@ -644,6 +644,29 @@ class ReadyTest(SetupCase):
             self.assertEqual(len(self.cmds("gh auth status")), 4)  # setup dropped the ready() cache
 
 
+class SetupCacheTest(SetupCase):
+    def test_setup_clears_caches_at_end(self):
+        self.shop(*DONE)
+        with contextlib.redirect_stdout(io.StringIO()):
+            shop.setup()
+        shop.ready()
+        self.assertIsNotNone(shop._cache)
+        self.assertIsNotNone(shop._ready)
+        with contextlib.redirect_stdout(io.StringIO()):
+            shop.setup()
+        self.assertIsNone(shop._cache)
+        self.assertIsNone(shop._ready)
+
+    def test_first_setup_links_settings_json_made_by_permissions(self):
+        h = Path(self.home)
+        (h / ".claude").mkdir()
+        self.shop(('mkdir -p "$HOME/.claude-owa"', LOCAL, ""), ("ln -s", LOCAL, ""), ("python3 -", LOCAL, ""), *DONE)
+        self.assertFalse((h / ".claude" / "settings.json").exists())
+        got, lines = self.setup_out()
+        self.assertEqual(got["owa links"], "changed")
+        self.assertEqual(os.readlink(h / ".claude-owa" / "settings.json"), f"{h}/.claude/settings.json")
+
+
 class EnvCopyTest(SetupCase):
     def setUp(self):
         super().setUp()
@@ -755,7 +778,10 @@ class MdSyncTest(SetupCase):
         env = mock.patch.dict(os.environ, {"HOME": str(self.mac), "SCRUM_REGISTRY": str(self.registry)})
         env.start()
         self.addCleanup(env.stop)
-        self.today = f"md-sync-backup-{datetime.date.today().isoformat()}"
+
+    def backups(self, h):
+        """The md-sync-backup-* folder names under h, sorted."""
+        return sorted(n for n in os.listdir(h) if n.startswith("md-sync-backup-"))
 
     def repo(self, rel, scrum=True, memory=None):
         """Register <mac>/repos/<rel> (with a scrum/ dir when `scrum`) and give it local memory files {name: bytes}."""
@@ -882,7 +908,9 @@ class MdSyncTest(SetupCase):
         self.write(h, {"MACHINES.md": b"avoid heavy builds\n"})  # every other item missing: skipped
         self.shop(*SYNC)
         self.assertIs(self.sync(), True)
-        self.assertEqual(tree(h / self.today), {"MACHINES.md": b"avoid heavy builds\n"})
+        (name,) = self.backups(h)
+        self.assertRegex(name, r"^md-sync-backup-\d{4}-\d\d-\d\d-\d{6}$")
+        self.assertEqual(tree(h / name), {"MACHINES.md": b"avoid heavy builds\n"})
         shutil.rmtree(h)
         h.mkdir()
         self.write(h / ".claude", {"CLAUDE.md": b"shop own 963\n"})
@@ -893,26 +921,41 @@ class MdSyncTest(SetupCase):
         self.write(h / "scrum-probe", {"package.json": b"{}\n"})
         (h / "scrum-probe" / "node_modules").mkdir()
         self.assertIs(self.sync(), True)
-        backup = h / self.today
+        (name,) = self.backups(h)
+        backup = h / name
         self.assertEqual(tree(backup), {"CLAUDE.md": b"shop own 963\n", "MACHINES.md": b"avoid heavy builds\n",
                                         "projects/-Users-shop/memory/machines-registry.md": b"registry\n",
                                         "projects/-private-tmp/memory/MEMORY.md": b"tmp\n",
                                         "scrum-multi-machine-spec.md": b"per-machine boards\n",
                                         "scrum-probe/package.json": b"{}\n"})
         self.assertTrue((backup / "scrum-probe" / "node_modules").is_dir())
-        self.assertEqual(sorted(os.listdir(h)), [".claude", ".md-sync-cleanup-done", "code", self.today])
+        self.assertEqual(sorted(os.listdir(h)), [".claude", ".md-sync-cleanup-done", "code", name])
         self.assertEqual(os.listdir(h / "code"), ["keep.md"])
         self.assertEqual((h / ".claude" / "CLAUDE.md").read_bytes(), b"# rules 963\nno trailing newline\n" + IMPORT)
         self.assertEqual(list((h / ".claude" / "projects").glob("*/memory")), [])
+
+    def test_backup_folder_unique_per_run(self):
+        h = self.sh
+        old = h / f"md-sync-backup-{datetime.date.today().isoformat()}"
+        self.write(old, {"keep.txt": b"k\n"})
+        self.write(old / "scrum-probe", {"old.json": b"{}\n"})
+        self.write(h / "scrum-probe", {"package.json": b"{}\n"})
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        (new,) = [n for n in self.backups(h) if n != old.name]
+        self.assertEqual(tree(h / new), {"scrum-probe/package.json": b"{}\n"})
+        self.assertEqual(tree(old), {"keep.txt": b"k\n", "scrum-probe/old.json": b"{}\n"})
 
     def test_backup_failure_deletes_nothing(self):
         h = self.sh
         self.write(h / ".claude", {"CLAUDE.md": b"shop own 963\n"})
         self.write(h / ".claude" / "projects" / "-Users-shop" / "memory", {"MEMORY.md": b"m\n"})
-        self.write(h, {"MACHINES.md": b"avoid heavy builds\n", self.today: b"a file in the way\n"})
+        self.write(h, {"MACHINES.md": b"avoid heavy builds\n"})
         self.write(h / "code", {"scrum-multi-machine-spec.md": b"draft\n"})
         self.write(h / "scrum-probe", {"package.json": b"{}\n"})
         before = tree(h)
+        h.chmod(0o555)  # the backup folder cannot be made
+        self.addCleanup(h.chmod, 0o755)
         self.shop(*SYNC)
         self.assertIs(self.sync(), False)
         self.assertEqual(tree(h), before)
@@ -922,7 +965,8 @@ class MdSyncTest(SetupCase):
         h = self.sh
         self.shop(*SYNC)
         self.assertIs(self.sync(), True)  # writes the marker
-        shutil.rmtree(h / self.today)
+        for n in self.backups(h):
+            shutil.rmtree(h / n)
         self.write(h, {"MACHINES.md": b"m\n"})
         self.write(h / "code", {"scrum-multi-machine-spec.md": b"d\n"})
         self.write(h / "scrum-probe", {"package.json": b"{}\n"})
@@ -1298,7 +1342,7 @@ class StructureTest(unittest.TestCase):
                       setup)
         sync = text[text.index("## MD sync"):text.index("## Dispatch")]
         for phrase in ("`python3 shop.py md-sync`", "--ff-only", "`~/.md-sync-cleanup-done`",
-                       "`~/md-sync-backup-<YYYY-MM-DD>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",
+                       "`~/md-sync-backup-<YYYY-MM-DD-HHMMSS>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",
                        "`CLAUDE_CODE_DISABLE_AUTO_MEMORY`"):
             self.assertIn(phrase, sync, phrase)
 
