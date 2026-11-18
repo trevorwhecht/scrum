@@ -594,6 +594,19 @@ class SpawnAccountTest(AccountEnv):
         self.assertIsNone(env.get("CLAUDE_CONFIG_DIR"))  # never assertNotIn: it would print the whole env
         self.assertEqual(self.account(), "main")
 
+    def test_restart_takes_the_primary_not_the_recorded_backup(self):
+        """Job 1184: a job recorded on the backup restarts on the primary while it has room; only main's limit marker sends it to owa."""
+        now = time.time()
+        with mock.patch.object(board, "PACE_LEAD_PCT", 15), mock.patch.object(board, "USAGE_HOLD_PCT", 90):
+            self.write(self.main, seven=(72, 3 * 86400), written_at=now)  # the primary, ahead of pace
+            self.write(self.owa, seven=(4, 7 * 86400 - 60), written_at=now)
+            board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(now) + 7 * 86400}"])
+            self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))
+            self.assertEqual(self.account(), "main")
+            board.note_limit("main", int(now) + 3600)
+            self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
+            self.assertEqual(self.account(), "owa")
+
     def test_resume_keeps_recorded_account_while_it_has_room(self):
         board.cmd_set(self.root, self.job, ["account=owa"])
         self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
