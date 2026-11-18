@@ -413,14 +413,39 @@ def clean(text, limit=300):
     return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:limit]
 
 
+LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
+LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->\s*$")
+
+
+def loose_item(line):
+    """ITEM_RE's groups for a backlog line, with the markers in any order: the text ends at the first well-formed marker
+    (or the trailing estimate comment) when only markers follow it, else ITEM_RE decides, so prose that mentions marker
+    syntax stays text. A repeated {p:N} keeps the lowest N. None when it is not an item line."""
+    m = re.match(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*)$", line)
+    if not m:
+        return None
+    rest = m[3]
+    why = LOOSE_WHY_RE.search(rest)
+    body = rest[:why.start()] if why else rest  # markers inside the comment are not markers
+    cut = LOOSE_MARK_RE.search(body)
+    text, tail = (body[:cut.start()], body[cut.start():]) if cut else (body, "")
+    if LOOSE_MARK_RE.sub("", tail).strip():
+        return g.groups() if (g := ITEM_RE.match(line)) else None  # prose after a marker-like mention: the text keeps it
+    one = lambda pat: (re.search(pat, tail) or [None, None])[1]
+    prios = re.findall(r" \{p:([1-5])\}", tail)
+    needs = "".join(re.findall(r" \{needs((?: #[a-z0-9]{4})+)\}", tail))
+    return (m[1], m[2], text, one(r" \{#([a-z0-9]{4})\}"), min(prios) if prios else None, needs or None,
+            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), (re.search(r" → (\d{3,}-[a-z0-9-]+)", re.sub(r" \{setup: [^{}]*\}", "", tail)) or [None, None])[1], why[1] if why else None)
+
+
 def read_backlog(root):
     """(lines, items). Items remember their line so writes leave headings and notes alone."""
     path = Path(root) / "backlog.md"
     lines = path.read_text().splitlines() if path.exists() else ["# Backlog"]
     items = []
     for n, line in enumerate(lines):
-        if m := ITEM_RE.match(line):
-            done, pts, text, item_id, prio, needs, setup, by, job, why = m.groups()
+        if g := loose_item(line):
+            done, pts, text, item_id, prio, needs, setup, by, job, why = g
             items.append({"index": len(items), "line": n, "done": done == "x",
                           "points": int(pts) if pts and pts.isdigit() else None, "text": text.strip(), "why": why, "job": job,
                           "id": item_id, "priority": int(prio) if prio else None, "needs": needs.replace("#", "").split() if needs else [],
@@ -594,6 +619,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             if item["done"] or not item["setup"]:
                 raise SystemExit(f"backlog item {index} has no Human setup")
             line = lines[item["line"]]
+            if (ITEM_RE.match(line) or [None] * 4)[3] != item["text"]:
+                line = format_item(item)  # out-of-order markers: rewrite in order first
             m = ITEM_RE.match(line)  # cut just the marker, so the rest of the line stays byte for byte
             lines[item["line"]] = line[:m.start(7) - len(" {setup: ")] + line[m.end(7) + 1:]
         elif op == "priority":
@@ -606,6 +633,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             if -priority >= priority_key(item):
                 return backlog_items(root)
             line = lines[item["line"]]
+            if (ITEM_RE.match(line) or [None] * 4)[3] != item["text"]:
+                line = format_item(item)  # out-of-order markers: rewrite in order first
             m = ITEM_RE.match(line)  # splice just the marker, so the rest of the line stays byte for byte
             start, end = m.span(5) if m.group(5) else (m.end(4) + 1, m.end(4) + 1)  # after the "}" of {#id}
             lines[item["line"]] = line[:start] + (str(priority) if m.group(5) else f" {{p:{priority}}}") + line[end:]
