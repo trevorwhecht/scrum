@@ -112,10 +112,28 @@ ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.e
             " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
 REPO_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch; .git or not
 JOB_RE = re.compile(r"[0-9]{3,}-[a-z0-9-]+")  # board.ID_RE's shape; fullmatch, so a trailing newline fails
+# Claude Code ignores a project's .claude/settings.json permissions until the folder is trusted; set the flag in each
+# account's .claude.json that exists (tmp file + replace, mode 600). Idempotent. No single quote (it sits inside sh
+# '...') and no brace (CLONE goes through str.format).
+TRUST_PY = """import json, os, sys
+d = os.path.abspath(sys.argv[1])
+for f in (os.path.expanduser("~/.claude-owa/.claude.json"), os.path.expanduser("~/.claude.json")):
+    if not os.path.exists(f):
+        continue
+    c = json.load(open(f))
+    p = c.setdefault("projects", dict()).setdefault(d, dict())
+    if p.get("hasTrustDialogAccepted"):
+        continue
+    p["hasTrustDialogAccepted"] = True
+    with open(os.open(f + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as o:
+        json.dump(c, o)
+    os.replace(f + ".tmp", f)
+"""
+TRUST = "python3 -c '" + TRUST_PY + "' \"$d\""
 # The raw origin URL (config, not `remote get-url`, which expands insteadOf) must equal the one asked for. Never resets.
 CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" = {u} ]'
          ' || exit 3; git -C "$d" fetch origin && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
-         ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi')
+         ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
 SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
 START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + SHOP_ENV

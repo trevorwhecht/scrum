@@ -36,6 +36,8 @@
 
 The shop Mac has Google Chrome but no Playwright Chromium. With `SCRUM_PW_CHANNEL` set (e.g. `chrome`), `board.py e2e-specs` adds `--config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"` to its `command` before the spec files (after `--` for `npm run`), and the Check gate's debug exception adds it to its `npx playwright test`. Run from the repo root, the wrapper loads the repo's first `playwright.config.{ts,js,mts,mjs,cts,cjs}`, sets `use.channel` on its chromium projects (the top-level `use` when it has none), and resolves the config's relative paths (testDir, outputDir, snapshotDir, globalSetup and globalTeardown, tsconfig, webServer `cwd`, reporter output) against the repo, so no project repo is edited. Unset or blank, every command is byte-identical to before.
 
+`clone()` also sets `hasTrustDialogAccepted` for the clone's folder in the shop's `~/.claude-owa/.claude.json` and `~/.claude.json` (each that exists; mode 600), so the project's `.claude/settings.json` permissions apply in shop sessions.
+
 ## MD sync
 
 `md_sync()` makes this Mac the single writer of what shop sessions read: the skill clones, `~/.claude/CLAUDE.md` and the memory notes. Shop dispatch (below) calls `md_sync()` first, before any other shop step, and skips the dispatch on `False`. It prints nothing. `python3 shop.py md-sync` prints one line, `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1), and never remote output.
