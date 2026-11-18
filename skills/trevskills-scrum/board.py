@@ -1494,6 +1494,11 @@ def log_process(process: str, result: str, **fields) -> None:
     if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
         return  # a test run would add fixture runs to the live log the digest reads
     now = int(time.time())
+    if "repo" in fields:
+        try:
+            fields["repo"] = os.path.realpath(str(fields["repo"]))  # a relative repo would resolve against the digest's cwd
+        except (OSError, ValueError):
+            pass  # unresolvable: keep as given, never raise
     line = json.dumps({"t": now, "process": process, "result": result, **fields}, default=str)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

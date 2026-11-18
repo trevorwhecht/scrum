@@ -34,6 +34,22 @@ class ProcessesLogTest(unittest.TestCase):
                          '{"t": 1700000000, "process": "Disk reclaim", "result": "freed", "repo": "/r/app", "removed": 2}\n'
                          '{"t": 1700000000, "process": "Weekly digest", "result": "started", "digest": "004", "at": "/x"}\n')
 
+    def test_log_process_resolves_relative_repo(self):
+        real = Path(self.tmp.name).resolve() / "real"
+        real.mkdir()
+        link = Path(self.tmp.name) / "link"
+        link.symlink_to(real)
+        old = os.getcwd()
+        self.addCleanup(os.chdir, old)
+        os.chdir(link)
+        board.log_process("Disk reclaim", "freed", repo=".")
+        board.log_process("Disk reclaim", "freed", repo=str(link))
+        board.log_process("Disk reclaim", "freed")
+        lines = [json.loads(l) for l in self.log.read_text().splitlines()]
+        self.assertEqual(lines[0]["repo"], str(real))
+        self.assertEqual(lines[1]["repo"], str(real))
+        self.assertNotIn("repo", lines[2])
+
     def test_log_process_never_raises(self):
         self.log.parent.parent.mkdir(parents=True, exist_ok=True)
         self.log.parent.write_text("a file, not a folder\n")
@@ -161,6 +177,20 @@ class ProcessesDigestTest(unittest.TestCase):
         names = [l[3:] for l in text.splitlines() if l.startswith("## ")]
         self.assertEqual(names[0], "Session starts")
         self.assertEqual(names[-1], "Manual checks")
+
+    def test_relative_repo_run_lands_in_its_project(self):
+        other = Path(self.tmp.name) / "lib"
+        (other / "scrum" / "digests" / "002").mkdir(parents=True)
+        old = os.getcwd()
+        self.addCleanup(os.chdir, old)
+        os.chdir(self.repo)
+        board.log_process("Disk reclaim", "freed", repo=".", removed=7)
+        os.chdir(old)  # the digest runs elsewhere: a stored "." would resolve against this cwd
+        mine = self.section(self.processes(), "Disk reclaim")
+        board.write_processes(other / "scrum", "002")
+        theirs = self.section((other / "scrum" / "digests" / "002" / "processes.md").read_text(), "Disk reclaim")
+        self.assertIn("Runs: 1 (freed 1)", mine)
+        self.assertIn("Runs: none logged", theirs)
 
     def test_newest_ten_lines(self):
         self.write_log(*({"t": S + i, "process": "Disk reclaim", "result": "freed", "removed": i} for i in range(12)))
