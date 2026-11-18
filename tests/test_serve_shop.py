@@ -1040,6 +1040,18 @@ class ShopTickTest(unittest.TestCase):
                 self.serve.write_shop_room()
             self.assertFalse((self.base / "shop-room.json").exists())
 
+    def test_shop_room_empty_and_silent_on_a_bad_board(self):
+        """A bad board.json hides that board's shop jobs, so the file says no room (cmd_ready claims here) instead of
+        raising; the watchdog's per-project loop reports that board."""
+        self.workers("shopmac 2 owa,main\n")
+        self.project("aa", [])
+        (self.base / "shop-room.json").write_text('{"at": %d, "workers": ["shopmac"]}' % time.time())
+        (self.project("bb", []) / "board.json").write_text("{not json")
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.serve.write_shop_room()
+        self.assertEqual(self.room_file()["workers"], [])
+        self.assertEqual(err.getvalue(), "")
+
     def test_shop_room_rewritten_after_dispatch(self):
         self.workers("shopmac 1 owa,main\n")
         root = self.project("mm", self.runall({"id": "043-a"}))

@@ -1657,12 +1657,18 @@ def shop_worker():
 def write_shop_room():
     """Write board.shop_room_path() (shop-room.json) as {"at": epoch, "workers": [alias, ...]}: every shop_worker()
     worker, so cmd_ready knows without ssh whether a worker has room (shop.ready's cache answers; board.shop_room reads
-    it). Temp file, then os.replace. Under unittest it writes only with SCRUM_REGISTRY set."""
+    it). A bad board.json hides its shop jobs, so it writes no workers (cmd_ready claims here) and prints nothing: the
+    watchdog's per-project loop reports that board. Temp file, then os.replace. Under unittest it writes only with
+    SCRUM_REGISTRY set."""
     if "unittest" in sys.modules and not os.environ.get("SCRUM_REGISTRY"):
         return
+    try:
+        workers = [w.alias for w, _ in shop_worker()]
+    except SystemExit:  # board.read_board on a bad board.json
+        workers = []
     path = board.shop_room_path()
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"at": time.time(), "workers": [w.alias for w, _ in shop_worker()]}))
+    tmp.write_text(json.dumps({"at": time.time(), "workers": workers}))
     os.replace(tmp, path)
 
 
