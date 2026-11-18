@@ -49,6 +49,8 @@ main{display:grid;gap:12px;padding:0 16px 16px;overflow-x:auto}
 .card:hover,.card:focus-visible{border-color:var(--accent);outline:none}
 .card.human{border:2px solid var(--human);box-shadow:0 0 0 3px color-mix(in srgb,var(--human) 15%,transparent)}
 .card.paused{border:2px solid var(--human)}
+.card.shop{border:2px solid var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent)}
+.card.shop .lanechip{color:var(--accent);border-color:var(--accent)}
 .card.roadmap{border:2px solid var(--roadmap);box-shadow:0 0 0 3px color-mix(in srgb,var(--roadmap) 15%,transparent)}
 .card.roadmap .lanechip{color:var(--roadmap);border-color:var(--roadmap)}.card.roadmap:hover,.card.roadmap:focus-visible{border-color:var(--accent)}
 .card.roadmap .line{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card.roadmap b{color:var(--human);font-weight:inherit}
@@ -597,6 +599,7 @@ const roadmapWaiting = p => {
 const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p === filter) && (!laneFilter || laneFilter === "roadmap"));
 
 function card(job) {
+  const shop = job.stage === "cloud" && !!job.shop; // on the shop Mac: the remote session pid sits in `shop`
   // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
   const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);
@@ -604,8 +607,8 @@ function card(job) {
   // waiting/plan/running sit idle by design (a BigBoy parent or a child waiting its turn), and cloud runs elsewhere, so they never go stale.
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
-  return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
+  return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${shop ? '<span class="lanechip">Shop</span>' : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
@@ -1093,7 +1096,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : setupWait(job) ? "Waiting on you: setup"
   : job.e2eWait ? e2eWaitLine(job.e2eWait)
   : job.buildLockWait ? "Waiting for the build lock"
-  : `${VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
+  : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
 
 // The modal subtitle: the red stop box already holds the full reason, so a needs-human job with the box shows only its short title.
 const modalStatus = job => {
