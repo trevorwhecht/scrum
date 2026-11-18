@@ -4454,7 +4454,7 @@ def child_files(jobs_dir, job_id):
                 return {p for p in re.findall(r"`([^`\s]+)`", text)
                         if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
             found = likely_files(text)
-            return found if name == "spec.md" or found else prose_paths(text)  # no spec, no Likely files: the paths the ticket text names
+            return found or prose_paths(text) | bare_name_paths(text, Path(jobs_dir).parent.parent)  # no Likely files: the paths the text names
     return set()
 
 
@@ -4474,6 +4474,19 @@ def prose_paths(text):
     bare = (t.rstrip(".,;:") for t in re.sub(r"`[^`]*`", " ", text).split())
     return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | \
            {t for t in bare if PATH_RE.match(t) and repo_path(t) and "/" in t}
+
+
+def bare_name_paths(text, repo):
+    """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one `git ls-files` entry carries by base name."""
+    names = {t.strip("`").rstrip(".,;:") for t in text.split()}
+    names = {n for n in names if "/" not in n and PATH_RE.match(n) and repo_path(n)}
+    if not names:
+        return set()
+    try:
+        tracked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True, text=True, timeout=20, check=True).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {m[0] for n in names if len(m := [t for t in tracked if t.rsplit("/", 1)[-1] == n]) == 1}
 
 
 def shared_files(a, b):
