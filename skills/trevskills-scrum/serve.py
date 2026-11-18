@@ -3279,6 +3279,51 @@ def timed(handler):
     return run
 
 
+SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
+SHOP_STATS_CMD = "sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q"  # shop.PROBE_CMD's load lines, then free RAM
+SHOP_STATS = {"at": None, "busy": False, "value": []}  # at: time.monotonic() the last refresh ended
+SHOP_STATS_LOCK = threading.Lock()
+
+
+def shop_stats():
+    """GET /api/machine "shop": the cached refresh_shop_stats list ([] before the first read). Starts one background
+    refresh when none runs and the last one ended SHOP_STATS_TTL ago or more, so a poll never runs ssh."""
+    with SHOP_STATS_LOCK:
+        if not SHOP_STATS["busy"] and (SHOP_STATS["at"] is None or time.monotonic() - SHOP_STATS["at"] >= SHOP_STATS_TTL):
+            SHOP_STATS["busy"] = True
+            threading.Thread(target=refresh_shop_stats, daemon=True).start()
+        return SHOP_STATS["value"]
+
+
+def refresh_shop_stats():
+    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "at"} per shop.workers() worker from one shop.run each:
+    memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the core count and
+    time.time() of the read. An unreadable value is null; a worker with neither reading is unreachable and is re-read
+    only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
+    try:
+        old, value = {e["name"]: e for e in SHOP_STATS["value"]}, []
+        for w in shop.workers():
+            prev = old.get(w.alias)
+            down = prev and prev["free_ram_pct"] is None and prev["cpu_load_pct"] is None
+            if down and time.time() - prev["at"] < shop.DOWN_TTL:
+                value.append(prev)
+                continue
+            out = shop.run(SHOP_STATS_CMD, shop.PROBE_TIMEOUT, alias=w.alias).stdout  # read whatever the exit code
+            lines, ram = out.splitlines(), board.FREE_RAM_RE.search(out)
+            try:
+                load, cores = float(lines[0].strip("{} ").split()[0]), int(lines[1])
+            except (IndexError, ValueError):
+                load = cores = None
+            value.append({"name": w.alias, "free_ram_pct": float(ram.group(1)) if ram else None,
+                          "cpu_load_pct": round(load / cores * 100, 1) if load is not None and cores else None,
+                          "cpu_cores": cores, "at": time.time()})
+        with SHOP_STATS_LOCK:
+            SHOP_STATS["value"] = value
+    finally:
+        with SHOP_STATS_LOCK:
+            SHOP_STATS.update(at=time.monotonic(), busy=False)
+
+
 def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
@@ -3291,7 +3336,7 @@ def machine_status():
             "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
             "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": r(board.cpu_load_pct()),
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
-            "restart_waiting": restart_blockers()}
+            "restart_waiting": restart_blockers(), "shop": shop_stats()}
 
 
 def machine_usage(now):

@@ -2077,7 +2077,7 @@ class ServeTest(unittest.TestCase):
     def test_api_machine(self):
         keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct",
                 "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
-                "restart_waiting", "server", "sessions", "swap_pct", "usage", "verdict"]
+                "restart_waiting", "server", "sessions", "shop", "swap_pct", "usage", "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
         self.addCleanup(cores.stop)
@@ -2086,6 +2086,7 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, sorted(out)), (200, keys))
         out.pop("server")
         out.pop("restart_waiting")  # the fixture board's jobs; RestartBlockersTest pins the value
+        out.pop("shop")  # a background read; test_shop_stats_poll_never_runs_ssh pins it
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2093,7 +2094,7 @@ class ServeTest(unittest.TestCase):
                                "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
-            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting")},
+            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting", "shop")},
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2115,6 +2116,7 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
         out.pop("server")
         out.pop("restart_waiting")
+        out.pop("shop")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2301,7 +2303,79 @@ class ServeTest(unittest.TestCase):
             usage.unlink()
             self.assertEqual(self.serve.machine_usage(now), "unknown", "the string return is unchanged")
 
-    PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
+    def shop_stats_state(self, **state):
+        s = self.serve
+        saved = dict(s.SHOP_STATS)
+        s.SHOP_STATS.update({"at": None, "busy": False, "value": [], **state})
+        self.addCleanup(lambda: (s.SHOP_STATS.clear(), s.SHOP_STATS.update(saved)))
+
+    def test_shop_stats_reads_each_worker_and_backs_off_a_down_one(self):
+        s = self.serve
+        self.shop_stats_state()
+        up = "{ 6.00 5.00 4.00 }\n4\nThe system has 8589934592 (524288 pages).\nSystem-wide memory free percentage: 41%\n"
+        outs = {"shopmac": (0, up), "mac2": (255, "")}
+        calls = []
+
+        def run(cmd, timeout, alias):
+            calls.append((cmd, timeout, alias))
+            return subprocess.CompletedProcess([], *outs[alias], "")
+        workers = [s.shop.Worker("shopmac", 2, ("owa", "main")), s.shop.Worker("mac2", 1, ("main",))]
+        with mock.patch.object(s.shop, "workers", return_value=workers), mock.patch.object(s.shop, "run", side_effect=run), \
+                mock.patch.object(s.time, "time", return_value=1000.0) as clock:
+            s.refresh_shop_stats()
+            self.assertEqual(s.SHOP_STATS["value"], [
+                {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0},
+                {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": 1000.0}])
+            self.assertEqual(calls, [("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "shopmac"),
+                                     ("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "mac2")])
+            self.assertFalse(s.SHOP_STATS["busy"])
+            calls.clear()
+            clock.return_value = 1299.0
+            s.refresh_shop_stats()
+            self.assertEqual([c[2] for c in calls], ["shopmac"], "an unreachable worker waits 300 s before another ssh")
+            self.assertEqual(s.SHOP_STATS["value"][1]["at"], 1000.0)
+            calls.clear()
+            clock.return_value = 1300.0
+            outs["mac2"] = (1, "{ 1.00 1.00 1.00 }\n8\n")  # memory_pressure failed: load still counts
+            s.refresh_shop_stats()
+            self.assertEqual([c[2] for c in calls], ["shopmac", "mac2"])
+            self.assertEqual(s.SHOP_STATS["value"][1],
+                             {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": 12.5, "cpu_cores": 8, "at": 1300.0})
+        with mock.patch.object(s.shop, "workers", return_value=workers), \
+                mock.patch.object(s.shop, "run", side_effect=KeyError("boom")):
+            with self.assertRaises(KeyError):
+                s.refresh_shop_stats()
+        self.assertFalse(s.SHOP_STATS["busy"], "a failed refresh never leaves the next one blocked")
+
+    def test_shop_stats_poll_never_runs_ssh(self):
+        s = self.serve
+        cached = [{"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0}]
+        self.shop_stats_state(value=cached)
+        with mock.patch.object(s.threading, "Thread") as thread, mock.patch.object(s.time, "monotonic", return_value=500.0):
+            self.assertEqual(s.shop_stats(), cached, "the cached value comes back at once")
+            self.assertEqual(thread.call_args.kwargs, {"target": s.refresh_shop_stats, "daemon": True})
+            thread.return_value.start.assert_called_once_with()
+            self.assertEqual(s.shop_stats(), cached)
+            self.assertEqual(thread.call_count, 1, "one refresh at a time")
+            s.SHOP_STATS.update(busy=False, at=480.0)
+            s.shop_stats()
+            self.assertEqual(thread.call_count, 1, "20 s after the last refresh: none")
+            s.SHOP_STATS["at"] = 470.0
+            s.shop_stats()
+            self.assertEqual(thread.call_count, 2, "30 s after it: the next one")
+        s.SHOP_STATS.update(busy=False, at=None)
+        s.MACHINE_CACHE.clear()
+        with mock.patch.object(s.shop, "run", side_effect=AssertionError("ssh on the poll")) as run, \
+                mock.patch.object(s, "refresh_shop_stats") as refresh:
+            code, out = self.req("GET", "/api/machine")
+            for _ in range(50):
+                if refresh.called:
+                    break
+                time.sleep(0.01)
+        self.assertEqual((code, out["shop"]), (200, cached))
+        self.assertEqual((run.called, refresh.call_count), (False, 1), "the refresh runs on its own thread")
+
+    PAUSED_REASON ="stalled in build: paused by Trevor. Fix: click Play."
 
     def paused_job(self, title, **fields):
         b = self.serve.board
