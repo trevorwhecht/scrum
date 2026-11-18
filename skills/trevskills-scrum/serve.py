@@ -1076,17 +1076,22 @@ def merges_since(repo, record) -> int:
 
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
-    flight anywhere, this project's UI sweep is not running (its dev server holds the checkout's dev lock), the E2E
-    lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    flight in this serve (E2E_FULL), this project's UI sweep is not running (its dev server holds the checkout's dev
+    lock), the E2E lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
-    cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run."""
+    cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run.
+    With no run in flight here, every project's `running` record is an orphan (a serve reload killed its thread; one
+    serve.py per Mac) and is rewritten as `error` first, keeping its head and lastGreen."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
     now = time.time()
-    for rec in [e2e_full_record(other / "scrum") for other in board.projects().values()] + [ui_sweep_record(root)]:
-        if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
-            return
+    for other in board.projects().values():
+        if (rec := e2e_full_record(other / "scrum")) and rec.get("result") == "running":
+            write_e2e_full(other / "scrum", {**rec, "result": "error"})
+    sweep = ui_sweep_record(root)
+    if sweep and sweep.get("result") == "running" and now - (sweep.get("at") or 0) < E2E_FULL_STALE:
+        return
     if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         return
     record = e2e_full_record(root)
@@ -1109,7 +1114,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
     when board.cpu_load_pct, read after each E2E_FULL_LOAD_SECS of the wait and once at exit, went over
     board.MAX_CPU_LOAD_PCT (it keeps exit and failed, adds nothing, and e2e_full_due re-runs it); otherwise a
     non-zero exit with parsed failures is fail; any other non-zero exit (lock timeout 124, a dev-server error) is
-    error and adds nothing."""
+    error and adds nothing. An exception before the result is recorded records error (exit None) and re-raises."""
+    rec = None
     try:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
@@ -1146,6 +1152,11 @@ def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
             e2e_full_backlog(repo, root, failed, last_green, head,
                              timeouts_only=all((f["spec"], f["line"]) in timed_out for f in failed))
         return rec
+    except Exception:
+        if rec is None:  # the tick's `running` record is still on disk
+            write_e2e_full(root, {"at": at, "head": head, "result": "error", "exit": None, "failed": [],
+                                  "lastGreen": last_green})
+        raise
     finally:
         E2E_FULL["running"] = None
 

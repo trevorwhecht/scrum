@@ -12189,11 +12189,33 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(self.tick(), 0)
         self.assertFalse((self.root / "e2e-full.json").exists())
 
-    def test_tick_skips_fresh_running_record(self):
+    def test_tick_live_running_untouched(self):
+        """A `running` record while this serve's own run is in flight is left alone and starts nothing."""
         rec = {"at": time.time() - 600, "head": "x", "result": "running", "exit": None, "failed": [], "lastGreen": None}
         (self.root / "e2e-full.json").write_text(json.dumps(rec))
+        self.serve.E2E_FULL["running"] = "p"
         self.assertEqual(self.tick(), 0)
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual(self.serve.E2E_FULL["running"], "p")
+
+    def test_tick_orphan_running_becomes_error(self):
+        """Job 1158: a serve reload killed the run's thread at 11:26, so `running` stayed on disk and blocked every
+        project's full run for E2E_FULL_STALE. With no run in this serve, a `running` record is an orphan."""
+        at = time.time() - 600
+        other = Path(self.tmp.name) / "other"
+        (other / "scrum").mkdir(parents=True)
+        (Path(self.tmp.name) / "projects.json").write_text(json.dumps([str(self.repo), str(other)]))
+        (other / "scrum" / "e2e-full.json").write_text(json.dumps(
+            {"at": at, "head": "abc", "result": "running", "exit": None, "failed": [], "lastGreen": "def"}))
+        self.assertEqual(self.tick(), 1, "another project's orphan no longer blocks this one")
+        self.assertEqual(json.loads((other / "scrum" / "e2e-full.json").read_text()),
+                         {"at": at, "head": "abc", "result": "error", "exit": None, "failed": [], "lastGreen": "def"})
+        self.serve.E2E_FULL["running"] = None
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": at, "head": self.base, "result": "running", "exit": None, "failed": [], "lastGreen": "lg"}))
+        self.assertEqual(self.tick(), 0, "an error record on an unchanged HEAD is not due")
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()),
+                         {"at": at, "head": self.base, "result": "error", "exit": None, "failed": [], "lastGreen": "lg"})
 
     def test_tick_skips_while_this_projects_ui_sweep_runs(self):
         """Job 1109: the sweep's dev server held the checkout's next dev lock, so the full run exited 1 at start."""
@@ -12317,6 +12339,27 @@ class E2eFullTest(unittest.TestCase):
     def test_pass_sets_last_green(self):
         rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
         self.assertEqual((rec["result"], rec["lastGreen"]), ("pass", self.git("rev-parse", "HEAD")))
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+
+    def test_run_exception_writes_error(self):
+        """Job 1158: an exception after the running record was written left `running` on disk."""
+        (self.root / "e2e-full.json").write_text(json.dumps(
+            {"at": 123.0, "head": self.base, "result": "running", "exit": None, "failed": [], "lastGreen": "lg"}))
+        self.serve.E2E_FULL["running"] = "p"
+        with mock.patch.object(self.serve.board, "cpu_load_pct", side_effect=RuntimeError("boom")), \
+                self.assertRaises(RuntimeError):
+            self.run_suite("5 passed (9s)\n", 0, last_green="lg")
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()),
+                         {"at": 123.0, "head": self.base, "result": "error", "exit": None, "failed": [], "lastGreen": "lg"})
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+
+    def test_run_exception_after_result_keeps_it(self):
+        """A failure after the result is recorded (filing the backlog) keeps that result, never turns it to error."""
+        with mock.patch.object(self.serve, "e2e_full_backlog", side_effect=RuntimeError("boom")), \
+                self.assertRaises(RuntimeError):
+            self.run_suite(E2E_LIST_OUTPUT, 1, last_green="lg")
+        rec = json.loads((self.root / "e2e-full.json").read_text())
+        self.assertEqual((rec["result"], len(rec["failed"])), ("fail", 2))
         self.assertIsNone(self.serve.E2E_FULL["running"])
 
 
