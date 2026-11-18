@@ -1581,10 +1581,10 @@ def shop_tick(project, repo, root) -> bool:
     the shop Mac as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
     shop.ready(). Cool-down counts as a hold (machine_ok refuses), so the shop keeps working through it. Account: the
     first in pick_account's own order (soonest seven-day reset) the shop has ready, else the other. A child is claimed
-    (cmd_ready shop=), then md_sync, setup, clone, env_copy and start run; a failed step puts a claimed child back to
-    waiting, prints one `shop: <project>: <id>: ` line and holds every shop call for SHOP_RETRY_EVERY. The job is then
-    marked stage cloud with shop=<pid> and account=; a refused mark, or a local run started meanwhile, kills the shop
-    session. A down shop or nothing to send: no output, no change. True when it dispatched."""
+    (cmd_ready shop=), then md_sync, setup, clone, env_copy, profile_copy and start run; a failed step puts a claimed
+    child back to waiting, prints one `shop: <project>: <id>: ` line and holds every shop call for SHOP_RETRY_EVERY. The
+    job is then marked stage cloud with shop=<pid> and account=; a refused mark, or a local run started meanwhile, kills
+    the shop session. A down shop or nothing to send: no output, no change. True when it dispatched."""
     if time.time() < SHOP_RETRY_AT:
         return False
     try:
@@ -1653,6 +1653,8 @@ def shop_tick(project, repo, root) -> bool:
         return fail("clone")
     if shop.env_copy(repo.name, str(repo)) == "failed":
         return fail("env copy")
+    if shop.profile_copy(repo.name, str(repo)) == "failed":
+        return fail("profile copy")
     try:
         prompt = f"/trevskills-scrum cloud-job {job_id} " + (jobs_dir / job_id / "feature.md").read_text()
         if (jobs_dir / job_id / "spec.md").is_file():
