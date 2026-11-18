@@ -1,4 +1,4 @@
-"""Job 964: serve.py's shop_tick sends one held job to the shop Mac while this Mac's machine guard holds it, and
+"""Job 964: serve.py's shop_tick sends one held job to the shop Mac whenever a worker has room, and
 cloud_tick requeues a shop session that ended without a PR. Every shop.py function is a mock: no test reaches ssh."""
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
@@ -148,12 +148,16 @@ class ShopTickTest(unittest.TestCase):
         return err.getvalue()
 
     # --- criterion 1: gates and the cap ---
-    def test_dispatch_only_while_guard_holds(self):
+    def test_dispatch_when_guard_passes(self):
         root = self.project("mm", self.runall({"id": "043-a"}))
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM=str(self.board.MIN_FREE_RAM_PCT), SCRUM_CPU_LOAD_PCT="1"):
-            self.assertEqual(self.tick(), (False, "", ""))
-        self.assertEqual(self.calls(), [], "the guard passes: this Mac takes the job, no shop call")
-        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+            got, out, err = self.tick()  # this Mac's guard passes and a worker has room: the shop still takes it
+        self.assertEqual((got, err), (True, ""))
+        self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
+        self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+
+    def test_dispatch_through_cooldown(self):
+        root = self.project("mm", self.runall({"id": "043-a"}))
         flag = self.base / "cooldown"
         flag.write_text("")
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag), SCRUM_FREE_RAM=str(self.board.MIN_FREE_RAM_PCT),
