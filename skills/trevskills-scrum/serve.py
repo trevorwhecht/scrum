@@ -2869,7 +2869,7 @@ def set_volume(level, muted) -> tuple[int, dict]:
     return 200, {"level": level, "muted": muted}
 
 
-SELF_FILES = (HERE / "serve.py", HERE / "board.py", Path(route.__file__).resolve())
+SELF_FILES = (HERE / "serve.py", HERE / "board.py", Path(route.__file__).resolve(), HERE / "shop.py")
 
 
 def code_stamp() -> tuple:
