@@ -13,6 +13,10 @@ class BacklogTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "scrum"
         self.root.mkdir()
+        # an empty registry keeps finish_first off the real projects' live jobs
+        patch = mock.patch.dict(os.environ, {"SCRUM_REGISTRY": str(Path(self.tmp.name) / "projects.json")})
+        patch.start()
+        self.addCleanup(patch.stop)
         (self.root / "backlog.md").write_text(
             "# Backlog\n"
             "- [x] Old thing → 001-old-thing\n"
@@ -29,6 +33,14 @@ class BacklogTest(unittest.TestCase):
 
     def plain(self):  # the text without the {#id} every new item gets (job 679)
         return re.sub(r" \{#[a-z0-9]{4}\}", "", self.text())
+
+    def test_loose_item_comment_before_trailing_markers(self):
+        g = board.loose_item("- [ ] [3] Text here {#abcd} <!-- why it matters {p:5} --> {p:2}")
+        self.assertEqual((g[2], g[3], g[4], g[9]), ("Text here", "abcd", "2", "why it matters {p:5}"))
+        g = board.loose_item("- [ ] Text <!-- why --> {#abcd}")
+        self.assertEqual((g[2], g[3], g[9]), ("Text", "abcd", "why"))
+        g = board.loose_item("- [ ] Text <!-- why --> prose {p:2}")  # prose after the comment: the text keeps it
+        self.assertEqual(g[2], "Text <!-- why --> prose")
 
     def test_items_parse_points_why_done_and_job(self):
         items = board.backlog_items(self.root)

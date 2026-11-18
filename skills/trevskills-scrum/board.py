@@ -414,7 +414,7 @@ def clean(text, limit=300):
 
 
 LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
-LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->\s*$")
+LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->")
 
 
 def loose_item(line):
@@ -425,8 +425,9 @@ def loose_item(line):
     if not m:
         return None
     rest = m[3]
-    why = LOOSE_WHY_RE.search(rest)
-    body = rest[:why.start()] if why else rest  # markers inside the comment are not markers
+    # the estimate comment is the first one with only markers after it, wherever it sits; markers inside it are not markers
+    why = next((w for w in LOOSE_WHY_RE.finditer(rest) if not LOOSE_MARK_RE.sub("", rest[w.end():]).strip()), None)
+    body = rest[:why.start()] + rest[why.end():] if why else rest
     cut = LOOSE_MARK_RE.search(body)
     text, tail = (body[:cut.start()], body[cut.start():]) if cut else (body, "")
     if LOOSE_MARK_RE.sub("", tail).strip():
