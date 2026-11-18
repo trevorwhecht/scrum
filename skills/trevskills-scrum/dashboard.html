@@ -320,10 +320,10 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
 </dialog>
 <dialog id="usage" aria-label="Usage">
   <div class="tabs"><b>Usage</b><button class="close" type="button" aria-label="Close">✕</button></div>
-  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: 5h and weekly used % from ~/.claude/usage.json, Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
+  <article><table class="usage" data-agent-hint="Latest reading per AI, refreshed every 60 s. Claude: weekly used % from ~/.claude/usage.json (5h shows —), Latest is when the status line last wrote it (it may be stale); hover a % for its reset time. Codex: 5h and weekly used % from the newest rollout file. Jev: TypeSafe calls logged today across every registered project's jev.log, and the newest call. A window past its reset shows —.">
     <thead><tr><th scope="col">AI</th><th scope="col">5h</th><th scope="col">Week</th><th scope="col">Latest</th></tr></thead>
     <tbody id="usageRows"></tbody></table>
-  <table class="usage windows" data-agent-hint="The newest 5h and 7d window scorecard per project (the #filter project, or every project), from scrum/windows/ via GET /api/p/&lt;project&gt;/windows, fetched each time this dialog opens. Points done, budget used, the headline (points per % of budget), first-pass rate, wasted spend % and escapes; hover a row for when the window ended.">
+  <table class="usage windows" data-agent-hint="The newest 7d window scorecard per project (the #filter project, or every project), from scrum/windows/ via GET /api/p/&lt;project&gt;/windows, fetched each time this dialog opens. Points done, budget used, the headline (points per % of budget), first-pass rate, wasted spend % and escapes; hover a row for when the window ended.">
     <thead><tr><th scope="col">Project</th><th scope="col">Last window</th></tr></thead>
     <tbody id="windowRows"></tbody></table></article>
 </dialog>
@@ -2148,21 +2148,21 @@ $("colourReset").addEventListener("click", () => saveColour(null));
 
 // Pinned by test_dashboard_routing.
 function routingText(s) {
-  return `Claude 5h ${pct(s.claude?.["5h"])} · wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)}`;
+  return `Claude wk ${pct(s.claude?.weekly)} · Codex 5h ${pct(s.codex?.["5h"])} · wk ${pct(s.codex?.weekly)}`;
 }
 // The Usage dialog's rows, one per AI the scrum calls. Pinned by test_dashboard_routing.
 function usageRows(s) {
   const c = s.claude || {}, x = s.codex || {}, j = s.jev || {};
   const cell = (v, reset) => `<td${reset ? ` title="resets ${esc(when(reset))}"` : ""}>${esc(v)}</td>`;
   const row = (ai, five, week, latest) => `<tr><th scope="row">${ai}</th>${five}${week}<td>${esc(latest)}</td></tr>`;
-  return row("Claude", cell(pct(c["5h"]), c["5h_resets_at"]), cell(pct(c.weekly), c.weekly_resets_at), when(c.as_of))
+  return row("Claude", cell("—"), cell(pct(c.weekly), c.weekly_resets_at), when(c.as_of))  // Claude has no 5h window now
     + row("Codex", cell(pct(x["5h"])), cell(pct(x.weekly)), "—")
     + row("Jev", cell("—"), cell("—"), `${Number.isInteger(j.today) ? j.today : "—"} today · last ${when(j.last)}`);
 }
-// The Usage dialog's window scorecard rows: one per project per window, 5h then 7d. Pinned by test_dashboard_routing.
+// The Usage dialog's window scorecard rows: one 7d row per project (Claude has no 5h window now). Pinned by test_dashboard_routing.
 function windowRows(list) {
   const num = v => typeof v === "number" && isFinite(v), n = (v, one) => `${num(v) ? v : "—"} ${one}${v === 1 ? "" : "s"}`;
-  return list.map(({project, windows}) => [["five_hour", "5h"], ["seven_day", "7d"]].map(([key, label]) => {
+  return list.map(({project, windows}) => [["seven_day", "7d"]].map(([key, label]) => {
     const c = windows?.[key], head = `<tr><th scope="row">${esc(project)}</th>`;
     if (!c) return `${head}<td>${esc(`Last ${label} window: ${windows === null ? "Couldn't load scorecard" : "No scorecard yet"}`)}</td></tr>`;
     const text = `Last ${label} window: ${n(c.points_done, "point")}, ${pct(c.budget?.used_pct)} budget, `

@@ -182,7 +182,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_fits_390px(self):
         got = self.browse("header")
-        self.assertEqual(got["routing"], "Claude 5h — · wk — · Codex 5h 42% · wk 17%", got)
+        self.assertEqual(got["routing"], "Claude wk — · Codex 5h 42% · wk 17%", got)
         self.assertIn(PROJECT, got["options"], got)
         self.assertGreaterEqual(len(PROJECT), 30)
         self.assertLessEqual(got["scrollWidth"], 390, got)
