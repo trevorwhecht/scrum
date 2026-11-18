@@ -1732,7 +1732,7 @@ def shop_tick(project, repo, root) -> bool:
         out = board.cmd_next(root, shop=fits)
         if out["id"] is None:
             return False
-        (jobs_dir / out["id"] / "feature.md").write_text(out["feature"] + "\n")  # as Run now writes it
+        (jobs_dir / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))  # as Run now writes it
         job, child = {"id": out["id"], "stage": "spec"}, False
     job_id, claimed = job["id"], "spec" if child else job["stage"]
 
@@ -6080,7 +6080,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not text:
                         raise SystemExit("backlog item text is empty")
                     job_id = board.cmd_new(root, board.short_title(text))
-                    (root / "jobs" / job_id / "feature.md").write_text(text + "\n")
+                    (root / "jobs" / job_id / "feature.md").write_text(board.feature_text(text))
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
                     return 202, {"id": job_id, "feature": text}
                 top = urgency == "next"
@@ -6119,7 +6119,7 @@ class Handler(BaseHTTPRequestHandler):
             if cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT:
                 return 409, {"error": f"CPU load {cpu:.0f}% is over {board.MAX_LAUNCH_CPU_LOAD_PCT}%; nothing claimed, try again shortly"}
             out = board.cmd_next(root, body.get("index"))
-            (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
+            (root / "jobs" / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
                 code, obj = run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE,
                                                           f"/trevskills-scrum start {out['id']} askme {askme}"),
