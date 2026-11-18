@@ -4907,14 +4907,14 @@ class BoardTest(unittest.TestCase):
         text, _ = self.pulse_digest([line(s, 10), line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 400}])],
                                     since=s, boards=boards)
         self.assertIn("Claims while CPU load over 500%: 0\n"
-                      "Other starts while CPU load over 500%: 2 — hand app 11; other app 12\n", text)
+                      "Other starts while CPU load over 500%: 1 — hand app 11\n", text)  # job 1087: runall creations are no start
         self.tearDown(); self.setUp()
         ghost = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top}
         text, _ = self.pulse_digest([line(s, 10, ghost=ghost(3)),
                                      line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 520}], ghost=ghost(5))],
                                     since=s, boards=boards)
         self.assertIn("Claims while CPU load over 500%: 1 — app 13\n"
-                      "Other starts while CPU load over 500%: 4 — hand app 11; unregistered ghost 4 5; other app 12\n",
+                      "Other starts while CPU load over 500%: 3 — hand app 11; unregistered ghost 4 5\n",
                       text)
 
     def test_pulse_hot_claims_malformed_started(self):
@@ -5033,7 +5033,7 @@ class BoardTest(unittest.TestCase):
             boards={"app": [{"id": "001-a", "started_by": "serve"}, {"id": "002-b", "started_by": "runall"}],
                     "new": [{"id": f"00{n}-n", "started_by": "serve"} for n in range(1, 6)]})
         self.assertIn("Claims during cool down: 2 — app 1 2\n", text)
-        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 2 — other app 1 2\n", text)
+        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 1 — other app 1\n", text)
 
     def claim_pulse(self, gap, boards, cpu=100):
         """pulse_digest over two cool-down lines `gap` s apart, app's top 10 then 13; returns the pulse.md text."""
