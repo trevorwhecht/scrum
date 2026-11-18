@@ -1077,6 +1077,13 @@ class ContractTest(unittest.TestCase):
                       "spawns, and any step 4 re-spawn of them, also get `VISUAL_DIFF=$F/jobs/$ID/round-$N/visual-diff.md`; "
                       "no other reviewer gets it", step3)
 
+    def test_review_render_only_rework_prompt(self):
+        step3 = next(l for l in self.lane("review").splitlines() if l.startswith("3. Spawn **in ONE message**"))
+        self.assertIn("has a `fix-now` line containing `render-only` (the render-only REWORK route in Approve), "
+                      "the `scrum-review-ui` and `scrum-review-ux` spawns, and any step 4 re-spawn of them, also get the "
+                      "prompt line `Also perform each render check JOB_DIR/decision.md marks fix-now render-only.`; "
+                      "no other reviewer gets it", step3)
+
     def test_review_ui_ux_read_visual_diff(self):
         for name in ("review-ui", "review-ux"):
             text = (ROOT / "agents" / f"scrum-{name}.md").read_text()
