@@ -3324,19 +3324,41 @@ def refresh_shop_stats():
             SHOP_STATS.update(at=time.monotonic(), busy=False)
 
 
+HISTORY_EVERY = 60  # seconds between two sparkline samples of one machine
+HISTORY_LEN = 30  # samples kept per machine: the meter's sparklines span the last 30 min
+HISTORY = {}  # "mac" or ("shop", alias) -> deque of (time.time(), free_ram_pct, cpu_load_pct)
+HISTORY_LOCK = threading.Lock()
+
+
+def machine_history(key, ram, cpu, now):
+    """The meter's sparkline readings for `key`, oldest first: {"free_ram_pct": [...], "cpu_load_pct": [...]} from its
+    samples of the last HISTORY_LEN * HISTORY_EVERY seconds, after appending (now, ram, cpu) when its newest sample is
+    HISTORY_EVERY s old or more. In memory only, sampled on the /api/machine poll; an unread value stays null."""
+    with HISTORY_LOCK:
+        q = HISTORY.setdefault(key, collections.deque(maxlen=HISTORY_LEN))
+        if not q or now - q[-1][0] >= HISTORY_EVERY:
+            q.append((now, ram, cpu))
+        recent = [s for s in q if now - s[0] < HISTORY_LEN * HISTORY_EVERY]
+    return {"free_ram_pct": [s[1] for s in recent], "cpu_load_pct": [s[2] for s in recent]}
+
+
 def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
-    ms each) so its verdict is exactly the gate's, whatever checks it grows."""
+    ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
+    machine_history's sparkline readings."""
     r = lambda v: None if v is None else round(v, 1)
-    return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
+    now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
+    return {"free_ram_pct": ram, "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
+            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(now), "cooldown": board.cooling_down(),
             "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
-            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": r(board.cpu_load_pct()),
+            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": cpu,
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
-            "restart_waiting": restart_blockers(), "shop": shop_stats()}
+            "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
+            "shop": [{**s, "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
+                     for s in shop_stats()]}
 
 
 def machine_usage(now):
