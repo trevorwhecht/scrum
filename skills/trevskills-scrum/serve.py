@@ -2106,6 +2106,10 @@ def board_busy(project, root, jobs, by_id, alive) -> bool:
                and not parked_tree(project, root, j, by_id, alive) for j in jobs)
 
 
+SWEEP_SEEN: dict[str, tuple] = {}  # project -> claimable items at its last auto run-all start
+SWEEP_HELD: set[str] = set()  # projects a machine gate held since that start
+
+
 def auto_continue_tick(busy: dict[str, bool]) -> None:
     """watchdog_tick calls this only when its resume pass resumed nothing, nothing waits and nothing was auto-played.
     Start one headless run-all in every opted-in project (`- Auto continue: <n>`; n orders nothing) with no
@@ -2115,6 +2119,8 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
     (cool-down, RAM, disk, the session ceiling; claim=True), board.finish_first and board.pick_account's allowance are
     checked before each start; the first failure stops
     this tick's later starts, except a disk refusal (one volume): that project is skipped and the next is tried.
+    A gate hold marks the project (SWEEP_HELD); once marked, no sweep starts until its claimable items differ from
+    the last sweep's (job 1132: 129 sweeps in 5 h while swap, CPU and memory gates flickered, nothing new to claim).
     A project missing from busy (its sweep failed this tick) is never a target."""
     for project, repo in board.projects().items():
         root = repo / "scrum"
@@ -2126,11 +2132,19 @@ def auto_continue_tick(busy: dict[str, bool]) -> None:
                 if refused and refused.startswith("free disk"):  # only this project's volume is full: try the next
                     continue
                 if refused or board.finish_first(root):  # no room on this machine, or work in flight first
+                    SWEEP_HELD.add(project)
                     return
                 live = board.live_sessions()
                 allow = board.pick_account(time.time(), live)[1]
                 if allow is not None and live >= allow:  # the 5h/7d budget is low; retry next tick
+                    SWEEP_HELD.add(project)
                     return
+                items = tuple(sorted(i["text"] for i in board.backlog_items(root)
+                                     if not i["done"] and not i["setup"] and not i["waits"]))
+                if project in SWEEP_HELD and SWEEP_SEEN.get(project) == items:
+                    continue  # a gate held since the last sweep and it has nothing new to claim
+                SWEEP_SEEN[project] = items
+                SWEEP_HELD.discard(project)
                 spawn(project, root, "run-all", "run-all", "/trevskills-scrum run-all")
         except (Exception, SystemExit) as e:
             print(f"watchdog: {project}: {e}", file=sys.stderr, flush=True)
