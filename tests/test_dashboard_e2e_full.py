@@ -136,6 +136,19 @@ class ChecksMarkup(unittest.TestCase):
         mobile = text[text.index("@media (max-width:640px){#colour"):]
         self.assertIn("#checks,#usage,#rank{width:100%", mobile[:mobile.index("}")])
 
+    def test_desktop_header_one_row(self):
+        """At 1400 px and wider the header never wraps: buttons keep their size, #status, #machine and #routing shrink
+        and ellipsize instead (job 977 ruling); narrower widths keep the wrapping header."""
+        text = DASHBOARD.read_text()
+        start = text.index("@media (min-width:1400px){header{flex-wrap:nowrap")
+        rule = text[start:text.index("\n", start)]
+        self.assertIn("header>*{flex-shrink:0}", rule)
+        self.assertIn("#status{flex:0 10 26ch}", rule)
+        self.assertIn("#machine,#routing{flex-shrink:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}",
+                      rule)
+        self.assertIn("#cooldownState:empty,#autoOff:empty{min-width:0}", rule, "an empty state text takes no room")
+        self.assertLess(text.index("header{flex-wrap:wrap}"), start, "the desktop rule overrides the wrapping one")
+
 
 if __name__ == "__main__":
     unittest.main()
