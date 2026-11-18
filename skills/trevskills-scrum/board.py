@@ -660,16 +660,21 @@ def backlog_set_estimate(root, text, points, why):
     return False
 
 
+def jev_gate():
+    """jev-gate.py as a module: its name has a hyphen, so no plain import."""
+    spec = importlib.util.spec_from_file_location("jev_gate", Path(__file__).resolve().with_name("jev-gate.py"))
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    return gate
+
+
 def cmd_rank_backlog(root, all_items=False) -> dict:
     """Rate open backlog items with jev-gate's rank step (unmarked ones, or every one with all_items) outside the lock,
     plus its critical step for an agent item whose text starts with "Critical:"; back items get no Jev call. Then, under
     one lock, re-read backlog.md and write source_priority on the first open item with the same text and source (and
     still unmarked without all_items), only when it changed. A none rank, or an item gone or edited meanwhile, is left
     byte for byte."""
-    # jev-gate.py has a hyphen, so no plain import; loaded only here
-    spec = importlib.util.spec_from_file_location("jev_gate", Path(__file__).resolve().with_name("jev-gate.py"))
-    gate = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gate)
+    gate = jev_gate()
     log = Path(root) / "jev.log"
     items = [i for i in read_backlog(root)[1] if not i["done"]]
     picked = [i for i in items if all_items or i["priority"] is None]
@@ -3743,6 +3748,76 @@ def job_complex(root: Path, job_id: str) -> bool:
     d = Path(root) / "jobs" / job_id
     return (header_value(d / "feature.md", "Complex", ("yes", "no"))
             or header_value(d / "spec.md", "Complex", ("yes", "no"))) == "yes"
+
+
+# --- Runs on (job 1155): which machine may run a job. `shop` jobs never start here, `main` jobs never go to a worker,
+# and an `any` waiting child goes to a worker with room first (cmd_ready, serve.py shop_tick).
+RUNS_ON = ("any", "main", "shop")
+SHOP_NOTES = Path(__file__).resolve().with_name("shop")  # machine-notes-<alias>.md, one per worker Mac
+SHOP_ROOM_TTL = 180  # seconds serve.py's shop-room.json counts as fresh
+SHOP_FIRST_MAX_S = 300  # seconds an `any` waiting child is left to the shop before this Mac claims it anyway
+
+
+def stored_runs_on(root, job: dict) -> str | None:
+    """The job's tag as it stands: feature.md's header `Runs on:`, else its board `runs_on`; None when untagged.
+    Never asks Jev and never writes, so it is safe under the board lock."""
+    return header_value(Path(root) / "jobs" / str(job.get("id")) / "feature.md", "Runs on", RUNS_ON) \
+        or (job.get("runs_on") if job.get("runs_on") in RUNS_ON else None)
+
+
+def main_only_terms() -> list[str]:
+    """The terms of every shop.workers() worker's `## Cannot run` section (each `- ` bullet a comma-separated list) in
+    SHOP_NOTES/machine-notes-<alias>.md, in order with no repeats. A worker with no file or no section adds none."""
+    import shop  # shop.py never imports board.py; only the tag needs it here
+    terms = []
+    for w in shop.workers():
+        try:
+            text = (SHOP_NOTES / f"machine-notes-{w.alias}.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in (md_section(text, "Cannot run") or "").splitlines():
+            if line.startswith("- "):
+                terms += [t.strip() for t in line[2:].split(",") if t.strip()]
+    return list(dict.fromkeys(terms))
+
+
+def names_main_only(text: str, terms: list[str]) -> bool:
+    """True when text names a term, any case, never inside a longer word (`brew` is not in `Homebrew`)."""
+    return any(re.search(r"(?<!\w)" + r"\s+".join(map(re.escape, t.split())) + r"(?!\w)", text, re.I)
+               for t in terms if t.split())
+
+
+def jev_main_only(text: str, terms: list[str], log_path: Path) -> bool | None:
+    """Jev's answer to jev-gate.py's runs-on question, logged to log_path: True (needs this Mac), False, or None when
+    unsure or on any error. A network call: never under the board lock."""
+    gate = jev_gate()
+    decision = gate.run("runs-on", lambda asked: gate.runs_on(text, terms, asked), log_path)
+    return {"main": True, "any": False}.get(decision)
+
+
+def tag_runs_on(root, job_id: str) -> str:
+    """The job's Runs on tag. feature.md's header wins and is stored when it differs from the board's `runs_on`; else
+    the stored tag; else it is decided once: `any` for an empty main_only_terms() (no Jev call), else jev_main_only
+    over feature.md plus spec.md (`main` / `any`), falling back to names_main_only when Jev is unsure or down. A
+    decided tag is stored under the lock only when the job is still untagged. Call it outside the board lock."""
+    job = find(read_board(root), check_id(job_id))
+    folder = Path(root) / "jobs" / job_id
+    head = header_value(folder / "feature.md", "Runs on", RUNS_ON)
+    stored = job.get("runs_on") if job.get("runs_on") in RUNS_ON else None
+    if stored and head in (None, stored):
+        return stored
+    tag = head
+    if not tag:
+        text = "\n\n".join(f.read_text(encoding="utf-8", errors="replace")
+                           for f in (folder / "feature.md", folder / "spec.md") if f.is_file())
+        terms = main_only_terms()
+        main = jev_main_only(text, terms, folder / "jev.log") if terms else False
+        tag = "main" if (names_main_only(text, terms) if main is None else main) else "any"
+    with locked_board(root) as board:
+        live = find(board, job_id)
+        if head or live.get("runs_on") not in RUNS_ON:
+            live["runs_on"] = tag
+        return live["runs_on"]
 
 
 def cmd_lilguy_fit(root, job_id: str) -> dict:

@@ -12,3 +12,14 @@ This session runs on the shop MacBook Pro, a remote worker for the main Mac's sc
 ## Memory, rules and CLAUDE.md are read-only
 
 Shop sessions never write memory notes, rules or CLAUDE.md, even where other instructions say to save a note. The main Mac replaces them on every sync, so a write here is lost. Put anything worth keeping in the job's follow-ups (`followups/*.md` in the job folder).
+
+## Cannot run
+
+Only the main Mac has these, so the main Mac's scrum never sends a job that needs one here (board.py `main_only_terms`). Each bullet is a comma-separated list of terms.
+
+- VectorCraft, PhotoCraft, claude-in-chrome, computer use, MCP
+- Chrome profile, logged-in Chrome
+- .env.prod, prod data, /trevskills-migrate, /trevskills-datafix
+- printer, film printing
+- iMessage, Messages, Contacts
+- Keychain, Homebrew, brew, PR merge
