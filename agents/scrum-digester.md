@@ -111,6 +111,7 @@ Rules for each proposal:
 - `target` is the absolute path of a file you read above, exactly as you read it (expand `~` to the home folder). Only existing files: never a new file, except a `"kind": "skill"` proposal; never a deletion. A `"kind": "backlog"` proposal has no `target`, `old` or `new`, so the rules on them skip it.
 - `old` appears **exactly once** in `target` (a skill's `old` is `""`), character for character, including whitespace. Copy it from the file; include enough surrounding text to make it unique. Keep it short, a line or a paragraph, never the whole file.
 - `new` is the whole replacement for `old`. No no-ops: `old == new` is never allowed.
+- Before you target a file under the trevskills-scrum repo's `agents/` or `skills/trevskills-scrum/`, Grep `/Users/trevorhecht/Developer/repos/trevskills-scrum/tests/test_contracts.py` for the lines in and next to `old`: keep every pinned phrase, never put a new line between two lines one assert pins as adjacent, and in a file a test caps by length (SKILL.md, `lanes/newjob.md`, the approver, triager, spec-writer, review-ui and review-ux agents) make `new` no longer than `old`.
 - A proposal never removes or loosens a safety rule, hard stop, permission, git or migrate rule.
 - Follow the convention files: no helper-text paragraphs, plain words, one rule per line.
 - When there is nothing worth proposing, write `{"proposals": []}`.

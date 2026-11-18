@@ -1587,7 +1587,8 @@ DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md exp
 
 def shop_tick(project, repo, root) -> bool:
     """While this Mac's machine guard holds work (machine_ok(claim=True) refuses or cpu_hot), send the project's
-    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy, setup pending or
+    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy (board lane, `Lane: lilguy` anywhere in
+    feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent), setup pending or
     naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md, nor a
     launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the shop Mac
     as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
@@ -1615,9 +1616,18 @@ def shop_tick(project, repo, root) -> bool:
             return ""  # dispatched, then failed as a step: the claim is put back
 
     jobs = board.read_board(root)["jobs"]
+    lane = {j["id"]: j.get("lane") for j in jobs}
+
+    def lilguy(j):  # what the local lilguy route takes: board lane, `Lane: lilguy` anywhere, or a fit job (no parent / Run-all parent)
+        if board.job_lane(root, j) == "lilguy" or re.search(r"\bLane:\s*lilguy\b", feature(j["id"]), re.I):
+            return True
+        if j.get("parent") and lane.get(j["parent"]) != "runall":
+            return False
+        return board._health_file(jobs_dir / j["id"] / "lilguy-fit.json", dict).get("fit") is True
+
     pool = sorted((j for j in held_work(project, jobs)
                    if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
-                   and j.get("setup") != "pending" and board.job_lane(root, j) != "lilguy"
+                   and j.get("setup") != "pending" and not lilguy(j)
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
                   key=lambda j: (int(j["id"].split("-")[0]), j["id"]))  # numeric: 1000- sorts after 999-
     # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
