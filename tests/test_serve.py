@@ -959,7 +959,8 @@ class ServeTest(unittest.TestCase):
         self.edit_job(moved, stage="merge")
         s.RUNS[f"repo/{busy}"] = {"action": "approve", "started": time.time(), "proc": fake(None, busy, "x")[0], "log": "x"}
         ps.write_text("   02:01 claude -p /trevskills-scrum start 999-young\n")  # aged past SESSION_RAMP_SECS
-        jobs = json.loads((self.root / "board.json").read_text())["jobs"]
+        mine = (moved, busy, first, second, third)  # a queued job another test left on this board must not drain here
+        jobs = [j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] in mine]
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="30", SCRUM_SWAP_PCT="0", SCRUM_PS=str(ps)), \
                 mock.patch.object(b, "spawn", side_effect=fake) as spawn:
             self.assertTrue(s.play_queue_tick("repo", self.root, jobs))
