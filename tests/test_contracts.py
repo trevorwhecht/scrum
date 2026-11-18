@@ -1482,13 +1482,19 @@ class ContractTest(unittest.TestCase):
         stop_trust = ("   - When you stop trusting a client-sent field on one route method, grep every route and "
                       "method (POST, PUT, PATCH, submit) that reads that field or passes it to the same helper "
                       "and apply the same fix, or cite in build.md why one is left out.")
+        look = ("   - When you change how an existing element looks or behaves (a highlight, a badge, a row, a note), "
+                "grep for every other component or tree that renders the same thing (mobile and desktop, list and "
+                "detail, a sibling card) and apply the change to each, or cite in build.md why one is left out.")
+        walk = ("   - A walkthrough or live check whose record (a customer, a vendor, a product) is missing from "
+                "the dev DB creates it first; never use a stand-in or skip the live check.")
+        self.assertIn(e2e + "\n" + walk + "\n", text)
         for line in (rmw, e2e, manual, siblings, stop_trust):
             self.assertEqual(text.count(line), 1, line)
         agree = ("   - When one value feeds two places that must agree (a header and its body, the pricing "
                  "engine input and the stored copy), compute it once, pass both the same normalised value, "
                  "and add a test that asserts the two match.")
         self.assertEqual(text.count(agree), 1)
-        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
+        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + look + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
