@@ -5,8 +5,9 @@ workers() line of workers.txt beside projects.json (no file: the one shop MacBoo
 usage: shop.py probe [alias]   (print the cached probe as one JSON line; exit 0 whether the worker is up or down)
        shop.py setup [alias]   (prepare the worker for a scrum job: one `<step>: <result>` line per step; exit 1 when
                                 it is down or a step failed)
-       shop.py md-sync [alias] (pull the worker's skill clones and copy this Mac's CLAUDE.md and memory notes there:
-                                one line, `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1))
+       shop.py md-sync [alias] (pull the worker's skill clones and copy this Mac's CLAUDE.md, memory notes and plain
+                                skill folders there: one line, `md-sync: ok` (exit 0), `md-sync: failed` or
+                                `shop: down` (exit 1))
        alias defaults to the first workers() alias, else shopmac.
 
 Every function that makes an ssh call takes alias= (default ALIAS, shopmac); probe and ready() caches are per alias.
@@ -192,7 +193,8 @@ for f in MACHINES.md code/scrum-multi-machine-spec.md scrum-probe; do
 done
 touch "{CLEANUP_MARKER}"''')
 # stdin is the tar from _md_tar(), unpacked in a temp dir under ~/.claude so each mv is a rename. Every memory dir goes,
-# then each project's moves in under the key of the shop's own $HOME/scrum-work/<name> (memory_key() in tr).
+# then each project's moves in under the key of the shop's own $HOME/scrum-work/<name> (memory_key() in tr). Each
+# skills/<name> replaces the shop's ~/.claude/skills/<name> (a link or an older copy); other shop skills stay.
 # ponytail: no remote lock; two syncs at once can nest a memory dir. Add a mkdir lock if dispatch ever syncs in parallel.
 MD_COPY = "/bin/sh -c " + shlex.quote('mkdir -p "$HOME/.claude/projects" && export TMPDIR="$HOME/.claude" || exit 1; '
                                       + IN_TMP.format('''tar -xf - && mv -f CLAUDE.md "$HOME/.claude/CLAUDE.md" || exit 1
@@ -203,6 +205,11 @@ for p in memory/*; do
   [ -d "$p" ] || continue
   k=$(printf %s "$HOME/scrum-work/$(basename "$p")" | tr -c 'A-Za-z0-9' -)
   mkdir -p "$HOME/.claude/projects/$k" && mv "$p" "$HOME/.claude/projects/$k/memory" || exit 1
+done
+for s in skills/*; do
+  [ -d "$s" ] || continue
+  n=$(basename "$s")
+  mkdir -p "$HOME/.claude/skills" && rm -rf "$HOME/.claude/skills/$n" && mv "$s" "$HOME/.claude/skills/$n" || exit 1
 done'''))
 
 # ponytail: module globals with no lock; add one when a second thread calls probe(). Callers treat the dicts as read-only.
@@ -532,8 +539,10 @@ def _projects() -> dict[str, Path]:
 
 def _md_tar(alias: str = ALIAS) -> bytes:
     """The copy step's stdin: CLAUDE.md (this Mac's bytes, a newline when they lack one, then notes_import(alias), left
-    out when this repo has no notes file for that worker) and
-    memory/<name>/ for each _projects() entry that has a memory dir here. Raises OSError (no CLAUDE.md, a bad read)."""
+    out when this repo has no notes file for that worker), memory/<name>/ for each _projects() entry that has a memory
+    dir here, and skills/<name>/ for each plain folder in ~/.claude/skills (not a link, not `synced`, a PROJECT_RE name;
+    jobs read files there, e.g. trevskills-email's ai-tells.md), its links copied as files and a broken one skipped.
+    Raises OSError (no CLAUDE.md, a bad read)."""
     claude = Path.home() / ".claude"
     text = (claude / "CLAUDE.md").read_bytes()
     if (Path(__file__).parent / "shop" / f"machine-notes-{alias}.md").is_file():
@@ -547,12 +556,22 @@ def _md_tar(alias: str = ALIAS) -> bytes:
             mem = claude / "projects" / memory_key(str(repo)) / "memory"
             if mem.is_dir():
                 tar.add(mem, f"memory/{name}")
+        skills = claude / "skills"
+        for d in sorted(skills.iterdir()) if skills.is_dir() else ():
+            if d.is_symlink() or not d.is_dir() or d.name == "synced" or not PROJECT_RE.fullmatch(d.name):
+                continue
+            for top, _, files in os.walk(d):
+                for f in sorted(files):
+                    p = Path(top, f)
+                    if p.is_file():  # follows a link; a broken one is skipped (tar.add would raise)
+                        tar.add(p, f"skills/{d.name}/{p.relative_to(d).as_posix()}")
     return buf.getvalue()
 
 
 def md_sync(alias: str = ALIAS) -> bool:
     """Make this Mac the single writer of what shop sessions read: pull the shop's skill clones (MD_PULL), run the
-    one-time cleanup (MD_CLEANUP) and replace its CLAUDE.md and memory dirs (MD_COPY), each one run() of STEP_TIMEOUT.
+    one-time cleanup (MD_CLEANUP) and replace its CLAUDE.md, memory dirs and the skill folders this Mac has as plain
+    folders (MD_COPY), each one run() of STEP_TIMEOUT.
     True when all three exit 0; False at the first failure, with no later call. This Mac's files are read before any
     ssh, so a missing CLAUDE.md costs no call, and a down shop Mac costs only the probe. Prints nothing."""
     try:
@@ -570,7 +589,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     for name, text in (("probe", "print the probe as one JSON line"),
                        ("setup", "prepare the worker Mac for a scrum job; one line per step"),
-                       ("md-sync", "pull the worker's skill clones and copy CLAUDE.md and memory there; one line")):
+                       ("md-sync", "pull the worker's skill clones and copy CLAUDE.md, memory and skill folders there; one line")):
         sub.add_parser(name, help=text).add_argument("alias", nargs="?", help="default: the first workers.txt alias")
     args = parser.parse_args(argv)
     command, alias = args.command, args.alias or next((w.alias for w in workers()), ALIAS)

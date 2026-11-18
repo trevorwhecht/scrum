@@ -3672,9 +3672,19 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
 
     def test_cloud_artifacts_block_is_zsh_safe(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "cloud.md").read_text()
-        block = self.section(text, "- **Artifacts:**", "`B artifacts` prints only")
+        block = self.section(text, "- **Artifacts:**", "`board.py artifacts` prints only")
         self.assertIn("git push origin", block)
         self.assertNotRegex(block, r"\$[A-Za-z_]+:")  # zsh reads $C:r as a modifier
+
+    def test_no_zsh_modifier_after_shell_variable(self):
+        # The shop's Bash is zsh: "$C:refs/..." there is $C with the :r modifier, then "efs/..." (job 970's push).
+        files = [*sorted((ROOT / "skills").rglob("*.md")), *sorted((ROOT / "agents").glob("*.md")),
+                 ROOT / "codex" / "AGENTS.md"]
+        self.assertGreater(len(files), 30)
+        bad = [f"{path.relative_to(ROOT)}:{n}: {m.group()}" for path in files
+               for n, line in enumerate(path.read_text().splitlines(), 1)
+               for m in re.finditer(r"\$[A-Za-z_][A-Za-z0-9_]*:[A-Za-z&]", line)]
+        self.assertEqual(bad, [])
 
     def test_moved_sections_have_lane_files(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
@@ -4109,10 +4119,15 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         text = skill_text()
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
-        for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "B artifacts $ID", "git write-tree",
-                       "commit-tree", "refs/heads/scrum-artifacts/${ID}", "never merged", "never has a PR",
-                       "does not change the job's outcome", "merged, needs-human or obsolete abort"):
+        for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "git write-tree",
+                       "commit-tree", "refs/heads/scrum-artifacts/$ID", "never merged", "never has a PR",
+                       "does not change the job's outcome", "merged, needs-human or obsolete abort",
+                       "artifacts: pushed", "artifacts: push failed", "never deletes or force-pushes"):
             self.assertIn(phrase, job, phrase)
+        artifacts = job[job.index("- **Artifacts:**"):]  # SCRUM_SHOP is in Setup too: check it in this bullet
+        for phrase in ("A shop run (`SCRUM_SHOP` set) pushes it too", "the shop's `scrum/jobs/` never reaches this Mac",
+                       "The final report quotes the block's last line"):
+            self.assertIn(phrase, artifacts, phrase)
         sync = cloud[cloud.index("3. **Sync**"):]
         for phrase in ("git fetch origin scrum-artifacts/$ID", "missing branch", "git archive FETCH_HEAD",
                        "scrum/jobs/$ID", "all but `feature.md`", "never overwrites the local `feature.md`",
