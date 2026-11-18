@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "trevskills-scrum"))
 sys.path.insert(0, str(ROOT / "tests"))  # bare sibling imports resolve however the module is invoked
+tempfile.tempdir = os.path.realpath(tempfile.gettempdir())  # macOS: /var/folders is a symlink to /private/var; code logs resolved paths
 os.environ["SCRUM_MUTE"] = "1"  # no test run makes a sound
 DEFAULT_REGISTRY = os.path.join(tempfile.mkdtemp(), "projects.json")  # pulse.log, weekly/ never in the real home
 os.environ["SCRUM_REGISTRY"] = DEFAULT_REGISTRY
@@ -9637,6 +9638,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
                 with self.subTest(case=case, cooling=cooling):
                     (self.root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n")
                     self.serve.ORPHAN_RESPAWN.clear(); self.serve.STALL_RESUMED.clear(); self.serve.AUTO_RESUME.clear()
+                    self.serve.SWEEP_SEEN.clear(); self.serve.SWEEP_HELD.clear()  # the cooling pass held it (job 1132)
                     self.queue_board(*(dict(j) for j in jobs))
                     if cooling:
                         flag.write_text("")
@@ -10125,6 +10127,7 @@ class AutoContinueTest(unittest.TestCase):
                 with mock.patch.object(self.board, "machine_ok",
                                        side_effect=lambda path, **kw: next(answers) if kw.get("claim") else None):
                     self.assertEqual(self.tick(), self.started(first))
+                self.serve.SWEEP_HELD.clear()  # the refused tick held the lower project (job 1132)
                 self.assertEqual(self.tick(), self.started(first) + self.started(lower), "room for both: rank order")
 
     def test_rank_skips_unstartable_higher_rank(self):
