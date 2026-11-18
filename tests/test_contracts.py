@@ -4121,9 +4121,10 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         for phrase in ("**Reviewers always run:**", "even on a one-line diff or a repo with no tests",
                        "only the Lilguy lane (after `B lilguy-fit $ID` prints `fit: true`)",
-                       "Merge always starts with its step 2 `B set $ID stage=merging`",
+                       "Merge runs its step 1 guards, then its step 2 `B set $ID stage=merging`",
                        "round-N/review-code.md`, decision.md or human-approval.md"):
             self.assertIn(phrase, job, phrase)
+        self.assertIn("**Unreviewed merge.**", cloud)  # job 1105: a gh-api merge skips stage=merging
 
     def test_skill_cloud_artifacts_come_home(self):
         text = skill_text()
