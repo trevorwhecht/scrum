@@ -6822,7 +6822,8 @@ def last_log_line(root, runlog):
 
 
 def cmd_watchdog(root, alive=None, exits=None, hold=None):
-    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
+    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session (for a parent,
+    a live child session or its live chain lock counts as its own): it keeps
     its stage with `stalled` true and a STALL reason, and plays no sound. Its stall line carries "exit" (exits, serve.py's
     {run log: exit code}, looked up by the job's runlog) and "last_log" (last_log_line), each None when unknown.
     Every stall line is "auto" when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
@@ -6848,7 +6849,9 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                                                      and not parent.get("paused")
                                                      and parent.get("lane") in ("runall", "bigboy"))
                 live_idle = False
-                if alive(job):
+                # a parent's final review runs in its child's session (onewitharts 1091): its family counts as its own
+                kids = [j for j in board["jobs"] if j["id"] in (job.get("children") or ())]
+                if alive(job) or (kids and (chain_lock_live(root, job["id"]) or any(alive(k) for k in kids))):
                     if not (stalled_since(job, idle_cutoff) and job_dir_idle(root, job["id"], idle_cutoff.timestamp())):
                         continue
                     live_idle = True
