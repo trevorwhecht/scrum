@@ -1349,6 +1349,10 @@ def cmd_digest_start(root):
         write_pulse(root, digest_id)
     except (SystemExit, OSError, ValueError, TypeError) as e:
         print(f"digest-start: pulse: {e}", file=sys.stderr)
+    try:
+        write_processes(root, digest_id)
+    except (SystemExit, OSError, ValueError, TypeError) as e:
+        print(f"digest-start: processes: {e}", file=sys.stderr)
     return out
 
 
@@ -1412,6 +1416,55 @@ def pulse_path():
     """The serve.py watchdog's pulse log (one JSON line a tick): $SCRUM_PULSE when set and non-empty, else beside
     projects.json (SCRUM_REGISTRY moves both)."""
     return Path(os.environ.get("SCRUM_PULSE") or registry_path().parent / "pulse.log")
+
+
+# Every process the scrum runs on its own, for the digest (write_processes): (name, serve.py/board.py functions,
+# state files relative to the scrum folder, globs allowed). tests/test_processes.py fails on a watchdog call, *_tick
+# or scrum-folder file no entry names, and on a log_process name that is no entry.
+PROCESSES = (
+    ("Session starts", ("spawn", "auto_continue_tick", "play_queue_tick", "auto_resume", "auto_play", "idle_claim",
+                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
+    ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
+     ("questions.log",)),
+    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run"), ("e2e-full.json", "e2e-full.log")),
+    ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record"), ("ui-sweep.json", "ui-sweep/*/review.md")),
+    ("Prod error sweep", ("prod_errors_tick",), ("prod-errors.json",)),
+    ("Actions alerts", ("actions_alert",), ()),
+    ("Disk reclaim", ("reclaim_disk",), ()),
+    ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
+    ("E2E lock reaps", ("e2e_lock_reap",), ()),
+    ("Digest retry", ("digest_retry_tick",), ()),
+    ("Weekly digest", ("weekly_tick",), ()),
+    ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick"), ()),
+    ("Usage windows", ("window_tick",), ("windows",)),
+    ("Pulse", ("pulse_tick", "record_cpu_sample", "cooldown_chime"), ()),
+    ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
+    ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
+    ("Backlog ranking", ("cmd_rank_backlog",), ("jev.log",)),
+    ("Held items", (), ("held.md",)),
+    ("Manual checks", ("cmd_manual_add",), ("manual-checks.md",)),
+)
+
+
+def processes_path():
+    """The machine-wide process run log (one JSON line a run, log_process), beside pulse.log (SCRUM_PULSE moves it)."""
+    return pulse_path().with_name("processes.log")
+
+
+def log_process(process: str, result: str, **fields) -> None:
+    """Append one {"t", "process", "result", **fields} JSON line to processes_path(): one PROCESSES entry's run, for
+    the digest's processes.md (write_processes). Never raises: an OSError prints one `processes: ` stderr line. Under
+    unittest the real default ~/.claude/trevskills-scrum/processes.log is never written (a silent return)."""
+    path = processes_path()
+    if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
+        return  # a test run would add fixture runs to the live log the digest reads
+    line = json.dumps({"t": int(time.time()), "process": process, "result": result, **fields}, default=str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print(f"processes: {e}", file=sys.stderr)
 
 
 def pulse_auto(lines, project=None):
@@ -1591,6 +1644,65 @@ def write_pulse(root, digest_id):
                 "Claims by account: " + (", ".join(f"{k} {by_acc[k]}" for k in sorted(by_acc, key=lambda k: (
                     k == "unknown", names.index(k) if k in names else len(names)))) or "none")]
     (Path(root) / "digests" / digest_id / "pulse.md").write_text("\n".join(out) + "\n")
+
+
+PROCESSES_NEWEST = 10  # write_processes: run lines and changed glob matches shown per process
+
+
+def write_processes(root, digest_id):
+    """digests/<NNN>/processes.md: per PROCESSES entry, in order, its code, its processes.log runs since the last
+    digest (_pulse_since; none: every line) and its state files. A run counts when its t is numeric and at or after the
+    cutoff, its process is the entry's name and its result a string; a run whose `repo` resolves to another checkout
+    than root's parent is left out (no repo: every project's). Runs: the count by result (most first, ties by name),
+    false alarms (a fail whose string head a later counted pass of the same process has), and the time from numeric
+    `secs` (whole minutes), then the PROCESSES_NEWEST newest lines, newest first. Files: a plain path is missing,
+    changed since the last digest (mtime at or after the cutoff, or no cutoff) or unchanged; a glob lists its changed
+    matches relative to root, sorted, PROCESSES_NEWEST at most."""
+    since = _pulse_since(root, digest_id)
+    me = os.path.realpath(Path(root).parent)
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="minutes")
+    show = lambda v: v if isinstance(v, str) else json.dumps(v, default=str)
+    changed = lambda p: since is None or p.stat().st_mtime >= since
+    runs = [l for l in _json_lines(processes_path()) if is_num(l.get("t")) and (since is None or l["t"] >= since)
+            and isinstance(l.get("process"), str) and isinstance(l.get("result"), str)
+            and ("repo" not in l or os.path.realpath(str(l["repo"])) == me)]
+    runs = [l for _, l in sorted(enumerate(runs), key=lambda x: (x[1]["t"], x[0]))]  # time order, file order on ties
+    out = [f"# Processes: digest {digest_id}", "",
+           f"Since: {iso(since)}" if since is not None else "Since: the start"]
+    for name, code, files in PROCESSES:
+        mine = [l for l in runs if l["process"] == name]
+        out += ["", f"## {name}", "Code: " + (", ".join(code) or "none")]
+        if mine:
+            counts = {}
+            for l in mine:
+                counts[l["result"]] = counts.get(l["result"], 0) + 1
+            line = f"Runs: {len(mine)} (" + ", ".join(
+                f"{r} {n}" for r, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))) + ")"
+            alarms = sum(1 for i, l in enumerate(mine) if l["result"] == "fail" and isinstance(l.get("head"), str)
+                         and any(m["result"] == "pass" and m.get("head") == l["head"] for m in mine[i + 1:]))
+            if alarms:
+                line += f" · false alarms: {alarms}"
+            secs = [l["secs"] for l in mine if is_num(l.get("secs"))]
+            if secs:
+                line += f" · time: {round(sum(secs) / 60)} min total, longest {round(max(secs) / 60)} min"
+            out.append(line)
+            for l in reversed(mine[-PROCESSES_NEWEST:]):
+                rest = " ".join(f"{k}={show(v)}" for k, v in l.items() if k not in ("t", "process", "result"))
+                out.append(f"- {iso(l['t'])} {l['result']}" + (f" {rest}" if rest else ""))
+        else:
+            out.append("Runs: none logged since the last digest")
+        out.append("Files:" if files else "Files: none")
+        for f in files:
+            if "*" in f:
+                hits = sorted(str(p.relative_to(root)) for p in Path(root).glob(f) if changed(p))
+                more = f" (+{len(hits) - PROCESSES_NEWEST} more)" if len(hits) > PROCESSES_NEWEST else ""
+                out.append(f"- {f}: " + (", ".join(hits[:PROCESSES_NEWEST]) + more if hits
+                                         else "none changed since the last digest"))
+            else:
+                p = Path(root) / f
+                out.append(f"- {f}: " + ("missing" if not p.exists() else "changed since the last digest"
+                                         if changed(p) else "unchanged"))
+    (Path(root) / "digests" / digest_id / "processes.md").write_text("\n".join(out) + "\n")
 
 
 def weekly_ran(resets_at):
@@ -3257,6 +3369,7 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
     tmp = Path(root) / "ui-sweep.json.tmp"
     tmp.write_text(json.dumps(out, indent=1) + "\n")
     os.replace(tmp, Path(root) / "ui-sweep.json")
+    log_process("UI sweep", out["result"], repo=str(Path(root).parent), findings=out["findings"], dir=out["dir"])
     return out
 
 

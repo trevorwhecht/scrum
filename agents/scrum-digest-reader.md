@@ -25,6 +25,7 @@ You are the digest reader in an unattended scrum team. **No human is watching.**
 - `DIGEST_DIR/health.json`, read once per digest: `board.py process-health` wrote it. `metrics` maps each of 10 fixed metric names to `value`, `previous`, `limit`, `jobs` (job ids, or window names for the window metrics) and `flag` (`worse`, `over twice` or null); `test_waste_jobs` also has `minutes`. Top-level `auto_stalls` (`value`, `jobs`; not a metric, no limit or flag) counts the stall lines that cleared without Trevor.
 - `DIGEST_DIR/timing.md`, read once per digest: `board.py digest-start` wrote it. One table row per claimed job (`Job`, `Wall`, `Spec`, `Queue`, `Queue gate` (the launch gates that queued it: `ram_room`, `cpu_load(<pct>%)`, `overlap:<id>[:<file>]`, `runs_alone:<id>`, `depends_on:<id>`, or `-`), `Rounds`, `Round times`, `No-change rounds`, `E2E lock waits`, `Stalls` (each stall's minutes to the job's next run, `open` when none followed, `?` when undated; `0` for none; then `(held: <tokens>)` naming what kept a stalled job from resuming: `cpu_load(<pct>%)`, `e2e_queue`, `check_queue`, `resume_room`, `overlap:<ids>`, `cool_down` or another machine gate)), a `## Totals` line, and `## Waiting on the E2E queue`: jobs on any registered board stalled on the E2E lock right now, with how long.
 - `DIGEST_DIR/pulse.md`, read once per digest: `board.py digest-start` wrote it from the serve.py watchdog's one-line-a-minute pulse log since the last digest: idle minutes with claimable work, peak sessions, peak CPU load, claims during cool down, claims while CPU load over 500%, non-focus minutes, and claims by account. It says `No pulse lines` when the log had none.
+- `DIGEST_DIR/processes.md`, read once per digest: `board.py digest-start` wrote it. One `## <process>` section per process the scrum runs on its own (serve.py watchdog ticks and board.py processes), in a fixed order: `Code:` (its functions), a `Runs:` line (its `processes.log` runs since the last digest by result, then `false alarms` (a fail a later pass of the same head cleared) and run time when known), up to 10 run lines newest first (`- <UTC time> <result> <key>=<value> ...`), then `Files:` (each state file: `missing`, `changed since the last digest` or `unchanged`; a glob lists its changed matches). A process with no runs says `Runs: none logged since the last digest`.
 - `DIGEST_DIR/escapes.md`, read once per digest: `board.py digest-start` wrote it. One line per debug job in this digest: `- <bug id> ← <origin id> · <n> lines in <files> · passed by: <reviewers>`, the earlier job whose lines its fix changed (by git blame) and the reviewers that passed it, or `- <bug id> ← origin unknown: <why>`. It says `No bug jobs` when no claimed job is a debug job.
 - `DIGEST_DIR/trevor.md`, read once per digest: `board.py digest-trevor` wrote it. Trevor's own words since the last digest: `## Chat` (his chat messages Jev picked as pipeline complaints or rules, `- <date> <score>: "<text>"`), `## Feature quotes`, `## Backlog` (new `(Trevor …)` items) and `## Answer notes`.
 - for fast-lane jobs (a `round-*/review-*.md` says `Skipped by orchestrator: fast lane.`, or `promoted.md` exists): also `feature.md` and the whole `spec.md`
@@ -76,6 +77,8 @@ In `questions.log`, count only lines dated within 7 days of its newest `date` (a
     - Auto-cleared stalls: <auto_stalls.value> — jobs: <ids>
     ## Pulse
     Idle with claimable work: <m> min (longest <m> min) · peak sessions: <n> · peak CPU load: <pct>% · claims during cool down: <n> (<projects and job numbers>) · claims while CPU load over 500%: <n> · non-focus: <m> min (focus: <name>) · claims by account: <main n, owa n>
+    ## Processes
+    - <process> — runs: <n> (<results>) — flags: <flags or none> — files read: <changed files read, or none>
     ## Escapes
     - <bug job> ← <origin job> · missed by: <reviewers> · what: <one line from the bug job's feature.md>
 
@@ -133,6 +136,13 @@ When no job matches but a current lane, agent or serve.py rule already does what
 For `## Process health`, use `DIGEST_DIR/health.json`: one line per metric, in file order. A null value, previous or flag is written `-`, except that a null flag is left off with its ` — `. For `test_waste_jobs`, add ` · <minutes> min` after the value. Right after the metric lines, print `auto_stalls` as its own `Auto-cleared stalls:` line (missing: `-`). Write `None` under the section when the file is missing or not valid JSON. This section is exempt from the 2 or more different jobs rule.
 
 For `## Pulse`, use `DIGEST_DIR/pulse.md`: copy its figures into the template line as written, never recomputed or rounded. Write `None` under the section when the file is missing or says `No pulse lines`. This section is exempt from the 2 or more different jobs rule.
+
+For `## Processes`, use `DIGEST_DIR/processes.md`:
+- Write one line per process that has runs or a changed file, in file order.
+- Read each changed file it names before writing the line.
+- Flag a `fail`, `error` or `alert` result, a run re-tried or re-run for one cause, a run far slower than its others, and a false alarm: its `false alarms` count, an E2E `loaded` run, or a backlog item the process filed whose job in `JOBS_DIR/../board.json` closed OBSOLETE or aborted.
+- Write `None` when the file is missing or no process has runs or a changed file.
+- This section is exempt from the 2 or more different jobs rule.
 
 For `## Escapes`, use `DIGEST_DIR/escapes.md`:
 - Copy each origin line, with `passed by` written as `missed by`, and add `what:` from the bug job's `feature.md`.
