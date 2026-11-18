@@ -1156,7 +1156,7 @@ class BoardTest(unittest.TestCase):
         parent = self.plan(self.ticket(1), self.ticket(2, deps="T1"), self.ticket(3, deps="T1, T2", exposure="yes"))
         c1, c2, c3 = board.cmd_plan_apply(self.root, parent)["children"]
         self.assertEqual(board.cmd_ready(self.root, parent),
-                         {"ready": [c1], "merged": 0, "total": 3, "in_progress": 1, "all_merged": False})
+                         {"ready": [c1], "merged": 0, "total": 3, "in_progress": 1, "all_merged": False, "held": None})
         self.assertEqual(self.child(c1)["stage"], "spec")
         board.cmd_set(self.root, c1, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c2])
@@ -1164,7 +1164,7 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c3])
         board.cmd_set(self.root, c3, ["stage=done"])
         self.assertEqual(board.cmd_ready(self.root, parent),
-                         {"ready": [], "merged": 3, "total": 3, "in_progress": 0, "all_merged": True})
+                         {"ready": [], "merged": 3, "total": 3, "in_progress": 0, "all_merged": True, "held": None})
         self.assertEqual(self.child(parent)["stage"], "running")
 
     def outside(self, parent, c1, dep_id=None):
@@ -1315,6 +1315,57 @@ class BoardTest(unittest.TestCase):
         self.spec(d1, "src/x.py")
         board.cmd_ready(self.root, parent)
         self.assertEqual(gates(d2), [f"runs_alone:{d1}"])  # job 825: names the holder
+
+    def test_cmd_ready_reports_held_gate(self):
+        """Job 955: a machine, usage or RAM hold names itself in `held`, so start_ready can note the gate."""
+        parent, (c1, c2, _) = self.three()
+        self.spec(c1, "src/a.py")
+        self.spec(c2, "src/b.py")
+        with mock.patch.object(board, "machine_ok", return_value="free RAM 14% (< 20%)"):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([], "free RAM 14% (< 20%)"))
+        usage = board.Allowance(0, "no account has room: main usage 5h 97% used")
+        with mock.patch.object(board, "pick_account", return_value=(None, usage)):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([], "no account has room: main usage 5h 97% used"))
+        with mock.patch.object(board, "ram_room", return_value=0):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([], "ram_room"))
+        out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([c1, c2], None))
+
+    def test_cmd_ready_light_kid_uses_light_room(self):
+        """Job 955: with no standard RAM room a fast kid still claims on the light room spawn sizes it with, as the
+        call's only claim; a standard kid waits."""
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
+                           self.ticket(4, deps="T1, T2, T3", exposure="yes"))
+        std, fast1, fast2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(std, "src/a.py")
+        self.spec(fast1, "src/b.py")
+        board.cmd_set(self.root, fast1, ["lane=fast"])
+        self.write(f"{fast2}/spec.md", "# x\nLane: fast\n## Likely files\n- `src/c.py`: why\n")
+        rooms = lambda std_room, light_room: mock.patch.object(
+            board, "ram_room", side_effect=lambda floor=1, light=False: light_room if light else std_room)
+        with rooms(0, 0):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([], "ram_room"))
+        with rooms(0, 1):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([fast1], "ram_room"))
+        self.assertEqual([self.child(k)["stage"] for k in (std, fast2)], ["waiting", "waiting"])  # light room 1: one claim
+        with rooms(0, 1):
+            self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [fast2])  # spec.md's Lane: fast counts too
+        self.assertEqual(self.child(std)["stage"], "waiting")
+        # standard room 1, light room 2: spawn counts the standard claim as a young session, so the fast kid waits
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        std, fast, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(std, "src/d.py")
+        self.spec(fast, "src/e.py")
+        board.cmd_set(self.root, fast, ["lane=fast"])
+        with rooms(1, 2):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([std], None))
+        self.assertEqual(self.child(fast)["stage"], "waiting")
 
     def test_ready_records_overlap_hold(self):
         # Job 764: the card shows why a waiting child is held; a claim or a dep wait drops a stale hold.

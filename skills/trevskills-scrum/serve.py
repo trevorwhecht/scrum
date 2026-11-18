@@ -416,11 +416,16 @@ def cpu_hot(manual=False):
 
 def start_ready(project, root, parent_id, manual=False):
     """Claim the parent's startable children and start each one headless. Returns cmd_ready's output ({"ready": []}
-    when CPU load holds it: cpu_hot claims nothing). Cool-down and CPU load hold the claims unless `manual`."""
+    when CPU load holds it: cpu_hot claims nothing). Cool-down and CPU load hold the claims unless `manual`. A hold
+    cmd_ready names in `held` is noted on each ready waiting child: ram_room, held_gate's token for a machine_ok
+    refusal, usage_allowance for the rest (the usage cap; held_gate knows every machine_ok reason)."""
     if cpu_hot(manual):
         note_held(root, cpu_token(), ready_waiting(root, parent_id))
         return {"ready": []}
     out = board.cmd_ready(root, parent_id, live_ids(project), manual=manual)
+    if held := out.get("held"):
+        tok = held if held == "ram_room" else held_gate(held)
+        note_held(root, "usage_allowance" if tok == "other" else tok, ready_waiting(root, parent_id))
     for child in out["ready"]:
         spawn(project, root, child, "start", f"/trevskills-scrum start {child}", manual=manual)
     return out

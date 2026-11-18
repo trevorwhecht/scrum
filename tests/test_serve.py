@@ -8921,6 +8921,25 @@ class WatchdogIdleParentTest(unittest.TestCase):
             self.assertEqual(self.serve.start_ready("idle", self.root, "001-par"), {"ready": []})
         self.assertEqual((self.gate_text("002-kid"), self.gate_text("003-kid")), ("cpu_load(501%)\n", None))
 
+    def test_start_ready_notes_held_gate(self):
+        """Job 955: a machine, RAM or usage hold inside cmd_ready leaves a gate line on each ready waiting child."""
+        self.queue_board({"id": "001-par", "stage": "running", "lane": "runall", "children": ["002-kid", "003-kid"]},
+                         {"id": "002-kid", "parent": "001-par", "stage": "waiting"},
+                         {"id": "003-kid", "parent": "001-par", "stage": "waiting", "depends_on": ["002-kid"]})
+        for i in ("002-kid", "003-kid"):
+            (self.root / "jobs" / i).mkdir(parents=True, exist_ok=True)
+        usage = self.board.Allowance(0, "no account has room: main usage 5h 97% used")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            for _ in range(2):  # the second call adds no duplicate line
+                with mock.patch.object(self.board, "machine_ok", return_value="free RAM 14% (< 20%)"):
+                    self.assertEqual(self.serve.start_ready("idle", self.root, "001-par")["ready"], [])
+            with mock.patch.object(self.board, "ram_room", return_value=0):
+                self.assertEqual(self.serve.start_ready("idle", self.root, "001-par")["ready"], [])
+            with mock.patch.object(self.board, "pick_account", return_value=(None, usage)):
+                self.assertEqual(self.serve.start_ready("idle", self.root, "001-par")["ready"], [])
+        spawn.assert_not_called()
+        self.assertEqual((self.gate_text("002-kid"), self.gate_text("003-kid")), ("ram\nram_room\nusage_allowance\n", None))
+
     def test_wake_waiting_gate_dedup_and_unready(self):
         self.waiting_pair()
         for _ in range(2):
