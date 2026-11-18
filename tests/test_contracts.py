@@ -1482,13 +1482,19 @@ class ContractTest(unittest.TestCase):
         stop_trust = ("   - When you stop trusting a client-sent field on one route method, grep every route and "
                       "method (POST, PUT, PATCH, submit) that reads that field or passes it to the same helper "
                       "and apply the same fix, or cite in build.md why one is left out.")
+        look = ("   - When you change how an existing element looks or behaves (a highlight, a badge, a row, a note), "
+                "grep for every other component or tree that renders the same thing (mobile and desktop, list and "
+                "detail, a sibling card) and apply the change to each, or cite in build.md why one is left out.")
+        walk = ("   - A walkthrough or live check whose record (a customer, a vendor, a product) is missing from "
+                "the dev DB creates it first; never use a stand-in or skip the live check.")
+        self.assertIn(e2e + "\n" + walk + "\n", text)
         for line in (rmw, e2e, manual, siblings, stop_trust):
             self.assertEqual(text.count(line), 1, line)
         agree = ("   - When one value feeds two places that must agree (a header and its body, the pricing "
                  "engine input and the stored copy), compute it once, pass both the same normalised value, "
                  "and add a test that asserts the two match.")
         self.assertEqual(text.count(agree), 1)
-        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + step3, text)
+        self.assertIn(b9 + "\n" + agree + "\n" + stop_trust + "\n" + siblings + "\n" + rmw + "\n" + look + "\n" + step3, text)
         self.assertIn(b4 + "\n" + e2e + "\n", text)
         self.assertIn(manual + "\n" + running_app, text)
         rule_500 = ("a 500 response returns a fixed generic message, never `error.message`, `details` or a "
@@ -1594,6 +1600,13 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, rule, phrase)
         self.assertNotIn("3 files", rule)
 
+    def test_spec_writer_likely_files_names_functions(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("- **Likely files** names every file the diff will change"))
+        for phrase in ("(functions:", "`skills/trevskills-scrum/board.py`", "`serve.py`"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertEqual(text.count("(functions:"), 1)  # no second rule
+
     def test_spec_writer_honours_orchestrator_lane_and_complex(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("Lane override:", "Complex: yes|no", "five header lines"):
@@ -1695,6 +1708,49 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, escapes, phrase)
         weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
         self.assertIn("**Pulse**, **Escapes**, **Backlog fallback**", weekly)
+
+    def test_digest_reads_processes(self):
+        """Job 976: the digest audits every process in board.PROCESSES through $D/processes.md."""
+        lane = self.lane("digest")
+        self.assertIn("Learns from finished jobs and from every process the scrum runs (`$D/processes.md`).", lane)
+        step1 = next(l for l in lane.splitlines() if l.startswith("1. Run `B digest-start`"))
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        for phrase in ("`$D/processes.md`", "`board.PROCESSES`", "`processes.log` lines since the last digest",
+                       "state files"):
+            self.assertIn(phrase, last, phrase)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        bullet = "- `DIGEST_DIR/processes.md`, read once per digest: `board.py digest-start` wrote it"
+        self.assertIn(bullet, read)
+        self.assertLess(read.index("- `DIGEST_DIR/pulse.md`"), read.index(bullet))
+        line = read[read.index(bullet):]
+        line = line[:line.index("\n")]
+        for phrase in ("`Runs:`", "`false alarms`", "`Files:`", "newest first", "`Runs: none logged since the last digest`"):
+            self.assertIn(phrase, line, phrase)
+        self.assertIn("    ## Processes\n    - <process> — runs: <n> (<results>) — flags: <flags or none> — files read: "
+                      "<changed files read, or none>\n", reader)
+        self.assertLess(reader.index("    ## Pulse\n"), reader.index("    ## Processes\n"))
+        self.assertLess(reader.index("    ## Processes\n"), reader.index("    ## Escapes\n"))
+        rule = reader[reader.index("For `## Processes`, use `DIGEST_DIR/processes.md`:"):]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("one line per process that has runs or a changed file, in file order",
+                       "Read each changed file it names before writing", "`loaded` run", "closed OBSOLETE or aborted",
+                       "re-tried or re-run for one cause", "far slower than its others",
+                       "Write `None` when the file is missing or no process has runs or a changed file",
+                       "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, rule, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        step2 = next(l for l in digester.splitlines() if l.startswith("2. The scrum's own files:"))
+        self.assertIn("`~/.claude/skills/trevskills-scrum/lanes/*.md`", step2)
+        self.assertLess(digester.index("**Escapes.**"), digester.index("**Processes.**"))
+        self.assertLess(digester.index("**Processes.**"), digester.index("**Backlog fallback.**"))
+        procs = digester[digester.index("**Processes.**"):digester.index("**Backlog fallback.**")]
+        for phrase in ("at most one proposal whose `why` starts `Processes:`", "names the process and the flag",
+                       "`lanes/uisweep.md`", "`lanes/runall.md`", "`lanes/bigboy.md`", "**Backlog fallback**",
+                       "a serve.py tick, an E2E spec or seed data", "A `None` section gets no proposal", "at-most-8 cap"):
+            self.assertIn(phrase, procs, phrase)
+        weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
+        self.assertIn("**Escapes**, **Backlog fallback**, **New skill** and **Processes** read `notes.md`", weekly)
 
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))

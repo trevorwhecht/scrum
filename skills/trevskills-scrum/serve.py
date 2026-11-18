@@ -369,6 +369,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
                                        "account": account,
                                        **({"reason": reason} if action in ("approve", "rework", "resume") else {})}
+    board.log_process("Session starts", action, repo=str(Path(root).parent), job=job_id, manual=manual)
     return log
 
 
@@ -1106,6 +1107,8 @@ def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 else last_green}
         write_e2e_full(root, rec)
+        board.log_process("Full E2E on main", result, repo=str(repo), head=head, exit=code, failed=len(failed),
+                          secs=int(time.time() - at))
         if failed and not loaded:
             timed_out = e2e_full_timed_out(output, test_dir)
             e2e_full_backlog(repo, root, failed, last_green, head,
@@ -1497,7 +1500,10 @@ def cloud_tick(project, root, jobs, now=None):
         ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]))
                  for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
         out = board.cmd_cloud_sync(root)
+        for m in out.get("moved") or []:
+            board.log_process("Cloud jobs", m.get("state"), repo=str(Path(root).parent), job=m.get("id"), pr=m.get("pr"))
         if out.get("error"):
+            board.log_process("Cloud jobs", "error", repo=str(Path(root).parent), error=out["error"])
             print(f"cloud-sync: {project}: {out['error']}", file=sys.stderr, flush=True)
         elif ended:
             live = {j["id"]: j for j in board.read_board(root)["jobs"]}
@@ -2058,6 +2064,8 @@ def reclaim_disk(repo: Path, jobs: list[dict]) -> int:
         if not git_run(repo, "worktree", "remove", "--force", "--", str(wt)).returncode:
             removed += 1
     git_run(repo, "worktree", "prune")
+    if removed:
+        board.log_process("Disk reclaim", "freed", repo=str(repo), removed=removed)
     return removed
 
 
@@ -2168,6 +2176,8 @@ def prod_errors_tick(project, repo, root, now=None) -> None:
         board.cmd_backlog_add(root, [f"Prod error sweep: {over} more new production error signatures in the last 24 h "
                                      f"were not backlogged (cap {PROD_ERRORS_CAP} a day); see scrum/prod-errors.json"],
                               unless_open="Prod error sweep:")
+    board.log_process("Prod error sweep", "error" if rows is None else "pass", repo=str(repo), signatures=len(groups),
+                      added=added)
 
 
 ACTIONS_ALERT_EVERY = 600  # seconds between one repo's actions_alert gh checks (run by the watchdog only)
@@ -2188,7 +2198,18 @@ def actions_alert(repo: Path) -> str | None:
     """One line starting with repo's folder name when GitHub Actions is failing it, else None (also when gh fails).
     (a) The newest completed run failed and every job gh run view lists has 0 steps: GitHub refused to start it
     (billing or spending limit). (b) Per workflow, the newest completed `schedule` run failed, started up wrong or
-    timed out. gh run list is newest first, so a later success (or a later run that started steps) clears each."""
+    timed out. gh run list is newest first, so a later success (or a later run that started steps) clears each.
+    A result that differs from the ACTIONS_ALERT value cached for repo (none cached: None) logs one board.log_process line."""
+    hit = ACTIONS_ALERT.get(str(repo))
+    alert = actions_alert_check(repo)
+    if alert != (hit[1] if hit else None):
+        board.log_process("Actions alerts", "alert" if alert else "clear", repo=str(repo),
+                          **({"alert": alert} if alert else {}))
+    return alert
+
+
+def actions_alert_check(repo: Path) -> str | None:
+    """actions_alert's gh reading, uncached and unlogged."""
     cols = "databaseId,workflowName,event,conclusion,status,createdAt"
     runs = gh_json(repo, "run", "list", "--limit", "20", "--json", cols)
     if not isinstance(runs, list):
@@ -2351,7 +2372,7 @@ def idle_cleanup(busy: dict[str, bool]) -> None:
         return
     idle = {name: repo for name, repo in board.projects().items() if not busy.get(name, True) and not live_ids(name)}
     listening = listeners()
-    killed = stop_dev_servers(idle, listening)
+    killed, orphans = stop_dev_servers(idle, listening), []
     if idle:
         jobs = {}
         for name, repo in idle.items():
@@ -2359,8 +2380,10 @@ def idle_cleanup(busy: dict[str, bool]) -> None:
                 jobs[name] = board.read_board(repo / "scrum").get("jobs") or []
             except (OSError, SystemExit, AttributeError):  # an unreadable board reaps nothing
                 jobs[name] = []
-        stop_orphans(idle, jobs, processes())
-    docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
+        orphans = stop_orphans(idle, jobs, processes())
+    docker = docker_tick(idle, [entry for entry in listening if entry[0] not in killed])
+    if killed or orphans or docker:
+        board.log_process("Idle cleanup", "cleaned", dev_servers=len(killed), orphans=len(orphans), docker=bool(docker))
 
 
 OUTCOME_SKIP = ("Permission allow rule",)  # CLI warnings written to the run log before real output
@@ -2726,6 +2749,7 @@ def weekly_tick():
         return
     if (out := board.cmd_weekly_start(resets, now))["id"]:
         spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
+        board.log_process("Weekly digest", "started", digest=out["id"])
 
 
 PULSE_GATES = (("free RAM", "ram"), ("memory pressure", "vm_pressure"), ("swap used", "swap"), ("free disk", "disk"),
@@ -3990,6 +4014,7 @@ def e2e_lock_reap(now):
             buildlock.holder_path(slot).unlink(missing_ok=True)
         print(f"watchdog: freed {slot.name} from {'dead holder' if dead else 'a job out of check'} {h[0]} ({h[1]})",
               file=sys.stderr, flush=True)
+        board.log_process("E2E lock reaps", "freed", slot=slot.name, pid=h[0], cwd=h[1], dead=dead)
 
 
 BOARD_CACHE = {}  # str(scrum root) -> ((st_ino, st_mtime_ns, st_size), parsed board.json); final jobs carry `routed`
@@ -5522,6 +5547,8 @@ def digest_retry_tick(project, repo, root):
         if ready.setdefault(target_repo, digest_apply_ready(target_repo)):
             continue
         _, not_applied, job_id = digest_apply(root, digest_id, props, from_status="queued")
+        board.log_process("Digest retry", "retried", repo=str(repo), digest=digest_id, proposals=len(props),
+                          not_applied=len(not_applied))
         by_id = {p["id"]: p for p in props}
         updates = {}
         for q in not_applied:

@@ -1750,6 +1750,55 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
             self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} runs alone"})
 
+    BOARD_PY = "skills/trevskills-scrum/board.py"
+
+    def funcs_spec(self, job_id, lane, funcs):
+        """A spec naming only board.py, with `(functions: ...)` when funcs is non-empty."""
+        named = f" (functions: {', '.join(funcs)})" if funcs else ": why"
+        self.write(f"{job_id}/spec.md", f"# x\nLane: {lane}\n## Likely files\n- `{self.BOARD_PY}`{named}\n- `tests/test_board.py`\n"
+                   "## Assumptions\n- none\n")
+
+    def board_py_kids(self, holder, k1, k2, lane="fast"):
+        """A building sibling holder and two waiting siblings, each naming board.py with these function lists."""
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
+                           self.ticket(4, deps="T1, T2, T3", exposure="yes"))
+        h, c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.funcs_spec(h, "standard", holder)
+        board.cmd_set(self.root, h, ["stage=build"])
+        self.funcs_spec(c1, lane, k1)
+        self.funcs_spec(c2, lane, k2)
+        return parent, h, c1, c2
+
+    def gates_of(self, job_id):
+        p = self.root / "jobs" / job_id / "queue-gates.txt"
+        return p.read_text().split() if p.exists() else []
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_fast_kids_share_board_py_when_functions_differ(self):
+        parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], ["likely_funcs", "cmd_next"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        self.assertEqual(self.gates_of(c2), [])
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_holds_board_py_kids_on_common_or_unnamed_functions(self):
+        # c2 is held once both h and c1 count toward the 2-holder limit: each shares a function with c2 or names none
+        for name, sets in (("one name common to all", (["cmd_hook", "cmd_ready"], ["slot_conflict", "cmd_ready"], ["cmd_ready"])),
+                           ("a common name with each", (["cmd_hook"], ["slot_conflict"], ["slot_conflict", "cmd_hook"])),
+                           ("holder names none", ([], ["slot_conflict"], ["slot_conflict", "cmd_next"])),
+                           ("kid names none", (["cmd_hook"], ["slot_conflict"], []))):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                parent, h, c1, c2 = self.board_py_kids(*sets)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+                self.assertIn(f"overlap:{h}:{self.BOARD_PY}", self.gates_of(c2))
+                self.assertEqual(self.overlap_of(c2)["text"], f"sibling {h} shares {self.BOARD_PY}; sibling {c1} shares {self.BOARD_PY}")
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_non_fast_kid_ignores_functions(self):
+        parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], ["cmd_next"], lane="standard")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertEqual(self.gates_of(c2), [f"overlap:{h}:{self.BOARD_PY}", f"overlap:{c1}:{self.BOARD_PY}"])
+
     def test_ready_critical_skips_unbuilt_outside_holder(self):
         (self.root.parent / "src").mkdir(exist_ok=True)  # an in-repo folder, so src/ paths are not foreign
         out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
@@ -1995,6 +2044,16 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(board.likely_files("## Likely files\n- cmd_ready(root): the scheduler\n- Edit the scheduler\nsrc/c.py\n## Assumptions\n- src/d.py\n"), set())
         mixed = "## Likely files\n- `x/a.py`: see y/b.py\n- src/app/(app)/page.tsx\n"
         self.assertEqual(board.likely_files(mixed), {"x/a.py", "src/app/(app)/page.tsx"})
+
+    def test_likely_funcs_parses_function_lists(self):
+        named = "## Likely files\n- `skills/trevskills-scrum/board.py` (functions: cmd_ready, slot_conflict)\n## Assumptions\n- none\n"
+        self.assertEqual(board.likely_funcs(named), {"skills/trevskills-scrum/board.py": {"cmd_ready", "slot_conflict"}})
+        self.assertEqual(board.likely_files(named), {"skills/trevskills-scrum/board.py"})
+        bare = "## Likely files\n- `skills/trevskills-scrum/board.py`: the scheduler\n"
+        self.assertEqual(board.likely_funcs(bare), {})
+        self.assertEqual(board.likely_files(bare), {"skills/trevskills-scrum/board.py"})
+        outside = "## Problem\n- `skills/trevskills-scrum/serve.py` (functions: spawn)\n## Likely files\n- `tests/t.py`\n"
+        self.assertEqual(board.likely_funcs(outside), {})
 
     def five(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),
@@ -5722,6 +5781,22 @@ class BoardTest(unittest.TestCase):
             c1, out = setup("fast", kid_files=())
             self.assertEqual(board.resume_blocker(self.root, c1), "this job runs alone")
 
+    @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build siblings run
+    def test_resume_blocker_fast_kid_disjoint_functions(self):
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        for lane, k2, free in (("fast", ["cmd_next"], True), ("fast", ["cmd_hook", "slot_conflict"], False), ("fast", [], False),
+                               ("standard", ["cmd_next"], False)):
+            with self.subTest(lane=lane, funcs=k2):
+                self.tearDown(); self.setUp()
+                parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], k2, lane=lane)
+                board.cmd_set(self.root, c1, ["stage=build"])
+                board.cmd_set(self.root, c2, stalled, internal=True)
+                got = board.resume_blocker(self.root, c2)
+                if free:
+                    self.assertIsNone(got)
+                else:
+                    self.assertEqual(got, f"sibling {h} shares {self.BOARD_PY}; sibling {c1} shares {self.BOARD_PY}")
+
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
@@ -8328,6 +8403,19 @@ class UiSweepRecordTest(unittest.TestCase):
 
     def record(self):
         return json.loads((self.root / "ui-sweep.json").read_text())
+
+    def test_record_logs_process(self):
+        """Job 976: a recorded sweep logs its result, finding count and folder to processes.log."""
+        f = self.review("VERDICT: PASS\n- ok /leads\n- ok /\n- ok /admin/views\n- ok /pricing\n")
+        log = Path(self.tmp.name) / "machine" / "processes.log"
+        with mock.patch.dict(os.environ, SCRUM_PULSE=str(log.with_name("pulse.log"))):
+            board.cmd_ui_sweep_record(self.root, f)
+            self.review("VERDICT: CHANGES\n- [blocking] /leads — tall — /s/a.png\n")
+            board.cmd_ui_sweep_record(self.root, f)
+        lines = [{k: v for k, v in json.loads(l).items() if k != "t"} for l in log.read_text().splitlines()]
+        self.assertEqual(lines, [
+            {"process": "UI sweep", "result": "pass", "repo": str(self.root.parent), "findings": 0, "dir": str(self.dir)},
+            {"process": "UI sweep", "result": "fail", "repo": str(self.root.parent), "findings": 4, "dir": str(self.dir)}])
 
     def test_files_findings_and_unrendered_once(self):
         f = self.review("VERDICT: CHANGES\n- [blocking] /leads — rows 160 px tall — /s/render/leads-1440.png\n"
