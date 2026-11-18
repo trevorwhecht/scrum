@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, threading, unittest
+import json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -162,6 +162,12 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
                                                                          "claude_exhausted_until": None})
         status.start()
         self.addCleanup(status.stop)
+        # The widest header: the shop Mac's RAM and CPU rings both read (job 1116), with no background refresh.
+        shop = mock.patch.dict(serve.SHOP_STATS, at=time.monotonic(), busy=False, value=[
+            {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 62.5, "cpu_cores": 4, "at": time.time()}])
+        shop.start()
+        self.addCleanup(shop.stop)
+        serve.MACHINE_CACHE.clear()
         self.server = serve.make_server(0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -195,7 +201,8 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_compact_390px(self):
         got = self.browse("header")
-        self.assertLessEqual(got["height"], 220, got)  # 358 before job 550; 204 after; 215 with job 648's 44 px controls
+        # 358 before job 550; 204 after; 215 with job 648's 44 px controls; 233 with job 1116's shop rings (a 2nd meter line)
+        self.assertLessEqual(got["height"], 235, got)
         by = {c["id"]: c for c in got["children"]}
         self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
         for i in ("rankBtn", "cooldown"):
