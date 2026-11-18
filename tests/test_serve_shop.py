@@ -533,6 +533,76 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual(self.board.cmd_ready(root, PAR, (), only="043-a")["ready"], [])
             self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
 
+    # --- job 989: a queued launch skips files a running or cloud job holds ---
+    def holder(self, kind, likely=("src/a.py",)):
+        """Job 060-o holding `likely`, busy as `kind` (live: a serve.py run; watched: review with a live session; cloud;
+        done: not busy). Returns its board entry; a live holder is put in RUNS, a watched one in session_alive_fn."""
+        stage = {"live": "build", "watched": "review", "cloud": "cloud", "done": "done"}[kind]
+        if kind == "live":
+            proc = mock.Mock()
+            proc.poll.return_value = None
+            self.serve.RUNS["mm/060-o"] = {"action": "start", "started": time.time(), "proc": proc, "log": "x"}
+        if kind == "watched":
+            alive = mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: job["id"] == "060-o")
+            alive.start()
+            self.addCleanup(alive.stop)
+        return {"id": "060-o", "stage": stage, **({"likely": list(likely)} if likely else {})}
+
+    def assert_held(self, root, job_id="050-q"):
+        job = self.job(root, job_id)
+        self.assertEqual((job["stage"], job["queued_launch"]["action"]), ("spec", "start"))
+        self.assertNotIn("shop", job)
+
+    def test_queued_launch_overlapping_busy_job_not_sent(self):
+        for kind in ("live", "watched", "cloud"):
+            with self.subTest(kind):
+                self.serve.RUNS.clear()
+                self.sh.reset_mock()
+                root = self.project("mm", [self.queued(likely=["src/a.py"]), self.holder(kind)])
+                self.assertEqual(self.tick(), (False, "", ""))
+                self.sh.start.assert_not_called()
+                self.assert_held(root)
+        with self.subTest("control: a done holder holds nothing"):
+            self.serve.RUNS.clear()
+            root = self.project("mm", [self.queued(likely=["src/a.py"]), self.holder("done")])
+            self.assertIs(self.tick()[0], True)
+            self.assertEqual(self.job(root, "050-q")["stage"], "cloud")
+
+    def test_overlap_skips_to_next_pool_entry(self):
+        root = self.project("mm", [self.queued("050-q", likely=["src/a.py"]), self.queued("051-r", likely=["src/b.py"]),
+                                   self.holder("cloud")])
+        got, out, err = self.tick()
+        self.assertEqual((got, out, err), (True, "shop: mm: 051-r: started on the shop Mac (pid 4242, account owa)\n", ""))
+        self.assertEqual(self.job(root, "051-r")["stage"], "cloud")
+        self.assert_held(root)
+
+    def test_unreadable_files_wait_while_busy(self):
+        cases = [("unreadable launch, busy holder", None, ["src/z.py"], "cloud", False),
+                 ("unreadable launch, nothing busy", None, ["src/z.py"], "done", True),
+                 ("busy holder with unreadable files", ["src/a.py"], None, "cloud", False)]
+        for why, mine, theirs, kind, sent in cases:
+            with self.subTest(why):
+                self.sh.reset_mock()
+                root = self.project("mm", [self.queued(**({"likely": mine} if mine else {})),
+                                           self.holder(kind, theirs)])
+                self.assertIs(self.tick()[0], sent)
+                if sent:
+                    self.assertEqual(self.job(root, "050-q")["stage"], "cloud")
+                else:
+                    self.sh.start.assert_not_called()
+                    self.assert_held(root)
+
+    def test_no_launch_no_overlap_work(self):
+        with mock.patch.object(self.serve, "busy_files", side_effect=AssertionError("overlap work")), \
+                mock.patch.object(self.board, "machine_ok", side_effect=AssertionError("sensor read")):
+            self.project("mm", [self.holder("cloud")])
+            self.assertEqual(self.tick(), (False, "", ""), "no held job: no sensor read, no overlap work")
+        with mock.patch.object(self.serve, "busy_files", side_effect=AssertionError("overlap work")):
+            root = self.project("mm", self.runall({"id": "043-a", "parallel": True, "likely": ["src/b.py"]})
+                                + [self.holder("cloud")])
+            self.assertIs(self.tick()[0], True, "a child only: cmd_ready checks it, no busy list")
+            self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+
 
 if __name__ == "__main__":
     unittest.main()

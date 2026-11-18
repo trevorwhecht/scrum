@@ -10280,6 +10280,14 @@ class IdleClaimTest(unittest.TestCase):
             got, spawn = self.claim(age=610)
         self.assertEqual((got, spawn.call_args_list, self.stage("002-big")), (False, [], "waiting"))
 
+    def test_idle_claim_cloud_job_blocks_overlap(self):
+        """Job 989: a stage-cloud leaf job (claude.ai or shop Mac) holds its files, with no live session here."""
+        self.write({"id": "006-cloud", "stage": "cloud"}, kids={"002-big": ["a.py", "b.py"], "003-small": ["c.py"]})
+        self.files("006-cloud", ["c.py"])
+        got, spawn = self.claim(age=610)
+        self.assertEqual((got, self.started(spawn)), (True, [("002-big", "start", True)]))  # 003-small shares src/c.py
+        self.assertEqual(self.stage("003-small"), "waiting")
+
     def test_unknown_files_only_when_nothing_runs(self):
         self.write({"id": "006-run", "stage": "build"}, kids={"002-nofiles": []})
         self.files("006-run", ["z.py"])
