@@ -13,7 +13,7 @@ md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick 
 or fast-forward a project in ~/scrum-work, start() to launch a headless cloud-job session there (the prompt only on
 stdin) and ended() to read a finished session's log tail. See lanes/shop.md.
 """
-import argparse, io, json, os, re, shlex, subprocess, sys, tarfile, time
+import argparse, io, json, os, posixpath, re, shlex, subprocess, sys, tarfile, time
 from pathlib import Path
 
 ALIAS = "shopmac"
@@ -110,6 +110,15 @@ READY_TTL = 600
 PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.env.local.tmp"
             " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
+HOME_TOKEN = "@@SCRUM_SHOP_HOME@@"  # project_copy() writes it for this Mac's home; the shop's sed puts its own $HOME there
+# Only into an existing clone: a fake .git would break the next clone(). Then setup step 2's exclude lines, each once.
+PROFILE_COPY = ('d="$HOME/scrum-work/{p}"; [ -d "$d/.git" ] || exit 3; mkdir -p "$d/scrum" "$d/.git/info"'
+                ' && LC_ALL=C sed "s|{t}|$HOME|g" > "$d/scrum/project.md.tmp"'
+                ' && mv -f "$d/scrum/project.md.tmp" "$d/scrum/project.md" || exit 1; x="$d/.git/info/exclude";'
+                ' if [ -n "$(tail -c 1 "$x" 2>/dev/null)" ]; then echo >> "$x" || exit 1; fi;'
+                ' for l in scrum/ .claude/worktrees/; do grep -qxF "$l" "$x" 2>/dev/null || echo "$l" >> "$x" || exit 1; done')
+AUTH_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p}/{d} && cat > ~/scrum-work/{p}/{f}.tmp"
+             " && mv -f ~/scrum-work/{p}/{f}.tmp ~/scrum-work/{p}/{f}")
 REPO_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch; .git or not
 JOB_RE = re.compile(r"[0-9]{3,}-[a-z0-9-]+")  # board.ID_RE's shape; fullmatch, so a trailing newline fails
 # Claude Code ignores a project's .claude/settings.json permissions until the folder is trusted; set the flag in each
@@ -355,6 +364,51 @@ def env_copy(project: str, repo: str) -> str:
     if not probe()["up"]:
         return "failed"
     return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data).returncode == 0 else "failed"
+
+
+def _render_auth(text: str) -> str | None:
+    """project.md's `- Render auth:` path read from a job worktree ($WT, as lanes/review.md does) as a repo-relative
+    path, or None: no line, or a path outside the repo, inside .claude/worktrees/ or with a character off [A-Za-z0-9._/-]."""
+    m = re.search(r"^- Render auth:[ \t]*(\S.*?)[ \t]*\r?$", text, re.M)
+    if not m:
+        return None
+    rel = posixpath.normpath(".claude/worktrees/scrum-x/" + m.group(1))
+    if rel.startswith("..") or posixpath.isabs(rel) or (rel + "/").startswith(".claude/worktrees/") \
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", rel):
+        return None
+    return rel
+
+
+def project_copy(project: str, repo: str) -> bool:
+    """Write the shop's ~/scrum-work/<project>/scrum/project.md from this Mac's <repo>/scrum/project.md (stdin only,
+    tmp file + mv -f), so a cloud-job session there skips first-run setup and keeps E2E, Test sign-in and Render auth.
+    The repo path (as given and its realpath) becomes the shop clone and any other path under this Mac's home moves to
+    the shop's $HOME; every other byte is unchanged. The same call adds setup's `scrum/` and `.claude/worktrees/` lines to
+    the clone's .git/info/exclude. Then the file the Render auth line names, when _render_auth() accepts it and it exists
+    here, goes to the same repo-relative path there (mode 600, bytes on stdin only). False with no ssh for a name off
+    PROJECT_RE or no project.md here; False for a down shop Mac, no clone there or a failed call. Prints nothing."""
+    if not PROJECT_RE.fullmatch(project):
+        return False
+    try:
+        text = (Path(repo) / "scrum" / "project.md").read_bytes().decode("utf-8", "surrogateescape")
+    except OSError:
+        return False
+    rel = _render_auth(text)
+    try:
+        auth = (Path(repo) / rel).read_bytes() if rel else None
+    except OSError:
+        auth = None
+    paths = sorted({str(repo), os.path.realpath(repo)}, key=len, reverse=True)
+    text = re.sub("(?:" + "|".join(map(re.escape, paths)) + r")(?![A-Za-z0-9._-])",
+                  lambda _: f"{HOME_TOKEN}/scrum-work/{project}", text)
+    text = text.replace(str(Path.home()) + "/", HOME_TOKEN + "/")
+    if not probe()["up"]:
+        return False
+    if run(PROFILE_COPY.format(p=project, t=HOME_TOKEN), STEP_TIMEOUT,
+           input=text.encode("utf-8", "surrogateescape")).returncode:
+        return False
+    return auth is None or run(AUTH_COPY.format(p=project, d=posixpath.dirname(rel), f=rel), STEP_TIMEOUT,
+                               input=auth).returncode == 0
 
 
 def clone(project: str, url: str) -> bool:

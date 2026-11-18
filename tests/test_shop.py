@@ -714,6 +714,88 @@ class EnvCopyTest(SetupCase):
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
 
 
+AUTH = b'{"cookies": [{"name": "next-auth.session-token", "value": "sess1069xyz"}]}\n'
+AUTH_CMD = ("umask 077 && mkdir -p ~/scrum-work/app/playwright/.auth && cat > ~/scrum-work/app/playwright/.auth/admin.json.tmp"
+            " && mv -f ~/scrum-work/app/playwright/.auth/admin.json.tmp ~/scrum-work/app/playwright/.auth/admin.json")
+GIT_EXCLUDE = b"# git ls-files --others --exclude-from=.git/info/exclude\n# *~\n"
+
+
+class ProjectCopyTest(SetupCase):
+    """This Mac's HOME and the shop's are two temp dirs; LOCAL runs every remote call in a local sh under the shop's
+    HOME, as the shop would. The repo is reached through a symlink, so str(repo) and its realpath differ."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.home)
+        self.mac, self.sh = base / "mac_home.1", base / "shop_home.2"
+        self.home = str(self.sh)  # SetupCase's LOCAL answer runs under self.home
+        self.real = self.mac / "repos" / "app"
+        (self.real / "scrum").mkdir(parents=True)
+        self.link = self.mac / "link-app"
+        self.link.symlink_to(self.real)
+        self.clone = self.sh / "scrum-work" / "app"
+        (self.clone / ".git" / "info").mkdir(parents=True)
+        (self.clone / ".git" / "info" / "exclude").write_bytes(GIT_EXCLUDE)
+        env = mock.patch.dict(os.environ, {"HOME": str(self.mac)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def profile(self, text):
+        (self.real / "scrum" / "project.md").write_bytes(text.encode())
+
+    def copy(self, project="app", repo=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            got = shop.project_copy(project, str(repo or self.link))
+        self.assertEqual(out.getvalue(), "")
+        return got
+
+    def shop_profile(self):
+        return (self.clone / "scrum" / "project.md").read_bytes()
+
+    def test_profile_copied_with_shop_paths(self):
+        m, r, l = self.mac, self.real, self.link
+        self.profile(
+            "# Project profile\n"
+            f"- Conventions to read: {r}/CLAUDE.md {l}/AGENTS.md, {m}/Developer/repos/CLAUDE.md {m}/.claude/rules/x.md\n"
+            "- E2E: E2E_PORT=$(python3 -c 'import socket') npm run test:e2e\r\n"
+            "- Test sign-in: admin a@b.test / pw|&\\1 (Ünïcode)\n"
+            "- Render auth: ../../../playwright/.auth/admin.json\n"
+            "- Visual mask: [data-visual-mask]\n"
+            f"- Notes: {m}/repos/app-old/x, {m}/repos/app.bak, {m}/repos/apps, \"{r}\" `{l}`; {r}:{l}\n"
+            f"- Other home: /Users/someone/x {m}x/y\n"
+            f"Ends on {r}")
+        sh = self.sh
+        want = ("# Project profile\n"
+                f"- Conventions to read: {sh}/scrum-work/app/CLAUDE.md {sh}/scrum-work/app/AGENTS.md, "
+                f"{sh}/Developer/repos/CLAUDE.md {sh}/.claude/rules/x.md\n"
+                "- E2E: E2E_PORT=$(python3 -c 'import socket') npm run test:e2e\r\n"
+                "- Test sign-in: admin a@b.test / pw|&\\1 (Ünïcode)\n"
+                "- Render auth: ../../../playwright/.auth/admin.json\n"
+                "- Visual mask: [data-visual-mask]\n"
+                f"- Notes: {sh}/repos/app-old/x, {sh}/repos/app.bak, {sh}/repos/apps, \"{sh}/scrum-work/app\" "
+                f"`{sh}/scrum-work/app`; {sh}/scrum-work/app:{sh}/scrum-work/app\n"
+                f"- Other home: /Users/someone/x {m}x/y\n"
+                f"Ends on {sh}/scrum-work/app").encode()
+        self.write_shop_profile(b"".join(b"- shop line %d\n" % i for i in range(14)))
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        self.assertIs(self.copy(), True)
+        self.assertEqual(self.shop_profile(), want)
+        self.assertEqual(sorted(os.listdir(self.clone / "scrum")), ["project.md"])  # the tmp file is gone
+        [(cmd, timeout, given)] = self.cmds("project.md")
+        self.assertEqual(timeout, 60)
+        self.assertNotIn(str(m), cmd)
+        self.assertFalse([a for a in self.argv if "Test sign-in" in " ".join(a)])
+        self.assertIn(b"- Test sign-in: admin a@b.test", given)
+        self.profile("- Test: second\n")
+        self.assertIs(self.copy(), True)
+        self.assertEqual(self.shop_profile(), b"- Test: second\n")
+
+    def write_shop_profile(self, data):
+        (self.clone / "scrum").mkdir(exist_ok=True)
+        (self.clone / "scrum" / "project.md").write_bytes(data)
+
+
 class SecretTest(SetupCase):
     def assert_clean(self, secret, text):
         self.assertFalse([a for a in self.argv if secret in " ".join(a)], "secret in argv")
