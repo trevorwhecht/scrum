@@ -7471,12 +7471,12 @@ class CloudSyncTest(unittest.TestCase):
             runs.append(argv)
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         with mock.patch.object(board.subprocess, "run", side_effect=run):
-            path = board.cloud_worktree(self.root.parent, "7-x", "scrum/7")
-            board.cloud_worktree(self.root.parent, "7-x")
-        wt = str(self.root.parent.resolve() / ".claude" / "worktrees" / "scrum-7-x")
+            path = board.cloud_worktree(self.root.parent, "007-x", "scrum/007")
+            board.cloud_worktree(self.root.parent, "007-x")
+        wt = str(self.root.parent.resolve() / ".claude" / "worktrees" / "scrum-007-x")
         self.assertEqual(path, wt)
         adds = [r for r in runs if "worktree" in r]
-        self.assertEqual([a[-1] for a in adds], ["scrum/7", "scrum/7-x"])
+        self.assertEqual([a[-1] for a in adds], ["scrum/007", "scrum/007-x"])
         self.assertEqual([a[-2] for a in adds], [wt, wt])
 
     def test_needs_human_short_head_gets_worktree_and_branch(self):
