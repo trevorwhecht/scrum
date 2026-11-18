@@ -5277,6 +5277,7 @@ class BoardTest(unittest.TestCase):
         self.write(f"{job}/spec.md", "s\n")
         os.utime(folder / "feature.md", (t0, t0))
         os.utime(folder / "spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        (folder / "claimed-at.txt").write_text(f"{t0}\n")  # claim at created: the run log below is no claim fallback
         (self.root / "runs").mkdir()
         stamp = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
         (self.root / "runs" / f"{stamp}-start-{job}.log").write_text("x")
