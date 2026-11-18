@@ -5553,7 +5553,9 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
     """unpause writes to a paused job. Only the caller grants it: serve.py's Play and spawn bookkeeping, and
     `set --unpause`, which resume and rework use. Only an unpause write with stage= clears `paused`. expect: write only
     while the job is still in that stage (checked under the lock), else raise SystemExit and write nothing.
-    stage=needs-human is refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes."""
+    stage=needs-human is refused (a stop is a closed question: `ask`) unless internal, which only cmd_cloud_sync passes.
+    Entering stage=merging is refused for a fast or standard job with no round-N/review-code.md, decision.md or
+    human-approval.md."""
     if "stage=needs-human" in pairs and not internal:
         raise SystemExit(f'use board.py ask {job_id} "<question>" --a "Label=command" --b "Label=command" --title TITLE: '
                          "set never parks a job at needs-human")
@@ -5575,6 +5577,12 @@ def cmd_set(root, job_id, pairs, unpause=False, expect=None, internal=False):
         was = job["stage"]
         if expect and was != expect:
             raise SystemExit(f"job {job_id} is {was}, not {expect}; left alone")
+        lane = given.get("lane") or job.get("lane")  # job 1044: a shop fast job merged with no reviewer
+        if given.get("stage") == "merging" and was != "merging" and lane in ("fast", "standard") \
+                and not any((d / f).exists() for f in ("decision.md", "human-approval.md")) \
+                and not any(d.glob("round-*/review-code.md")):
+            raise SystemExit(f"not merging: {lane} job {job_id} has no round-N/review-code.md, decision.md or "
+                             "human-approval.md; run the code review (Fast lane step 2 / Review) first")
         for pair in pairs:
             key, sep, value = pair.partition("=")
             if not sep or key not in FIELDS:

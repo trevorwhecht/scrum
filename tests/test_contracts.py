@@ -4115,6 +4115,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         for phrase in ("## Pre-written spec", "## Digest proposal <NNN> <PID>", "not found in proposals.json"):
             self.assertLess(cloud.index(phrase), feat, phrase)
 
+    def test_skill_cloud_job_keeps_builder_and_reviewers(self):
+        # Job 1044: a shop fast job made its own edit, ran py_compile and merged with no reviewer or stage=merging.
+        cloud = self.lane("cloud")
+        job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
+        for phrase in ("**Reviewers always run:**", "even on a one-line diff or a repo with no tests",
+                       "only the Lilguy lane (after `B lilguy-fit $ID` prints `fit: true`)",
+                       "Merge always starts with its step 2 `B set $ID stage=merging`",
+                       "round-N/review-code.md`, decision.md or human-approval.md"):
+            self.assertIn(phrase, job, phrase)
+
     def test_skill_cloud_artifacts_come_home(self):
         text = skill_text()
         cloud = self.lane("cloud")
