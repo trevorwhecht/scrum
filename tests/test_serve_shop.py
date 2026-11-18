@@ -94,6 +94,8 @@ class ShopTickTest(unittest.TestCase):
                 (d / "feature.md").write_text(feature)
             if likely := j.pop("likely", None):
                 (d / "spec.md").write_text("# Spec\n## Likely files\n" + "".join(f"- `{p}`\n" for p in likely))
+            if j.pop("fit", None):
+                (d / "lilguy-fit.json").write_text('{"fit": true, "why": "tiny"}')
             board.append({"updatedAt": self.board.now(), "reason": None, **j})
         (root / "board.json").write_text(json.dumps({"jobs": board}))
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -201,6 +203,9 @@ class ShopTickTest(unittest.TestCase):
         cases = {
             "paused child": (plain, self.runall({"id": "043-a", "paused": True})),
             "lilguy child": (plain, self.runall({"id": "043-a", "feature": "Lane: lilguy\n\nFix the widget\n"})),
+            "inline lane, fit, run-all parent": (plain, self.runall({"id": "043-a", "fit": True,
+                                                 "feature": "Fix it. Lane: lilguy (tiny)\n"})),
+            "fit true under run-all": (plain, self.runall({"id": "043-a", "fit": True})),
             "setup pending launch": (plain, [self.queued(setup="pending")]),
             "digest proposals": (plain, self.runall({"id": "043-a", "feature": "Apply scrum/digests/012/proposals.json\n"})),
             "queued approve": (plain, [self.queued(action="approve")]),
