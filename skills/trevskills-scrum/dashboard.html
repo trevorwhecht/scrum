@@ -619,12 +619,17 @@ function card(job) {
     ${job.stage === "aborted" ? `<span class="reason">${esc(job.reason || "Aborted")}</span>` : ""}
     ${job.stage === "done" && (job.reason || "").startsWith("merged, not live") ? `<span class="reason" role="status">${esc(job.reason)}</span>` : ""}
     ${job.reopened_to ? `<span class="meta">Reopened as ${esc(job.reopened_to)}</span>` : ""}
-    ${run?.alive ? `<span class="running">${esc(runLine(run))}</span>` : ""}
+    ${run?.alive ? `<span class="running">${esc(runLine(run))}</span>` : ""}${costLine(job)}
     ${act && !["done", "aborted"].includes(job.stage)
       ? `<span class="meta activity"><span class="what" title="${esc(act.text)}">${esc(act.text)}</span><span>·</span>${stale ? staleText : `<span data-at="${+act.at}">${ago(act.at)}</span>`}</span>`
       : `<span class="meta">${job.pr ? "PR ready · " : ""}${stale ? staleText : esc(new Date(job.updatedAt).toLocaleTimeString())}</span>`}
   </button>`;
 }
+
+// "3.2M", "48.7K", "850": the token count on a card's cost line.
+const compactNum = new Intl.NumberFormat("en", {notation: "compact", maximumFractionDigits: 1});
+// A job's API-equivalent spend over the last 7 days (serve.py job_costs), or "" when it has none.
+const costLine = job => typeof job.costUsd === "number" ? `<span class="meta">$${job.costUsd.toFixed(2)} · ${compactNum.format(job.costTokens || 0)} tokens</span>` : "";
 
 // The Done column shows this many cards; Load more adds DONE_STEP. Kept outside the DOM so a poll re-render keeps it.
 const DONE_STEP = 10;

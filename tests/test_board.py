@@ -10885,6 +10885,39 @@ class WindowReportTest(unittest.TestCase):
         self.assertEqual(c["model_mix"], {"main": {"claude-opus": 500, "claude-sonnet": 100},
                                           "scrum-review-code": {"claude-opus": 100}})
 
+    def test_window_report_cost_usd(self):
+        self.scoring_fixture()
+        self.board(("101-a", "done", self.R - 100), ("102-b", "done", self.R - 200, {"lane": "fast"}),
+                   ("103-c", "done", self.R - 300, {"lane": "fast"}))
+        self.transcript("p/s3.jsonl", [  # no job tag: counted in total only
+            prompt("hello"),
+            reply(self.R - 600, "m5", cwd=str(self.repo), model="claude-opus-4-5", output_tokens=1000)])
+        self.transcript("p/s4.jsonl", [  # a job that is not on the board
+            prompt("JOB_DIR=/x/scrum/jobs/999-z"),
+            reply(self.R - 500, "m6", cwd=str(self.repo), model="claude-haiku-4-5", input_tokens=1000)])
+        c = self.card()
+        self.assertEqual(c["tokens"], {"total": 2700, "by_job": {"101-a": 600, "102-b": 100, "999-z": 1000}})
+        cost = c["cost_usd"]
+        self.assertEqual(set(cost), {"total", "by_job", "by_lane"})
+        self.assertEqual(set(cost["by_job"]), {"101-a", "102-b", "999-z"})
+        # 101-a: opus 100/50/300/50 + opus 40/60 = 0.0022125 + 0.0017; 102-b: sonnet 10/20/60/10 = 0.0003855
+        self.assertAlmostEqual(cost["by_job"]["101-a"], 0.0039125, places=6)
+        self.assertAlmostEqual(cost["by_job"]["102-b"], 0.0003855, places=6)
+        self.assertAlmostEqual(cost["by_job"]["999-z"], 0.001, places=6)
+        self.assertEqual(set(cost["by_lane"]), {"standard", "fast", "unknown"})
+        self.assertAlmostEqual(cost["by_lane"]["standard"], 0.0039125, places=6)
+        self.assertAlmostEqual(cost["by_lane"]["fast"], 0.0003855, places=6)
+        self.assertAlmostEqual(cost["by_lane"]["unknown"], 0.001, places=6)
+        # total: the three jobs plus the unattributed opus row (1000 output = 0.025)
+        self.assertAlmostEqual(cost["total"], 0.030298, places=6)
+
+    def test_window_report_cost_usd_null_without_tokens(self):
+        self.scoring_fixture()
+        with mock.patch.dict(os.environ, {"SCRUM_TRANSCRIPTS": str(self.base / "missing")}):
+            c = self.card()
+        self.assertIsNone(c["tokens"])
+        self.assertIsNone(c["cost_usd"])
+
     def test_window_report_wasted(self):
         R = self.R
         self.board(("201-x", "aborted", R - 100), ("202-y", "done", R - 100), ("203-z", "running", R - 100),
@@ -11316,6 +11349,31 @@ def prompt(text, **extra):
 def reply(t, mid, cwd="/nowhere", model="claude-x", **usage_counts):
     return {"type": "assistant", "timestamp": iso(t), "cwd": cwd,
             "message": {"id": mid, "model": model, "usage": usage_counts}}
+
+
+class RowCostTest(unittest.TestCase):
+    """board.row_cost: API-equivalent USD for one transcript_tokens row, from PRICES_USD_PER_MTOK."""
+
+    def row(self, model, i=0, o=0, cr=0, cc=0):
+        return {"ts": 1, "model": model, "input_tokens": i, "output_tokens": o, "cache_read_input_tokens": cr,
+                "cache_creation_input_tokens": cc, "project": "p", "job": "1-a", "agent": "main", "skill": None}
+
+    def test_known_model_sums_four_kinds(self):
+        # opus: 5 in, 25 out, 0.5 cache read, 6.25 cache creation USD per million tokens
+        self.assertAlmostEqual(board.row_cost(self.row("claude-opus-4-5-20251101", 1_000_000, 1_000_000, 1_000_000,
+                                                       1_000_000)), 36.75)
+        self.assertAlmostEqual(board.row_cost(self.row("claude-opus", 100, 50, 300, 50)), 0.0022125)
+        # sonnet: 3 / 15 / 0.3 / 3.75
+        self.assertAlmostEqual(board.row_cost(self.row("claude-sonnet-4-5", 2_000_000, 0, 0, 0)), 6.0)
+        self.assertAlmostEqual(board.row_cost(self.row("claude-sonnet-4-5", 0, 0, 0, 2_000_000)), 7.5)
+        # haiku: 1 / 5 / 0.1 / 1.25
+        self.assertAlmostEqual(board.row_cost(self.row("claude-haiku-4-5", 0, 1_000_000, 1_000_000, 0)), 5.1)
+
+    def test_unknown_or_missing_model_is_free(self):
+        for model in (None, "", "claude-x", "<synthetic>", 7):
+            with self.subTest(model=model):
+                self.assertEqual(board.row_cost(self.row(model, 1000, 1000, 1000, 1000)), 0)
+        self.assertEqual(board.row_cost({"input_tokens": 1000}), 0)
 
 
 class TranscriptTokensTest(unittest.TestCase):

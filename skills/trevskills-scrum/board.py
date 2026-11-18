@@ -2595,7 +2595,7 @@ def _scorecard(root, e, t, board, questions, acc=None):
     rows = [r for r in transcript_tokens(start, end, pdir) if r["project"] == name] \
         if name is not None and pdir.is_dir() else None
     tok = lambda r: sum(r[k] for k in TOKEN_KEYS)
-    tokens = model_mix = None
+    tokens = model_mix = cost_usd = None
     if rows is not None:
         by_job, model_mix = {}, {}
         for r in rows:
@@ -2604,6 +2604,17 @@ def _scorecard(root, e, t, board, questions, acc=None):
             mix = model_mix.setdefault(r["agent"], {})
             mix[r["model"] or "unknown"] = mix.get(r["model"] or "unknown", 0) + tok(r)
         tokens = {"total": sum(tok(r) for r in rows), "by_job": by_job}
+        lane = {j["id"]: j.get("lane") or "standard" for j in board["jobs"]
+                if isinstance(j, dict) and isinstance(j.get("id"), str)}
+        cost_usd = {"total": 0, "by_job": {}, "by_lane": {}}
+        for r in rows:
+            usd = row_cost(r)
+            cost_usd["total"] += usd
+            if r["job"]:
+                cost_usd["by_job"][r["job"]] = cost_usd["by_job"].get(r["job"], 0) + usd
+        for i, usd in cost_usd["by_job"].items():
+            ln = lane.get(i, "unknown")
+            cost_usd["by_lane"][ln] = cost_usd["by_lane"].get(ln, 0) + usd
     total = tokens and tokens["total"]
     share = lambda ids: None if tokens is None else sum(tokens["by_job"].get(i, 0) for i in ids)
     pct = lambda n: round(100 * n / total, 1) if n is not None and total else None
@@ -2671,7 +2682,7 @@ def _scorecard(root, e, t, board, questions, acc=None):
         "account": acc.name, "window": e["window"], "label": label, "resets_at": end, "start": start, "end": end,
         "written_at": datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds"),
         "budget": budget, "headline": round(points_done / used, 3) if is_num(used) and used else None,
-        "points_done": points_done, "done_jobs": done_jobs, "tokens": tokens,
+        "points_done": points_done, "done_jobs": done_jobs, "tokens": tokens, "cost_usd": cost_usd,
         "tokens_per_point": round(total / points_done, 3) if tokens is not None and points_done else None,
         "first_pass_rate": round(sum(f["fix_rounds"] == 0 for f in fits) / len(fits), 3) if fits else None,
         "cache_hit_rate": round(cache_read / (fresh + cache_read), 3) if rows and fresh + cache_read else None,
@@ -3911,6 +3922,20 @@ def read_usage(account=None):
 
 WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))  # usage.json's rate-limit windows and their short labels
 TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+# API-equivalent list prices, USD per million tokens, in TOKEN_KEYS order (input, output, cache read, cache creation; cache
+# read is 0.1x input, cache creation 1.25x). Keyed by a family substring of the transcript's model string; edit here.
+PRICES_USD_PER_MTOK = {"opus": (5, 25, 0.5, 6.25), "sonnet": (3, 15, 0.3, 3.75), "haiku": (1, 5, 0.1, 1.25)}
+
+
+def row_cost(row):
+    """USD for one transcript_tokens row: each TOKEN_KEYS count x its PRICES_USD_PER_MTOK price / 1e6, summed. 0 when the
+    model is missing or names no listed family."""
+    model = row.get("model")
+    price = next((p for fam, p in PRICES_USD_PER_MTOK.items() if fam in model), None) \
+        if isinstance(model, str) else None
+    return sum(token_count(row.get(k)) * p for k, p in zip(TOKEN_KEYS, price)) / 1e6 if price else 0
 
 
 def token_count(v):
