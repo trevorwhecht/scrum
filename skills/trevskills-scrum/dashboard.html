@@ -611,6 +611,8 @@ const roadmapShown = () => projects.filter(p => roadmaps[p] && (!filter || p ===
 
 function card(job) {
   const shop = !!job.shop; // ran on the shop Mac (its remote session pid sits in `shop`): blue in every column
+  // serve.py runsOn (job 1155): where the job may run; a shop tag adds nothing once the Shop chip shows.
+  const runsOn = !(job.runsOn === "shop" && shop) && {any: "Any", main: "Main", shop: "Shop"}[job.runsOn];
   // A stalled or limit-held job waits on its retry, not on Trevor: no red, a stalled badge, never stale.
   const stall = isStalled(job), held = limitHeld(job), hold = heldByTrevor(job);
   const asked = job.stage === "needs-human" && !playQueued(job) && !stall && !answering(job);
@@ -619,7 +621,7 @@ function card(job) {
   const stale = !human && !hold && !held && !stall && !["done", "needs-human", "aborted", "waiting", "plan", "running", "cloud"].includes(job.stage) && Date.now() - staleAt(job) > STALE_MS;
   const staleText = `<span class="stale">stale since ${esc(new Date(staleAt(job)).toLocaleString())}</span>`;
   return `<button class="card${human || setup ? " human" : ""}${hold ? " paused" : ""}${job.stage === "aborted" ? " aborted" : ""}${shop ? " shop" : ""}" data-key="${esc(job.key)}">
-    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
+    ${tag(job.project)}<span class="lanechip">${esc(laneLabel(job))}</span>${job.account ? `<span class="lanechip">${esc(job.account)}</span>` : ""}${GROUPED[job.stage] && colOf(job) === GROUPED[job.stage] ? `<span class="lanechip">${esc(job.stage)}</span>` : ""}${job.fable ? '<span class="lanechip">Fable</span>' : ""}${runsOn ? `<span class="lanechip" title="Runs on">${runsOn}</span>` : ""}${shop ? `<span class="lanechip">${job.worker ? `Shop · ${esc(job.worker)}` : "Shop"}</span>` : ""}${job.diverged ? '<span class="badge">diverged</span>' : ""}<span class="id">${esc(job.id)}</span><span class="title">${esc(job.title)}</span>${titled ? `<span class="badge">${esc(titled)}</span>` : ""}${hold ? '<span class="badge">paused</span>' : ""}${stall || held ? `<span class="badge" data-agent-hint="The session stopped (usage limit, RAM guard, crash or the 30-minute watchdog). serve.py resumes it by itself at the retry time; Resume in its panel starts it now.">${job.nextRetryAt ? `stalled · retry ${esc(when(job.nextRetryAt))}` : "stalled"}</span>` : ""}
     ${bigboyLines(job)}
     ${waitingNote(job, "meta")}
     ${(job.rounds || []).map(roundRow).join("")}
@@ -1145,6 +1147,8 @@ const VERBS = {spec: "Writing spec", plan: "Planning", build: "Building", check:
 // A launch spawn's RAM gate held over 1h names its reading (serve.py ram_hold), next to the Start now button; one its CPU
 // gate holds reads "Waiting for CPU 2h 10m" (serve.py cpuHeldSecs).
 // An answered or reworked needs-human job whose session runs reads as that run, not as a question; a Discuss session keeps the question.
+// A job tagged Runs on shop that waits or has a queued start (serve.py shopWait) reads "Waiting for a shop Mac slot",
+// never "Queued, starts next": this Mac never starts it.
 // serve.py e2e_wait_info's seconds as "2h 10m".
 const hoursMins = secs => `${Math.floor(secs / 3600)}h ${String(Math.floor(secs % 3600 / 60)).padStart(2, "0")}m`;
 const e2eWaitLine = w => `Waiting for the E2E queue ${hoursMins(w.waitSecs)}${w.holder ? `, held by ${w.holder.job} for ${hoursMins(w.holder.ageSecs)}` : ""}`;
@@ -1155,7 +1159,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   ? `Waiting for CPU ${hoursMins(job.cpuHeldSecs)}`
   : !job.waitingOn && !job.paused && playQueued(job) && job.resumeRefusal
   ? `Waiting for CPU/RAM: ${noPaths(String(job.resumeRefusal).replace(/^waiting: /, "").split(" Fix: ")[0])}`
-  : !job.waitingOn && job.play_queued && !playQueued(job) && !["done", "aborted"].includes(job.stage)
+  : !job.waitingOn && job.play_queued && !playQueued(job) && !job.shopWait && !["done", "aborted"].includes(job.stage)
   ? String(job.resumeRefusal || "").startsWith("waiting: ") ? "Queued: starts when CPU/RAM frees up" : "Queued, starts next"
   : noPaths(job.stage === "done" ? "Done" : job.stage === "aborted" ? "Aborted"
   : job.waitingOn ? `Waiting on ${(job.waitingOn.ids || []).map((id, i) => job.waitingOn.titles?.[i] ? `${id} ${job.waitingOn.titles[i]}` : id).join(", ")} (${job.waitingOn.why})`
@@ -1170,6 +1174,7 @@ const statusLine = job => !job.waitingOn && job.play_queued && job.ram_hold && !
   : setupWait(job) ? "Waiting on you: setup"
   : job.e2eWait ? e2eWaitLine(job.e2eWait)
   : job.buildLockWait ? "Waiting for the build lock"
+  : job.shopWait ? "Waiting for a shop Mac slot"
   : `${job.stage === "cloud" && job.shop ? "Running on shop Mac" : VERBS[job.stage] || job.stage}, ${Math.max(0, Math.floor((Date.now() - Date.parse(job.updatedAt)) / 60000)) || 0} min`);
 
 // The modal subtitle: the red stop box already holds the full reason, so a needs-human job with the box shows only its short title.

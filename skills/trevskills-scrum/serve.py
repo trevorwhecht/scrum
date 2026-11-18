@@ -4470,7 +4470,7 @@ def board_with_activity(root, project):
                                             or (job.get("queued_launch") or {}).get("action") == "start"):
                 job["shopWait"] = True  # the dashboard's "Waiting for a shop Mac slot" line
         else:
-            job["runsOn"] = job.get("runs_on")  # a final job's feature.md is not read each poll
+            job["runsOn"] = job.get("runs_on") if job.get("runs_on") in board.RUNS_ON else None  # no feature.md read
         if resumable(job) and not running(project, job.get("id")):
             # ponytail: machine_ok runs per resumable job each poll; compute it once per board if many sit paused
             # manual: as the dashboard's click sends it; a queued Play is gated as play_queue_tick gates it: CPU included,
