@@ -11159,6 +11159,21 @@ def usage(five=None, seven=None, written_at=USAGE_NOW):
     return {"rate_limits": limits, "written_at": written_at}
 
 
+class HeldWindowsTest(unittest.TestCase):
+    def test_held_windows(self):
+        both = usage(five=(93, 3600), seven=(95, 86400))
+        got = board.held_windows(both, USAGE_NOW)
+        self.assertEqual([(k, l, w["resets_at"]) for k, l, w in got],
+                         [("five_hour", "5h", USAGE_NOW + 3600), ("seven_day", "7d", USAGE_NOW + 86400)])
+        self.assertEqual([k for k, _, _ in board.held_windows(usage(five=(89.9, 3600), seven=(90, 3600)), USAGE_NOW)],
+                         ["seven_day"], "90 holds, 89.9 does not")
+        self.assertEqual(board.held_windows(usage(five=(99, 0), seven=(99, -5)), USAGE_NOW), [], "a passed reset")
+        bad = {"rate_limits": {"five_hour": {"used_percentage": "99", "resets_at": USAGE_NOW + 5},
+                               "seven_day": {"used_percentage": 99}}, "written_at": USAGE_NOW}
+        self.assertEqual(board.held_windows(bad, USAGE_NOW), [])
+        self.assertEqual(board.held_windows({"rate_limits": {"five_hour": "x"}}, USAGE_NOW), [])
+
+
 class UsageAllowanceTest(unittest.TestCase):
     def setUp(self):
         hold = mock.patch.object(board, "USAGE_HOLD_PCT", 101)  # the 90 % hold has its own tests: here the ladder alone

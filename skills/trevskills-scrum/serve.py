@@ -3164,12 +3164,10 @@ def machine_usage(now):
     if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
         return "unknown"
     u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
-    held = [w["resets_at"] for k, _ in board.WINDOWS if isinstance(w := usage["rate_limits"].get(k), dict)
-            and board.is_num(w.get("used_percentage")) and board.is_num(w.get("resets_at")) and w["resets_at"] > now
-            and w["used_percentage"] >= board.USAGE_HOLD_PCT]
+    held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)]
     return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
             "allowance": None if allow is None else int(allow), "fable": board.fable_state(usage, now),
-            "hold_until": held[0] if held else None}
+            "hold_until": max(held) if held else None}
 
 
 def claude_usage(now):

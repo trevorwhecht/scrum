@@ -4048,6 +4048,17 @@ class Allowance(int):
         return self
 
 
+def held_windows(usage, now):
+    """[(key, label, window)] in WINDOWS order for each window of usage.json at USAGE_HOLD_PCT used or more with a numeric
+    used_percentage and a resets_at after `now`: the windows that hold every automated claim. [] for malformed data."""
+    limits = usage.get("rate_limits") if isinstance(usage, dict) else None
+    if not isinstance(limits, dict):
+        return []
+    return [(key, label, w) for key, label in WINDOWS if isinstance(w := limits.get(key), dict)
+            and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now
+            and w["used_percentage"] >= USAGE_HOLD_PCT]
+
+
 def usage_allowance(usage, now, live):
     """How many live headless sessions automated claims may run under the 5h and 7d budgets (an Allowance), or None
     for no taper. Each window's remaining % picks a rung of USAGE_STEPS; a reset within USAGE_RELAX_SECS relaxes
@@ -4069,12 +4080,9 @@ def usage_allowance(usage, now, live):
             if w["used_percentage"] - elapsed >= PACE_LEAD_PCT:
                 return Allowance(0, f"pace {label} {round(w['used_percentage'])}% used at {round(elapsed)}% elapsed, "
                                     f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M} (lead {PACE_LEAD_PCT}+ points)")
-    for key, label in WINDOWS:
-        w = usage["rate_limits"].get(key)
-        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) and w["resets_at"] > now \
-                and w["used_percentage"] >= USAGE_HOLD_PCT:
-            return Allowance(0, f"hold {label} {round(w['used_percentage'])}% used ({USAGE_HOLD_PCT}% cap), "
-                                f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M}")
+    for key, label, w in held_windows(usage, now):
+        return Allowance(0, f"hold {label} {round(w['used_percentage'])}% used ({USAGE_HOLD_PCT}% cap), "
+                            f"resets {datetime.fromtimestamp(w['resets_at']):%H:%M}")
     rungs = (None,) + USAGE_STEPS
     best = None
     for key, label in WINDOWS:
