@@ -228,7 +228,8 @@ def _text(params: dict) -> str:
     return " ".join(out)
 
 
-BUSY_JS = """!!document.querySelector('[aria-busy=true]') || [...document.querySelectorAll('[role=status]')].some(
+BUSY_JS = """[...document.querySelectorAll('[class*=skeleton i],.animate-pulse')].some(e => e.getClientRects().length > 0)
+|| !!document.querySelector('[aria-busy=true]') || [...document.querySelectorAll('[role=status]')].some(
   e => /^(loading(\\.\\.\\.)?)?$/i.test(e.textContent.trim()) && e.getClientRects().length > 0
 ) || [...document.querySelectorAll('body *')].some(
   e => /^loading(\\.\\.\\.)?$/i.test([...e.childNodes].filter(n => n.nodeType === 3).map(n => n.data).join('').trim())

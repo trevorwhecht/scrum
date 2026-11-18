@@ -18,6 +18,8 @@ MARKERS = {"role": '<div role="status">Loading</div>', "busy": '<div aria-busy="
 LOADING_JS = "<script>setTimeout(() => {{ document.querySelector('{sel}').remove(); console.error('ready') }}, 2000)</script>"
 LOADING_PAGES = {f"/load-{k}": (f"<!doctype html><title>l</title>{m}" + LOADING_JS.format(sel=sel)).encode()
                  for (k, m), sel in zip(MARKERS.items(), ("div", "div", "p"))}
+LOADING_PAGES["/load-skeleton"] = ("<!doctype html><title>l</title><div class=\"animate-pulse\">x</div>"
+                                   + LOADING_JS.format(sel="div")).encode()
 LOADING_PAGES["/load-never"] = f"<!doctype html><title>l</title>{MARKERS['role']}".encode()
 LOADING_PAGES["/load-empty"] = ("<!doctype html><title>l</title><div role=\"status\"></div>"
                                 + LOADING_JS.format(sel="div")).encode()
@@ -261,6 +263,12 @@ class RenderChromeTest(unittest.TestCase):
         lines = (self.out / "console.log").read_text().splitlines()
         self.assertIn("/load-empty 390 error: ready", lines)
         self.assertIn("/load-empty 1440 error: ready", lines)
+
+    def test_skeleton_is_busy(self):
+        code, _, err = run_chrome([self.url, str(self.out), "/load-skeleton"])
+        self.assertEqual(code, 0, err)
+        lines = (self.out / "console.log").read_text().splitlines()
+        self.assertIn("/load-skeleton 390 error: ready", lines)
 
     def assert_not_busy(self, path):
         code, err, took = timed_chrome([self.url, str(self.out), path], LOAD_CAP=20)
