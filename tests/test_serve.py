@@ -9749,6 +9749,7 @@ class AutoContinueTest(unittest.TestCase):
         self.projects = {}
         ic = mock.patch.object(serve, "idle_claim", return_value=False)  # idle_claim claims on the first tick; IdleClaimTest covers it
         ic.start(); self.addCleanup(ic.stop)
+        serve.SWEEP_SEEN.clear(); serve.SWEEP_HELD.clear()
 
     def project(self, name, n=None, backlog="- [ ] Open item\n", jobs=(), focus=False):
         root = self.base / name / "scrum"
@@ -9853,6 +9854,16 @@ class AutoContinueTest(unittest.TestCase):
                 mock.patch.object(self.board.os, "cpu_count", return_value=8):
             self.assertEqual(self.tick(), [])
             self.assertEqual(self.board.machine_ok(root, claim=True), "CPU load 388% of 8 cores (> 300%)")
+
+    def test_auto_continue_skips_resweep_after_gate_hold_without_new_items(self):
+        """Job 1132: a gate hold then a clear tick with the same claimable items starts no second sweep; a new item does."""
+        root = self.project("a", n=1)
+        self.assertEqual(self.tick(), self.started("a"))
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="14"):
+            self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(), [], "gate cleared, same items: no resweep")
+        (root / "backlog.md").write_text("# Backlog\n- [ ] Open item\n- [ ] New item\n")
+        self.assertEqual(self.tick(), self.started("a"))
 
     def test_auto_continue_disk_refusal_tries_next_project(self):
         self.project("a", n=1); self.project("b", n=2)
@@ -10619,7 +10630,7 @@ class HighUsageStartsTest(unittest.TestCase):
     def setUp(self):
         import serve
         self.serve, self.board = serve, serve.board
-        serve.AUTO_RESUME.clear()
+        serve.AUTO_RESUME.clear(); serve.SWEEP_SEEN.clear(); serve.SWEEP_HELD.clear()
         self.base = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.root = self.base / "repo" / "scrum"
