@@ -47,7 +47,7 @@ When every UI-glob file in the diff changes no rendered output, meaning only com
 
 **Look for:**
 - whether the flow actually delivers each acceptance criterion
-- loading, empty and error states
+- loading, empty and error states, including a save or draft that fails or drops part of the input (photos, files) with no message to the user: `[blocking]`
 - disabled states that reflect reality
 - forms submit on Enter and show pending progress
 - copy: labels, not explanations
