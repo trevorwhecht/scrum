@@ -9117,6 +9117,14 @@ class WatchdogIdleParentTest(unittest.TestCase):
                          {"id": "002-kid", "parent": "001-par", **kid},
                          {"id": "003-wait", "stage": "waiting", "parent": "001-par"}, *extra)
 
+    def test_claimable_count_skips_follow_up_of_open_origin(self):
+        """Job 1137: a `(from <id>)` line waits while its origin job is open, so it is not claimable."""
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Follow up (from 010-origin)\n- [ ] Plain\n")
+        for stage, want in (("build", 1), ("done", 2)):
+            with self.subTest(stage=stage):
+                self.queue_board({"id": "010-origin", "stage": stage})
+                self.assertEqual(self.serve.claimable_count(self.root), want)
+
     def ps_file(self, text):
         ps = self.repo / "ps.txt"
         ps.write_text(text)
