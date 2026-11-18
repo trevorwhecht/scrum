@@ -3576,6 +3576,12 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertLessEqual(len(text), 20000)
         self.assertLessEqual(len(text) // 4, 5000)  # agentskills.io: a 5k-token body
 
+    def test_cloud_artifacts_block_is_zsh_safe(self):
+        text = (ROOT / "skills" / "trevskills-scrum" / "lanes" / "cloud.md").read_text()
+        block = self.section(text, "- **Artifacts:**", "`B artifacts` prints only")
+        self.assertIn("git push origin", block)
+        self.assertNotRegex(block, r"\$[A-Za-z_]+:")  # zsh reads $C:r as a modifier
+
     def test_moved_sections_have_lane_files(self):
         text = (ROOT / "skills" / "trevskills-scrum" / "SKILL.md").read_text()
         pointers = re.findall(r"^Read `\$HOME/\.claude/skills/trevskills-scrum/lanes/(\w+)\.md` when this section runs\.$", text, re.M)
