@@ -52,6 +52,9 @@ GH_INSTALL = IN_TMP.format(
 # File storage, never the keychain: the shop's login keychain is locked in SSH sessions (security exits 36).
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
+# ruff for edit-check.py's `ruff check --select F`: no Homebrew on the shop, so pip into ~/.local (its bin is on PATH_PREFIX).
+RUFF_CHECK = "command -v ruff"
+RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" python3 -m pip install --user -q ruff'
 GIT_HELPER = "git config --global --get-all credential.https://github.com.helper"
 
 # Entries of this Mac's ~/.claude-owa that are links into ~/.claude (read 2026-11-17); its credentials are not.
@@ -358,6 +361,12 @@ def _account_step(name: str, alias: str) -> tuple[str, str]:
     return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
 
 
+def _ruff(alias: str) -> tuple[str, str]:
+    if run(RUFF_CHECK, STEP_TIMEOUT, alias=alias).returncode == 0:
+        return "ok", ""
+    return _done(run(RUFF_INSTALL, INSTALL_TIMEOUT, alias=alias))
+
+
 def _jev_key(alias: str) -> tuple[str, str]:
     """Pipe this Mac's Keychain TypeSafe key into the shop's JEV_KEY_FILE on stdin, unless that file is non-empty."""
     if run(f'[ -s "{JEV_KEY_FILE}" ]', STEP_TIMEOUT, alias=alias).returncode == 0:
@@ -389,7 +398,7 @@ def setup(alias: str = ALIAS) -> dict[str, str]:
              "gh login": lambda: _gh_login(alias), "gh git": lambda: _gh_git(alias),
              "permissions": lambda: _permissions(alias), "owa links": lambda: _owa_links(alias),
              **{f"account {n}": (lambda n=n: _account_step(n, alias)) for n in _accounts(alias)},
-             "jev key": lambda: _jev_key(alias)}
+             "ruff": lambda: _ruff(alias), "jev key": lambda: _jev_key(alias)}
     out = {}
     for name, step in steps.items():
         out[name], note = step()
