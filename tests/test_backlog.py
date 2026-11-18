@@ -400,6 +400,59 @@ class BacklogTest(unittest.TestCase):
         self.assertEqual((self.root / "board.json").read_bytes(), before_board)
         self.assertEqual(sorted(p.name for p in (self.root / "jobs").iterdir()), ["001-something-else"])
 
+    def set_origin(self, stage, job_id="100-a"):
+        (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": job_id, "title": "a", "stage": stage}]}))
+
+    def test_next_skips_followup_of_unfinished_origin(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] X (from 100-a)\n")
+        for stage in ("build", "needs-human", "spec"):
+            self.set_origin(stage)
+            self.assertEqual(board.cmd_next(self.root), {"id": None, "feature": None})
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X (from 100-a)\n")
+
+    def test_next_index_refuses_followup_of_unfinished_origin(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] X (from 100-a)\n")
+        self.set_origin("build")
+        with self.assertRaises(SystemExit) as e:
+            board.cmd_next(self.root, 0)
+        self.assertEqual(str(e.exception), "backlog item 0 waits on job 100-a")
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X (from 100-a)\n")
+
+    def test_next_claims_followup_after_origin_done(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] X (from 100-a)\n")
+        self.set_origin("done")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "X (from 100-a)")
+
+    def test_followup_of_aborted_or_missing_origin_not_blocked(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] X (from 100-a)\n- [ ] Y (from 200-b)\n")
+        self.set_origin("aborted")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "X (from 100-a)")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "Y (from 200-b)")
+
+    def test_runall_start_holds_followup_of_unfinished_origin(self):
+        (self.root / "backlog.md").write_text(
+            "# Backlog\n- [ ] X (from 100-a) {#xxxx}\n- [ ] Needs X {needs #xxxx}\n- [ ] Free\n")
+        self.set_origin("build")
+        out = board.cmd_runall_start(self.root)
+        self.assertEqual(len(out["children"]), 1)
+        self.assertEqual(self.text(), "# Backlog\n- [ ] X (from 100-a) {#xxxx}\n- [ ] Needs X {needs #xxxx}\n"
+                                      f"- [x] Free → {out['children'][0]}\n")
+
+    def test_cloud_claim_skips_followup_of_unfinished_origin(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] X (from 100-a)\n")
+        (self.root / "backlog-specs").mkdir()
+        board.spec_path(self.root, "X (from 100-a)").write_text("## Likely files\n- `x.py`\n")
+        self.set_origin("build")
+        self.assertEqual(board.cmd_cloud_claim(self.root, 1), {"claimed": []})
+        self.set_origin("done")
+        self.assertEqual(len(board.cmd_cloud_claim(self.root, 1)["claimed"]), 1)
+
+    def test_item_without_trailing_from_suffix_unaffected(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] A (from 100-a) then more\n- [ ] B\n")
+        self.set_origin("build")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "A (from 100-a) then more")
+        self.assertEqual(board.cmd_next(self.root)["feature"], "B")
+
     def test_next_all_waiting_returns_null(self):
         (self.root / "backlog.md").write_text(
             "# Backlog\n- [ ] A {#aaaa} {needs #bbbb}\n- [ ] B {#bbbb} {needs #aaaa}\n")

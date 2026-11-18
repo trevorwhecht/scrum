@@ -26,7 +26,7 @@
                                    then set the job stage=done
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
-                                   no {setup: …} Human setup as a new job, print {"id","feature"}
+                                   no {setup: …} Human setup, and no trailing "(from <id>)" job still open, as a new job, print {"id","feature"}
   board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
@@ -456,6 +456,15 @@ def waiting_on(item, items, board):
     return [n for n in item["needs"] if any(i["id"] == n and blocks(i) for i in items)]
 
 
+def origin_open(item, board):
+    """The id in the trailing " (from <id>)" of item's text when that board job exists and is not done or aborted, else None.
+    A follow-up waits for its origin to merge; a missing, done or aborted origin does not block."""
+    m = re.search(r"[ \t]\(from (\d+-[\w-]+)\)\s*\Z", item["text"])
+    if m and any(j.get("id") == m[1] and j.get("stage") not in ("done", "aborted") for j in board.get("jobs") or []):
+        return m[1]
+    return None
+
+
 def setup_steps(raw):
     """A Human setup checklist "step; step" as its list of steps: split on ";", braces removed, trimmed, empties dropped.
     Raises when no step is left or the checklist would not fit on one backlog line."""
@@ -704,7 +713,7 @@ def cmd_next(root, index=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board)), None)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
@@ -715,6 +724,8 @@ def cmd_next(root, index=None):
                 raise SystemExit(f"backlog item {index} waits on Human setup")
             if waits := waiting_on(item, items, board):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
+            if origin := origin_open(item, board):
+                raise SystemExit(f"backlog item {index} waits on job {origin}")
         job_id = add_job(root, board, short_title(item["text"]), started_by="runall" if index is None else "hand")
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
@@ -745,7 +756,7 @@ def cmd_cloud_claim(root, n) -> dict:
         for item in sorted(items, key=priority_key):
             if blocked_all or len(claimed) >= n:
                 break
-            if item["done"] or item["setup"] or waiting_on(item, items, board):
+            if item["done"] or item["setup"] or waiting_on(item, items, board) or origin_open(item, board):
                 continue
             spec = spec_path(root, item["text"])
             files = likely_files(spec.read_text(encoding="utf-8")) if spec.is_file() else set()
@@ -2546,7 +2557,7 @@ def _project_idle(root, board) -> bool:
     if any(j.get("stage") in ACTIVE for j in board["jobs"]):
         return False
     _, items = read_backlog(root)
-    return any(not i["done"] and not i["setup"] and not waiting_on(i, items, board) for i in items)
+    return any(not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board) for i in items)
 
 
 def _scorecard(root, e, t, board, questions, acc=None):
@@ -4431,7 +4442,7 @@ def cmd_runall_start(root, match=None):
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         held = {i["index"] for i in items if not i["done"]  # indexes of open items left open
-                and (i["setup"] or match is not None and not match_words(i["text"], match))}
+                and (i["setup"] or origin_open(i, board) or match is not None and not match_words(i["text"], match))}
         while True:
             more = {i["index"] for i in items if not i["done"] and i["index"] not in held
                     and any(o["id"] == n and (o["done"] or o["index"] in held)
