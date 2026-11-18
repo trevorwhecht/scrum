@@ -4363,7 +4363,7 @@ JOB_STATES_MAX = 200  # ids one GET /api/p/<project>/job-states may ask for
 
 
 def job_states(root, ids):
-    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, question, options} per job, in board order,
+    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, play_queued, question, options} per job, in board order,
     read from cached_board only (no activity, refusal, lock or session work). ids (exact strings) picks those jobs and
     leaves unknown ids out; None or empty gives every job not done or aborted."""
     jobs = cached_board(root).get("jobs", [])
@@ -4374,7 +4374,7 @@ def job_states(root, ids):
         jobs = [j for j in jobs if j.get("stage") not in ("done", "aborted")]
     return [{"id": j.get("id"), "title": j.get("title"), "stage": j.get("stage"), "reason": j.get("reason"),
              "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j),
-             "question": j.get("question"), "options": j.get("options")}
+             "play_queued": bool(j.get("play_queued")), "question": j.get("question"), "options": j.get("options")}
             for j in jobs]
 
 
