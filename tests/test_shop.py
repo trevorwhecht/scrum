@@ -795,6 +795,105 @@ class ProjectCopyTest(SetupCase):
         (self.clone / "scrum").mkdir(exist_ok=True)
         (self.clone / "scrum" / "project.md").write_bytes(data)
 
+    def test_exclude_lines_added_once(self):
+        self.profile("- Test: x\n")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        for before, after in ((GIT_EXCLUDE, GIT_EXCLUDE + b"scrum/\n.claude/worktrees/\n"),
+                              (b"# mine\nscrum/", b"# mine\nscrum/\n.claude/worktrees/\n"),
+                              (None, b"scrum/\n.claude/worktrees/\n")):
+            with self.subTest(before=before):
+                if before is None:
+                    shutil.rmtree(exclude.parent)
+                else:
+                    exclude.write_bytes(before)
+                self.assertIs(self.copy(), True)
+                self.assertEqual(exclude.read_bytes(), after)
+                self.assertIs(self.copy(), True)
+                self.assertEqual(exclude.read_bytes(), after)
+
+    def test_no_clone_writes_nothing(self):
+        self.profile("- Render auth: ../../../a.json\n")
+        (self.real / "a.json").write_bytes(AUTH)
+        shutil.rmtree(self.clone / ".git")
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        for gitfile in (False, True):
+            with self.subTest(gitfile=gitfile):
+                if gitfile:
+                    (self.clone / ".git").write_text("gitdir: /elsewhere\n")
+                before = tree(self.sh)
+                self.assertIs(self.copy(), False)
+                self.assertEqual(tree(self.sh), before)
+                self.assertEqual(sorted(os.listdir(self.clone)), [".git"] if gitfile else [])
+                self.assertEqual(self.cmds("a.json"), [])
+        shutil.rmtree(self.sh / "scrum-work")
+        self.assertIs(self.copy(), False)
+        self.assertEqual(os.listdir(self.sh), [])
+
+    def test_render_auth_copied_mode_600(self):
+        self.profile("- Render auth: ../../../playwright/.auth/admin.json\n")
+        (self.real / "playwright" / ".auth").mkdir(parents=True)
+        (self.real / "playwright" / ".auth" / "admin.json").write_bytes(AUTH)
+        (self.real / "playwright" / ".auth" / "customer.json").write_bytes(b"{}\n")
+        dest = self.clone / "playwright" / ".auth" / "admin.json"
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        self.assertIs(self.copy(), True)
+        self.assertEqual([c[0] for c in self.calls[2:]], [AUTH_CMD])
+        self.assertEqual(self.calls[2][1:], (60, AUTH))
+        self.assertEqual((dest.read_bytes(), sorted(os.listdir(dest.parent))), (AUTH, ["admin.json"]))
+        self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o600)
+        dest.chmod(0o644)
+        (self.real / "playwright" / ".auth" / "admin.json").write_bytes(b"fresh\n")
+        self.assertIs(self.copy(), True)
+        self.assertEqual((dest.read_bytes(), stat.S_IMODE(dest.stat().st_mode)), (b"fresh\n", 0o600))
+        self.profile("- Render auth: ../../../root.json\n")  # at the repo root: dirname is empty
+        (self.real / "root.json").write_bytes(AUTH)
+        self.assertIs(self.copy(), True)
+        self.assertEqual(((self.clone / "root.json").read_bytes(), stat.S_IMODE((self.clone / "root.json").stat().st_mode)),
+                         (AUTH, 0o600))
+
+    def test_render_auth_skipped(self):
+        wt = self.real / ".claude" / "worktrees" / "scrum-x"
+        for rel in ("../x", ".claude/worktrees/scrum-x/admin.json", ".claude/worktrees/scrum-x/abs/x", "a b"):
+            (self.real / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.real / rel).write_bytes(AUTH)  # each exists here, so only the path check refuses it
+        self.assertTrue((wt / "admin.json").is_file())
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        for line in ("", "- Render auth: ../../../playwright/.auth/missing.json\n", "- Render auth: ../../../../x\n",
+                     "- Render auth: admin.json\n", "- Render auth: /abs/x\n", "- Render auth: ../../../a b\n",
+                     "- Render auth: ../../..\n", "- Render auth: ../../../scrum\n"):
+            with self.subTest(line=line):
+                shop._cache = None
+                self.calls.clear()
+                self.profile(f"- Test: x\n{line}")
+                self.assertIs(self.copy(), True)
+                self.assertEqual([c[0] for c in self.calls][:1], [shop.PROBE_CMD])
+                self.assertEqual(len(self.calls), 2, self.calls)
+                self.assertIn("project.md", self.calls[1][0])
+                self.assertEqual(self.shop_profile(), f"- Test: x\n{line}".encode())
+        self.assertEqual(sorted(os.listdir(self.clone)), [".git", "scrum"])
+
+    def test_refusals_and_failures(self):
+        self.profile("- Render auth: ../../../a.json\n")
+        (self.real / "a.json").write_bytes(AUTH)
+        self.shop(("scrum-work", LOCAL, ""), *DONE)
+        for name in ("-x", "../x", ".hidden", "", "a b", "a/b", "x;rm -rf ~", "$(id)", "é", "x\n"):
+            with self.subTest(name=name):
+                self.assertIs(self.copy(name), False)
+        self.assertIs(self.copy(repo=self.mac), False)  # no scrum/project.md here
+        self.assertEqual(self.argv, [])
+        self.shop(("sysctl", 255, ""), ("scrum-work", LOCAL, ""))
+        self.assertIs(self.copy(), False)
+        self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
+        for fail, ran in (("project.md", 1), ("a.json", 2)):
+            for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
+                with self.subTest(fail=fail, rc=rc):
+                    shop._cache = None
+                    self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), *DONE)
+                    self.assertIs(self.copy(), False)
+                    self.assertEqual(len(self.calls), 1 + ran)
+        self.assertFalse((self.clone / "a.json").exists())
+
 
 class SecretTest(SetupCase):
     def assert_clean(self, secret, text):
@@ -826,6 +925,24 @@ class SecretTest(SetupCase):
                 self.assertEqual(got, "copied" if rc == 0 else "failed")
                 self.assert_clean("abc962xyz", out.getvalue() + err.getvalue())
                 self.assertEqual([c[2] for c in self.calls if c[2]], [b"SECRET_962=abc962xyz\n"])
+
+    def test_render_auth_never_in_argv_or_output(self):
+        repo = Path(self.home) / "app"
+        (repo / "scrum").mkdir(parents=True)
+        (repo / "scrum" / "project.md").write_text("- Render auth: ../../../playwright/.auth/admin.json\n")
+        (repo / "playwright" / ".auth").mkdir(parents=True)
+        (repo / "playwright" / ".auth" / "admin.json").write_bytes(AUTH)
+        for rc in (0, 1, subprocess.TimeoutExpired(["ssh"], 60, output=AUTH)):
+            with self.subTest(rc=rc):
+                shop._cache = None
+                self.shop(("admin.json", rc, AUTH.decode()), *DONE)
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    got = shop.project_copy("app", str(repo))
+                self.assertIs(got, rc == 0)
+                self.assert_clean("sess1069xyz", out.getvalue() + err.getvalue())
+                self.assertEqual([c[0] for c in self.calls if c[2] and b"sess1069xyz" in c[2]], [AUTH_CMD])
+                self.assertEqual(self.cmds("admin.json")[0][2], AUTH)
 
 
 PULL = "git -C ~/code/scrum pull --ff-only && git -C ~/code/trevorhecht-skills pull --ff-only"
