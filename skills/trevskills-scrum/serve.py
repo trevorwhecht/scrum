@@ -1540,15 +1540,15 @@ CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a sessio
 
 
 def shop_pr_close(project, root, job_id):
-    """Close the open `[scrum <id>]` PR from this repo's own scrum/<id> (board._cloud_trusted) of a shop job cloud_tick
-    just aborted, with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
+    """Close the open PR that board._cloud_trusted accepts as this job's, for a shop job cloud_tick just aborted,
+    with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
     repo = Path(root).parent
     try:
         prs = board.gh_api(repo, board.CLOUD_PULLS)
         if not isinstance(prs, list):
             raise board.GhError(f"gh api {board.CLOUD_PULLS} did not return a list")
-        pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
-                   and board._cloud_trusted(p, job_id) and p.get("state") == "open"), None)
+        pr = next((p for p in prs if isinstance(p, dict) and board._cloud_trusted(p, job_id)
+                   and p.get("state") == "open"), None)
         if pr is None:
             return
         if not isinstance(pr.get("number"), int):

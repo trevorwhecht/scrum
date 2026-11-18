@@ -6023,9 +6023,15 @@ def _login(item):
 
 
 def _cloud_trusted(pr, job_id):
-    """Whether pr's head is this repo's own scrum/<id> branch: a fork PR, or one from another branch, steers nothing."""
+    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>) branch, and a leading
+    `[scrum <tag>]` names the id or its number. An untagged title is matched by its head; a fork PR, another branch or
+    another job's tag steers nothing."""
     head, base = pr.get("head"), pr.get("base")
-    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") != f"scrum/{job_id}":
+    names = {job_id, job_id.split("-", 1)[0]}
+    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") not in {f"scrum/{n}" for n in names}:
+        return False
+    tag = re.match(r"\[scrum ([^\]]*)\]", str(pr.get("title") or ""))
+    if tag and tag[1] not in names:
         return False
     full = [r.get("full_name") if isinstance(r, dict) else None for r in (head.get("repo"), base.get("repo"))]
     return bool(full[0]) and full[0] == full[1]
@@ -6066,11 +6072,10 @@ def cloud_pending_clear(root: Path, job_id: str) -> None:
 
 
 def _cloud_plan(repo, job_id, prs):
-    """(state, pairs, reason, needs a worktree, abort) for this job's newest [scrum <id>] PR, or None while it still
+    """(state, pairs, reason, needs a worktree, abort) for this job's newest PR (_cloud_trusted), or None while it still
     runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
     raises GhError."""
-    pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
-               and _cloud_trusted(p, job_id)), None)
+    pr = next((p for p in prs if isinstance(p, dict) and _cloud_trusted(p, job_id)), None)
     if not pr:
         return None
     url = pr.get("html_url") or ""
