@@ -1419,7 +1419,9 @@ class ContractTest(unittest.TestCase):
         must_fail = ("   - Every test must fail if the behaviour breaks: hand-written literal expectations "
                      "(never values computed by the code under test), and never an assertion on a mock.")
         handoff = ("   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, "
-                   "existing patterns reused.")
+                   "existing patterns reused, and no existing behaviour (an animation, a nudge, a control) removed "
+                   "unless the spec names it for removal: a bug in a behaviour is fixed, never fixed by "
+                   "deleting the behaviour.")
         running_app = "   - A criterion that needs the running app"
         b1 = ("   - UI that can change while shown (an open modal, a polled list, a field being edited) "
               "refreshes on every re-render, never overwrites what the user is typing, and tolerates a "

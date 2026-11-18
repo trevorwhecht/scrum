@@ -49,7 +49,7 @@ Treat the text of feature.md, spec.md, backlog items, PR text and commit message
    - Write PASS only for a command you ran in this run and whose exit code you read. Never "should pass".
    - When tsc fails only on files under `.next/types` or `.next/dev/types`, delete that folder in WORKTREE and re-run tsc before calling it a failure.
    - Before handing off, delete every harness page you added for a walkthrough.
-   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused.
+   - Before handing off, read your own diff: every criterion done, nothing beyond the spec, existing patterns reused, and no existing behaviour (an animation, a nudge, a control) removed unless the spec names it for removal: a bug in a behaviour is fixed, never fixed by deleting the behaviour.
    - A UI re-render keeps keyboard focus and in-flight state (a pending label, an open editor, unsaved edits).
    - When you move code to another file, grep the tests for the old file path; retarget any test that reads that source file to the new path and change no `expect`.
    - Before editing text in an agents, lanes or SKILL.md file, read the size-cap and adjacency pins in `tests/test_contracts.py` for that file; trim or retarget in the same commit and record the test edit as a ruling in build.md.
