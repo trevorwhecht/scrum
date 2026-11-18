@@ -3738,6 +3738,18 @@ def header_value(path: Path, key: str, words: tuple[str, ...]) -> str | None:
     return m[1].lower() if m else None
 
 
+def feature_text(text: str) -> str:
+    """text as a feature.md body: an inline `Lane:` / `Complex:` clause (a backlog item is one line) is also written on its
+    own header line after the first line, where header_value reads it. The last valid clause of each key wins."""
+    hdr = {}
+    for m in re.finditer(r"\b(Lane|Complex):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex):|\Z)", text, re.S):
+        key, rest = m[1].title(), " ".join(m[2].split())
+        if rest.split()[0].lower() in (LANES if key == "Lane" else ("yes", "no")):
+            hdr[key] = rest
+    first, _, more = text.rstrip("\n").partition("\n")
+    return first + "\n" + "".join(f"{k}: {v}\n" for k, v in hdr.items()) + (more + "\n" if more else "")
+
+
 def job_complex(root: Path, job_id: str) -> bool:
     """True only when feature.md's header `Complex:` is yes, or, with no such line there, spec.md's is."""
     d = Path(root) / "jobs" / job_id
@@ -4727,7 +4739,7 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
     job_id = add_job(root, board, short_title(t["title"]), started_by=parent.get("started_by") or "runall")
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
-    feature = t["text"] + "\n" if plain else \
+    feature = feature_text(t["text"]) if plain else \
         f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "") \
