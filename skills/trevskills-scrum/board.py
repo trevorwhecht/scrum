@@ -3820,6 +3820,55 @@ def tag_runs_on(root, job_id: str) -> str:
         return live["runs_on"]
 
 
+def shop_room_path() -> Path:
+    """shop-room.json beside projects.json: serve.py's write_shop_room lists the workers with room each tick."""
+    return registry_path().parent / "shop-room.json"
+
+
+def shop_project_excluded(root) -> bool:
+    """A project the shop never runs: project.md has a `- Base branch:` line or names docker (any case)."""
+    try:
+        profile = (Path(root) / "project.md").read_text(errors="replace")
+    except OSError:
+        profile = ""
+    return bool(re.search(r"^- Base branch:", profile, re.M) or "docker" in profile.lower())  # docker: as docker_projects reads it
+
+
+def shop_room(root) -> bool:
+    """True when shop-room.json is at most SHOP_ROOM_TTL seconds old, lists a worker and the project is not
+    shop_project_excluded. A missing, stale or malformed file is False; so is any read under unittest with the registry
+    not moved (SCRUM_REGISTRY unset)."""
+    if "unittest" in sys.modules and not os.environ.get("SCRUM_REGISTRY"):
+        return False
+    try:
+        room = json.loads(shop_room_path().read_text())
+        fresh = abs(time.time() - float(room["at"])) <= SHOP_ROOM_TTL  # abs: a clock stepped back is not "fresh forever"
+        workers = room["workers"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return fresh and isinstance(workers, list) and bool(workers) and not shop_project_excluded(root)
+
+
+DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md expands these; shop dispatch does not
+
+
+def shop_excluded(root, job: dict, jobs: list) -> bool:
+    """A job shop dispatch never takes: lilguy as the local lilguy route takes it (board lane, `Lane: lilguy` anywhere
+    in feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent) or a feature.md naming a digest
+    proposals.json. cmd_ready never leaves one of these to the shop."""
+    folder = Path(root) / "jobs" / job["id"]
+    try:
+        feature = (folder / "feature.md").read_text(errors="replace")
+    except OSError:
+        feature = ""  # dispatched, then failed as a step: the claim is put back
+    if job_lane(root, job) == "lilguy" or re.search(r"\bLane:\s*lilguy\b", feature, re.I) \
+            or DIGEST_PROPOSALS_RE.search(feature):
+        return True
+    if job.get("parent") and next((j.get("lane") for j in jobs if j["id"] == job["parent"]), None) != "runall":
+        return False
+    return _health_file(folder / "lilguy-fit.json", dict).get("fit") is True
+
+
 def cmd_lilguy_fit(root, job_id: str) -> dict:
     """The _lilguy_verdict, also written to jobs/<id>/lilguy-fit.json when that folder exists (process-health reads it)."""
     verdict = _lilguy_verdict(root, job_id)
@@ -5431,8 +5480,25 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
     Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was, except that
     one light kid (LIGHT_LANES, its lane read as for the skip below) still claims when ram_room(floor=0, light=True),
     spawn's size for it, is at least 1 and the call has claimed nothing else. `held` in the output: the machine_ok or usage refusal,
-    `ram_room` when the standard room is 0, else None (serve.py's start_ready notes it as a queue gate)."""
+    `ram_room` when the standard room is 0, else None (serve.py's start_ready notes it as a queue gate).
+    Runs on (job 1155): a call without `shop` never claims a `shop` child (it waits for a worker, the parent keeps
+    running) and a `shop` call never claims a `main` one. When shop_room(root) says a worker has room, a call without
+    `shop` (only= and manual included) first tags each waiting child that is not shop_excluded with tag_runs_on, before
+    the lock (Jev is a network call), then leaves an `any` child (an untagged one counts as any; under the lock only the
+    header and stored field are read) in waiting for the shop, setting `shop_first_since` once, until it is older than
+    SHOP_FIRST_MAX_S; a claim drops it."""
     jobs_dir = Path(root) / "jobs"
+    shop_first = not shop and shop_room(root)  # a worker has room: an `any` child goes there first
+    if shop_first:
+        jobs = read_board(root)["jobs"]
+        by_id = {j["id"]: j for j in jobs}
+        for k in [by_id[i] for i in (by_id.get(parent_id) or {}).get("children") or [] if i in by_id]:
+            if k["stage"] == "waiting" and k.get("setup") != "pending" and not k.get("wake") \
+                    and only in (None, k["id"]) and not shop_excluded(root, k, jobs):
+                try:
+                    tag_runs_on(root, k["id"])
+                except SystemExit:
+                    pass  # gone meanwhile: the lock below reads the live board
     with locked_board(root) as board:
         parent = find(board, check_id(parent_id))
         was = parent["stage"]
@@ -5497,6 +5563,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
             room = min(room, cap)
         light_room = None  # read once a light kid meets a spent standard room: spawn's size for it (job 955)
         ready = []
+        left = []  # children left in waiting for a shop Mac: the parent keeps running
         critical = lambda j: str(j.get("title") or "").startswith("Critical")
         built = {}  # holder id -> not unbuilt(), so each holder's branch is read once per call
         held_by = lambda pool: [o for o in pool  # a Critical kid skips holders that produced nothing (job 855)
@@ -5505,6 +5572,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         for k in sorted(kids, key=lambda j: not critical(j)) if go and not machine else []:
             if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only \
                     or shop and k["id"] != shop:
+                continue
+            tag = stored_runs_on(root, k) or "any"  # never Jev under the lock: untagged counts as any
+            if tag == ("main" if shop else "shop"):
+                left.append(k["id"])
                 continue
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
@@ -5547,10 +5618,20 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                         else [overlap_gate(i, files[k["id"]], files.get(i, set())) for i in hit[1]]:
                     note_queue_gate(root, k["id"], g)
                 continue
+            if shop_first and tag == "any" and not shop_excluded(root, k, board["jobs"]):
+                try:
+                    waited = time.time() - datetime.fromisoformat(k["shop_first_since"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    k["shop_first_since"], waited = now(), 0  # set once; a malformed one starts again
+                if waited <= SHOP_FIRST_MAX_S:
+                    k.pop("overlap_hold", None)
+                    left.append(k["id"])
+                    continue
             for i in skipped:
                 note_queue_gate(root, k["id"], f"overlap_skipped:{i}")
             k.update(stage="spec", updatedAt=now())
             k.pop("overlap_hold", None)
+            k.pop("shop_first_since", None)
             try:  # the claim time, written once, for timing.md's Spec start (see _timing_row)
                 with (jobs_dir / k["id"] / "claimed-at.txt").open("x", encoding="utf-8") as f:
                     f.write(f"{int(time.time())}\n")
@@ -5567,7 +5648,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
         elif machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):
                 new = "running", MACHINE_WAIT + machine
-        elif blocked and (ready or busy or finished == len(kids)):
+        elif blocked and (ready or busy or left or finished == len(kids)):
             new = "running", None
         elif not ready and not busy and finished < len(kids) and go:
             human = [k["id"] for k in kids if k["stage"] == "needs-human" or k.get("paused")]
@@ -5581,6 +5662,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 new = "running", WAITING_ON + ", ".join(waits)
             elif overlap:  # another tree's job holds the files; sweep_parents' start_ready retries each tick
                 new = "running", OVERLAP_WAIT + ", ".join(dict.fromkeys(overlap))
+            elif left:  # a child waits for a shop Mac: shop_tick or a later call here claims it
+                new = "running", None
             elif any(stalled(k) for k in kids):  # a child stalled in its own stage is auto-resumed; keep running
                 new = "running", None
             elif not runall and aborted and stuck_on(kids, set(aborted)):  # Resume skips the dependents

@@ -3,6 +3,8 @@ workers' `## Cannot run` lists decides once and the board stores it. serve.py's 
 has room; with room, cmd_ready leaves an `any` waiting child to the shop for up to SHOP_FIRST_MAX_S and never claims a
 `shop` one."""
 import json, os, sys, tempfile, time, unittest
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -182,6 +184,186 @@ class RunsOnTest(unittest.TestCase):
             with self.subTest(text):
                 self.assertIs(board.names_main_only(text, terms), want)
         self.assertFalse(board.names_main_only("brew", []))
+
+    # --- criterion 3: the room file ---
+    def test_shop_room_fresh_stale_missing(self):
+        self.assertFalse(board.shop_room(self.root), "no file")
+        self.room()
+        self.assertTrue(board.shop_room(self.root))
+        self.room(age=170)
+        self.assertTrue(board.shop_room(self.root), "170 s old is still fresh")
+        self.room(age=200)
+        self.assertFalse(board.shop_room(self.root), "stale past 180 s")
+        self.room(workers=())
+        self.assertFalse(board.shop_room(self.root), "no worker has room")
+        for text in ("not json", "[]", '{"workers": ["shopmac"]}', '{"at": "soon", "workers": ["shopmac"]}',
+                     json.dumps({"at": time.time(), "workers": "shopmac"}), json.dumps({"at": time.time()})):
+            with self.subTest(text):
+                (self.base / "shop-room.json").write_text(text)
+                self.assertFalse(board.shop_room(self.root))
+        self.room()
+        with mock.patch.dict(os.environ), mock.patch.object(board, "registry_path", return_value=self.base / "projects.json"):
+            del os.environ["SCRUM_REGISTRY"]  # a test that forgot to move the registry never reads the real file
+            self.assertFalse(board.shop_room(self.root))
+
+    def test_shop_room_false_for_docker_and_base_branch(self):
+        self.room()
+        for profile in ("# Project\n- Base branch: dev\n", "# Project\n- E2E: DOCKER compose up\n",
+                        "# Project\n- Notes: runs in a docker container\n"):
+            with self.subTest(profile):
+                (self.root / "project.md").write_text(profile)
+                self.assertTrue(board.shop_project_excluded(self.root))
+                self.assertFalse(board.shop_room(self.root))
+        (self.root / "project.md").write_text("# Project\n- Test: x\n- Notes: the base branch is main\n")
+        self.assertFalse(board.shop_project_excluded(self.root))
+        self.assertTrue(board.shop_room(self.root))
+
+    # --- criteria 5, 6, 7 and 9: cmd_ready with and without room ---
+    def kid(self, job_id, src, **extra):
+        """A parallel waiting child whose spec.md names src/<src>.py, so siblings never clash."""
+        return {"id": job_id, "parallel": True, "spec": f"# Spec\n## Likely files\n- `src/{src}.py`\n", **extra}
+
+    def ready(self, **kw):
+        return board.cmd_ready(self.root, PAR, **kw)["ready"]
+
+    def ago(self, seconds):
+        return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+    def test_ready_leaves_any_child_to_shop_and_claims_main(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a"), self.kid("011-b", "b", feature="Redraw the logo in VectorCraft\n"))
+        self.room()
+        ask = self.jev(None)  # Jev down: the term list decides
+        self.assertEqual(self.ready(), ["011-b"], "the main sibling is still claimed in the same call")
+        a, b = self.job("010-a"), self.job("011-b")
+        self.assertEqual((a["stage"], a["runs_on"]), ("waiting", "any"))
+        self.assertEqual((b["stage"], b["runs_on"]), ("spec", "main"))
+        self.assertNotIn("shop_first_since", b)
+        since = a["shop_first_since"]
+        for kw in ({}, {"manual": True}, {"only": "010-a"}):
+            with self.subTest(**kw):
+                self.assertEqual(self.ready(**kw), [])
+                self.assertEqual(self.job("010-a")["shop_first_since"], since, "set once")
+                self.assertEqual(self.job("010-a")["stage"], "waiting")
+        self.assertEqual(ask.call_count, 2, "each child asked once, then read back")
+        with self.subTest("a parent whose only open child waits for the shop keeps running"):
+            self.runall(self.kid("010-a", "a"))
+            self.assertEqual(self.ready(), [])
+            self.assertEqual((self.job(PAR)["stage"], self.job(PAR)["reason"]), ("running", None))
+
+    def test_ready_claims_any_child_when_no_room(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a"), self.kid("011-b", "b"))
+        self.jev(AssertionError("no Jev without room"))
+        self.assertEqual(self.ready(), ["010-a", "011-b"])
+        for job_id in ("010-a", "011-b"):
+            job = self.job(job_id)
+            self.assertEqual(job["stage"], "spec")
+            self.assertNotIn("shop_first_since", job)
+            self.assertNotIn("runs_on", job)
+            self.assertTrue((self.root / "jobs" / job_id / "claimed-at.txt").is_file())
+        for workers, age in (((), 0), (("shopmac",), 200)):  # no worker with room, or a stale file
+            with self.subTest(workers=workers, age=age):
+                self.runall(self.kid("010-a", "a"))
+                self.room(workers, age)
+                self.assertEqual(self.ready(), ["010-a"])
+
+    def test_ready_claims_lilguy_and_digest_children_despite_room(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a", lane="lilguy"),
+                    self.kid("011-b", "b", feature="Fix the widget\n\n## Notes\nLane: lilguy\n"),
+                    self.kid("012-c", "c", fit=True),
+                    self.kid("013-d", "d", feature="Expand digests/042/proposals.json\n"),
+                    self.kid("014-e", "e"))
+        self.room()
+        self.jev(False)
+        self.assertEqual(self.ready(), ["010-a", "011-b", "012-c", "013-d"])
+        self.assertEqual(self.job("014-e")["stage"], "waiting")
+        jobs = [{"id": "020-p", "lane": "bigboy"}, {"id": "021-k", "parent": "020-p"}, {"id": "022-n"}]
+        for job in jobs[1:]:
+            (self.root / "jobs" / job["id"]).mkdir()
+            (self.root / "jobs" / job["id"] / "lilguy-fit.json").write_text('{"fit": true}')
+        self.assertFalse(board.shop_excluded(self.root, jobs[1], jobs), "a fit BigBoy child is not lilguy's")
+        self.assertTrue(board.shop_excluded(self.root, jobs[2], jobs), "a fit parentless job is")
+
+    def test_ready_claims_after_shop_first_max(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a", shop_first_since=self.ago(board.SHOP_FIRST_MAX_S + 1)),
+                    self.kid("011-b", "b", shop_first_since=self.ago(200)),
+                    self.kid("012-c", "c", shop_first_since="soon"))
+        self.room()
+        self.jev(False)
+        self.assertEqual(board.SHOP_FIRST_MAX_S, 300)
+        recent = self.job("011-b")["shop_first_since"]
+        self.assertEqual(self.ready(), ["010-a"])
+        self.assertNotIn("shop_first_since", self.job("010-a"), "a claim drops it")
+        self.assertEqual(self.job("011-b")["shop_first_since"], recent)
+        self.assertNotEqual(self.job("012-c")["shop_first_since"], "soon", "a malformed time starts again")
+        self.assertEqual(self.job("012-c")["stage"], "waiting")
+
+    def test_ready_never_claims_shop_child(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a", feature="Runs on: shop\n\nFix the widget\n"),
+                    self.kid("011-b", "b", feature="Runs on: main\n\nFix the widget\n"))
+        self.jev(AssertionError("the header decides"))
+        self.assertEqual(self.ready(), ["011-b"])
+        for kw in ({}, {"manual": True}, {"only": "010-a"}):
+            with self.subTest(room=False, **kw):
+                self.assertEqual(self.ready(**kw), [])
+        self.room()
+        for kw in ({}, {"manual": True}, {"only": "010-a"}):
+            with self.subTest(room=True, **kw):
+                self.assertEqual(self.ready(**kw), [])
+        self.assertEqual(self.job("010-a")["stage"], "waiting")
+        with self.subTest("a parent whose only open child is a shop one keeps running"):
+            self.runall(self.kid("010-a", "a", feature="Runs on: shop\n"))
+            (self.base / "shop-room.json").unlink()
+            self.assertEqual(self.ready(), [])
+            self.assertEqual((self.job(PAR)["stage"], self.job(PAR)["reason"]), ("running", None))
+        with self.subTest("the shop claims it; a shop call never claims a main one"):
+            self.runall(self.kid("010-a", "a", feature="Runs on: shop\n"), self.kid("011-b", "b", feature="Runs on: main\n"))
+            self.assertEqual(self.ready(shop="011-b"), [])
+            self.assertEqual(self.ready(shop="010-a"), ["010-a"])
+
+    def test_ready_asks_no_jev_without_room(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a"))
+        self.jev(AssertionError("no Jev without room"))
+        with mock.patch.object(board, "tag_runs_on") as tag:
+            self.assertEqual(self.ready(), ["010-a"])
+            self.runall(self.kid("010-a", "a"))
+            self.room()
+            (self.root / "project.md").write_text("# Project\n- Base branch: dev\n")  # never a shop project
+            self.assertEqual(self.ready(), ["010-a"])
+        tag.assert_not_called()
+
+    def test_ready_tags_before_the_lock(self):
+        (self.root.parent / "src").mkdir()
+        self.runall(self.kid("010-a", "a"), self.kid("011-b", "b"), self.kid("012-c", "c", lane="lilguy"))
+        self.room()
+        depth, real = [0], board.locked_board
+
+        @contextmanager
+        def watched(*a, **kw):
+            depth[0] += 1
+            try:
+                with real(*a, **kw) as b:
+                    yield b
+            finally:
+                depth[0] -= 1
+
+        asked = []
+        self.jev(lambda text, terms, log: asked.append((log.parent.name, depth[0])) or False)
+        with mock.patch.object(board, "locked_board", watched):
+            self.assertEqual(self.ready(), ["012-c"])
+        self.assertEqual(asked, [("010-a", 0), ("011-b", 0)], "asked outside the lock; a lilguy child is not asked")
+        with self.subTest("under the lock an untagged child counts as any"):
+            self.runall(self.kid("010-a", "a"))
+            with mock.patch.object(board, "tag_runs_on") as tag:
+                self.assertEqual(self.ready(), [])
+            tag.assert_called_once_with(self.root, "010-a")
+            self.assertNotIn("runs_on", self.job("010-a"))
+            self.assertIn("shop_first_since", self.job("010-a"))
 
 
 if __name__ == "__main__":
