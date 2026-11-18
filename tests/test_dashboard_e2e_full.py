@@ -129,8 +129,10 @@ class ChecksMarkup(unittest.TestCase):
         btn = re.search(r'<button class="btn" id="checksBtn" type="button" hidden data-agent-hint="[^"]+">Checks</button>',
                         text)
         self.assertIsNotNone(btn)
-        # Job 1116: Checks sits with the other status buttons, right after Codex routing, so at 390 px it shares their row.
-        self.assertLess(text.index('id="routing"'), btn.start())
+        # Job 1116: Checks sits with the other status buttons, right after Cool down and its state texts, so at 390 px it
+        # shares their row (job 1171: the Codex button moved into the meters' row 2).
+        self.assertLess(text.index('id="autoOff"'), btn.start())
+        self.assertLess(text.index('<div id="controls">'), btn.start())
         self.assertLess(btn.start(), text.index('id="filter"'))
         self.assertLess(btn.start(), text.index("</header>"))
         dialog = text[text.index('<dialog id="checks" aria-label="Checks">'):]
@@ -146,27 +148,28 @@ class ChecksMarkup(unittest.TestCase):
         self.assertIn("#checks,#usage,#rank{width:100%", mobile[:mobile.index("}")])
 
     def test_desktop_header_one_row(self):
-        """At 1400 px and wider buttons keep their size, and #machine and #routing wrap their text inside their own box
+        """At 1400 px and wider buttons keep their size, and the meters (#machine, #aiUsage) wrap inside their own box
         instead (job 977 rework: no readout text is cut off). Job 1116: the buttons sit together in #controls, so the
         header breaks only between the meters and the whole button row, never inside a meter group or between buttons."""
         text = DASHBOARD.read_text()
         start = text.index("@media (min-width:1400px){header{gap:8px;align-items:center}")
         rule = text[start:text.index("\n", start)]
         self.assertIn("h1,#controls>*{flex-shrink:0}", rule, "the title and every button keep their size")
-        self.assertIn("#machine{flex:1 1 auto}", rule, "the meter is measured at its one-line width, so the buttons move under it whole")
-        self.assertIn("#machine,#routing{flex-shrink:1;white-space:normal}", rule)
+        self.assertIn("#meters{flex:1 1 auto}", rule, "the meters are measured at their one-line width, so the buttons move under them whole")
+        self.assertIn("#meters,#aiUsage{flex-shrink:1;white-space:normal}", rule)
         self.assertIn("#status:empty{flex-basis:0}", rule, "an empty status takes no room; a status keeps its 26ch")
         self.assertIn("#cooldownState:empty,#autoOff:empty{min-width:0}", rule, "an empty state text takes no room")
         self.assertLess(text.index("header{flex-wrap:wrap}"), start, "the desktop rule overrides the wrapping one")
 
     def test_machine_and_routing_never_cut_off(self):
-        """No rule anywhere ellipsizes or clips the machine readout or the Claude usage button."""
+        """No rule anywhere ellipsizes or clips the meters: row 1 (the machine readout) or row 2 (the AI usage button)."""
         text = DASHBOARD.read_text()
-        rules = re.findall(r"[^{}]*#(?:machine|routing)\b[^{}]*\{[^}]*\}", text[:text.index("</style>")])
+        rules = re.findall(r"[^{}]*#(?:meters|machine|aiUsage)\b[^{}]*\{[^}]*\}", text[:text.index("</style>")])
         self.assertTrue(rules)
+        self.assertTrue(any(re.search(r"#aiUsage\s*(?:,|$)", r[:r.index("{")].strip() + ",") for r in rules), "row 2 has its own rule")
         for r in rules:
             sel = r[:r.index("{")]
-            if re.search(r"#(?:machine|routing)\s*(?:,|$)", sel.strip() + ","):  # the element itself, not a descendant
+            if re.search(r"#(?:meters|machine|aiUsage)\s*(?:,|$)", sel.strip() + ","):  # the element itself, not a descendant
                 self.assertNotIn("ellipsis", r)
                 self.assertNotIn("overflow:hidden", r)
                 self.assertNotIn("min-width:0", r)

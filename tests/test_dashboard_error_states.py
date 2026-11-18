@@ -37,7 +37,7 @@ def poll_script(tail):
     poll = text[text.index("async function poll()"):text.index('$("filter").addEventListener')]
     helpers = "\n".join(line(text, s) for s in ("const STALE = ", "const SLOW = ", "const setStatus = "))
     return (STUBS + helpers + "\nlet missed = 0, answer = null;\n"
-            "const getJson = async () => null, renderMachine = () => {}, renderCooldown = () => {};\n"
+            "const getJson = async () => null, renderMachine = () => {}, renderAiUsage = () => {}, renderCooldown = () => {};\n"
             "const timed = async () => { if (answer instanceof Error) throw answer; return answer; };\n"
             + poll + "\n(async () => {" + tail + "})();")
 
@@ -98,10 +98,13 @@ class HeaderErrors(unittest.TestCase):
         text = DASHBOARD.read_text()
         fn = text[text.index("async function loadRouting()"):]
         fn = fn[:fn.index("\n}\n") + 2]
-        got = node_run(STUBS + "let usage = {old: 1};\nconst getJson = async () => null, routingText = () => 'x', usageRows = () => '';\n"
-                       + fn + "\n(async () => { await loadRouting(); const r = $('routing');\n"
-                       "console.log(JSON.stringify([r.hidden, r.innerHTML, r.title, usage])); })();")
-        self.assertEqual(got, [False, '<span class="danger">Usage —</span>', "Couldn't load usage.", None])
+        render = text[text.index("function renderAiUsage("):]
+        render = render[:render.index("\n}\n") + 2]
+        got = node_run(STUBS + "let usage = {old: 1}, aiClaude, aiHtml;\nconst getJson = async () => null, usageRows = () => '';\n"
+                       "const aiUsageHtml = (c, s) => s === null ? 'codex error' : 'other';\n"
+                       + render + fn + "\n(async () => { await loadRouting(); const r = $('aiUsage');\n"
+                       "console.log(JSON.stringify([r.hidden, r.innerHTML, usage])); })();")
+        self.assertEqual(got, [False, "codex error", None], "a failed status shows row 2's Codex error, and the click guard sees null")
 
     def test_machine_null_stays_visible(self):
         text = DASHBOARD.read_text()

@@ -7,7 +7,8 @@ in routing.json, and cloud otherwise. Every other role answers cloud.
 
   route.py <role> [--job JOB_DIR] [--scrum DIR]   -> {"runner", "model", "why"}
   route.py record JOB_DIR <role> <runner> <model> <seconds> <outcome>   appends one JSON line to JOB_DIR/routing.log
-  route.py status [--scrum DIR]   -> {"codex": {"5h", "weekly"}, "claude_exhausted_until"}
+  route.py status [--scrum DIR]   -> {"codex": {"5h", "weekly", "5h_resets_at", "weekly_resets_at"},
+                                       "codex_limits": {"5h", "weekly"}, "claude_exhausted_until"}
 """
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -59,8 +60,9 @@ def _codex_local_base_url():
 
 
 def codex_quota():
-    """Used percent of the 5h and weekly Codex windows, from the newest rollout file that has rate_limits (of the 20 newest)."""
-    quota = {'5h': None, 'weekly': None}
+    """Used percent and reset epoch of the 5h and weekly Codex windows, from the newest rollout file that has rate_limits
+    (of the 20 newest). A missing or already-past window, or a non-number resets_at, leaves that reset None."""
+    quota = {'5h': None, 'weekly': None, '5h_resets_at': None, 'weekly_resets_at': None}
     root = Path(os.environ.get('SCRUM_CODEX_SESSIONS') or Path.home() / '.codex' / 'sessions')
     files = list(root.glob('**/rollout-*.jsonl'))
     if not files:
@@ -89,7 +91,19 @@ def codex_quota():
             continue
         if isinstance(data.get('used_percent'), (int, float)):
             quota[key] = data['used_percent']
+        if isinstance(resets, (int, float)):
+            quota[f'{key}_resets_at'] = resets
     return quota
+
+
+def codex_limits():
+    """The Codex 5h and weekly thresholds from routing.json; None for each when the file is missing, malformed or lacks
+    a key."""
+    try:
+        thresholds = json.loads(Path(CONFIG).read_text())['thresholds']
+        return {'5h': thresholds['codex_5h'], 'weekly': thresholds['codex_weekly']}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {'5h': None, 'weekly': None}
 
 
 def claude_exhausted_until(scrum):
@@ -163,7 +177,8 @@ def record(job_dir, role, runner, model, seconds, outcome):
 
 def status(scrum_dir=None):
     until = claude_exhausted_until(scrum_dir)
-    return {'codex': codex_quota(), 'claude_exhausted_until': until.isoformat() if until else None}
+    return {'codex': codex_quota(), 'codex_limits': codex_limits(),
+            'claude_exhausted_until': until.isoformat() if until else None}
 
 
 def main(argv=None):
