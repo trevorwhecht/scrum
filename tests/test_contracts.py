@@ -3590,8 +3590,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         self.assertNotIn("'<Build>'", check)
         builder = (ROOT / "agents" / "scrum-builder.md").read_text()
         step4 = self.section(builder, "4. Run the focused tests", "5. Commit on your branch")
-        self.assertNotIn("buildlock.py", step4)
+        self.assertNotIn("--project", step4)
         self.assertNotIn("'<Build>'", step4)
+        typecheck = ('SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/check.lock" python3 '
+                     '"$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<Typecheck>\'')
+        self.assertIn(typecheck, step4)  # job 966: the builder's tsc no longer competes with the Check gate's runs
+        debugger = (ROOT / "agents" / "scrum-debugger.md").read_text()
+        limits = debugger[debugger.index("**Hard limits:**"):]
+        self.assertIn('SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/check.lock" python3 '
+                      '"$HOME/.claude/skills/trevskills-scrum/buildlock.py" \'<command>\'', limits)
+        self.assertIn('python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project <PROJECT>', limits)
 
     def test_load_never_gates_tests_or_stops(self):
         spec_writer = (ROOT / "agents" / "scrum-spec-writer.md").read_text()

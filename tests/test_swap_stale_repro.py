@@ -18,7 +18,7 @@ class StaleSwap(unittest.TestCase):
         self.ps.write_text("   30:00 claude -p /trevskills-scrum run-all\n   05:00 claude -p /trevskills-scrum start 1-a\n")
         env = mock.patch.dict(os.environ, SCRUM_FREE_RAM="71", SCRUM_SWAP_LOG=str(self.log), SCRUM_PS=str(self.ps),
                               SCRUM_COOLDOWN=os.path.join(os.devnull, "no"), SCRUM_CPU_BUSY_PCT="1",
-                              SCRUM_CPU_LOAD_PCT="1", SCRUM_FREE_DISK_GB="1000", SCRUM_MUTE="1")
+                              SCRUM_CPU_LOAD_PCT="1", SCRUM_FREE_DISK_GB="1000", SCRUM_MUTE="1", SCRUM_VM_PRESSURE="1")
         env.start()
         self.addCleanup(env.stop)
 
@@ -34,7 +34,7 @@ class StaleSwap(unittest.TestCase):
         self.falling_then_rebound()
         self.ps.write_text("   30:00 claude -p /trevskills-scrum run-all\n   00:30 claude -p /trevskills-scrum start 1-a\n")
         with mock.patch.dict(os.environ, SCRUM_SWAP_PCT="27"):
-            self.assertEqual(board.ram_room(floor=0), 9, "71% free (over 2x min): no young cap, 51 // 5 - 1 young")
+            self.assertEqual(board.ram_room(floor=0), 1, "71% free: 51 // 5 - 1 young, young cap 2 - 1 (job 966)")
 
 
 if __name__ == "__main__":

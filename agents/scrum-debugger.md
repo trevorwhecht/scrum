@@ -49,6 +49,7 @@ If you cannot make a test fail for the reported reason, write `ASSESSMENT: NO_RE
 - Change files only inside `WORKTREE`, and commit only the repro test (or its removal). The one exception is `JOB_DIR/assessment.md`.
 - Never run `prisma migrate` or `prisma db push`. Never run `git merge`, `git reset`, `git rebase`, `git push` or any push, `git checkout main`, or any `gh` command.
 - Never start a background load generator or an infinite loop (`while :; do :; done`, `yes > /dev/null`) to fake CPU load; mock the load reading instead. Any background process you start gets `P=$!` and `trap "kill $P" EXIT` in the same shell, so it dies with that shell.
+- Run PROJECT's `Typecheck` or full `Test` only as `SCRUM_BUILD_LOCK="$HOME/.claude/trevskills-scrum/check.lock" python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" '<command>'`, and `Build` only as `python3 "$HOME/.claude/skills/trevskills-scrum/buildlock.py" --project <PROJECT>`, the Check gate's locks. The repro test and tests on named files run unlocked.
 - Never commit `.env*` files or secrets. The `.env*` files in the worktree are symlinks to the main checkout; leave them alone.
 
 <!-- Debug rules adapted from obra/superpowers 6.4.1 (MIT): systematic-debugging, test-driven-development. -->

@@ -13,6 +13,7 @@ os.environ["SCRUM_PULSE"] = os.path.join(tempfile.mkdtemp(), "pulse.log")  # nev
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"  # machine_ok passes unless a test says so; no test runs memory_pressure
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")  # never Trevor's real cool-down flag
 os.environ["SCRUM_SWAP_PCT"] = "1"  # swap nearly empty unless a test says so; no test runs sysctl
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log
@@ -8898,7 +8899,7 @@ class WatchdogIdleParentTest(unittest.TestCase):
                            ("pace 5h 80% used at 20% elapsed, resets 14:00", "usage_pace"),
                            ("no account has room: a pace 5h 80% used", "usage_pace"),
                            ("free RAM 14% (< 20%)", "ram"), ("CPU load 600% of 8 cores (> 500%)", "cpu_load"),
-                           ("whatever", "other")):
+                           ("memory pressure warn (kernel level 2)", "vm_pressure"), ("whatever", "other")):
             self.assertEqual(self.serve.held_gate(why), token, why)
 
     def test_wake_waiting_allowance_notes_gate(self):
@@ -11691,6 +11692,22 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual((rec["result"], rec["head"], rec["lastGreen"]), ("running", self.base, None))
         self.assertEqual(self.tick(), 0, "the in-flight guard holds")
 
+    def test_tick_skips_when_machine_refuses(self):
+        """Job 966: full runs under load filed load failures as bugs; a refused machine starts none."""
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(self.tick(), 0)
+            self.assertFalse((self.root / "e2e-full.json").exists())
+            self.assertIsNone(self.serve.E2E_FULL["running"])
+        rec = {"at": time.time() - 90000, "head": self.base, "result": "pass", "exit": 0, "failed": [],
+               "lastGreen": self.base}
+        (self.root / "e2e-full.json").write_text(json.dumps(rec))
+        self.merge("one merge")
+        with mock.patch.dict(os.environ, SCRUM_VM_PRESSURE="2"):
+            self.assertEqual(self.tick(), 0, "due (25 h, new HEAD) but refused")
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+        self.assertEqual(self.tick(), 1, "the same due run starts once the machine has room")
+
     def test_tick_skips_dirty_checkout(self):
         (self.repo / "a.txt").write_text("dirty\n")
         self.assertEqual(self.tick(), 0)
@@ -11775,6 +11792,34 @@ class E2eFullTest(unittest.TestCase):
     def test_lock_timeout_is_error_with_no_backlog(self):
         rec = self.run_suite("buildlock: timed out\n", 124)
         self.assertEqual((rec["result"], rec["exit"], rec["failed"]), ("error", 124, []))
+        self.assertEqual(self.open_items(), [])
+
+    def test_loaded_run_files_nothing_and_is_due(self):
+        """Job 966: every debug job filed from a full run under load found load, not code."""
+        self.assertEqual(self.serve.E2E_FULL_LOAD_SECS, 60)
+        self.merge("Fix the cart")
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+            rec = self.run_suite(E2E_LIST_OUTPUT, 1, last_green=self.base)
+        self.assertEqual((rec["result"], rec["exit"], rec["lastGreen"]), ("loaded", 1, self.base))
+        self.assertEqual([f["spec"] for f in rec["failed"]], ["e2e/pricing.spec.ts", "e2e/admin/orders.spec.ts"])
+        self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
+        self.assertEqual(self.open_items(), [])
+        self.assertTrue(self.serve.e2e_full_due(rec, rec["head"], 0, rec["at"] + 1))
+
+    def test_loaded_pass_stays_pass(self):
+        with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT="350"):
+            rec = self.run_suite("5 passed (9s)\n", 0, last_green="old")
+        self.assertEqual((rec["result"], rec["lastGreen"]), ("pass", self.git("rev-parse", "HEAD")))
+
+    def test_run_samples_load_while_waiting(self):
+        """A run longer than one E2E_FULL_LOAD_SECS slice is sampled while it waits, not only after it exits."""
+        (self.repo / "out.txt").write_text(E2E_LIST_OUTPUT)
+        (self.repo / "run-e2e.sh").write_text("sleep 1; cat out.txt; exit 1\n")
+        loads = [400.0]  # the first sample, taken during the wait; every later one, the after-exit one too, reads 1
+        with mock.patch.object(self.serve, "E2E_FULL_LOAD_SECS", 0.2), \
+                mock.patch.object(self.serve.board, "cpu_load_pct", side_effect=lambda: loads.pop() if loads else 1.0):
+            rec = self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", self.base, 123.0, self.base)
+        self.assertEqual(rec["result"], "loaded")
         self.assertEqual(self.open_items(), [])
 
     def test_pass_sets_last_green(self):

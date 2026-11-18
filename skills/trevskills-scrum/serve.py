@@ -928,6 +928,7 @@ def e2e_queue_free():
 # project's main checkout, after 5 merges or 24 h. One run in flight across all projects.
 E2E_FULL = {"running": None}  # the project whose full run is in flight in this serve.py
 E2E_FULL_MERGES, E2E_FULL_EVERY, E2E_FULL_STALE = 5, 86400, 7200
+E2E_FULL_LOAD_SECS = 60  # e2e_full_run samples board.cpu_load_pct once per this many seconds of the run, and at exit
 E2E_FULL_FAILED_RE = re.compile(r"^\s*(\d+) failed\s*$")
 E2E_FULL_ENTRY_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*›\s*)?(\S+?):(\d+):\d+\s*›\s*(.+?)[\s─]*$")  # ─ pads the line
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -938,8 +939,9 @@ E2E_FULL_TIMEOUT_RE = re.compile(r"Test timeout of \d+ms exceeded")  # a test-le
 def e2e_full_due(record, head, merges, now, settled=False) -> bool:
     """A full run is due with no record yet, else only when HEAD moved and 5+ commits or 24 h passed since the last,
     or the project is settled (cool down is on and no job blocks a restart there). An `error` or `running` record
-    24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried."""
-    if not record:
+    24 h+ old is due whatever the HEAD, so a failed or orphaned run is retried. A `loaded` record (a fail under load)
+    is due at once, whatever the HEAD, merges or age."""
+    if not record or record.get("result") == "loaded":
         return True
     if record.get("result") in ("error", "running") and now - (record.get("at") or 0) >= E2E_FULL_EVERY:
         return True
@@ -1011,7 +1013,8 @@ def merges_since(repo, record) -> int:
 
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
-    flight anywhere, the E2E lock is free, the tracked tree is clean and e2e_full_due holds (watchdog_tick pass 1). During
+    flight anywhere, the E2E lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
@@ -1027,7 +1030,7 @@ def e2e_full_tick(project, repo, root) -> None:
     head = board._git(repo, "rev-parse", "HEAD").decode().strip()
     merges = merges_since(repo, record)
     settled = board.cooling_down() and not [b for b in restart_blockers(project) if b != f"{project}/{E2E_FULL_BLOCKER}"]
-    if not e2e_full_due(record, head, merges, now, settled):
+    if not e2e_full_due(record, head, merges, now, settled) or board.machine_ok(root):
         return
     last_green = (record or {}).get("lastGreen")
     write_e2e_full(root, {"at": now, "head": head, "result": "running", "exit": None, "failed": [],
@@ -1039,32 +1042,41 @@ def e2e_full_tick(project, repo, root) -> None:
 def e2e_full_run(repo, root, cmd, head, at, last_green) -> dict:
     """Run cmd in repo through buildlock.py on the E2E lock (output to root/e2e-full.log), record the result in
     root/e2e-full.json and add one backlog item per failing spec not already on an open line, or one combined item
-    for them all when every failure is a test timeout (e2e_full_timed_out). Exit 0 is pass; a
+    for them all when every failure is a test timeout (e2e_full_timed_out). Exit 0 is pass; a non-zero exit is loaded
+    when board.cpu_load_pct, read after each E2E_FULL_LOAD_SECS of the wait and once at exit, went over
+    board.MAX_CPU_LOAD_PCT (it keeps exit and failed, adds nothing, and e2e_full_due re-runs it); otherwise a
     non-zero exit with parsed failures is fail; any other non-zero exit (lock timeout 124, a dev-server error) is
     error and adds nothing."""
     try:
         env = {**os.environ, "SCRUM_BUILD_LOCK": str(Path.home() / ".claude" / "trevskills-scrum" / "e2e.lock")}
         log = root / "e2e-full.log"
+        loads = []
         try:
             with open(log, "w") as f:
                 proc = subprocess.Popen([sys.executable, str(Path(buildlock.__file__).resolve()), cmd], cwd=repo,
                                         env=env, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
                                         start_new_session=True)
-                try:
-                    code = proc.wait(timeout=E2E_FULL_STALE)
-                except subprocess.TimeoutExpired:
+                for _ in range(int(E2E_FULL_STALE // E2E_FULL_LOAD_SECS)):
+                    try:
+                        code = proc.wait(timeout=E2E_FULL_LOAD_SECS)
+                        break
+                    except subprocess.TimeoutExpired:
+                        loads.append(board.cpu_load_pct())
+                else:  # E2E_FULL_STALE passed
                     os.killpg(proc.pid, signal.SIGTERM)
                     code = proc.wait()
+                loads.append(board.cpu_load_pct())
             output = log.read_text(errors="replace")
         except OSError as e:
             code, output = -1, str(e)
         test_dir = board._e2e_dir(Path(repo))
         failed = e2e_full_failures(output, test_dir) if code else []
-        result = "pass" if code == 0 else "fail" if failed else "error"
+        loaded = code != 0 and any((load or 0) > board.MAX_CPU_LOAD_PCT for load in loads)
+        result = "pass" if code == 0 else "loaded" if loaded else "fail" if failed else "error"
         rec = {"at": at, "head": head, "result": result, "exit": code, "failed": failed,
                "lastGreen": head if code == 0 else last_green}
         write_e2e_full(root, rec)
-        if failed:
+        if failed and not loaded:
             timed_out = e2e_full_timed_out(output, test_dir)
             e2e_full_backlog(repo, root, failed, last_green, head,
                              timeouts_only=all((f["spec"], f["line"]) in timed_out for f in failed))
@@ -2549,8 +2561,9 @@ def weekly_tick():
         spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
 
 
-PULSE_GATES = (("free RAM", "ram"), ("swap used", "swap"), ("free disk", "disk"), ("CPU busy", "cpu_busy"),
-               ("CPU load", "cpu_load"), ("sessions running", "sessions"))  # pulse_tick: machine_ok reason -> gate token
+PULSE_GATES = (("free RAM", "ram"), ("memory pressure", "vm_pressure"), ("swap used", "swap"), ("free disk", "disk"),
+               ("CPU busy", "cpu_busy"), ("CPU load", "cpu_load"),
+               ("sessions running", "sessions"))  # pulse_tick: machine_ok reason -> gate token
 PULSE_STARTS: list[dict] = []  # spawn's non-manual board starts since the last pulse_tick: {project, job, cpu}
 PULSE_STARTS_LOCK = threading.Lock()
 

@@ -12,6 +12,7 @@ os.environ.setdefault("SCRUM_PULSE", os.path.join(tempfile.mkdtemp(), "pulse.log
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"  # a watchdog tick never signals a real dev server or quits Docker
 os.environ["SCRUM_PS"] = os.devnull  # no live sessions unless a test says so, whatever this machine runs
 os.environ["SCRUM_FREE_RAM"] = "100"
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")
 os.environ["SCRUM_SWAP_PCT"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so; no test runs top or reads the real CPU log

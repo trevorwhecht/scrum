@@ -11,6 +11,7 @@ os.environ["SCRUM_MUTE"] = "1"
 os.environ["SCRUM_IDLE_CLEANUP"] = "0"
 os.environ["SCRUM_PS"] = os.devnull
 os.environ["SCRUM_FREE_RAM"] = "100"
+os.environ["SCRUM_VM_PRESSURE"] = "1"  # kernel memory pressure normal unless a test says so; no test runs sysctl
 os.environ["SCRUM_COOLDOWN"] = os.path.join(os.devnull, "no-cooldown")
 os.environ["SCRUM_SWAP_PCT"] = "1"
 os.environ["SCRUM_CPU_BUSY_PCT"] = "1"

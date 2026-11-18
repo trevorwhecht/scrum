@@ -4506,6 +4506,21 @@ def swap_used_pct():
     return float(m.group(1)) * 1048576 / int(m.group(2)) * 100 if m and int(m.group(2)) else None
 
 
+def vm_pressure_level() -> int | None:
+    """The kernel's memory pressure level (1 normal, 2 warn, 4 critical), or None when unknown (no sysctl, as on Linux,
+    or a non-integer reading). Unlike free_ram_pct it does not count inactive pages as free: on 2026-11-17 it read 2
+    while free RAM flickered between 32% and 61% (job 966). SCRUM_VM_PRESSURE stands in for the reading."""
+    fake = os.environ.get("SCRUM_VM_PRESSURE")
+    if fake:
+        return int(fake)
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True,
+                             text=True, timeout=10).stdout
+        return int(out.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def cpu_busy_sample():
     """How busy the CPU is right now, 0-100 over all cores: 100 - idle from top's second sample (the first covers no
     interval). Takes 1-2 s, so only the serve.py watchdog calls it (record_cpu_sample). None when unknown (no top -l, as
@@ -4626,7 +4641,8 @@ def swap_pressing(ram, swap, limit):
 
 def machine_ok(path, manual=False, claim=False):
     """None when the machine has room for new work, else why not: cool-down (only for an automatic start of new or
-    not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then swap, then free
+    not-yet-started work, claim=True, and skipped for Trevor's manual clicks), then free RAM, then the kernel memory
+    pressure level (vm_pressure_level, 2+ refuses), then swap, then free
     disk, then CPU busy, then CPU load (the 5-minute load average over the cores; both CPU checks also skipped for
     manual clicks), then the session ceiling.
     Gates new claims, resumes and auto-continue starts only; a running job is never touched. An unknown reading passes."""
@@ -4635,6 +4651,9 @@ def machine_ok(path, manual=False, claim=False):
     ram = free_ram_pct()
     if ram is not None and ram < MIN_FREE_RAM_PCT:
         return f"free RAM {ram:g}% (< {MIN_FREE_RAM_PCT}%)"
+    level = vm_pressure_level()
+    if level is not None and level >= 2:
+        return f"memory pressure {'critical' if level >= 4 else 'warn'} (kernel level {level})"
     swap = swap_used_pct()
     if swap_pressing(ram, swap, MAX_SWAP_PCT):
         return f"swap used {swap:.1f}% of RAM (> {MAX_SWAP_PCT}%)"
@@ -4704,14 +4723,15 @@ def ram_room(floor=1, light=False):
     """How many new sessions one claim batch may start once machine_ok passed: the free RAM above MIN_FREE_RAM_PCT
     split into shares of the measured session_rss_pct (SESSION_RAM_PCT when unknown, never below MIN_SESSION_RAM_PCT),
     minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
-    for but not used yet), never past MAX_SESSIONS in all nor (unless free RAM is over 2 * MIN_FREE_RAM_PCT) MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
+    for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
-    floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap or unknown case 1 only
+    A kernel memory pressure level (vm_pressure_level) of 2 or more also allows 1.
+    floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap, pressure or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS. light (serve.py, light_job): the free RAM left after the young
     sessions' standard shares, split into ram_share(light=True) shares; the swap, unknown and ceiling cases are the same."""
     ram = free_ram_pct()
     swap = swap_used_pct()
-    if ram is None or swap_pressing(ram, swap, MAX_SWAP_PCT / 2):
+    if ram is None or (vm_pressure_level() or 0) >= 2 or swap_pressing(ram, swap, MAX_SWAP_PCT / 2):
         return 1 if floor or not any(a < SESSION_RAMP_SECS for a in session_ages()) else 0
     ages = session_ages()
     young = sum(a < SESSION_RAMP_SECS for a in ages)
@@ -4720,10 +4740,7 @@ def ram_room(floor=1, light=False):
         fit = int((ram - MIN_FREE_RAM_PCT - young * share) // ram_share(True))
     else:
         fit = int((ram - MIN_FREE_RAM_PCT) // share) - young
-    caps = [fit, MAX_SESSIONS - len(ages)]
-    if ram <= 2 * MIN_FREE_RAM_PCT:  # ample free RAM: the RAM fit alone ramps starts, no young-session cap
-        caps.append(MAX_YOUNG_SESSIONS - young)
-    room = min(caps)
+    room = min(fit, MAX_SESSIONS - len(ages), MAX_YOUNG_SESSIONS - young)
     return max(floor, room) if floor else room
 
 
