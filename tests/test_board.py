@@ -1923,6 +1923,26 @@ class BoardTest(unittest.TestCase):
         self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
         self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
 
+    def test_prose_paths_strips_unmatched_parens(self):
+        self.assertEqual(board.prose_paths("Reword (lanes/cloud.md wording) now"), {"lanes/cloud.md"})
+        self.assertEqual(board.prose_paths("see (the lanes/cloud.md)"), {"lanes/cloud.md"})
+        self.assertEqual(board.prose_paths("Edit src/app/(shop)/page.tsx now"), {"src/app/(shop)/page.tsx"})
+
+    def test_child_files_partial_slash_path_maps_to_tracked(self):
+        repo = Path(self.tmp.name)
+        jobs = self.root / "jobs"
+        self.write("j1/spec.md", "Reword (lanes/cloud.md wording) and a/ex.md, x/none.md, lanes/dup.md.\n")
+        want = {"lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"}
+        self.assertEqual(board.child_files(jobs, "j1"), want)  # no git repo: as written
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        for f in ("skills/x/lanes/cloud.md", "a/ex.md", "z/a/ex.md", "p/lanes/dup.md", "q/lanes/dup.md"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (repo / f).write_text("x")
+        sh("add", "-A")
+        self.assertEqual(board.child_files(jobs, "j1"),
+                         {"skills/x/lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"})
+
     def test_child_files_bare_name_backticked_then_punctuation(self):
         repo = Path(self.tmp.name)
         sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
