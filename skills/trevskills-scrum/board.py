@@ -7537,6 +7537,10 @@ def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
         return "none"
     now = time.time()
     usage = read_usage()
+    if isinstance(usage, dict) and is_num(usage.get("written_at")):
+        # Only the interactive statusline refreshes usage.json, so a headless job reads it hours old. Trust its windows anyway:
+        # a reset window reads 0 (fable_used) and a live one is a lower bound. ponytail: a stale 7d reading can undercount.
+        usage = {**usage, "written_at": now}
     state = fable_state(usage, now)
     model = FABLE_MODEL if state == "ok" else "none"
     job = Path(root) / "jobs" / job_id
