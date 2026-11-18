@@ -4478,6 +4478,18 @@ def likely_files(spec_text):
     return {p for p in found if PATH_RE.match(p) and repo_path(p)}
 
 
+def likely_funcs(spec_text):
+    """{path: set of function names} for each `## Likely files` bullet whose backticked path is followed by
+    `(functions: a, b)`; slot_conflict uses them so fast jobs may share a BIG_SHARED_FILES path."""
+    found = {}
+    for line in (md_section(spec_text, "Likely files") or "").splitlines():
+        if m := re.match(r"\s*- `([^`\s]+)`[^(]*\(functions:\s*([^)]*)\)", line):
+            names = {n.strip(" `") for n in m.group(2).split(",")} - {""}
+            if names:
+                found.setdefault(m.group(1), set()).update(names)
+    return found
+
+
 def parse_plan(text):
     """(goal, tickets) from plan.md, or SystemExit naming the first problem. Each ticket's depends are ticket names."""
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")

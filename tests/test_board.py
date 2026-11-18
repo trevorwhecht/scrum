@@ -1996,6 +1996,16 @@ class BoardTest(unittest.TestCase):
         mixed = "## Likely files\n- `x/a.py`: see y/b.py\n- src/app/(app)/page.tsx\n"
         self.assertEqual(board.likely_files(mixed), {"x/a.py", "src/app/(app)/page.tsx"})
 
+    def test_likely_funcs_parses_function_lists(self):
+        named = "## Likely files\n- `skills/trevskills-scrum/board.py` (functions: cmd_ready, slot_conflict)\n## Assumptions\n- none\n"
+        self.assertEqual(board.likely_funcs(named), {"skills/trevskills-scrum/board.py": {"cmd_ready", "slot_conflict"}})
+        self.assertEqual(board.likely_files(named), {"skills/trevskills-scrum/board.py"})
+        bare = "## Likely files\n- `skills/trevskills-scrum/board.py`: the scheduler\n"
+        self.assertEqual(board.likely_funcs(bare), {})
+        self.assertEqual(board.likely_files(bare), {"skills/trevskills-scrum/board.py"})
+        outside = "## Problem\n- `skills/trevskills-scrum/serve.py` (functions: spawn)\n## Likely files\n- `tests/t.py`\n"
+        self.assertEqual(board.likely_funcs(outside), {})
+
     def five(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1"), self.ticket(4, deps="T2"),
                            self.ticket(5, deps="T1, T2, T3, T4", exposure="yes"))
