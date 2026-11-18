@@ -1923,6 +1923,16 @@ class BoardTest(unittest.TestCase):
         self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
         self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
 
+    def test_child_files_bare_name_backticked_then_punctuation(self):
+        repo = Path(self.tmp.name)
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src/x.ts").write_text("x")
+        sh("add", "-A")
+        self.write("j1/spec.md", "Edit `x.ts`. Then `x.ts`, and `x.ts`;\n")
+        self.assertEqual(board.child_files(self.root / "jobs", "j1"), {"src/x.ts"})
+
     def test_ready_spec_copy_of_feature_uses_prose_paths(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
         c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
