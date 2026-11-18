@@ -418,7 +418,8 @@ class ShopTickTest(unittest.TestCase):
         self.sh.ended.side_effect = lambda project, job_id, pid: "Working on it\nDone for now\n"
         with mock.patch.object(self.board, "gh_api", return_value=[]) as gh:
             self.assertEqual(self.cloud(project="Mm Shown"), "")
-        gh.assert_called_once()  # cmd_cloud_sync ran for real, and found no PR
+        # cmd_cloud_sync ran for real and found no PR; then one close lookup per aborted job, with nothing to close
+        self.assertEqual([c.args[1:] for c in gh.call_args_list], [(self.board.CLOUD_PULLS,)] * 3)
         self.assertEqual(self.sh.ended.call_args_list, [mock.call("mm", "050-x", 4242), mock.call("mm", "051-k", 4343)])
         for job_id in ("050-x", "051-k"):
             job = self.job(root, job_id)
@@ -481,6 +482,92 @@ class ShopTickTest(unittest.TestCase):
         job = self.job(root, "050-x")
         self.assertEqual((job["stage"], job["reason"]), ("done", None))
         self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n")
+
+    # --- job 990: an ended shop job's open unlabelled PR is closed, so the rerun opens no duplicate ---
+    @staticmethod
+    def pr(job_id, number, state="open", head_repo="trevorwhecht/mm", title=None, merged_at=None):
+        """A REST PR for job_id on trevorwhecht/mm with no label."""
+        return {"title": title or f"[scrum {job_id}] Fix the widget", "state": state, "number": number,
+                "merged_at": merged_at, "labels": [], "html_url": f"https://github.com/trevorwhecht/mm/pull/{number}",
+                "user": {"login": "bot"}, "body": "",
+                "head": {"ref": f"scrum/{job_id}", "repo": {"full_name": head_repo}},
+                "base": {"ref": "main", "repo": {"full_name": "trevorwhecht/mm"}}}
+
+    @staticmethod
+    def patches(gh):
+        """The pulls/<n> PATCH endpoints gh_api was called with."""
+        return [c.args[1] for c in gh.call_args_list if "-X" in c.args]
+
+    def test_ended_shop_job_closes_open_pr(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"},
+                                   {"id": PAR, "stage": "running", "lane": "bigboy", "children": ["051-k"]},
+                                   {"id": "051-k", "stage": "cloud", "parent": PAR, "shop": "4343", "account": "main",
+                                    "feature": "Kid work\n"}])
+        self.sh.ended.side_effect = lambda *a: "Opened the PR\n"
+        prs = [self.pr("051-k", 12), self.pr("050-x", 11)]
+        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else prs) as gh:
+            self.assertEqual(self.cloud(), "")
+        for job_id in ("050-x", "051-k"):
+            job = self.job(root, job_id)
+            self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+        backlog = (root / "backlog.md").read_text()
+        self.assertIn("Fix the widget", backlog)
+        self.assertNotIn("Kid work", backlog)
+        self.assertEqual(self.patches(gh), ["repos/{owner}/{repo}/pulls/11", "repos/{owner}/{repo}/pulls/12"])
+        for c in gh.call_args_list:
+            if "-X" in c.args:
+                self.assertEqual(c.args[2:], ("-X", "PATCH", "-f", "state=closed"))
+
+    def test_ended_shop_job_closes_only_own_open_pr(self):
+        cases = [("closed", self.pr("050-x", 11, state="closed")),
+                 ("merged", self.pr("050-x", 11, state="closed", merged_at="2026-11-18T00:00:00Z")),
+                 ("another job id", self.pr("050-x", 11, title="[scrum 050-xy] Other")),
+                 ("fork head", self.pr("050-x", 11, head_repo="someone/mm"))]
+        for why, pr in cases:
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+                self.sh.ended.side_effect = lambda *a: "Session over\n"
+                lists = iter([[], [pr]])  # the sync sees no PR; the close lookup sees this one
+                with mock.patch.object(self.board, "gh_api",
+                                       side_effect=lambda repo, ep, *f: {} if f else next(lists)) as gh:
+                    self.assertEqual(self.cloud(), "")
+                self.assertEqual(self.job(root, "050-x")["stage"], "aborted")
+                self.assertEqual(gh.call_count, 2, "the sync's read and the close lookup")
+                self.assertEqual(self.patches(gh), [])
+
+    def test_pr_close_failure_keeps_abort(self):
+        def list_fails(repo, ep, *f):
+            if list_fails.n:
+                raise self.board.GhError("gh down")
+            list_fails.n += 1
+            return [self.pr("050-x", 11)]
+
+        def patch_fails(repo, ep, *f):
+            if f:
+                raise self.board.GhError("HTTP 403")
+            return [self.pr("050-x", 11)]
+
+        for why, fake, err in (("list", list_fails, "gh down"), ("patch", patch_fails, "HTTP 403")):
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                list_fails.n = 0
+                root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+                self.sh.ended.side_effect = lambda *a: "Session over\n"
+                with mock.patch.object(self.board, "gh_api", side_effect=fake):
+                    self.assertEqual(self.cloud(), f"cloud-sync: mm: 050-x: PR close failed: {err}\n")
+                job = self.job(root, "050-x")
+                self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+
+    def test_no_close_when_abort_refused(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.side_effect = lambda *a: "Session over\n"
+        with mock.patch.object(self.board, "gh_api", return_value=[self.pr("050-x", 11)]) as gh, \
+                mock.patch.object(self.board, "_cloud_abort",
+                                  side_effect=SystemExit("job 050-x is done, not cloud; left alone")):
+            self.assertEqual(self.cloud(), "cloud-sync: mm: 050-x: job 050-x is done, not cloud; left alone\n")
+        self.assertEqual(gh.call_count, 1, "only the sync's own read")
+        self.assertEqual(self.job(root, "050-x")["stage"], "cloud")
 
     # --- criterion 9: shop jobs hold their files ---
     def test_ready_shop_mode_claims_one_child(self):
