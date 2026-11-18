@@ -69,7 +69,7 @@ def run_chrome(argv, env=None, took=None):
         pages = json.loads(manifest.read_text()).get("pages", []) if manifest.exists() else []
         if code == 0 and all(p["status"] != "timeout" for p in pages):
             break
-    if code and manifest.exists():
+    if code == 1 and manifest.exists():
         why = json.loads(manifest.read_text()).get("error") or ""
         if why.startswith("Chrome failed to start") or (not why and any(p["status"] == "timeout" for p in pages)):
             raise unittest.SkipTest("Chrome start or page-load timeout after one retry (loaded machine): " + (why or "page timeout"))
