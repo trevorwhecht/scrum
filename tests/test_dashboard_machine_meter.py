@@ -226,7 +226,7 @@ class MachineMeter(unittest.TestCase):
             acct("ok", 49, "main 49%", title="resets 14:05") + " " + acct("danger", 90, "owa 90%", title="resets 09:53"),
             acct("low", 80, "main 80%", title="resets 14:05") + " " + acct("ok", 79, "owa 79%", title="resets 09:53"),
             acct("danger", 95, "main 95%", title="resets 14:05") + " " + acct("ok", 0, "owa —")
-            + ' <span class="danger">allowance 0 · held until 14:05</span> <span class="danger">Fable paused, using Opus</span>',
+            + ' <span class="danger">held until 14:05</span> <span class="danger">Fable paused, using Opus</span>',
             acct("low", 75, "&lt;b&gt; 75%", cap=85, title="resets 14:05") + ' <span class="low">allowance 2</span>',
             acct("danger", 100, "main 104%", title="resets 14:05")])
 
