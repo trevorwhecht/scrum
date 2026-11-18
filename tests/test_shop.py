@@ -1,4 +1,5 @@
-import ast, contextlib, datetime, hashlib, io, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, unittest
+import ast, contextlib, datetime, hashlib, io, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, time
+import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -91,6 +92,20 @@ class RunTest(ShopCase):
         self.answer(0, b"ok\xff", b"\xfe")
         r = shop.run("true", 5)
         self.assertEqual((r.stdout, r.stderr), ("ok�", "�"))
+
+
+class UnittestGuardTest(unittest.TestCase):
+    def test_real_run_never_starts_ssh_under_unittest(self):
+        # No ShopCase patch here: a watchdog test that reaches shop_tick must never ssh the real shop Mac.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "ssh-ran"
+            fake = Path(tmp) / "ssh"
+            fake.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+            fake.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"}):
+                r = shop.run("true", 5)
+            self.assertEqual(r.returncode, 127)
+            self.assertFalse(marker.exists(), "ssh started under unittest")
 
 
 class ProbeTest(ShopCase):
@@ -1032,6 +1047,182 @@ class ChannelConfigTest(unittest.TestCase):
         self.assertIn(f"Error: channel.config.mjs: no playwright.config.* in {self.repo}", r.stderr)
 
 
+URL = "https://github.com/trevorwhecht/onewitharts.git"
+PROMPT = f"/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` {TOKEN}\n"
+START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop && cat > .git/scrum-shop/964-shop-x.prompt)'
+         ' || exit 1; export CLAUDE_CONFIG_DIR="$HOME/.claude-owa"; [ -r "$HOME/.claude-owa/oauth-token" ] && export '
+         'CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude-owa/oauth-token")"; export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 '
+         'CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; nohup claude -p "$(cat '
+         '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
+         '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
+CLONE = ('d="$HOME/scrum-work/onewitharts"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" '
+         '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch origin && git -C "$d" merge '
+         '--ff-only refs/remotes/origin/HEAD; else mkdir -p "$HOME/scrum-work" && git clone -- '
+         'https://github.com/trevorwhecht/onewitharts.git "$d"; fi')
+ENDED = ('ps -p 4242 -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/onewitharts/.git/scrum-shop/964-shop-x.log";'
+         ' [ -f "$f" ] || exit 0; tail -c 8192 "$f"')
+
+
+class DispatchTest(SetupCase):
+    """clone, start and ended run their remote commands in a local sh under the shop's temp HOME (LOCAL), with a fake
+    `claude` on the shop's PATH and GitHub URLs pointed at local bare repos by that HOME's git insteadOf."""
+
+    def git(self, *args, cwd=None):
+        r = REAL_RUN(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, capture_output=True,
+                     text=True, env={"HOME": self.home, "PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def origin(self, url=URL):
+        """(work tree, bare repo) of a one-commit origin that `url` reaches here."""
+        name = url.rsplit("/", 1)[1]
+        work, bare = Path(self.home) / "origins" / f"{name}-work", Path(self.home) / "origins" / f"{name}-bare.git"
+        self.git("init", "-q", "--bare", "-b", "main", str(bare))
+        self.git("init", "-q", "-b", "main", str(work))
+        self.commit(work, bare, "one")
+        with open(Path(self.home) / ".gitconfig", "a") as f:
+            f.write(f'[url "{bare.as_uri()}"]\n\tinsteadOf = {url}\n')
+        return work, bare
+
+    def commit(self, work, bare, message):
+        self.git("commit", "-q", "--allow-empty", "-m", message, cwd=work)
+        self.git("push", "-q", str(bare), "main", cwd=work)
+
+    def head(self, repo, ref="HEAD"):
+        return self.git("rev-parse", ref, cwd=repo)
+
+    def test_start_prompt_only_on_stdin(self):
+        h = Path(self.home)
+        clone = h / "scrum-work" / "onewitharts"
+        (clone / ".git").mkdir(parents=True)
+        (h / ".local" / "bin").mkdir(parents=True)
+        claude = h / ".local" / "bin" / "claude"
+        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
+                          '"$CLAUDE_CODE_OAUTH_TOKEN" "$SCRUM_PW_CHANNEL" "$SCRUM_SHOP" "$CLAUDE_NOTIFIER_DISABLE" '
+                          '"$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" "$PWD" > "$HOME/env"\n'
+                          'for a in "$@"; do printf "%s\\n--\\n" "$a"; done > "$HOME/args"\necho session-out\n'
+                          'touch "$HOME/done"\n')
+        claude.chmod(0o755)
+        (h / ".claude-owa").mkdir()
+        (h / ".claude-owa" / "oauth-token").write_text("tok-owa-964\n")
+        self.shop(("nohup claude", LOCAL, ""))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            pid = shop.start("onewitharts", "964-shop-x", PROMPT, "owa", model="claude-opus-4-5[1m]")
+        deadline = time.monotonic() + 10
+        while not (h / "done").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.calls, [(START, 60, PROMPT.encode())])
+        self.assertFalse([a for a in self.argv if TOKEN in " ".join(a) or "touch" in " ".join(a)])
+        self.assertEqual((h / "pid").read_text(), f"{pid}\n")
+        self.assertEqual((h / "args").read_text(),
+                         "-p\n--\n/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` "
+                         f"{TOKEN}\n--\n--permission-mode\n--\nacceptEdits\n--\n--model\n--\nclaude-opus-4-5[1m]\n--\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|chrome|1|1|0|{clone}\n")
+        self.assertEqual(sorted(p.name for p in h.rglob("pwned*")), [])
+        logs = clone / ".git" / "scrum-shop"
+        self.assertEqual(((logs / "964-shop-x.prompt").read_text(), (logs / "964-shop-x.log").read_text()),
+                         (PROMPT, "session-out\n"))
+        self.assertEqual((stat.S_IMODE(logs.stat().st_mode), stat.S_IMODE((logs / "964-shop-x.prompt").stat().st_mode)),
+                         (0o700, 0o600))
+        for answer in ((1, "4242\n"), (0, ""), (255, "")):
+            with self.subTest(answer=answer):
+                self.shop(("nohup claude", *answer))
+                self.assertIsNone(shop.start("onewitharts", "964-shop-x", PROMPT, "main"))
+                self.assertIn("--permission-mode acceptEdits < /dev/null > ", self.calls[0][0])
+                self.assertTrue(self.calls[0][0].startswith(
+                    "cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop && cat > "
+                    '.git/scrum-shop/964-shop-x.prompt) || exit 1; [ -r "$HOME/.claude/oauth-token" ] && '), self.calls)
+
+    def test_start_refuses_bad_names(self):
+        self.shop()
+        for project, job, account in (("-x", "964-a", "main"), ("../x", "964-a", "main"), ("a b", "964-a", "main"),
+                                      ("x;id", "964-a", "main"), ("onewitharts", "964", "main"),
+                                      ("onewitharts", "96-a", "main"), ("onewitharts", "964-A", "main"),
+                                      ("onewitharts", "-964-a", "main"), ("onewitharts", "964-a;id", "main"),
+                                      ("onewitharts", "964-a\n", "main"), ("onewitharts", "964-a/../x", "main"),
+                                      ("onewitharts", "964-a", "other"), ("onewitharts", "964-a", ""),
+                                      ("onewitharts", "964-a", "OWA")):
+            with self.subTest(project=project, job=job, account=account):
+                self.assertIsNone(shop.start(project, job, PROMPT, account))
+        self.assertEqual(self.argv, [])
+
+    def test_clone_or_fast_forward(self):
+        work, bare = self.origin()
+        dest = Path(self.home) / "scrum-work" / "onewitharts"
+        self.shop(("scrum-work", LOCAL, ""))
+        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertEqual((self.head(dest), self.git("config", "--get", "remote.origin.url", cwd=dest)),
+                         (self.head(work), URL))
+        self.commit(work, bare, "two")
+        self.assertTrue(shop.clone("onewitharts", URL))
+        self.assertEqual(self.head(dest), self.head(work))
+        self.git("commit", "-q", "--allow-empty", "-m", "shop only", cwd=dest)  # not on origin: no fast-forward
+        mine = self.head(dest)
+        self.commit(work, bare, "three")
+        self.assertFalse(shop.clone("onewitharts", URL))
+        self.assertEqual((self.head(dest), self.head(dest, "refs/remotes/origin/main")), (mine, self.head(work)))
+        self.assertEqual(self.calls, [(CLONE, 600, None)] * 3)
+
+    def test_clone_refuses_other_origin_or_url(self):
+        self.shop(("scrum-work", LOCAL, ""))
+        for url in ("http://github.com/trevorwhecht/onewitharts.git", "https://gitlab.com/trevorwhecht/onewitharts",
+                    "https://github.com/trevorwhecht/onewitharts/x", "https://github.com/-x/onewitharts",
+                    "git@github.com:trevorwhecht/onewitharts.git", URL + "\n", "https://github.com/trevorwhecht/a;id",
+                    "https://github.com/trevorwhecht/..", "https://github.com/trevorwhecht/a b", "--upload-pack=x", ""):
+            with self.subTest(url=url):
+                self.assertFalse(shop.clone("onewitharts", url))
+        for name in ("-x", "../x", "a b", "", "x\n"):
+            with self.subTest(name=name):
+                self.assertFalse(shop.clone(name, URL))
+        self.assertEqual(self.argv, [])
+        work, bare = self.origin()
+        other = "https://github.com/trevorwhecht/other"  # no .git: accepted
+        self.origin(other)
+        dest = Path(self.home) / "scrum-work" / "onewitharts"
+        self.assertTrue(shop.clone("onewitharts", URL))
+        fetched = self.head(dest, "refs/remotes/origin/main")
+        self.commit(work, bare, "two")
+        self.assertFalse(shop.clone("onewitharts", other))
+        self.assertEqual((self.head(dest, "refs/remotes/origin/main"), self.git("config", "--get", "remote.origin.url",
+                                                                              cwd=dest)), (fetched, URL))
+        self.assertTrue(shop.clone("other", other))
+        self.assertEqual(self.git("config", "--get", "remote.origin.url", cwd=Path(self.home) / "scrum-work" / "other"),
+                         other)
+
+    def test_ended_states(self):
+        h = Path(self.home)
+        logs = h / "scrum-work" / "onewitharts" / ".git" / "scrum-shop"
+        logs.mkdir(parents=True)
+        self.shop(("sysctl", 255, ""))
+        self.assertIsNone(shop.ended("onewitharts", "964-shop-x", 4242))
+        self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
+        shop._cache = None
+        self.shop(("ps -p 4242", 0, ""), ("ps -p", LOCAL, ""), *DONE)
+        self.assertEqual((shop.ended("onewitharts", "964-shop-x", 4242), self.calls[1:]),
+                         (NOISE, [(ENDED, 60, None)]))
+        # `ps -o command=` of the first reads "/bin/sh -c sleep 30; : claude"; `; :` keeps sh from exec'ing sleep
+        procs = {name: subprocess.Popen(argv, start_new_session=True)
+                 for name, argv in (("claude", ["/bin/sh", "-c", "sleep 30; :", "claude"]), ("other", ["/bin/sleep", "30"]))}
+        for proc in procs.values():
+            self.addCleanup(proc.wait)
+            self.addCleanup(os.killpg, proc.pid, 9)
+        gone = subprocess.Popen(["/usr/bin/true"])
+        gone.wait()
+        self.assertIsNone(shop.ended("onewitharts", "964-shop-x", procs["claude"].pid))
+        self.assertEqual(shop.ended("onewitharts", "964-shop-x", gone.pid), "")
+        (logs / "964-shop-x.log").write_bytes(b"x" * 100 + b"y" * 8192)
+        self.assertEqual(shop.ended("onewitharts", "964-shop-x", gone.pid), "y" * 8192)
+        self.assertEqual(shop.ended("onewitharts", "964-shop-x", procs["other"].pid), "y" * 8192)
+        self.shop(("ps -p", 255, ""), *DONE)
+        self.assertIsNone(shop.ended("onewitharts", "964-shop-x", gone.pid))
+        self.shop(*DONE)
+        for project, job in (("-x", "964-shop-x"), ("onewitharts", "964-a\n"), ("onewitharts", "../x")):
+            self.assertIsNone(shop.ended(project, job, 4242))
+        self.assertEqual(self.argv, [])
+
+
 class StructureTest(unittest.TestCase):
     def test_stdlib_only(self):
         tree = ast.parse((SKILL / "shop.py").read_text())
@@ -1054,11 +1245,11 @@ class StructureTest(unittest.TestCase):
             self.assertIn(phrase, text, phrase)
         self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
                          ["## Transport and probe", "## Setup", "## Ready", "## Env copy", "## E2E channel",
-                          "## MD sync"])
+                          "## MD sync", "## Dispatch"])
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
-        sync = text[text.index("## MD sync"):]
+        sync = text[text.index("## MD sync"):text.index("## Dispatch")]
         for phrase in ("`python3 shop.py md-sync`", "--ff-only", "`~/.md-sync-cleanup-done`",
                        "`~/md-sync-backup-<YYYY-MM-DD>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",
                        "`CLAUDE_CODE_DISABLE_AUTO_MEMORY`"):

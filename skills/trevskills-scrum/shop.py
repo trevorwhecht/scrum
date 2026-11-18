@@ -9,7 +9,9 @@ usage: shop.py probe   (print the cached probe as one JSON line; exit 0 whether 
 
 run() never raises: a timeout comes back as exit 124, ssh that cannot start as 127, and ssh's own failure as 255.
 probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy() and
-md_sync() never print a secret or remote output. See lanes/shop.md.
+md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses clone() to clone
+or fast-forward a project in ~/scrum-work, start() to launch a headless cloud-job session there (the prompt only on
+stdin) and ended() to read a finished session's log tail. See lanes/shop.md.
 """
 import argparse, io, json, os, re, shlex, subprocess, sys, tarfile, time
 from pathlib import Path
@@ -108,6 +110,20 @@ READY_TTL = 600
 PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.env.local.tmp"
             " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
+REPO_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch; .git or not
+JOB_RE = re.compile(r"[0-9]{3,}-[a-z0-9-]+")  # board.ID_RE's shape; fullmatch, so a trailing newline fails
+# The raw origin URL (config, not `remote get-url`, which expands insteadOf) must equal the one asked for. Never resets.
+CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" = {u} ]'
+         ' || exit 3; git -C "$d" fetch origin && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
+         ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi')
+SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
+SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
+START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + SHOP_ENV
+         + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
+         ' < /dev/null > {d}/{j}.log 2>&1 & echo $!')
+# ponytail: liveness is `ps -p` showing claude; a reused pid of another claude keeps a dead job alive until it ends
+ENDED = ('ps -p {pid} -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/{p}/{d}/{j}.log"; [ -f "$f" ] || exit 0;'
+         ' tail -c 8192 "$f"')
 
 CLONES = ("~/code/scrum", "~/code/trevorhecht-skills")  # the clones the shop's ~/.claude skills, agents and rules link to
 MD_PULL = " && ".join(f"git -C {c} pull --ff-only" for c in CLONES)
@@ -146,11 +162,15 @@ done'''))
 # ponytail: module globals with no lock; add one when a second thread calls probe(). Callers treat the dicts as read-only.
 _cache = None  # (time.monotonic() of the probe, its result)
 _ready = None  # (time.monotonic() of the ready() check, its result)
+REAL_RUN = subprocess.run  # run() refuses ssh under unittest unless a test replaced subprocess.run
 
 
 def run(cmd: str, timeout: float, input: str | bytes | None = None) -> subprocess.CompletedProcess:
-    """Run `cmd` on the shop Mac. Secrets go in `input` (stdin), never in `cmd`. stdout and stderr come back as str."""
+    """Run `cmd` on the shop Mac. Secrets go in `input` (stdin), never in `cmd`. stdout and stderr come back as str.
+    Under unittest with the real subprocess.run (no test faked it) it returns 127 with no ssh, as a down shop Mac."""
     argv = ["ssh", ALIAS, *SSH_OPTS, PATH_PREFIX + cmd]
+    if "unittest" in sys.modules and subprocess.run is REAL_RUN:  # a watchdog test must never dispatch to the real shop
+        return subprocess.CompletedProcess(argv, 127, "", "ssh refused under unittest")
     feed = {"stdin": subprocess.DEVNULL} if input is None else {
         "input": input.encode("utf-8") if isinstance(input, str) else input}
     try:
@@ -314,6 +334,37 @@ def env_copy(project: str, repo: str) -> str:
     if not probe()["up"]:
         return "failed"
     return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data).returncode == 0 else "failed"
+
+
+def clone(project: str, url: str) -> bool:
+    """Clone `url` into the shop's ~/scrum-work/<project>, or fetch and fast-forward that clone to origin's HEAD when
+    its origin is `url`. False with no ssh for a name off PROJECT_RE or a URL off REPO_URL_RE (https GitHub only), and
+    False for another origin, a merge that is not a fast-forward or a failed call. Never resets or deletes."""
+    if not PROJECT_RE.fullmatch(project) or not REPO_URL_RE.fullmatch(url):
+        return False
+    return run(CLONE.format(p=project, u=shlex.quote(url)), INSTALL_TIMEOUT).returncode == 0
+
+
+def start(project: str, job_id: str, prompt: str, account: str, model: str | None = None) -> int | None:
+    """Start a headless `claude -p` cloud-job session in the shop's ~/scrum-work/<project> on SHOP_ACCOUNTS `account`,
+    in the background with its output in .git/scrum-shop/<job_id>.log: its pid, or None (a non-zero exit, output that
+    is not a pid). `prompt` goes only on stdin, into a umask 077 prompt file. None with no ssh for a project off
+    PROJECT_RE, a job id off JOB_RE or an unknown account."""
+    if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id) or account not in SHOP_ACCOUNTS:
+        return None
+    r = run(START.format(p=project, d=SHOP_LOGS, j=job_id, env=account_env(account),
+                         model=f" --model {shlex.quote(model)}" if model else ""), STEP_TIMEOUT, input=prompt)
+    lines = r.stdout.split()  # the pid is the last word: a shell startup line may come first
+    return int(lines[-1]) if r.returncode == 0 and lines and re.fullmatch(r"[0-9]{1,10}", lines[-1]) else None
+
+
+def ended(project: str, job_id: str, pid: int) -> str | None:
+    """The last 8192 bytes of a finished shop session's log ("" with no log), or None while `ps -p <pid>` still shows
+    claude, the shop Mac is down, a name is off PROJECT_RE or JOB_RE, or the call fails. Prints nothing."""
+    if not PROJECT_RE.fullmatch(project) or not JOB_RE.fullmatch(job_id) or not probe()["up"]:
+        return None
+    r = run(ENDED.format(pid=int(pid), p=project, d=SHOP_LOGS, j=job_id), STEP_TIMEOUT)
+    return r.stdout if r.returncode == 0 else None
 
 
 def memory_key(path: str) -> str:

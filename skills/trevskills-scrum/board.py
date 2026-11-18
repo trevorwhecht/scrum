@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome (empty = null);
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
                                    clears the pause
@@ -183,14 +183,15 @@ FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
           "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud", "outcome", "account")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome", "account", "shop")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
-          "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")}  # the dashboard links it
+          "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$"),  # the dashboard links it
+          "shop": re.compile(r"^[0-9]{1,10}$")}  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 # Every needs-human stop's fixed title (lanes/stops.md): key -> one-line meaning. The dashboard shows the key with
 # "_" replaced by a space.
@@ -4952,7 +4953,7 @@ def note_queue_gate(root, job_id, gate):
         pass
 
 
-def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
+def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, shop: str | None = None):
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
     holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
@@ -4965,8 +4966,11 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     all_merged, so its final review runs. A child held on an overlap gets `overlap_hold` {ids, text, since} (the card's
     "Waiting on" line; `since` is set once and a hold past OVERLAP_HOLD_MAX_S is released); a claim or a depends_on wait drops it.
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
-    siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
-    machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
+    siblings and outside jobs with a live session or in stage cloud (parked ones do not count), with room 1 in place of
+    ram_room(); machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
+    `shop` (serve.py's shop_tick) claims that one waiting child or nothing, with room 1, for a session on the shop Mac:
+    it skips machine_ok and ram_room but keeps the usage cap and every overlap rule of a normal call (a parallel: no
+    child still runs alone), and the parent's stage and reason change only on a claim.
     Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was, except that
     one light kid (LIGHT_LANES, its lane read as for the skip below) still claims when ram_room(floor=0, light=True),
     spawn's size for it, is at least 1 and the call has claimed nothing else. `held` in the output: the machine_ok or usage refusal,
@@ -4990,7 +4994,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                                            and reason.startswith((WAITING_ON, MACHINE_WAIT))))
         go = not held and (parent["stage"] == "running" or legacy)
         # checked once: a machine-wide state, so it gates the whole call
-        machine = go and machine_ok(root, manual=manual, claim=True)
+        machine = go and not shop and machine_ok(root, manual=manual, claim=True)  # a shop claim runs off this Mac
         cap = None  # the usage ladder's slots left this call; None = no taper
         if go and not machine:
             n_live = live_sessions()
@@ -5014,9 +5018,10 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         outside = [dict(j, parallel=True) for j in board["jobs"] if go and not machine and j["id"] not in sibs
                    and j["id"] != parent["id"] and not j.get("children") and j["stage"] not in POST_BUILD
                    and j["stage"] not in ("waiting", "done", "aborted") and (not idle(j) or j["id"] in live)]
-        if only:  # the idle claim: only jobs with a live session hold it
+        if only:  # the idle claim: only jobs with a live session, local or on the shop Mac (stage cloud), hold it
             alive = session_alive_fn() if any(j.get("stage") in WATCHED for j in slots + outside) else None
-            has_session = lambda j: j["id"] in live or (not idle(j) and j.get("stage") in WATCHED and alive(j))
+            has_session = lambda j: j["id"] in live or j.get("stage") == "cloud" \
+                or (not idle(j) and j.get("stage") in WATCHED and alive(j))
             slots = [k for k in slots if has_session(k)]
             outside = [j for j in outside if has_session(j)]
         specced = {j["id"] for j in outside if (jobs_dir / j["id"] / "spec.md").is_file()}
@@ -5025,7 +5030,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         outside = [j for j in outside if j["id"] in specced or files[j["id"]]]  # a no-spec holder naming no file holds nothing
         outside = [j for j in outside if not outside_repo_files(files[j["id"]], Path(root).parent)]  # another repo's job cannot clash
         overlap = []  # outside holder ids that alone hold a waiting child
-        room = (1 if only else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
+        room = (1 if only or shop else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
         ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
         if cap is not None:
             room = min(room, cap)
@@ -5037,7 +5042,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
                                 if built.setdefault(o["id"], not unbuilt(root, o))]
         # Critical kids first, so they take the first ram_room slots; sorted is stable, so the rest keep plan order
         for k in sorted(kids, key=lambda j: not critical(j)) if go and not machine else []:
-            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only:
+            if k["stage"] != "waiting" or k.get("setup") == "pending" or k.get("wake") or only and k["id"] != only \
+                    or shop and k["id"] != shop:
                 continue
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
@@ -5095,7 +5101,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
         merged = sum(k["stage"] == "done" for k in kids)
         finished = sum(k["stage"] in ("done", "aborted") for k in kids)  # an aborted child never runs again
         new = parent["stage"], parent.get("reason")
-        if (only or ram_full) and not ready:  # an idle claim that claimed nothing leaves the parent as it was
+        if (only or shop or ram_full) and not ready:  # an idle or shop claim that claimed nothing leaves the parent as it was
             pass
         elif machine:  # wait for RAM, disk or usage; never needs-human, and a legacy parent keeps its reason to re-evaluate
             if parent["stage"] == "running" and finished < len(kids):
