@@ -1,4 +1,5 @@
-import ast, contextlib, hashlib, io, json, os, shutil, stat, subprocess, sys, tarfile, tempfile, unittest, zipfile
+import ast, contextlib, datetime, hashlib, io, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -173,6 +174,24 @@ class CliTest(ShopCase):
                 self.assertEqual(cm.exception.code, 2)
                 self.assertIn("usage:", err.getvalue())
         self.sp.assert_not_called()
+
+    def test_md_sync_one_line(self):
+        home = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        Path(home, ".claude").mkdir()
+        Path(home, ".claude", "CLAUDE.md").write_text("rules\n")
+        env = mock.patch.dict(os.environ, {"HOME": home, "SCRUM_REGISTRY": os.path.join(home, "none.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        for fail, rc, want, code in ((None, 0, "md-sync: ok\n", 0), ("pull --ff-only", 1, "md-sync: failed\n", 1),
+                                     ("tar -xf", 255, "md-sync: failed\n", 1), ("sysctl", 255, "shop: down\n", 1)):
+            with self.subTest(fail=fail):
+                shop._cache = None
+                self.sp.side_effect = lambda argv, **kw: subprocess.CompletedProcess(
+                    argv, rc if fail and fail in argv[-1] else 0, NOISE.encode(), NOISE.encode())
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    got = self.main(["md-sync"])
+                self.assertEqual((got, err.getvalue()), ((code, want), ""))
 
 
 TOKEN = "gho_FAKE962TOKEN"
@@ -503,7 +522,9 @@ class PermissionsMergeTest(unittest.TestCase):
                       f"Edit(/{h}/.claude-owa/**/*.md)"],
             "deny": ["Bash(git reset:*)", "Bash(git rebase:*)", "Bash(git push --force:*)",
                      "Bash(git push --force-with-lease:*)", "Bash(git push -f:*)", "Bash(prisma migrate reset:*)",
-                     "Bash(npx prisma migrate reset:*)"],
+                     "Bash(npx prisma migrate reset:*)", f"Edit(/{h}/.claude/CLAUDE.md)", f"Edit(/{h}/.claude/rules/**)",
+                     f"Edit(/{h}/.claude/projects/*/memory/**)", f"Edit(/{h}/.claude-owa/CLAUDE.md)",
+                     f"Edit(/{h}/.claude-owa/rules/**)", f"Edit(/{h}/.claude-owa/projects/*/memory/**)"],
             "ask": ["Bash(prisma db push:*)", "Bash(npx prisma db push:*)"],
             "additionalDirectories": ["/private/tmp", f"{h}/scrum-work", f"{h}/.claude", f"{h}/.claude-owa"]}})
         self.file.write_text(json.dumps({"permissions": {"allow": ["Bash(ls:*)", "Read"], "deny": ["Bash(rm:*)"],
@@ -687,6 +708,220 @@ class SecretTest(SetupCase):
                 self.assertEqual([c[2] for c in self.calls if c[2]], [b"SECRET_962=abc962xyz\n"])
 
 
+PULL = "git -C ~/code/scrum pull --ff-only && git -C ~/code/trevorhecht-skills pull --ff-only"
+IMPORT = b"@~/code/scrum/skills/trevskills-scrum/shop/machine-notes.md\n"
+SYNC = (("pull --ff-only", 0, ""), (".md-sync-cleanup-done", LOCAL, ""), ("tar -xf", LOCAL, ""))  # no git here
+
+
+def key(path):
+    """Claude Code's projects/ dir name for `path`, written out apart from shop.memory_key."""
+    return "".join(c if c.isascii() and c.isalnum() else "-" for c in str(path))
+
+
+def tree(root):
+    """{path relative to `root`: bytes} for every file under `root`."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob("*")) if p.is_file()}
+
+
+class MdSyncTest(SetupCase):
+    """This Mac's HOME and the shop's are two temp dirs whose paths hold `/`, `.` and `_`. LOCAL runs the cleanup and
+    copy calls in a local sh under the shop's HOME, as the shop would."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.home)
+        self.mac, self.sh = base / "mac_home.1", base / "shop_home.2"
+        self.home = str(self.sh)  # SetupCase's LOCAL answer runs under self.home
+        (self.mac / ".claude").mkdir(parents=True)
+        self.sh.mkdir()
+        (self.mac / ".claude" / "CLAUDE.md").write_bytes(b"# rules 963\nno trailing newline")
+        self.registry, self.paths = base / "projects.json", [7, "/nowhere/gone"]
+        self.registry.write_text(json.dumps(self.paths))
+        env = mock.patch.dict(os.environ, {"HOME": str(self.mac), "SCRUM_REGISTRY": str(self.registry)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.today = f"md-sync-backup-{datetime.date.today().isoformat()}"
+
+    def repo(self, rel, scrum=True, memory=None):
+        """Register <mac>/repos/<rel> (with a scrum/ dir when `scrum`) and give it local memory files {name: bytes}."""
+        repo = self.mac / "repos" / rel
+        (repo / "scrum" if scrum else repo).mkdir(parents=True)
+        self.paths.append(str(repo))
+        self.registry.write_text(json.dumps(self.paths))
+        if memory is not None:
+            self.write(self.mac / ".claude" / "projects" / key(repo) / "memory", memory)
+
+    def write(self, folder, files):
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            (Path(folder) / name).write_bytes(data)
+
+    def sync(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            got = shop.md_sync()
+        self.assertEqual(out.getvalue(), "")
+        return got
+
+    def shop_key(self, name):
+        return key(f"{self.sh}/scrum-work/{name}")
+
+    def test_down_no_ssh(self):
+        self.shop(("sysctl", 255, ""), *SYNC)
+        self.assertIs(self.sync(), False)
+        self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
+
+    def test_pulls_first_and_failure_stops(self):
+        self.shop()  # every remote call exits 0 and prints noise
+        self.assertIs(self.sync(), True)
+        self.assertEqual(self.calls[0][0], shop.PROBE_CMD)
+        self.assertEqual(self.calls[1], (PULL, 60, None))
+        self.assertEqual([(c[1], c[2] is None) for c in self.calls[1:]], [(60, True), (60, True), (60, False)])
+        self.assertIn(".md-sync-cleanup-done", self.calls[2][0])
+        self.assertIn("tar -xf", self.calls[3][0])
+        for fail, ran in (("pull --ff-only", 1), (".md-sync-cleanup-done", 2), ("tar -xf", 3)):
+            for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
+                with self.subTest(fail=fail, rc=rc):
+                    shop._cache = None
+                    self.shop((fail, rc, ""))
+                    self.assertIs(self.sync(), False)
+                    self.assertEqual(len(self.calls), 1 + ran)
+
+    def test_claude_md_copied_with_import(self):
+        claude = self.sh / ".claude"
+        claude.mkdir()
+        target = self.sh / "linked.md"
+        target.write_bytes(b"shop own 963\n")
+        (claude / "CLAUDE.md").symlink_to(target)
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        want = b"# rules 963\nno trailing newline\n" + IMPORT
+        self.assertFalse((claude / "CLAUDE.md").is_symlink())
+        self.assertEqual(((claude / "CLAUDE.md").read_bytes(), target.read_bytes()), (want, b"shop own 963\n"))
+        [(_, timeout, given)] = self.cmds("tar -xf")
+        self.assertEqual(timeout, 60)
+        with tarfile.open(fileobj=io.BytesIO(given)) as tar:
+            self.assertEqual(tar.extractfile("CLAUDE.md").read(), want)
+        self.assertFalse([a for a in self.argv if "rules 963" in " ".join(a)])
+        (self.mac / ".claude" / "CLAUDE.md").write_bytes(b"# rules 963\n")  # a trailing newline gets no second one
+        self.assertIs(self.sync(), True)
+        self.assertEqual((claude / "CLAUDE.md").read_bytes(), b"# rules 963\n" + IMPORT)
+        os.remove(self.mac / ".claude" / "CLAUDE.md")
+        shop._cache = None
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), False)
+        self.assertEqual(self.argv, [])  # not even the probe
+
+    def test_memory_mapped_and_replaced(self):
+        self.assertEqual(shop.memory_key("/Users/a.b_c/scrum-work/my_app.web"), "-Users-a-b-c-scrum-work-my-app-web")
+        self.repo("web/my_app.web", memory={"MEMORY.md": b"index 963\n", "note_a.md": b"fact a\n"})
+        self.repo("api-two")  # registered, no local memory dir
+        self.repo("plain", scrum=False, memory={"x.md": b"no scrum dir\n"})
+        self.repo("a/dup", memory={"d.md": b"a\n"})
+        self.repo("b/dup", memory={"d.md": b"b\n"})  # a folder name used twice syncs neither
+        self.repo("_bad", memory={"b.md": b"bad name\n"})
+        projects = self.sh / ".claude" / "projects"
+        web, two, other = (projects / self.shop_key("my_app.web"), projects / self.shop_key("api-two"),
+                           projects / "-Users-someone")
+        self.assertTrue(web.name.endswith("-shop-home-2-scrum-work-my-app-web"), web.name)
+        self.write(web / "memory", {"MEMORY.md": b"old\n", "stale.md": b"a shop session wrote this\n"})
+        self.write(two / "memory", {"x.md": b"x\n"})
+        self.write(other / "memory", {"MEMORY.md": b"m\n"})
+        self.write(web, {"s1.jsonl": b"{}\n"})
+        self.write(other, {"s2.jsonl": b"{}\n"})
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        self.assertEqual(sorted(str(p.relative_to(projects)) for p in projects.glob("*/memory")),
+                         [f"{web.name}/memory"])
+        self.assertEqual(tree(projects), {f"{web.name}/memory/MEMORY.md": b"index 963\n",
+                                          f"{web.name}/memory/note_a.md": b"fact a\n",
+                                          f"{web.name}/s1.jsonl": b"{}\n", "-Users-someone/s2.jsonl": b"{}\n"})
+
+    def test_second_sync_same_files(self):
+        self.repo("app.one", memory={"MEMORY.md": b"index\n", "b_note.md": b"b\n"})
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        claude = self.sh / ".claude"
+        first = tree(claude)
+        k = self.shop_key("app.one")
+        self.assertEqual(first, {"CLAUDE.md": b"# rules 963\nno trailing newline\n" + IMPORT,
+                                 f"projects/{k}/memory/MEMORY.md": b"index\n", f"projects/{k}/memory/b_note.md": b"b\n"})
+        self.assertIs(self.sync(), True)
+        self.assertEqual(tree(claude), first)
+        self.assertEqual(sorted(os.listdir(claude)), ["CLAUDE.md", "projects"])  # the copy's temp dir is gone
+
+    def test_first_sync_backs_up_then_deletes(self):
+        h = self.sh
+        self.write(h, {"MACHINES.md": b"avoid heavy builds\n"})  # every other item missing: skipped
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        self.assertEqual(tree(h / self.today), {"MACHINES.md": b"avoid heavy builds\n"})
+        shutil.rmtree(h)
+        h.mkdir()
+        self.write(h / ".claude", {"CLAUDE.md": b"shop own 963\n"})
+        self.write(h / ".claude" / "projects" / "-Users-shop" / "memory", {"machines-registry.md": b"registry\n"})
+        self.write(h / ".claude" / "projects" / "-private-tmp" / "memory", {"MEMORY.md": b"tmp\n"})
+        self.write(h, {"MACHINES.md": b"avoid heavy builds\n"})
+        self.write(h / "code", {"scrum-multi-machine-spec.md": b"per-machine boards\n", "keep.md": b"k\n"})
+        self.write(h / "scrum-probe", {"package.json": b"{}\n"})
+        (h / "scrum-probe" / "node_modules").mkdir()
+        self.assertIs(self.sync(), True)
+        backup = h / self.today
+        self.assertEqual(tree(backup), {"CLAUDE.md": b"shop own 963\n", "MACHINES.md": b"avoid heavy builds\n",
+                                        "projects/-Users-shop/memory/machines-registry.md": b"registry\n",
+                                        "projects/-private-tmp/memory/MEMORY.md": b"tmp\n",
+                                        "scrum-multi-machine-spec.md": b"per-machine boards\n",
+                                        "scrum-probe/package.json": b"{}\n"})
+        self.assertTrue((backup / "scrum-probe" / "node_modules").is_dir())
+        self.assertEqual(sorted(os.listdir(h)), [".claude", ".md-sync-cleanup-done", "code", self.today])
+        self.assertEqual(os.listdir(h / "code"), ["keep.md"])
+        self.assertEqual((h / ".claude" / "CLAUDE.md").read_bytes(), b"# rules 963\nno trailing newline\n" + IMPORT)
+        self.assertEqual(list((h / ".claude" / "projects").glob("*/memory")), [])
+
+    def test_backup_failure_deletes_nothing(self):
+        h = self.sh
+        self.write(h / ".claude", {"CLAUDE.md": b"shop own 963\n"})
+        self.write(h / ".claude" / "projects" / "-Users-shop" / "memory", {"MEMORY.md": b"m\n"})
+        self.write(h, {"MACHINES.md": b"avoid heavy builds\n", self.today: b"a file in the way\n"})
+        self.write(h / "code", {"scrum-multi-machine-spec.md": b"draft\n"})
+        self.write(h / "scrum-probe", {"package.json": b"{}\n"})
+        before = tree(h)
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), False)
+        self.assertEqual(tree(h), before)
+        self.assertEqual(self.cmds("tar -xf"), [])
+
+    def test_cleanup_runs_once(self):
+        h = self.sh
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)  # writes the marker
+        shutil.rmtree(h / self.today)
+        self.write(h, {"MACHINES.md": b"m\n"})
+        self.write(h / "code", {"scrum-multi-machine-spec.md": b"d\n"})
+        self.write(h / "scrum-probe", {"package.json": b"{}\n"})
+        self.assertIs(self.sync(), True)
+        self.assertEqual(sorted(os.listdir(h)), [".claude", ".md-sync-cleanup-done", "MACHINES.md", "code",
+                                                 "scrum-probe"])
+        self.assertEqual(len(self.cmds(".md-sync-cleanup-done")), 2)
+
+    def test_machine_notes(self):
+        self.assertEqual(shop.NOTES_IMPORT, IMPORT.decode().strip())
+        notes = SKILL / "shop" / "machine-notes.md"
+        self.assertEqual(ROOT / IMPORT.decode().strip()[len("@~/code/scrum/"):], notes)  # ~/code/scrum: this repo
+        text = notes.read_text()
+        for phrase in ("macOS 12", "No Homebrew", "Python 3.12 is `~/.local/bin/python3`", "`/usr/bin/python3` is older",
+                       "Node 24", "darwin-x64", "`~/.local`", '`channel: "chrome"`', "`SCRUM_PW_CHANNEL`",
+                       "Full builds and full test suites are fine here",
+                       "never write memory notes, rules or CLAUDE.md, even where other instructions say to save a note",
+                       "follow-ups"):
+            self.assertIn(phrase, text, phrase)
+        for bad in ("trevorhecht", "onewitharts"):
+            self.assertNotIn(bad, text, bad)
+        src = (SKILL / "shop.py").read_text()
+        self.assertNotIn("onewitharts", src)
+        self.assertNotIn("/Users/", src)
+
+
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class ChannelConfigTest(unittest.TestCase):
     """Imports channel.config.mjs with local node from a temp repo holding a plain-object playwright config."""
@@ -806,10 +1041,16 @@ class StructureTest(unittest.TestCase):
                        "60 s", "300 s", "prints nothing and raises nothing", "`python3 shop.py probe`"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
-                         ["## Transport and probe", "## Setup", "## Ready", "## Env copy", "## E2E channel"])
+                         ["## Transport and probe", "## Setup", "## Ready", "## Env copy", "## E2E channel",
+                          "## MD sync"])
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
+        sync = text[text.index("## MD sync"):]
+        for phrase in ("`python3 shop.py md-sync`", "--ff-only", "`~/.md-sync-cleanup-done`",
+                       "`~/md-sync-backup-<YYYY-MM-DD>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",
+                       "`CLAUDE_CODE_DISABLE_AUTO_MEMORY`"):
+            self.assertIn(phrase, sync, phrase)
 
     def test_channel_documented(self):
         newjob = (SKILL / "lanes" / "newjob.md").read_text()
