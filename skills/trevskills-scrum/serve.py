@@ -5999,7 +5999,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/routing-status":  # the header spans every project, so no scrum dir
             t = time.time()
             s = route.status()  # only the keys the dashboard shows: route.py may still report its local model server
-            return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
+            return self.send_json(200, {"codex": s.get("codex"), "codex_limits": s.get("codex_limits"),
+                                        "claude_exhausted_until": s.get("claude_exhausted_until"),
                                         "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
         if path == "/api/machine":
             return self.send_json(200, cached_machine_status())

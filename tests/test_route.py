@@ -17,6 +17,8 @@ spec = importlib.util.spec_from_file_location('local_route', ROUTE_PY)
 route_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(route_mod)
 LIVE_CONFIG = route_mod.CONFIG
+RESETS = 4102444800  # 2100-01-01 UTC, always in the future
+NO_QUOTA = {'5h': None, 'weekly': None, '5h_resets_at': None, 'weekly_resets_at': None}
 
 
 class RouteTests(unittest.TestCase):
@@ -44,8 +46,7 @@ class RouteTests(unittest.TestCase):
         path.mkdir(parents=True)
         return str(path)
 
-    def rollout(self, primary=None, secondary=None):
-        future = int(time.time()) + 3600
+    def rollout(self, primary=None, secondary=None, future=RESETS):
         limits = {'primary': {'used_percent': primary, 'window_minutes': 300, 'resets_at': future},
                   'secondary': {'used_percent': secondary, 'window_minutes': 10080, 'resets_at': future}}
         folder = self.sessions / '2026' / '10' / '14'
@@ -162,7 +163,7 @@ class RouteTests(unittest.TestCase):
         newer.write_text(json.dumps(line) + '\n')
         os.utime(path, (time.time() - 100, time.time() - 100))
         self.assertEqual(self.runner('codex-review'), 'cloud')
-        self.assertEqual(route_mod.status()['codex'], {'5h': None, 'weekly': None})
+        self.assertEqual(route_mod.status()['codex'], NO_QUOTA)
 
     def test_codex_no_sessions_cloud(self):
         self.assertEqual(self.runner('codex-review'), 'cloud')
@@ -183,24 +184,26 @@ class RouteTests(unittest.TestCase):
         older = self.rollout(primary=14, secondary=1)
         os.utime(older, (now - 1, now - 1))
         self.bare_rollout('rollout-2.jsonl', now)
-        self.assertEqual(route_mod.status()['codex'], {'5h': 14, 'weekly': 1})
-        future = int(now) + 3600
+        self.assertEqual(route_mod.status()['codex'],
+                         {'5h': 14, 'weekly': 1, '5h_resets_at': RESETS, 'weekly_resets_at': RESETS})
+        future = RESETS - 60
         line = {'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
             'primary': {'used_percent': 40, 'resets_at': future},
             'secondary': {'used_percent': 5, 'resets_at': future}}}}
         newest = older.parent / 'rollout-3.jsonl'
         newest.write_text(json.dumps(line) + '\n')
         os.utime(newest, (now + 1, now + 1))
-        self.assertEqual(route_mod.status()['codex'], {'5h': 40, 'weekly': 5})
+        self.assertEqual(route_mod.status()['codex'],
+                         {'5h': 40, 'weekly': 5, '5h_resets_at': RESETS - 60, 'weekly_resets_at': RESETS - 60})
 
     def test_codex_quota_none_when_newest_20_files_lack_rate_limits(self):
         now = time.time()
         for i in range(20):
             self.bare_rollout(f'rollout-bare-{i}.jsonl', now - i)
-        self.assertEqual(route_mod.status()['codex'], {'5h': None, 'weekly': None})
+        self.assertEqual(route_mod.status()['codex'], NO_QUOTA)
         old = self.rollout(primary=14, secondary=1)
         os.utime(old, (now - 100, now - 100))
-        self.assertEqual(route_mod.status()['codex'], {'5h': None, 'weekly': None})
+        self.assertEqual(route_mod.status()['codex'], NO_QUOTA)
 
     def test_claude_exhausted_expired_reset_ignored(self):
         self.claude_limit(3 * 3600, -2 * 3600)
@@ -239,9 +242,53 @@ class RouteTests(unittest.TestCase):
         self.rollout(primary=27.0, secondary=8.0)
         with patch.object(socket, 'create_connection', side_effect=AssertionError('network used')), \
                 patch.object(socket.socket, 'connect', side_effect=AssertionError('network used')):
-            self.assertEqual(route_mod.status(), {'codex': {'5h': 27.0, 'weekly': 8.0}, 'claude_exhausted_until': None})
+            self.assertEqual(route_mod.status(), {
+                'codex': {'5h': 27.0, 'weekly': 8.0, '5h_resets_at': RESETS, 'weekly_resets_at': RESETS},
+                'codex_limits': {'5h': 85, 'weekly': 90}, 'claude_exhausted_until': None})
             self.claude_limit(60, 3600)
             self.assertIsNotNone(route_mod.status(str(self.scrum))['claude_exhausted_until'])
+
+    def test_codex_quota_returns_resets_at(self):
+        self.rollout(primary=42.0, secondary=17.0, future=4102448400)
+        self.assertEqual(route_mod.codex_quota(), {'5h': 42.0, 'weekly': 17.0,
+                                                   '5h_resets_at': 4102448400, 'weekly_resets_at': 4102448400})
+        line = {'payload': {'rate_limits': {'primary': {'used_percent': 3, 'resets_at': 4102444800.5},
+                                            'secondary': {'used_percent': 9, 'resets_at': 'soon'}}}}
+        path = self.sessions / '2026' / '10' / '14' / 'rollout-2.jsonl'
+        path.write_text(json.dumps(line) + '\n')
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        self.assertEqual(route_mod.codex_quota(), {'5h': 3, 'weekly': 9,
+                                                   '5h_resets_at': 4102444800.5, 'weekly_resets_at': None})
+        line = {'payload': {'rate_limits': {'primary': {'used_percent': 3, 'resets_at': 4102444800}}}}
+        path.write_text(json.dumps(line) + '\n')
+        self.assertEqual(route_mod.codex_quota(), {'5h': 3, 'weekly': None,
+                                                   '5h_resets_at': 4102444800, 'weekly_resets_at': None})
+
+    def test_codex_quota_expired_window_has_no_reset(self):
+        past = int(time.time()) - 60
+        line = {'payload': {'rate_limits': {'primary': {'used_percent': 99.0, 'resets_at': past},
+                                            'secondary': {'used_percent': 20.0, 'resets_at': 4102444800}}}}
+        path = self.sessions / 'rollout-9.jsonl'
+        path.write_text(json.dumps(line) + '\n')
+        self.assertEqual(route_mod.codex_quota(), {'5h': None, 'weekly': 20.0,
+                                                   '5h_resets_at': None, 'weekly_resets_at': 4102444800})
+
+    def test_codex_limits_from_config(self):
+        config = self.root / 'routing.json'
+        config.write_text(json.dumps({'thresholds': {'codex_5h': 70, 'codex_weekly': 95}}))
+        with patch.object(route_mod, 'CONFIG', str(config)):
+            self.assertEqual(route_mod.codex_limits(), {'5h': 70, 'weekly': 95})
+        self.assertEqual(route_mod.codex_limits(), {'5h': 85, 'weekly': 90})
+
+    def test_codex_limits_missing_or_bad_config(self):
+        config = self.root / 'routing.json'
+        none = {'5h': None, 'weekly': None}
+        with patch.object(route_mod, 'CONFIG', str(config)):
+            self.assertEqual(route_mod.codex_limits(), none, 'missing file')
+            for body in ('{not json', '[]', '{"thresholds": []}', '{"thresholds": {"codex_5h": 70}}',
+                         '{"other": 1}', '"text"'):
+                config.write_text(body)
+                self.assertEqual(route_mod.codex_limits(), none, body)
 
 
 if __name__ == '__main__':
