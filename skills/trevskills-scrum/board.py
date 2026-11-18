@@ -4725,7 +4725,7 @@ def ram_room(floor=1, light=False):
     minus one share per session younger than SESSION_RAMP_SECS (its RAM is spoken
     for but not used yet), never past MAX_SESSIONS in all nor MAX_YOUNG_SESSIONS young ones, at least `floor`. An unknown reading allows 1, so a batch never
     bursts blind, and so does swap past MAX_SWAP_PCT / 2 while free RAM is low or swap is growing (swap_pressing); stale swap at healthy free RAM uses the RAM math.
-    So does a kernel memory pressure level (vm_pressure_level) of 2 or more.
+    A kernel memory pressure level (vm_pressure_level) of 2 or more also allows 1.
     floor=0 (serve.py's launch gate) returns the raw room, 0 or less when full, and in the swap, pressure or unknown case 1 only
     while no session is younger than SESSION_RAMP_SECS. light (serve.py, light_job): the free RAM left after the young
     sessions' standard shares, split into ram_share(light=True) shares; the swap, unknown and ceiling cases are the same."""
