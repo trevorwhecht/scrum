@@ -1,7 +1,7 @@
 """Repro for job 624: approve/rework/resume/answer clicks on several needs-human jobs in one burst each start a session,
 past board.ram_room. With SCRUM_FREE_RAM=30 (2 shares of SESSION_RAM_PCT above MIN_FREE_RAM_PCT) and no session running,
 4 launches back to back must start only 2; the other 2 stay needs-human and queued."""
-import json, os, unittest
+import os, unittest
 from unittest import mock
 
 import test_serve  # module import only: unittest must not collect ServeTest a second time from here

@@ -112,7 +112,7 @@ click($("aiList").querySelectorAll("button[data-id]").find(b => b.dataset.id ===
 back(); out.audit = active();
 console.log(JSON.stringify(out));
 """)
-        self.assertEqual(got, {"category": f'id:user:skills/a b"c', "audit": f'id:user:skills/a b"c'})
+        self.assertEqual(got, {"category": 'id:user:skills/a b"c', "audit": 'id:user:skills/a b"c'})
 
     def test_back_falls_back_to_category(self):
         got = run(CATEGORY + """
@@ -136,8 +136,8 @@ click(listBtn('button[data-toggle="enable"]')); frame();
 pending.shift().res({...rows[0], disable: false}); await tick(); frame(); out.afterUndoNoDisable = active();
 console.log(JSON.stringify(out));
 """)
-        self.assertEqual(got, {"afterDisable": f'enable:user:skills/a b"c', "afterUndo": f'disable:user:skills/a b"c',
-                               "afterUndoNoDisable": f'research:user:skills/a b"c'})
+        self.assertEqual(got, {"afterDisable": 'enable:user:skills/a b"c', "afterUndo": 'disable:user:skills/a b"c',
+                               "afterUndoNoDisable": 'research:user:skills/a b"c'})
 
     def test_toggle_failure_refocuses_button(self):
         got = run(AUDIT + """

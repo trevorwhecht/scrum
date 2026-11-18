@@ -1,4 +1,4 @@
-import os, re, shutil, subprocess, sys, tempfile, textwrap, unittest
+import os, shutil, subprocess, sys, tempfile, textwrap, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

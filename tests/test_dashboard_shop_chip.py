@@ -1,6 +1,6 @@
 """A job with a `shop` pid ran on the shop Mac: its card stays highlighted (class shop) with a Shop chip in every column,
 and reads "Running on shop Mac" only while it is in stage cloud. Cloud without `shop` looks as before."""
-import json, re, sys, unittest
+import json, sys, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))  # sibling import works from the repo root too

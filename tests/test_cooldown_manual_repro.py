@@ -4,7 +4,7 @@ Jobs: a session Trevor's click launched (serve.spawn manual=True), or one whose 
 play_queued_manual), still parks itself at New job's `board.py cooldown-park` checkpoint (job 962).
 BigBoy parents: a manual Resume on a running, unpaused parent held with reason `waiting: cooling down` is answered 409
 and its next ready child is never claimed (BigBoy 960, child 963)."""
-import json, os, sys, tempfile, unittest
+import os, sys, tempfile, unittest
 from unittest import mock
 from pathlib import Path
 
