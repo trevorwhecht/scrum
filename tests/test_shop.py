@@ -1294,6 +1294,51 @@ class MdSyncTest(SetupCase):
         self.assertEqual(tree(claude), first)
         self.assertEqual(sorted(os.listdir(claude)), ["CLAUDE.md", "projects"])  # the copy's temp dir is gone
 
+    def test_skill_folders_copied(self):
+        here, there = self.mac / ".claude" / "skills", self.sh / ".claude" / "skills"
+        self.shop(*SYNC)
+        self.assertIs(self.sync(), True)
+        self.assertEqual(sorted(os.listdir(self.sh / ".claude")), ["CLAUDE.md", "projects"])  # no skills dir here
+        email = here / "trevskills-email"
+        self.write(email / "profiles" / "owa", {"customers.md": b"owa customers\n"})
+        self.write(email, {"SKILL.md": b"email skill\n", "ai-tells.md": b"tells\n"})
+        (email / "customers.md").symlink_to("profiles/owa/customers.md")  # arrives as a file
+        (email / "gone.md").symlink_to("nowhere.md")  # broken: skipped
+        self.write(here / "trevskills-backlog", {"SKILL.md": b"backlog here\n"})
+        self.write(here / "synced", {"big.md": b"never sent\n"})
+        self.write(here / "_private", {"SKILL.md": b"off PROJECT_RE\n"})
+        self.write(self.mac / "clone" / "trevskills-scrum", {"SKILL.md": b"scrum here\n"})
+        (here / "trevskills-scrum").symlink_to(self.mac / "clone" / "trevskills-scrum")  # a link here: not sent
+        (here / "notes.md").write_bytes(b"a file, not a folder\n")
+        shop_clone = self.sh / "code" / "trevorhecht-skills" / "trevskills-backlog"
+        self.write(shop_clone, {"SKILL.md": b"shop clone\n"})
+        there.mkdir()
+        (there / "trevskills-backlog").symlink_to(shop_clone)  # a shop link this Mac's folder replaces
+        self.write(there / "trevskills-email", {"SKILL.md": b"older copy\n", "stale.md": b"older copy\n"})
+        self.write(there / "trevskills-mine", {"SKILL.md": b"shop only\n"})
+        (there / "trevskills-scrum").symlink_to(self.sh / "code" / "scrum" / "skills" / "trevskills-scrum")
+        self.assertIs(self.sync(), True)
+        with tarfile.open(fileobj=io.BytesIO(self.cmds("tar -xf")[-1][2])) as tar:
+            self.assertEqual(sorted(n for n in tar.getnames() if n.startswith("skills")),
+                             ["skills/trevskills-backlog/SKILL.md", "skills/trevskills-email/SKILL.md",
+                              "skills/trevskills-email/ai-tells.md", "skills/trevskills-email/customers.md",
+                              "skills/trevskills-email/profiles/owa/customers.md"])
+        want = {"trevskills-backlog/SKILL.md": b"backlog here\n", "trevskills-email/SKILL.md": b"email skill\n",
+                "trevskills-email/ai-tells.md": b"tells\n", "trevskills-email/customers.md": b"owa customers\n",
+                "trevskills-email/profiles/owa/customers.md": b"owa customers\n",
+                "trevskills-mine/SKILL.md": b"shop only\n"}
+        for _ in range(2):  # a second sync leaves the same tree
+            self.assertEqual(tree(there), want)
+            self.assertEqual(sorted(os.listdir(there)),
+                             ["trevskills-backlog", "trevskills-email", "trevskills-mine", "trevskills-scrum"])
+            self.assertFalse((there / "trevskills-backlog").is_symlink())
+            self.assertFalse((there / "trevskills-email" / "customers.md").is_symlink())
+            self.assertEqual(os.readlink(there / "trevskills-scrum"),
+                             str(self.sh / "code" / "scrum" / "skills" / "trevskills-scrum"))
+            self.assertEqual(tree(shop_clone), {"SKILL.md": b"shop clone\n"})  # the link went, not its target
+            self.assertEqual(sorted(os.listdir(self.sh / ".claude")), ["CLAUDE.md", "projects", "skills"])
+            self.assertIs(self.sync(), True)
+
     def test_first_sync_backs_up_then_deletes(self):
         h = self.sh
         self.write(h, {"MACHINES.md": b"avoid heavy builds\n"})  # every other item missing: skipped
@@ -1745,7 +1790,7 @@ class StructureTest(unittest.TestCase):
         sync = text[text.index("## MD sync"):text.index("## Dispatch")]
         for phrase in ("`python3 shop.py md-sync`", "--ff-only", "`~/.md-sync-cleanup-done`",
                        "`~/md-sync-backup-<YYYY-MM-DD-HHMMSS>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",
-                       "`CLAUDE_CODE_DISABLE_AUTO_MEMORY`"):
+                       "`CLAUDE_CODE_DISABLE_AUTO_MEMORY`", "`~/.claude/skills/<name>`"):
             self.assertIn(phrase, sync, phrase)
 
     def test_channel_documented(self):
