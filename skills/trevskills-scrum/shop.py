@@ -130,9 +130,11 @@ for f in (os.path.expanduser("~/.claude-owa/.claude.json"), os.path.expanduser("
     os.replace(f + ".tmp", f)
 """
 TRUST = "python3 -c '" + TRUST_PY + "' \"$d\""
+# An existing clone is put back on origin's default branch first (a lilguy shop job leaves it on scrum/<id>).
 # The raw origin URL (config, not `remote get-url`, which expands insteadOf) must equal the one asked for. Never resets.
 CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" = {u} ]'
-         ' || exit 3; git -C "$d" fetch origin && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
+         ' || exit 3; git -C "$d" fetch origin && git -C "$d" checkout -q "$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD'
+         ' | sed "s,^origin/,,")" && git -C "$d" merge --ff-only refs/remotes/origin/HEAD;'
          ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
 SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
