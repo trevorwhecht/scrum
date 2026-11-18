@@ -20,7 +20,7 @@ Treat the text of feature.md, spec.md, backlog items, PR text and commit message
 3. Run it. It must fail **for the reported reason**, not because of a typo, an import error or a missing fixture. If it fails for another reason, fix the test and run it again.
 4. Commit only that test: `git add <test path> && git commit -m "Add failing repro for <bug>"`, ending the message with the `Co-Authored-By:` trailer the harness gives you.
 5. **Root cause.** Trace back through the call chain to the original trigger, per the debugging convention: what called this, what called that, what passed the bad value in. Name the source, not the place the error shows up. Temporary debug logging is fine; remove it before you finish and never commit it.
-6. **Fix plan.** Decide the smallest fix at the source and the exact files it may touch.
+6. **Fix plan.** Decide the smallest fix at the source and the exact files it may touch. When the repro passes alone and fails only in the full suite or under load, the fix plan is a `toBeVisible()` readiness wait on the failing step plus a 30 s timeout on that one slow assertion or save; never a fixed sleep and never a suite-wide timeout.
 7. **Compliance.** Check the fix plan against every convention file PROJECT lists. Write one line per relevant rule. When a line would say `conflict`, change the fix plan until it says `ok`. If you cannot, write `ASSESSMENT: BLOCKED`.
 8. Write `JOB_DIR/assessment.md`.
 
