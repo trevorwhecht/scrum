@@ -1185,10 +1185,11 @@ def write_ui_sweep(root, rec):
 
 def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep) on repo's main checkout when project.md has UI globs and a
-    Dev command, no sweep runs anywhere, the tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
+    Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds the dev lock), the
+    tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
     holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
     kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
-    if not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
+    if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
         return
     now = time.time()
     for other in board.projects().values():

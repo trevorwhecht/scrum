@@ -12271,6 +12271,14 @@ class UiSweepTickTest(unittest.TestCase):
     def test_skip_machine(self):
         self.assert_skipped(machine="free RAM 5% (< 20%)")
 
+    def test_skip_while_full_e2e_runs(self):
+        """Job 1109: a sweep's dev server beside a full run took the checkout's next dev lock first."""
+        self.serve.E2E_FULL["running"] = "p"
+        self.addCleanup(self.serve.E2E_FULL.update, running=None)
+        rec = {"at": time.time() - 86400, "head": "older", "result": "pass"}
+        self.record(**rec)
+        self.assert_skipped(rec=rec)
+
     def test_skip_not_due(self):
         now = time.time()
         for rec in ({"at": now - 60, "head": self.HEAD, "result": "pass"},
