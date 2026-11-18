@@ -1723,7 +1723,8 @@ class StructureTest(unittest.TestCase):
         text = (SKILL / "lanes" / "shop.md").read_text()
         self.assertTrue(text.startswith("# Shop Mac\n\n## Transport and probe\n"), text[:60])
         for phrase in ("`ssh shopmac`", 'export PATH="$HOME/.local/bin:$PATH";', "`input`", "`124`", "`127`",
-                       "60 s", "300 s", "prints nothing and raises nothing", "`python3 shop.py probe`"):
+                       "60 s", "300 s", "prints nothing and raises nothing", "`python3 shop.py probe`",
+                       "`workers.txt`", "`worker=<alias>`"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
                          ["## Transport and probe", "## Setup", "## Ready", "## Env copy", "## E2E channel",
