@@ -1489,15 +1489,16 @@ def main_guard_clear(repo, branch) -> bool:
 
 
 def main_ff_tick(project, repo, root, jobs) -> bool:
-    """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and that has no tracked run, once main is
-    ready (main_ready) and resume_refusal and take_room let it: once per job and updatedAt (MAIN_FF_TRIED), so a
+    """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and whose family has no live session or chain
+    lock (family_live), once main is ready (main_ready) and resume_refusal and take_room let it: once per job and
+    updatedAt (MAIN_FF_TRIED), so a
     resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned."""
-    spawned = False
+    spawned, by_id, alive = False, {j["id"]: j for j in jobs}, once(lambda: board.session_alive_fn())
     for job in jobs:
         key = f"{project}/{job['id']}"
         if job.get("lane") != "bigboy" or job.get("stage") != "running" or job.get("paused") \
-                or not (job.get("reason") or "").startswith(MAIN_FF) or running(project, job["id"]) \
-                or MAIN_FF_TRIED.get(key) == job.get("updatedAt"):
+                or not (job.get("reason") or "").startswith(MAIN_FF) \
+                or MAIN_FF_TRIED.get(key) == job.get("updatedAt") or family_live(project, root, job, by_id, alive):
             continue
         branch = (job.get("base") or "main").removeprefix("origin/")
         if not main_ready(repo, branch) or resume_refusal(project, root, job) or not take_room():
@@ -1923,23 +1924,32 @@ def once(fn):
     return lambda: cache[0] if cache else (cache.append(fn()) or cache[0])
 
 
+def family_live(project, root, job, by_id, alive) -> bool:
+    """A live session owns job: its chain lock is live, or job or one of its children on the board has a tracked run or
+    a ps line (a BigBoy parent's final review runs in its last child's session, onewitharts 1091). alive() last."""
+    fam = [job, *(by_id[k] for k in job.get("children") or () if k in by_id)]
+    return board.chain_lock_live(root, job["id"]) or any(running(project, j["id"]) for j in fam) \
+        or any(alive()(j) for j in fam)
+
+
 ORPHAN_MINUTES = 3  # fixed, not a setting: long enough for a just-claimed child's session to show up in ps
 ORPHAN_RESPAWN: dict[str, str] = {}  # "project/child id" -> stage it was last respawned in
 # ponytail: in-memory once-guards (this and STALL_RESUMED); a serve.py restart allows one more attempt per child
 
 
-def respawn_orphans(project, root, p, kids, alive):
+def respawn_orphans(project, root, p, kids, alive, by_id=None):
     """Start (or resume, once it has a spec and a worktree) each child of running parent p that sits in a WATCHED
     stage with no session for ORPHAN_MINUTES: a chaining session claimed it and ended before spawning it. Once per
-    child per stage. alive() (the ps scan) runs only for a child already past the cutoff. True when it spawned."""
-    spawned = False
+    child per stage. A child whose own children (looked up in by_id, the board) hold its session is not orphaned
+    (family_live). alive() (the ps scan) runs only for a child already past the cutoff. True when it spawned."""
+    spawned, by_id = False, by_id or {k["id"]: k for k in kids}
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
                 or kid.get("paused") or kid.get("stalled") or board.queue_waiting(kid) \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
-                or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
+                or family_live(project, root, kid, by_id, alive) or resume_refusal(project, root, kid):
             continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick
         action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
         if action == "resume":  # `resume` only accepts a stalled job
@@ -1991,7 +2001,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                 or p.get("paused"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
-        if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive):
+        if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive, by_id):
             continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
             if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
