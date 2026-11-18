@@ -92,7 +92,7 @@ For `## Builder model`, use the `jev.log` of every job read:
 
 For `## Repeated questions`, read the whole `JOBS_DIR/../questions.log`, not only the jobs in `jobs.txt`:
 - A line that is not valid JSON, or has neither `question` nor `pick`, is skipped.
-- Join each ask line to the next pick line for the same job that comes after it in the file. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
+- Join each ask line to the next pick line for the same job that comes after it in the file, unless that job asks a different normalised question first: a pick never answers an earlier, different question. An ask with no later pick still counts as asked, with pick `unanswered`; an `unanswered` pick never wins.
 - Group picks by label after trimming and lowercasing.
 - Normalise question text before grouping: lowercase it, then strip numbers, job ids, branch names, file paths and commit hashes.
 - List every normalised question asked 3 or more times (count ask lines, not jobs), sorted by count, highest first. Add ` — DEFAULT: <label>` when one pick won 3 or more times, and ` (unanimous)` after it when that same pick won every time.
