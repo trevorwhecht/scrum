@@ -413,23 +413,29 @@ def clean(text, limit=300):
     return re.sub(r"\s+", " ", str(text).replace("<!--", "").replace("-->", "")).strip()[:limit]
 
 
-LOOSE_CUT_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → (?=\d{3,}-)| <!-- ")
+LOOSE_MARK_RE = re.compile(r" \{(?:#[a-z0-9]{4}|p:[1-5]|needs(?: #[a-z0-9]{4})+|setup: [^{}]*|by:(?:t|back))\}| → \d{3,}-[a-z0-9-]+")
+LOOSE_WHY_RE = re.compile(r" <!-- (.*?) -->\s*$")
 
 
 def loose_item(line):
-    """ITEM_RE's groups for a backlog line, with the markers in any order: the text ends at the first well-formed marker; a repeated
-    {p:N} keeps the lowest N. None when it is not an item line."""
+    """ITEM_RE's groups for a backlog line, with the markers in any order: the text ends at the first well-formed marker
+    (or the trailing estimate comment) when only markers follow it, else ITEM_RE decides, so prose that mentions marker
+    syntax stays text. A repeated {p:N} keeps the lowest N. None when it is not an item line."""
     m = re.match(r"^- \[( |x)\] (?:\[(\d+|\?)\] )?(.*)$", line)
     if not m:
         return None
     rest = m[3]
-    cut = LOOSE_CUT_RE.search(rest)
-    text, tail = (rest[:cut.start()], rest[cut.start():]) if cut else (rest, "")
+    why = LOOSE_WHY_RE.search(rest)
+    body = rest[:why.start()] if why else rest  # markers inside the comment are not markers
+    cut = LOOSE_MARK_RE.search(body)
+    text, tail = (body[:cut.start()], body[cut.start():]) if cut else (body, "")
+    if LOOSE_MARK_RE.sub("", tail).strip():
+        return g.groups() if (g := ITEM_RE.match(line)) else None  # prose after a marker-like mention: the text keeps it
     one = lambda pat: (re.search(pat, tail) or [None, None])[1]
     prios = re.findall(r" \{p:([1-5])\}", tail)
     needs = "".join(re.findall(r" \{needs((?: #[a-z0-9]{4})+)\}", tail))
     return (m[1], m[2], text, one(r" \{#([a-z0-9]{4})\}"), min(prios) if prios else None, needs or None,
-            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), one(r" → (\d{3,}-[a-z0-9-]+)"), one(r" <!-- (.*?) -->\s*$"))
+            one(r" \{setup: ([^{}]*)\}"), one(r" \{by:(t|back)\}"), one(r" → (\d{3,}-[a-z0-9-]+)"), why[1] if why else None)
 
 
 def read_backlog(root):
