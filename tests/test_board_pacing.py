@@ -348,7 +348,7 @@ class AccountEnv(unittest.TestCase):
 
 class AccountsTest(AccountEnv):
     def test_accounts_order_env_override_and_missing_dir(self):
-        self.assertEqual(board.ACCOUNTS, (("main", "~/.claude", (80, 90)), ("owa", "~/.claude-owa", (80, 90))))
+        self.assertEqual(board.ACCOUNTS, (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 90))))
         self.assertEqual(board.accounts(), [("main", self.main, None), ("owa", self.owa, (80, 90))])
         self.assertEqual(board.accounts()[1].reserve, (80, 90))
         gone = Path(self.tmp.name) / "gone"
@@ -358,9 +358,9 @@ class AccountsTest(AccountEnv):
         home = Path(self.tmp.name)
         (home / ".claude-owa").mkdir()
         with mock.patch.dict(os.environ, HOME=str(home)):
-            self.assertEqual(board.accounts(), [("main", home / ".claude", (80, 90)), ("owa", home / ".claude-owa", (80, 90))])
+            self.assertEqual(board.accounts(), [("main", home / ".claude", (None, 90)), ("owa", home / ".claude-owa", (None, 90))])
             with mock.patch.dict(os.environ, SCRUM_USAGE="/x/usage.json"):
-                self.assertEqual(board.accounts(), [("main", home / ".claude", (80, 90))])
+                self.assertEqual(board.accounts(), [("main", home / ".claude", (None, 90))])
 
     def test_usage_path_per_account(self):
         self.assertEqual(board.usage_path(), self.main / "usage.json")
@@ -439,6 +439,19 @@ class PickAccountTest(AccountEnv):
         self.write(self.owa, seven=(95, 100000))  # owa now resets last: it flips to backup
         self.assertEqual(board.primary_account(NOW), "main")
         self.assertIn("reserve 7d", board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
+
+    def test_default_reserve_holds_the_backup_at_90_seven_day_only(self):
+        """Job 1139: ACCOUNTS gives main and owa the same reserve, 90 % 7d and no 5h value: a backup's 5h never holds it."""
+        os.environ["SCRUM_ACCOUNTS"] = json.dumps([[n, str(d), r] for (n, _, r), d in zip(board.ACCOUNTS, (self.main, self.owa))])
+        main, owa = board.accounts()
+        self.write(self.main, seven=(10, 50000))  # main resets first: owa is the backup
+        self.write(self.owa, five=(99, 9000), seven=(89, 90000))
+        self.assertIsNone(board.reserve_hit(owa, board.read_usage("owa"), NOW))
+        self.write(self.owa, seven=(90, 90000))
+        self.assertEqual(board.reserve_hit(owa, board.read_usage("owa"), NOW), "reserve 7d 90% used (keeps 90%)")
+        self.write(self.main, seven=(95, 95000))  # owa now resets first: primary, so main is the one held
+        self.assertIsNone(board.reserve_hit(owa, board.read_usage("owa"), NOW))
+        self.assertEqual(board.reserve_hit(main, board.read_usage("main"), NOW), "reserve 7d 95% used (keeps 90%)")
 
     def test_owa_below_reserve_with_main_full_gives_owa(self):
         self.write(self.main, five=self.FULL)

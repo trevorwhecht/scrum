@@ -4072,9 +4072,9 @@ def resume_first(jobs: list[dict]) -> int:
 
 
 # The Claude accounts automated sessions may run on, in order: (name, config dir, reserve) where reserve is
-# (5h used %, 7d used %) at which a backup account is kept for Trevor, or None. The primary account (primary_account)
-# is never held. SCRUM_ACCOUNTS (JSON) replaces it.
-ACCOUNTS = (("main", "~/.claude", (80, 90)), ("owa", "~/.claude-owa", (80, 90)))
+# (5h used %, 7d used %) at which a backup account is kept for Trevor (None for a window it never holds on), or None.
+# The primary account (primary_account) is never held. SCRUM_ACCOUNTS (JSON) replaces it.
+ACCOUNTS = (("main", "~/.claude", (None, 90)), ("owa", "~/.claude-owa", (None, 90)))
 Account = namedtuple("Account", "name dir reserve")
 ACCOUNT_RE = re.compile(r"[a-z0-9-]{1,20}")
 
@@ -4375,14 +4375,14 @@ def primary_account(now):
 
 def reserve_hit(acc, usage, now):
     """Why the account's reserve keeps it for Trevor, or None: a backup account (not primary_account) with a window
-    with resets_at > now whose used % is at or above its reserve value. written_at is ignored (used % only grows
-    inside one window)."""
+    with resets_at > now whose used % is at or above its reserve value (a None value never holds). written_at is
+    ignored (used % only grows inside one window)."""
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
     if not acc.reserve or not isinstance(limits, dict) or primary_account(now) == acc.name:
         return None
     for (key, label), cap in zip(WINDOWS, acc.reserve):
         w = limits.get(key)
-        if isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
+        if cap is not None and isinstance(w, dict) and is_num(w.get("used_percentage")) and is_num(w.get("resets_at")) \
                 and w["resets_at"] > now and w["used_percentage"] >= cap:
             return f"reserve {label} {round(w['used_percentage'])}% used (keeps {cap}%)"
     return None
