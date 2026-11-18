@@ -4,12 +4,14 @@
 usage: shop.py probe   (print the cached probe as one JSON line; exit 0 whether the shop Mac is up or down)
        shop.py setup   (prepare the shop Mac for a scrum job: one `<step>: <result>` line per step; exit 1 when the
                         shop Mac is down or a step failed)
+       shop.py md-sync (pull the shop's skill clones and copy this Mac's CLAUDE.md and memory notes there: one line,
+                        `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1))
 
 run() never raises: a timeout comes back as exit 124, ssh that cannot start as 127, and ssh's own failure as 255.
-probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready() and env_copy() never
-print a secret or remote output. See lanes/shop.md.
+probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy() and
+md_sync() never print a secret or remote output. See lanes/shop.md.
 """
-import argparse, json, re, subprocess, sys, time
+import argparse, io, json, os, re, shlex, subprocess, sys, tarfile, time
 from pathlib import Path
 
 ALIAS = "shopmac"
@@ -53,13 +55,17 @@ ACCOUNT_CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-t
 NO_TOKEN = 3  # the account check's exit code when the account's oauth-token file is missing
 TOKEN_HINT = " (run claude setup-token in the shop GUI)"
 # This Mac's ~/.claude/settings.json permissions a headless scrum job needs (read 2026-11-17), home paths as {home};
-# local-only entries (MCP tools, Chrome, .env.prod, Homebrew, PR merge, safe-reset) are left out.
+# local-only entries (MCP tools, Chrome, .env.prod, Homebrew, PR merge, safe-reset) are left out. The Edit denies keep
+# shop sessions off the docs md_sync() owns.
 SHOP_PERMISSIONS = {
     "allow": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebSearch", "WebFetch", "Skill", "Read(/{home}/**)",
               "Read(//tmp/**)", "Read(//private/tmp/**)", "Edit(/{home}/.claude/**/*.md)",
               "Edit(/{home}/.claude-owa/**/*.md)"],
     "deny": ["Bash(git reset:*)", "Bash(git rebase:*)", "Bash(git push --force:*)", "Bash(git push --force-with-lease:*)",
-             "Bash(git push -f:*)", "Bash(prisma migrate reset:*)", "Bash(npx prisma migrate reset:*)"],
+             "Bash(git push -f:*)", "Bash(prisma migrate reset:*)", "Bash(npx prisma migrate reset:*)",
+             "Edit(/{home}/.claude/CLAUDE.md)", "Edit(/{home}/.claude/rules/**)",
+             "Edit(/{home}/.claude/projects/*/memory/**)", "Edit(/{home}/.claude-owa/CLAUDE.md)",
+             "Edit(/{home}/.claude-owa/rules/**)", "Edit(/{home}/.claude-owa/projects/*/memory/**)"],
     "ask": ["Bash(prisma db push:*)", "Bash(npx prisma db push:*)"],
     "additionalDirectories": ["/private/tmp", "{home}/scrum-work", "{home}/.claude", "{home}/.claude-owa"],
 }
@@ -102,6 +108,40 @@ READY_TTL = 600
 PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.env.local.tmp"
             " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
+
+CLONES = ("~/code/scrum", "~/code/trevorhecht-skills")  # the clones the shop's ~/.claude skills, agents and rules link to
+MD_PULL = " && ".join(f"git -C {c} pull --ff-only" for c in CLONES)
+NOTES_IMPORT = "@~/code/scrum/skills/trevskills-scrum/shop/machine-notes.md"
+CLEANUP_MARKER = "$HOME/.md-sync-cleanup-done"
+# The shop's login shell is zsh, where a glob that matches nothing is an error, so both scripts run in /bin/sh.
+# Back up first; a failed backup exits before any mv and writes no marker. mv, not cp: ~/scrum-probe holds a 54 MB
+# node tarball plus node_modules, too slow to copy inside STEP_TIMEOUT.
+MD_CLEANUP = "/bin/sh -c " + shlex.quote(f'''[ -e "{CLEANUP_MARKER}" ] && exit 0
+b="$HOME/md-sync-backup-$(date +%Y-%m-%d)"
+mkdir -p "$b" || exit 1
+if [ -e "$HOME/.claude/CLAUDE.md" ]; then cp "$HOME/.claude/CLAUDE.md" "$b/" || exit 1; fi
+for m in "$HOME"/.claude/projects/*/memory; do
+  [ -d "$m" ] || continue
+  k=$(basename "$(dirname "$m")")
+  mkdir -p "$b/projects/$k/memory" && cp -R "$m/." "$b/projects/$k/memory/" || exit 1
+done
+for f in MACHINES.md code/scrum-multi-machine-spec.md scrum-probe; do
+  if [ -e "$HOME/$f" ] || [ -L "$HOME/$f" ]; then mv "$HOME/$f" "$b/" || exit 1; fi
+done
+touch "{CLEANUP_MARKER}"''')
+# stdin is the tar from _md_tar(), unpacked in a temp dir under ~/.claude so each mv is a rename. Every memory dir goes,
+# then each project's moves in under the key of the shop's own $HOME/scrum-work/<name> (memory_key() in tr).
+# ponytail: no remote lock; two syncs at once can nest a memory dir. Add a mkdir lock if dispatch ever syncs in parallel.
+MD_COPY = "/bin/sh -c " + shlex.quote('mkdir -p "$HOME/.claude/projects" && export TMPDIR="$HOME/.claude" || exit 1; '
+                                      + IN_TMP.format('''tar -xf - && mv -f CLAUDE.md "$HOME/.claude/CLAUDE.md" || exit 1
+for m in "$HOME"/.claude/projects/*/memory; do
+  if [ -e "$m" ] || [ -L "$m" ]; then rm -rf "$m" || exit 1; fi
+done
+for p in memory/*; do
+  [ -d "$p" ] || continue
+  k=$(printf %s "$HOME/scrum-work/$(basename "$p")" | tr -c 'A-Za-z0-9' -)
+  mkdir -p "$HOME/.claude/projects/$k" && mv "$p" "$HOME/.claude/projects/$k/memory" || exit 1
+done'''))
 
 # ponytail: module globals with no lock; add one when a second thread calls probe(). Callers treat the dicts as read-only.
 _cache = None  # (time.monotonic() of the probe, its result)
@@ -276,13 +316,76 @@ def env_copy(project: str, repo: str) -> str:
     return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data).returncode == 0 else "failed"
 
 
+def memory_key(path: str) -> str:
+    """Claude Code's ~/.claude/projects/ dir name for `path`: every character outside [A-Za-z0-9] becomes `-`."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def _projects() -> dict[str, Path]:
+    """{folder name: repo} for each projects.json entry (SCRUM_REGISTRY moves it) with a scrum/ dir whose folder name
+    matches PROJECT_RE and no other such entry shares. Read here as board.read_registry does, since board.py and
+    serve.py will import shop."""
+    try:
+        paths = json.loads(Path(os.environ.get("SCRUM_REGISTRY")
+                                or Path.home() / ".claude" / "trevskills-scrum" / "projects.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(paths, list):
+        return {}
+    repos = [Path(p) for p in paths if isinstance(p, str) and (Path(p) / "scrum").is_dir()]
+    names = [r.name for r in repos]
+    return {r.name: r for r in repos if names.count(r.name) == 1 and PROJECT_RE.fullmatch(r.name)}
+
+
+def _md_tar() -> bytes:
+    """The copy step's stdin: CLAUDE.md (this Mac's bytes, a newline when they lack one, then NOTES_IMPORT) and
+    memory/<name>/ for each _projects() entry that has a memory dir here. Raises OSError (no CLAUDE.md, a bad read)."""
+    claude = Path.home() / ".claude"
+    text = (claude / "CLAUDE.md").read_bytes()
+    text += (b"" if text.endswith(b"\n") else b"\n") + NOTES_IMPORT.encode() + b"\n"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", dereference=True) as tar:
+        info = tar.gettarinfo(claude / "CLAUDE.md", "CLAUDE.md")
+        info.size = len(text)
+        tar.addfile(info, io.BytesIO(text))
+        for name, repo in _projects().items():
+            mem = claude / "projects" / memory_key(str(repo)) / "memory"
+            if mem.is_dir():
+                tar.add(mem, f"memory/{name}")
+    return buf.getvalue()
+
+
+def md_sync() -> bool:
+    """Make this Mac the single writer of what shop sessions read: pull the shop's skill clones (MD_PULL), run the
+    one-time cleanup (MD_CLEANUP) and replace its CLAUDE.md and memory dirs (MD_COPY), each one run() of STEP_TIMEOUT.
+    True when all three exit 0; False at the first failure, with no later call. This Mac's files are read before any
+    ssh, so a missing CLAUDE.md costs no call, and a down shop Mac costs only the probe. Prints nothing."""
+    try:
+        stream = _md_tar()
+    except OSError:
+        return False
+    if not probe()["up"]:
+        return False
+    return all(run(cmd, STEP_TIMEOUT, input=data).returncode == 0
+               for cmd, data in ((MD_PULL, None), (MD_CLEANUP, None), (MD_COPY, stream)))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="shop.py", description="Talk to the shop Mac over ssh shopmac.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe", help="print the probe as one JSON line")
     sub.add_parser("setup", help="prepare the shop Mac for a scrum job; one line per step")
-    if parser.parse_args(argv).command == "setup":
+    sub.add_parser("md-sync", help="pull the shop's skill clones and copy CLAUDE.md and memory there; one line")
+    command = parser.parse_args(argv).command
+    if command == "setup":
         return 1 if "failed" in setup().values() else 0
+    if command == "md-sync":
+        if not probe()["up"]:
+            print("shop: down")
+            return 1
+        ok = md_sync()
+        print(f"md-sync: {'ok' if ok else 'failed'}")
+        return 0 if ok else 1
     print(json.dumps(probe()))
     return 0
 
