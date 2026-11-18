@@ -4478,6 +4478,14 @@ def likely_files(spec_text):
     return {p for p in found if PATH_RE.match(p) and repo_path(p)}
 
 
+def spec_funcs(jobs_dir, job_id):
+    """likely_funcs of a job's spec.md, or {} with no readable spec."""
+    try:
+        return likely_funcs((Path(jobs_dir) / job_id / "spec.md").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return {}
+
+
 def likely_funcs(spec_text):
     """{path: set of function names} for each `## Likely files` bullet whose backticked path is followed by
     `(functions: a, b)`; slot_conflict uses them so fast jobs may share a BIG_SHARED_FILES path."""
@@ -5011,7 +5019,7 @@ PAST_REVIEW = {"approve", "merging", "deploying"}
 POST_BUILD = ("check", "review", "approve", "merging", "deploying")
 
 
-def slot_conflict(k, busy, files, extra=(), fast=False):
+def slot_conflict(k, busy, files, extra=(), fast=False, funcs=None):
     """(text, sibling ids) when child k may not run beside the in-progress siblings `busy`, else None. files maps a
     child id to its Likely files (child_files). The rules `ready` and `resume_blocker` share: parallel=no, or
     no readable Likely files, runs alone; anything else never beside such a sibling or one sharing a Likely file
@@ -5019,7 +5027,8 @@ def slot_conflict(k, busy, files, extra=(), fast=False):
     Siblings in PAST_REVIEW stages never hold, and shared test files (is_test_path) never clash. `extra` is the
     other pool's holders (cmd_ready's outside jobs or in-tree slots): they count toward the BIG_SHARED_FILES limit only.
     `fast` (a Lane: fast kid) with readable Likely files of its own is held only by a sharing or parallel=no holder:
-    one with unreadable Likely files no longer clashes."""
+    one with unreadable Likely files no longer clashes. `funcs` maps an id to its likely_funcs: a fast k does not
+    share a BIG_SHARED_FILES path with a holder when both name functions for it and the two sets are disjoint."""
     busy = [o for o in busy if o["id"] != k["id"] and o.get("stage") not in PAST_REVIEW]
     if not busy:
         return None
@@ -5028,10 +5037,16 @@ def slot_conflict(k, busy, files, extra=(), fast=False):
     if alone(k):
         return "this job runs alone", [o["id"] for o in busy]
     lone = (lambda o: not o.get("parallel")) if fast else alone  # k has files here, so a fast k skips unknown-file holders
+    fn = funcs or {}
+    mine = fn.get(k["id"]) or {}
+    apart = lambda o, p: fast and p in BIG_SHARED_FILES and bool(mine.get(p)) \
+        and bool((fn.get(o["id"]) or {}).get(p)) and not mine[p] & fn[o["id"]][p]  # named, disjoint functions
     shared = {o["id"]: set() if lone(o) else
-              {p for p in shared_files(files[k["id"]], files.get(o["id"], set())) if not is_test_path(p)} for o in busy}
+              {p for p in shared_files(files[k["id"]], files.get(o["id"], set())) if not is_test_path(p) and not apart(o, p)}
+              for o in busy}
     extra_shared = [set() if lone(o) or not files.get(o["id"]) else
-                    {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p)} for o in extra]
+                    {p for p in shared_files(files[k["id"]], files[o["id"]]) if not is_test_path(p) and not apart(o, p)}
+                    for o in extra]
     held = lambda p: p not in BIG_SHARED_FILES or sum(p in s for s in [*shared.values(), *extra_shared]) >= SHARED_BIG_LIMIT
     clash = [(o["id"], "runs alone" if lone(o) else f"shares {min(p for p in shared[o['id']] if held(p))}")
              for o in busy if lone(o) or any(held(p) for p in shared[o["id"]])]
@@ -5217,6 +5232,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                       for j in outside})
         outside = [j for j in outside if j["id"] in specced or files[j["id"]]]  # a no-spec holder naming no file holds nothing
         outside = [j for j in outside if not outside_repo_files(files[j["id"]], Path(root).parent)]  # another repo's job cannot clash
+        funcs = {j["id"]: spec_funcs(jobs_dir, j["id"]) for j in kids + outside}  # (functions: ...) per Likely file
         overlap = []  # outside holder ids that alone hold a waiting child
         room = (1 if only or shop else max(0, ram_room(floor=0))) if go and not machine else 0  # one claim = one new session
         ram_full = not room and go and not machine  # no RAM room: claim nothing, leave the parent; start_ready retries
@@ -5258,8 +5274,8 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
                 k_slots, k_outside = ([o for o in pool if o["id"] not in skipped] for pool in (k_slots, k_outside))
             fast = (header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                     or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) == "fast"
-            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files, k_outside, fast)  # only: never runs alone
-            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files, k_slots, fast)
+            hit = slot_conflict(dict(k, parallel=True) if only else k, k_slots, files, k_outside, fast, funcs)  # only: never runs alone
+            out_hit = None if hit else slot_conflict(dict(k, parallel=True), k_outside, files, k_slots, fast, funcs)
             since = (k.get("overlap_hold") or {}).get("since")
             try:  # a hold older than OVERLAP_HOLD_MAX_S is released: the Merge Conflicts step handles any clash
                 expired = bool(since) and time.time() - datetime.fromisoformat(since).timestamp() > OVERLAP_HOLD_MAX_S

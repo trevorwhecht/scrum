@@ -1750,6 +1750,55 @@ class BoardTest(unittest.TestCase):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [])
             self.assertEqual(self.overlap_of(c2), {"ids": [c1], "text": f"sibling {c1} runs alone"})
 
+    BOARD_PY = "skills/trevskills-scrum/board.py"
+
+    def funcs_spec(self, job_id, lane, funcs):
+        """A spec naming only board.py, with `(functions: ...)` when funcs is non-empty."""
+        named = f" (functions: {', '.join(funcs)})" if funcs else ": why"
+        self.write(f"{job_id}/spec.md", f"# x\nLane: {lane}\n## Likely files\n- `{self.BOARD_PY}`{named}\n- `tests/test_board.py`\n"
+                   "## Assumptions\n- none\n")
+
+    def board_py_kids(self, holder, k1, k2, lane="fast"):
+        """A building sibling holder and two waiting siblings, each naming board.py with these function lists."""
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
+                           self.ticket(4, deps="T1, T2, T3", exposure="yes"))
+        h, c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.funcs_spec(h, "standard", holder)
+        board.cmd_set(self.root, h, ["stage=build"])
+        self.funcs_spec(c1, lane, k1)
+        self.funcs_spec(c2, lane, k2)
+        return parent, h, c1, c2
+
+    def gates_of(self, job_id):
+        p = self.root / "jobs" / job_id / "queue-gates.txt"
+        return p.read_text().split() if p.exists() else []
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_fast_kids_share_board_py_when_functions_differ(self):
+        parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], ["likely_funcs", "cmd_next"])
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+        self.assertEqual(self.gates_of(c2), [])
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_holds_board_py_kids_on_common_or_unnamed_functions(self):
+        # c2 is held once both h and c1 count toward the 2-holder limit: each shares a function with c2 or names none
+        for name, sets in (("one name common to all", (["cmd_hook", "cmd_ready"], ["slot_conflict", "cmd_ready"], ["cmd_ready"])),
+                           ("a common name with each", (["cmd_hook"], ["slot_conflict"], ["slot_conflict", "cmd_hook"])),
+                           ("holder names none", ([], ["slot_conflict"], ["slot_conflict", "cmd_next"])),
+                           ("kid names none", (["cmd_hook"], ["slot_conflict"], []))):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                parent, h, c1, c2 = self.board_py_kids(*sets)
+                self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+                self.assertIn(f"overlap:{h}:{self.BOARD_PY}", self.gates_of(c2))
+                self.assertEqual(self.overlap_of(c2)["text"], f"sibling {h} shares {self.BOARD_PY}; sibling {c1} shares {self.BOARD_PY}")
+
+    @mock.patch.object(board, "ram_room", lambda floor=1, light=False: 5)
+    def test_ready_non_fast_kid_ignores_functions(self):
+        parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], ["cmd_next"], lane="standard")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1])
+        self.assertEqual(self.gates_of(c2), [f"overlap:{h}:{self.BOARD_PY}", f"overlap:{c1}:{self.BOARD_PY}"])
+
     def test_ready_critical_skips_unbuilt_outside_holder(self):
         (self.root.parent / "src").mkdir(exist_ok=True)  # an in-repo folder, so src/ paths are not foreign
         out = board.cmd_new(self.root, "Outside")  # stage spec, no worktree
