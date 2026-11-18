@@ -46,7 +46,8 @@ class MachineMeter(unittest.TestCase):
         self.assertIn("of all cores", meter.group(0))
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
         self.assertIn("Trevor's Play and Resume are never tapered", meter.group(0))
-        self.assertIn("main 49% · owa 90%", meter.group(0), "the hint names the per-account usage segment")
+        self.assertIn("as in main 49% owa 90%, each account's bar starting its reading with no · between", meter.group(0),
+                      "the hint names the per-account usage segment")
         self.assertNotIn("Claude's 5h and 7d used %", meter.group(0), "the header has no 5h reading")
         self.assertIn("read over ssh in the background at most every 30 s", meter.group(0), "the hint names the shop rings")
         self.assertIn("grey Shop —", meter.group(0))
@@ -117,8 +118,8 @@ class MachineMeter(unittest.TestCase):
                                        + CPU_NONE + ' <span class="ok">disk 50 GB</span>'), "the red ring already shows the RAM verdict")
         self.assertEqual(out["gone"], [False, '<span class="danger" title="Couldn\'t load machine status.">—</span>'])
         base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
-        self.assertEqual(out["use"], [base + G(acct("ok", 40, "main 40%") + ' · <span class="low">allowance 1</span>'),
-                                      base + G(acct("ok", 0, "main —") + ' · <span class="danger">allowance 0</span>'),
+        self.assertEqual(out["use"], [base + G(acct("ok", 40, "main 40%") + ' <span class="low">allowance 1</span>'),
+                                      base + G(acct("ok", 0, "main —") + ' <span class="danger">allowance 0</span>'),
                                       base + G(acct("ok", 12, "main 12%")),
                                       base + G('<span class="ok">usage: unknown</span>')])
         self.assertEqual(out["order"], G('<span class="ring danger" role="img" style="--pct:86" aria-label="RAM 14% free · swap 1%" title="RAM 14% free · swap 1%">14%</span><span class="lbl">RAM</span> '
@@ -189,8 +190,8 @@ class MachineMeter(unittest.TestCase):
                   f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         plain = acct("ok", 20, "main 20%")
-        self.assertEqual(out, [plain + ' · <span class="low">Fable near limit</span>',
-                               plain + ' · <span class="danger">Fable paused, using Opus</span>',
+        self.assertEqual(out, [plain + ' <span class="low">Fable near limit</span>',
+                               plain + ' <span class="danger">Fable paused, using Opus</span>',
                                plain, plain, plain, '<span class="ok">usage: unknown</span>'])
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
         self.assertRegex(meter, r'Fable[^"]*65%[^"]*75%[^"]*80%[^"]*85%')
@@ -221,11 +222,12 @@ class MachineMeter(unittest.TestCase):
                  {"accounts": [{**main, "seven_day_pct": 104.4}], "allowance": None}]
         out = self.node_meter(f"console.log(JSON.stringify({json.dumps(cases)}.map(usagePart)));")
         self.assertEqual(out, [
-            acct("ok", 49, "main 49%", title="resets 14:05") + " · " + acct("danger", 90, "owa 90%", title="resets 09:53"),
-            acct("low", 80, "main 80%", title="resets 14:05") + " · " + acct("ok", 79, "owa 79%", title="resets 09:53"),
-            acct("danger", 95, "main 95%", title="resets 14:05") + " · " + acct("ok", 0, "owa —")
-            + ' · <span class="danger">allowance 0 · held until 14:05</span> · <span class="danger">Fable paused, using Opus</span>',
-            acct("low", 75, "&lt;b&gt; 75%", cap=85, title="resets 14:05") + ' · <span class="low">allowance 2</span>',
+            # Parts are joined by a space, never a "·", so no separator is left dangling at a line end when the group wraps.
+            acct("ok", 49, "main 49%", title="resets 14:05") + " " + acct("danger", 90, "owa 90%", title="resets 09:53"),
+            acct("low", 80, "main 80%", title="resets 14:05") + " " + acct("ok", 79, "owa 79%", title="resets 09:53"),
+            acct("danger", 95, "main 95%", title="resets 14:05") + " " + acct("ok", 0, "owa —")
+            + ' <span class="danger">allowance 0 · held until 14:05</span> <span class="danger">Fable paused, using Opus</span>',
+            acct("low", 75, "&lt;b&gt; 75%", cap=85, title="resets 14:05") + ' <span class="low">allowance 2</span>',
             acct("danger", 100, "main 104%", title="resets 14:05")])
 
     def test_machine_meter_shop_rings(self):

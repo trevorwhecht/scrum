@@ -45,9 +45,11 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         scrollWidth: document.documentElement.scrollWidth,
         routing: document.getElementById("routing").textContent,
         options: [...document.getElementById("filter").options].map(o => o.textContent),
-        children: [...document.querySelector("header").children].filter(el => el.getClientRects().length)
+        // The header's items: its own children, with the buttons' #controls box counted as the buttons inside it.
+        children: [...document.querySelectorAll("header > :not(#controls), #controls > *")].filter(el => el.getClientRects().length)
           .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
                                                                      width: r.width, height: r.height}; }),
+        groups: [...document.querySelectorAll("#machine .grp")].map(g => { const r = g.getBoundingClientRect(); return Math.round(r.top + r.height / 2); }),  // centres
         sparks: [...document.querySelectorAll("#machine .spark")].filter(s => s.checkVisibility()).length,
         bars: [...document.querySelectorAll("#machine .bar")].filter(s => s.checkVisibility()).length,
         height: document.querySelector("header").getBoundingClientRect().height}));
@@ -231,22 +233,41 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     CONTROLS = ("cooldown", "routing", "checksBtn", "filter", "rankBtn", "laneFilter", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn")
 
-    def test_header_one_row_1440(self):
-        """Job 1116 rework: at 1440 px the header is one row, its meters (This Mac, Shop, usage) on the left and its
-        buttons on the right, every button 44 px tall with the same 8 px gap, with the Checks button, both usage bars and
-        the sparklines showing."""
-        got = self.browse("header", 1440)
-        self.assertLessEqual(got["scrollWidth"], 1440, got)
-        self.assertEqual((got["sparks"], got["bars"]), (4, 2), got)
+    def buttons_row(self, got, width):
+        """The header's buttons: in DOM order left to right on one row, each 44 px tall, 8 px apart, flush right."""
         by = {c["id"]: c for c in got["children"]}
         controls = sorted((by[i] for i in self.CONTROLS), key=lambda c: c["left"])
         self.assertEqual([c["id"] for c in controls], list(self.CONTROLS), got)
         self.assertEqual({c["height"] for c in controls}, {44}, got)
-        for c in [by["H1"], by["machine"]] + controls:  # one row: every item centred on the same line
-            self.assertAlmostEqual(c["top"] + c["height"] / 2, controls[0]["top"] + 22, delta=1, msg=c)
+        self.assertEqual({c["top"] for c in controls}, {controls[0]["top"]}, got)
         self.assertEqual({round(b["left"] - a["right"]) for a, b in zip(controls, controls[1:])}, {8}, got)
-        self.assertEqual(round(controls[0]["left"] - by["machine"]["right"]), 8, got)  # an empty state text adds no gap
-        self.assertAlmostEqual(controls[-1]["right"], 1440 - 16, delta=1, msg=got)
+        self.assertAlmostEqual(controls[-1]["right"], width - 16, delta=1, msg=got)
+        return by, controls
+
+    def test_header_two_rows_1440(self):
+        """Job 1116 rework round 1: at 1440 px the meters and the 11 buttons do not fit on one line, so the header is two
+        tidy rows: the title and the meters (This Mac, Shop, usage) as one line on the left, then every button on one row
+        of its own, flush right, 44 px tall with the same 8 px gap. No meter group stacks or splits."""
+        got = self.browse("header", 1440)
+        self.assertLessEqual(got["scrollWidth"], 1440, got)
+        self.assertEqual((got["sparks"], got["bars"]), (4, 2), got)
+        self.assertEqual(len(set(got["groups"])), 1, got)  # This Mac, Shop and usage side by side on one line
+        by, controls = self.buttons_row(got, 1440)
+        self.assertAlmostEqual(by["H1"]["top"] + by["H1"]["height"] / 2, by["machine"]["top"] + by["machine"]["height"] / 2, delta=1, msg=got)
+        self.assertLessEqual(by["machine"]["height"], 40, got)  # one line of rings
+        self.assertGreaterEqual(controls[0]["top"], by["machine"]["bottom"], got)
+        self.assertLessEqual(got["height"], 120, got)
+
+    def test_header_one_row_wide(self):
+        """Job 1116 rework round 1: where everything fits (2200 px), the header is one row: the title and the meters on
+        the left, the buttons flush right, every item centred on the same line."""
+        got = self.browse("header", 2200)
+        self.assertLessEqual(got["scrollWidth"], 2200, got)
+        self.assertEqual(len(set(got["groups"])), 1, got)
+        by, controls = self.buttons_row(got, 2200)
+        for c in [by["H1"], by["machine"]]:
+            self.assertAlmostEqual(c["top"] + c["height"] / 2, controls[0]["top"] + 22, delta=1, msg=c)
+        self.assertLess(by["machine"]["left"], controls[0]["left"], got)
 
     def test_header_two_bands_390(self):
         """Job 1116 rework: at 390 px the header wraps into two bands, the title and meters, then the buttons, with no
