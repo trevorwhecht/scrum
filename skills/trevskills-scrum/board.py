@@ -64,7 +64,7 @@
                                    up to 120 s; print {"up","started"} (exit 1 when still down), or {"up": null,"skipped"}
                                    for a missing file or URL or a non-local host (Check gate step 2)
   board.py cooldown-park <id>      while cooling down, stall a round-0 spec/build job at this checkpoint (serve.py resumes
-                                   it after cool down); print {"parked": bool}
+                                   it after cool down), unless Trevor's click launched or queued it; print {"parked": bool}
   board.py dev-clear <id>          stop every server listening from inside the job's .claude/worktrees/ worktree (TERM,
                                    up to 5 s, then KILL), print {"killed": [pids]}
   board.py digest-due              print {"due","undigested","questionsGrowth","reason"}: done jobs in no digests/*/jobs.txt
@@ -6193,16 +6193,20 @@ def lock_rank(cwd) -> int:
 def cmd_cooldown_park(root, job_id) -> dict:
     """cooldown-park: while cooling down, stall a round-0 spec or build job (not paused, not stalled, not lilguy or
     cloud) in its stage with reason `stalled: parked for cool down; ...`, so it stops at this checkpoint and
-    serve.py's auto_resume restarts it once cool down ends. Every condition is re-read under the board lock; any
+    serve.py's auto_resume restarts it once cool down ends. Trevor's click is a cool-down bypass: a job serve.spawn
+    launched with manual=True (`manual_run`) or whose Play he queued (`play_queued` with `play_queued_manual`) is never
+    parked; a park drops a leftover `play_queued_manual`. Every condition is re-read under the board lock; any
     other case writes nothing. Returns {"parked": bool}."""
     try:
         with locked_board(root) as board:
             job = find(board, check_id(job_id))
             if not (cooling_down() and job.get("stage") in PARK_STAGES and not job.get("round")
-                    and not job.get("paused") and not job.get("stalled") and job.get("lane") not in ("lilguy", "cloud")):
+                    and not job.get("paused") and not job.get("stalled") and job.get("lane") not in ("lilguy", "cloud")
+                    and not job.get("manual_run") and not (job.get("play_queued") and job.get("play_queued_manual"))):
                 raise _Gone
             job.update(stalled=True, reason=f"{STALL}{COOLDOWN_PARK}", updatedAt=now())
             job.pop("play_queued", None)  # a parked job must not be launched by play_queue_tick
+            job.pop("play_queued_manual", None)
             job.pop("queued_launch", None)
     except _Gone:
         return {"parked": False}

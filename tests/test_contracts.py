@@ -977,6 +977,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("B cooldown-park $ID", para)
         self.assertIn('`"parked": true`', para)
         self.assertIn("stop with the **Final report**", para)
+        self.assertIn("is a cool-down bypass whatever the prompt says", para)  # job 967: Trevor's click never parks
         newjob = (SKILL_DIR / "lanes" / "newjob.md").read_text()
         self.assertEqual(newjob.count("**Cool-down park**"), 2)
         self.assertIn("worktree=$WT stage=build`, then **Cool-down park**", newjob)

@@ -288,7 +288,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
     young ones counted as spent RAM; a fast or lilguy job sizes at the light share) and, unless `manual` (Trevor's click) or
     cpu_exempt (a small fast or debug job), board.cpu_load_pct() is not above MAX_LAUNCH_CPU_LOAD_PCT; else it is queued on the job (play_queued + queued_launch, which play_queue_tick drains) and this returns
-    None. A start clears both fields, whichever path launched it. A RAM hold older than RAM_HOLD_SECS (from
+    None. A start clears both fields, whichever path launched it, and sets manual_run (the cool-down bypass
+    board.cmd_cooldown_park reads) when `manual`, else pops it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
     While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
@@ -347,6 +348,10 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
                 live.pop("play_queued_manual", None)
                 live.pop("queued_launch", None)
                 live.pop("ram_hold", None)
+                if manual:  # Trevor's click: this session's cool-down checkpoints let it through
+                    live["manual_run"] = True
+                else:
+                    live.pop("manual_run", None)
         if proc is None:
             return None
         if action == "start" and not manual:  # a serve.py start, with the CPU reading its gate passed, for pulse_tick
@@ -5619,6 +5624,10 @@ class Handler(BaseHTTPRequestHandler):
         if action == "answer":
             return answer_job(project, root, job, jobs, body.get("key"), body.get("note"), raise_window=True)
         if action == "resume":  # a paused job (Play), one stopped for a reason whose card offers Resume (RESUMABLE), or a queued one (Start now)
+            if (body.get("manual") is True and job and job.get("children") and job["stage"] == "running"
+                    and not job.get("paused") and job.get("reason") == board.MACHINE_WAIT + board.COOLING):
+                # Trevor's click on a parent cool down holds: claim its next ready child past cool down (cmd_ready's checks)
+                return 202, {"id": job_id, "action": action, **start_ready(project, root, job_id, manual=True)}
             if not job or running(project, job_id) or not resumable(job) and not limit_held(job) and not job.get("play_queued"):
                 return 409, {"error": "job isn't stalled, or is already running"}
             manual = body.get("manual") is True  # the dashboard's click; continue.py sends {} and counts as automatic
