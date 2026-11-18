@@ -538,7 +538,8 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
     add with top inserts the item above the first item line with {p:5}, so next claims it first (newest top wins).
     add's by ("t", "back" or None = agent; top implies "t") and critical set the priority through source_priority.
     priority finds the open item by its {#id} on the freshly read file and only raises: it writes {p:priority} when that is
-    above the current priority (unmarked counts as 2.5, as priority_key does), else changes nothing."""
+    above the current priority (unmarked counts as 2.5, as priority_key does), else changes nothing.
+    add's id (4 [a-z0-9] chars the caller already told someone) is used instead of a fresh one."""
     with locked_board(root):
         lines, items = read_backlog(root)
         if op == "add":
@@ -554,7 +555,7 @@ def backlog_op(root, op, index=None, text=None, points=KEEP, delta=0, setup=None
             line = format_item({"done": False, "points": None if points is KEEP else points,
                                 "priority": source_priority(by, 5 if top else priority, critical),
                                 "text": clean(text, ITEM_MAX), "job": None, "why": None,
-                                "setup": None if setup is None else setup_steps(setup), "by": by, "id": new_item_id(items)})
+                                "setup": None if setup is None else setup_steps(setup), "by": by, "id": id or new_item_id(items)})
             if top and items:
                 lines.insert(items[0]["line"], line)
             else:
@@ -4491,8 +4492,8 @@ def likely_funcs(spec_text):
     `(functions: a, b)`; slot_conflict uses them so fast jobs may share a BIG_SHARED_FILES path."""
     found = {}
     for line in (md_section(spec_text, "Likely files") or "").splitlines():
-        if m := re.match(r"\s*- `([^`\s]+)`[^(]*\(functions:\s*([^)]*)\)", line):
-            names = {n.strip(" `") for n in m.group(2).split(",")} - {""}
+        if m := re.match(r"\s*- `([^`\s]+)`.*?\(functions:\s*((?:[^()]|\(\))*)\)", line):
+            names = {n.strip(" `").removesuffix("()") for n in m.group(2).split(",")} - {""}
             if names:
                 found.setdefault(m.group(1), set()).update(names)
     return found

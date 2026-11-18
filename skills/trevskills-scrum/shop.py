@@ -153,7 +153,7 @@ CLEANUP_MARKER = "$HOME/.md-sync-cleanup-done"
 # Back up first; a failed backup exits before any mv and writes no marker. mv, not cp: ~/scrum-probe holds a 54 MB
 # node tarball plus node_modules, too slow to copy inside STEP_TIMEOUT.
 MD_CLEANUP = "/bin/sh -c " + shlex.quote(f'''[ -e "{CLEANUP_MARKER}" ] && exit 0
-b="$HOME/md-sync-backup-$(date +%Y-%m-%d)"
+b="$HOME/md-sync-backup-$(date +%Y-%m-%d-%H%M%S)"
 mkdir -p "$b" || exit 1
 if [ -e "$HOME/.claude/CLAUDE.md" ]; then cp "$HOME/.claude/CLAUDE.md" "$b/" || exit 1; fi
 for m in "$HOME"/.claude/projects/*/memory; do
@@ -310,12 +310,13 @@ def setup() -> dict[str, str]:
     tools = p["tools"]
     steps = {"node": lambda: ("ok", "") if tools["node"] else _done(run(NODE_INSTALL, INSTALL_TIMEOUT)),
              "gh": lambda: ("ok", "") if tools["gh"] else _done(run(GH_INSTALL, INSTALL_TIMEOUT)),
-             "gh login": _gh_login, "gh git": _gh_git, "owa links": _owa_links, "permissions": _permissions,
+             "gh login": _gh_login, "gh git": _gh_git, "permissions": _permissions, "owa links": _owa_links,
              **{f"account {n}": (lambda n=n: _account_step(n)) for n in SHOP_ACCOUNTS}}
     out = {}
     for name, step in steps.items():
         out[name], note = step()
         print(f"{name}: {'ok (changed)' if out[name] == 'changed' else out[name]}{note}", flush=True)
+    _cache = _ready = None  # the steps changed what probe() and ready() report
     return out
 
 

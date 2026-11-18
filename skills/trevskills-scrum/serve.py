@@ -4287,7 +4287,7 @@ JOB_STATES_MAX = 200  # ids one GET /api/p/<project>/job-states may ask for
 
 
 def job_states(root, ids):
-    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled} per job, in board order,
+    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled, question, options} per job, in board order,
     read from cached_board only (no activity, refusal, lock or session work). ids (exact strings) picks those jobs and
     leaves unknown ids out; None or empty gives every job not done or aborted."""
     jobs = cached_board(root).get("jobs", [])
@@ -4297,7 +4297,8 @@ def job_states(root, ids):
     else:
         jobs = [j for j in jobs if j.get("stage") not in ("done", "aborted")]
     return [{"id": j.get("id"), "title": j.get("title"), "stage": j.get("stage"), "reason": j.get("reason"),
-             "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j)}
+             "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j),
+             "question": j.get("question"), "options": j.get("options")}
             for j in jobs]
 
 
@@ -4355,7 +4356,7 @@ def _drain_spool(root) -> None:
                 if not isinstance(entry, dict):
                     raise ValueError("not a JSON object")
                 top = entry.get("top") is True
-                items = board.backlog_op(root, "add", text=entry.get("text"), top=top, by="t",  # Trevor's own item
+                items = board.backlog_op(root, "add", text=entry.get("text"), top=top, by="t", id=entry.get("id"),  # Trevor's own item
                                          **({"points": entry["points"]} if "points" in entry else {}))
             except (ValueError, SystemExit) as e:
                 print(f"backlog spool: dropped {line}: {e}", file=sys.stderr, flush=True)
@@ -5950,12 +5951,12 @@ class Handler(BaseHTTPRequestHandler):
                     text = board.clean(body.get("text") or "", board.ITEM_MAX)
                     if not text:
                         raise SystemExit("backlog item text is empty")
-                    entry = {"text": text, "top": top}
+                    entry = {"text": text, "top": top, "id": board.new_item_id([])}  # id fixed now so the reply can name it
                     if "points" in body:
                         board.check_points(body["points"])
                         entry["points"] = body["points"]
                     spool_backlog_add(root, entry)
-                    return 202, {"queued": True}
+                    return 202, {"queued": True, "id": entry["id"]}
                 items = board.backlog_op(root, "add", text=body.get("text"), top=top, by="t",  # Trevor's own item
                                          **({"points": body["points"]} if "points" in body else {}))
                 new = items[0] if top else items[-1]
