@@ -8553,6 +8553,14 @@ class UiSweepRecordTest(unittest.TestCase):
         self.assertEqual(self.items(), [])
         self.assertEqual((self.record()["result"], self.record()["findings"]), ("pass", 0))
 
+    def test_path_with_space_is_matched_against_known_targets(self):
+        """Job 1119: a target path like "/admin/dashboard (Orders)" is named by its ok line, not filed as unrendered."""
+        t = dict(self.TARGETS, targets=[{"path": "/admin/dashboard (Orders)", "jobs": ["7-x"], "marked": False, "why": "y"}])
+        (self.dir / "targets.json").write_text(json.dumps(t))
+        f = self.review("VERDICT: PASS\n- ok /admin/dashboard (Orders) (viewport only)\n")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
+
     def test_ok_line_note_after_path_is_ignored(self):
         f = self.review("VERDICT: PASS\n- ok /leads\n- ok / (viewport shots only)\n- ok /admin/views\n- ok /pricing\n")
         board.cmd_ui_sweep_record(self.root, f)

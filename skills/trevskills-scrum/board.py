@@ -3393,7 +3393,7 @@ def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
 
 SWEEP_BLOCKING_RE = re.compile(r"^- \[blocking\] (.+?) — (.+) — (.+?)\s*$")
 SWEEP_UNRENDERED_RE = re.compile(r"^- Unrendered: (.+?)(?: — (.*?))?\s*$")
-SWEEP_OK_RE = re.compile(r"^- ok (\S+)")  # path is the first token; a trailing note is ignored
+SWEEP_OK_RE = re.compile(r"^- ok (.+)")  # the rest is the path plus any note; cmd_ui_sweep_record matches known paths
 
 
 def _ui_sweep_live(root, d):
@@ -3422,17 +3422,19 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
         raise SystemExit(f"cannot read the sweep review or targets: {e}")
     jobs = {t["path"]: ", ".join(t.get("jobs") or []) or "?" for t in targets.get("targets") or []}
     named, items = set(), []  # items: (text, unless_open)
+    by_len = sorted(jobs, key=len, reverse=True)  # a path may hold spaces, "/admin (Orders)": longest known path wins
+    known = lambda s: next((p for p in by_len if s == p or s.startswith(p + " ") or s.startswith(p + " —")), s)
     for line in text.splitlines():
         if m := SWEEP_BLOCKING_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
             key = f"UI sweep: {m[1]}: {m[2]}"
             items.append((f"{key} (merged job {jobs.get(m[1], '?')}; screenshot {m[3]})", key))
         elif m := SWEEP_UNRENDERED_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
             items.append((f"UI sweep could not render {m[1]} (merged job {jobs.get(m[1], '?')}): "
                           f"{m[2] or 'no reason given'}", f"UI sweep could not render {m[1]} ("))
         elif m := SWEEP_OK_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
     items += [(f"UI sweep could not render {p} (merged job {ids}): not in the sweep review",
                f"UI sweep could not render {p} (") for p, ids in jobs.items() if p not in named]
     for item, key in items:
