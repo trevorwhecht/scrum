@@ -53,8 +53,10 @@ GH_INSTALL = IN_TMP.format(
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
 # ruff for edit-check.py's `ruff check --select F`: no Homebrew on the shop, so pip into ~/.local (its bin is on PATH_PREFIX).
+# /usr/bin/python3: a bare python3 under PATH_PREFIX is uv's externally-managed one, which refuses pip install --user.
 RUFF_CHECK = "command -v ruff"
-RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" python3 -m pip install --user -q ruff'
+RUFF_INSTALL = 'PYTHONUSERBASE="$HOME/.local" /usr/bin/python3 -m pip install --user -q ruff'
+OPTIONAL_STEPS = {"ruff"}  # a failed step here never holds a dispatch; setup() still prints and returns its real result
 GIT_HELPER = "git config --global --get-all credential.https://github.com.helper"
 
 # Entries of this Mac's ~/.claude-owa that are links into ~/.claude (read 2026-11-17); its credentials are not.
