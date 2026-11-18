@@ -1942,6 +1942,10 @@ class BoardTest(unittest.TestCase):
         sh("add", "-A")
         self.assertEqual(board.child_files(jobs, "j1"),
                          {"skills/x/lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"})
+        (repo / "lanes").mkdir()
+        (repo / "lanes/cloud.md").write_text("x")  # on disk as written (untracked/ignored): not remapped
+        self.assertEqual(board.child_files(jobs, "j1"),
+                         {"lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"})
 
     def test_child_files_bare_name_backticked_then_punctuation(self):
         repo = Path(self.tmp.name)
