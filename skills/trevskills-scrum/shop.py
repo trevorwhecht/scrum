@@ -384,7 +384,7 @@ def _render_auth(text: str) -> str | None:
 
 def profile_copy(project: str, repo: str) -> str:
     """Write the shop's ~/scrum-work/<project>/scrum/project.md from this Mac's <repo>/scrum/project.md (stdin only,
-    tmp file + mv -f), so a cloud-job session there skips first-run setup and keeps E2E, Test sign-in and Render auth.
+    tmp file + mv -f), so a cloud-job session there keeps its E2E, Test sign-in and Render auth lines (cloud.md Setup).
     The repo path (as given and its realpath) becomes the shop clone and any other path under this Mac's home moves
     to the shop's $HOME; every other byte is unchanged. The same call adds setup's `scrum/` and `.claude/worktrees/`
     lines to the clone's .git/info/exclude. Then the file the Render auth line names, when _render_auth() accepts it
