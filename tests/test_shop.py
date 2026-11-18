@@ -1539,6 +1539,12 @@ class StructureTest(unittest.TestCase):
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
+        copy = text[text.index("## Env copy"):text.index("## E2E channel")]
+        for phrase in ("`project_copy(project, repo)`", "`scrum/` and `.claude/worktrees/`", "`- Render auth:`",
+                       "`posixpath.normpath(\".claude/worktrees/scrum-x/\" + <path>)`", "returns `True`"):
+            self.assertIn(phrase, copy, phrase)
+        self.assertIn("`clone(<repo folder>, <origin URL>)`, `project_copy()`, `env_copy()`",
+                      text[text.index("## Dispatch"):])
         sync = text[text.index("## MD sync"):text.index("## Dispatch")]
         for phrase in ("`python3 shop.py md-sync`", "--ff-only", "`~/.md-sync-cleanup-done`",
                        "`~/md-sync-backup-<YYYY-MM-DD-HHMMSS>`", "`memory_key()`", "`Edit(/{home}/.claude/rules/**)`",

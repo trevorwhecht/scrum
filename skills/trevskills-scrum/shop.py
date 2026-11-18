@@ -8,10 +8,11 @@ usage: shop.py probe   (print the cached probe as one JSON line; exit 0 whether 
                         `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1))
 
 run() never raises: a timeout comes back as exit 124, ssh that cannot start as 127, and ssh's own failure as 255.
-probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy() and
-md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses clone() to clone
-or fast-forward a project in ~/scrum-work, start() to launch a headless cloud-job session there (the prompt only on
-stdin) and ended() to read a finished session's log tail. See lanes/shop.md.
+probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready(), env_copy(),
+project_copy() and md_sync() never print a secret or remote output. Dispatch (serve.py's shop_tick and cloud_tick) uses
+clone() to clone or fast-forward a project in ~/scrum-work, project_copy() to give that clone this Mac's project.md and
+Render auth file, start() to launch a headless cloud-job session there (the prompt only on stdin) and ended() to read a
+finished session's log tail. See lanes/shop.md.
 """
 import argparse, io, json, os, posixpath, re, shlex, subprocess, sys, tarfile, time
 from pathlib import Path
