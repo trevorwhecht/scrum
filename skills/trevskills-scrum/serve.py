@@ -1070,15 +1070,15 @@ def merges_since(repo, record) -> int:
 
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
-    flight anywhere, the E2E lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    flight anywhere, this project's UI sweep is not running (its dev server holds the checkout's dev lock), the E2E
+    lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
     now = time.time()
-    for other in board.projects().values():
-        rec = e2e_full_record(other / "scrum")
+    for rec in [e2e_full_record(other / "scrum") for other in board.projects().values()] + [ui_sweep_record(root)]:
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
     if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
@@ -1185,10 +1185,11 @@ def write_ui_sweep(root, rec):
 
 def ui_sweep_tick(project, repo, root) -> None:
     """Start one headless sweep session (spawn id ui-sweep) on repo's main checkout when project.md has UI globs and a
-    Dev command, no sweep runs anywhere, the tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
+    Dev command, no sweep runs anywhere, no full E2E run is in flight (E2E_FULL; its next dev holds the dev lock), the
+    tracked tree is clean, board.machine_ok(claim=True) passes and e2e_full_due
     holds. It sweeps since the last record's head (its since after a running or error record, so a dead sweep's range is
     kept; HEAD~5 or the root commit with no record). No changed screen records a pass and starts nothing."""
-    if not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
+    if E2E_FULL["running"] or not board.ui_globs(root) or e2e_command(root, "Dev command").lower() in ("", "none"):
         return
     now = time.time()
     for other in board.projects().values():
