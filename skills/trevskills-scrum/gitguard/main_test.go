@@ -92,7 +92,7 @@ func TestReasonTextMatchesBoardPy(t *testing.T) {
 		"on main blocks every scrum merge in that repo. Save the change through a scrum job instead: " +
 		"/trevskills-scrum lilguy <what to save> (Lane: lilguy — knowledge save). " +
 		"Trevor can still commit by hand from his own terminal."
-	if got := guardReason(f.commit(), "??", 0); got != want {
+	if got := guardReason(f.commit()); got != want {
 		t.Fatalf("reason\n got %q\nwant %q", got, want)
 	}
 }
@@ -109,10 +109,10 @@ func TestDeniesCommitOnMainInRegisteredCheckout(t *testing.T) {
 		{"last cd wins", "cd a;cd " + f.repo + " && git commit -m x", other},
 	}
 	for _, c := range cases {
-		assertDenied(t, guardReason(f.event(c.command, c.cwd, ""), "??", 0), "main", c.label)
+		assertDenied(t, guardReason(f.event(c.command, c.cwd, "")), "main", c.label)
 	}
 	f.git("-C", f.repo, "branch", "-m", "master")
-	assertDenied(t, guardReason(f.commit(), "??", 0), "master", "master")
+	assertDenied(t, guardReason(f.commit()), "master", "master")
 }
 
 func TestAllowsOtherBranchesWorktreesUnregisteredAndNonCommits(t *testing.T) {
@@ -125,34 +125,34 @@ func allowsOtherBranches(t *testing.T, notifier string) {
 	f := setup(t)
 	t.Setenv("CLAUDE_NOTIFIER_DISABLE", notifier)
 	for _, command := range []string{"git status", "git commit-tree HEAD^{tree} -m x", "git log --grep commit"} {
-		assertAllowed(t, guardReason(f.event(command, "", ""), "??", 0), command)
+		assertAllowed(t, guardReason(f.event(command, "", "")), command)
 	}
-	assertAllowed(t, guardReason(f.event("git commit -m x", "", "Edit"), "??", 0), "non-Bash tool")
+	assertAllowed(t, guardReason(f.event("git commit -m x", "", "Edit")), "non-Bash tool")
 	wt := filepath.Join(f.base, "wt")
 	f.git("-C", f.repo, "worktree", "add", "-q", "-b", "scrum/607-x", wt)
-	assertAllowed(t, guardReason(f.event("git commit -m x", wt, ""), "??", 0), "linked worktree")
+	assertAllowed(t, guardReason(f.event("git commit -m x", wt, "")), "linked worktree")
 	f.git("-C", wt, "checkout", "-q", "--detach")
 	f.git("-C", f.repo, "checkout", "-q", "scrum/607-x")
-	assertAllowed(t, guardReason(f.commit(), "??", 0), "other branch")
+	assertAllowed(t, guardReason(f.commit()), "other branch")
 	f.git("-C", f.repo, "checkout", "-q", "--detach")
-	assertAllowed(t, guardReason(f.commit(), "??", 0), "detached HEAD")
+	assertAllowed(t, guardReason(f.commit()), "detached HEAD")
 	f.git("-C", f.repo, "checkout", "-q", "main")
-	assertDenied(t, guardReason(f.commit(), "??", 0), "main", "back on main")
+	assertDenied(t, guardReason(f.commit()), "main", "back on main")
 	f.register(filepath.Join(f.base, "elsewhere"))
-	assertAllowed(t, guardReason(f.commit(), "??", 0), "unregistered repo")
+	assertAllowed(t, guardReason(f.commit()), "unregistered repo")
 }
 
 func TestScrumSessionsAreNotExempt(t *testing.T) {
 	f := setup(t)
 	for _, v := range []string{"1", "yes", "True", "0", ""} {
 		t.Setenv("CLAUDE_NOTIFIER_DISABLE", v)
-		assertDenied(t, guardReason(f.commit(), "??", 0), "main", "CLAUDE_NOTIFIER_DISABLE="+v)
+		assertDenied(t, guardReason(f.commit()), "main", "CLAUDE_NOTIFIER_DISABLE="+v)
 	}
 	jobs := filepath.Join(f.repo, "scrum", "board.json")
 	f.write(jobs, `{"jobs": [{"id": "1", "stage": "merging", "pid": 111, "tty": "ttys004"}]}`)
-	assertDenied(t, guardReason(f.commit(), "??", 111), "main", "the orchestrator's own pid")
+	assertDenied(t, guardReason(f.commit()), "main", "the orchestrator's own pid")
 	f.write(jobs, `{"jobs": [{"id": "1", "stage": "merging", "tty": "ttys004"}]}`)
-	assertDenied(t, guardReason(f.commit(), "ttys004", 222), "main", "a pid-less job's tty")
+	assertDenied(t, guardReason(f.commit()), "main", "a pid-less job's tty")
 }
 
 func cli(stdin string) string {
@@ -229,7 +229,7 @@ func TestFastPathSkipsProcessAndFiles(t *testing.T) {
 	if got := cli(string(ev)); got != "" {
 		t.Fatalf("got %q", got)
 	}
-	assertAllowed(t, guardReason(f.event("git status", "", ""), "??", 0), "guardReason git status")
+	assertAllowed(t, guardReason(f.event("git status", "", "")), "guardReason git status")
 	if calls != 0 {
 		t.Fatalf("fast path made %d process/file calls, want 0", calls)
 	}
