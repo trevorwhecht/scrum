@@ -6999,6 +6999,7 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
     Every stall line is "auto" when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
     A live-idle stall for which `hold(job)` (serve.py stall_hold) names a gate token (e2e_lock, cpu_load(<pct>%)) is
     logged "auto" with that "hold": the gate, not the session, held it, so process-health counts no stop.
+    A job whose launch serve.py queued (`play_queued`) is waiting on its own gate and is never flagged.
     A stuck spec job with no feature.md is an orphaned claim instead: aborted and requeued, not flagged.
     Returns the flagged ids; writes board.json only when it flags something."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALL_MINUTES)
@@ -7007,8 +7008,9 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
         with locked_board(root) as board:
             # a lilguy job in the main checkout has no pipeline to resume: no worktree or builder.
             # limitResetAt: serve.py holds the job until its usage limit resets, then auto_resume restarts it.
+            # play_queued: serve.py's own CPU/RAM launch gate holds the launch: waiting, not stalled.
             stale = [j for j in board["jobs"] if j.get("stage") in WATCHED and not j.get("waiting") and not queue_waiting(j)
-                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt")
+                     and not j.get("paused") and not lilguy_in_checkout(j) and not j.get("limitResetAt") and not j.get("play_queued")
                      and not j.get("stalled") and stalled_since(j, cutoff)]
             alive = alive or (session_alive_fn() if stale else None)  # ps only when something could be stalled
             idle_cutoff = datetime.now(timezone.utc) - timedelta(hours=IDLE_HOURS)
