@@ -3449,6 +3449,16 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             self.assertIn(phrase, step6, phrase)
         self.assertLess(step6.index("after the fix for the GitHub test failure"), step6.index("gh pr merge"))
 
+    def test_merge_resyncs_before_pr_merge(self):
+        text = (SKILL_DIR / "lanes" / "merge.md").read_text()
+        step6 = self.section(text, "6. **Merge:**", "\n7. **Clean up:**")
+        sync = step6[step6.index("B sync $ID"):step6.index("gh pr merge")]
+        for phrase in ('merge-base --is-ancestor "origin/$DEFAULT" HEAD', "only if", "(never rebase)",
+                       "`Typecheck` and `Lint`", "no new review round", "--title CHECKS_FAILING",
+                       'git -C "$WT" push', 'git -C "$WT" fetch origin'):
+            self.assertIn(phrase, sync, phrase)
+        self.assertLess(sync.index("fetch origin"), sync.index("--is-ancestor"))
+
     def test_merge_gh_missing_fix_installs_first(self):
         text = skill_text()
         merge = self.section(text, "## Merge", "## Resuming the builder")
