@@ -602,8 +602,11 @@ class SetupTest(SetupCase):
         [(cmd, timeout, _)] = self.cmds("pip install")
         self.assertEqual((cmd, timeout), (shop.RUFF_INSTALL, 600))
         self.assertIn('PYTHONUSERBASE="$HOME/.local"', cmd)
-        self.shop(("command -v ruff", 1, ""), ("pip install", 1, ""), *DONE)
-        self.assertEqual(self.setup_out()[1][-2], "ruff: failed (exit 1)")
+        self.assertIn("/usr/bin/python3 -m pip install --user", cmd)  # never the shop's uv-managed ~/.local/bin/python3
+        self.shop(("command -v ruff", 1, ""), ("pip install", 1, "error: externally-managed-environment"), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[-2], got["ruff"]), ("ruff: failed (exit 1)", "failed"))
+        self.assertEqual(shop.OPTIONAL_STEPS, {"ruff"})
 
     def test_jev_key_skipped_when_file_exists(self):
         self.shop((JEV_CHECK, 0, ""), *DONE)

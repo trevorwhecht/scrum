@@ -1757,7 +1757,8 @@ def shop_tick(project, repo, root) -> bool:
     if not shop.md_sync(alias=alias):
         return fail("md-sync")
     steps = shop.setup(alias=alias)
-    if "failed" in steps.values() or steps.get(f"account {account}") != "ok":
+    if any(v == "failed" for k, v in steps.items() if k not in shop.OPTIONAL_STEPS) \
+            or steps.get(f"account {account}") != "ok":
         return fail("setup")
     try:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
