@@ -13321,7 +13321,7 @@ class SpawnCooldownTest(unittest.TestCase):
         self.assertEqual(lines, [])
 
     def test_runall_start_refused_in_cool_down(self):
-        for by in ("runall", "serve"):
+        for by in ("runall", "serve", "shop"):  # shop: a shop claim whose dispatch failed, left a queued start here
             job_id = self.job(by)
             out, bspawn, err = self.start(job_id)
             self.assertIsNone(out)

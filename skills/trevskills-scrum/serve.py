@@ -307,7 +307,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
     digest, weekly) runs on `account` when given, else board.pick_account's account, kept as RUNS[key]["account"]
     (None: the first account).
-    While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
+    While cooling down, a non-manual start of a serve, runall or shop job (started_by) is parked by board.cmd_cooldown_park
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
     project (live_ids). A launched non-manual `start` of a board job appends {project, job, cpu} (the gate's reading)
@@ -321,7 +321,7 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
             on_board = True
         except (SystemExit, OSError, ValueError):
             pass
-    if (on_board and action == "start" and not manual and job.get("started_by") in ("serve", "runall")
+    if (on_board and action == "start" and not manual and job.get("started_by") in ("serve", "runall", "shop")
             and board.cooling_down() and board.cmd_cooldown_park(root, job_id)["parked"]):
         print(f"cool down: refused start of {project}/{job_id}", file=sys.stderr, flush=True)
         return None

@@ -884,7 +884,7 @@ class ShopTickTest(unittest.TestCase):
                     "## Pre-written spec\n\n# Spec\n## Likely files\n- `src/a.py`\n", "owa"))
                 job = self.job(root, "001-polish-the-knob")
                 self.assertEqual((job["stage"], job["shop"], job["account"], job["worker"], job["started_by"]),
-                                 ("cloud", "4242", "owa", "shopmac", "runall"))
+                                 ("cloud", "4242", "owa", "shopmac", "shop"))
                 self.assertEqual((root / "backlog.md").read_text(), "# Backlog\n- [ ] Fix the gadget {p:3}\n"
                                  "- [x] Polish the knob {p:5} → 001-polish-the-knob\n", "one claim per tick")
                 self.assertEqual((root / "jobs" / "001-polish-the-knob" / "feature.md").read_text(), "Polish the knob\n")

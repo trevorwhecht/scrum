@@ -366,7 +366,7 @@ def short_title(text, n=60) -> str:
     return (cut or head) + "…"
 
 
-STARTED_BY = ("serve", "runall", "wake", "hand")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand)
+STARTED_BY = ("serve", "runall", "wake", "hand", "shop")  # a job's started_by: who started it (write_pulse's cool-down claims skip hand and shop)
 
 
 def add_job(root, board, title, job_id=None, started_by="hand"):
@@ -739,7 +739,7 @@ def cmd_next(root, index=None, shop=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
     Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
     and still claims. `shop` (serve.py's shop_tick, a claim for the shop Mac) is a predicate the automatic pick must
-    also pass; cool-down never refuses it, finish_first still does."""
+    also pass; cool-down never refuses it, finish_first still does, and the job is started_by shop."""
     if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
     if index is None and (hold := finish_first(root)):
@@ -761,7 +761,8 @@ def cmd_next(root, index=None, shop=None):
                 raise SystemExit(f"backlog item {index} waits on " + ", ".join(f"#{n}" for n in waits))
             if origin := origin_open(item, board):
                 raise SystemExit(f"backlog item {index} waits on job {origin}")
-        job_id = add_job(root, board, short_title(item["text"]), started_by="runall" if index is None else "hand")
+        job_id = add_job(root, board, short_title(item["text"]),
+                         started_by="hand" if index is not None else "runall" if shop is None else "shop")
         take_spec(root, item["text"], job_id)
         claim_item(lines, item, job_id)
         write_backlog(root, lines)
@@ -1576,10 +1577,11 @@ def write_pulse(root, digest_id):
     the line's `guard` (serve.py pulse_tick) is a non-empty string; ends an idle stretch; a line without it counts
     as before), peaks, claims during cool-down (each job number in a rise of a project's numeric top job number
     between two lines at most PULSE_TICK_CAP_S apart; a null top in the earlier line is 0, a project absent from it
-    rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started), claims while
+    rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started, started_by shop
+    skipped: cool-down never stops the shop), claims while
     CPU load over 500% (only the lines' `started` entries, serve.py's own non-manual starts, whose launch-time `cpu`
     is a number over 500; a missing or malformed `started` adds nothing), other starts while CPU load over 500% (rise
-    jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall skipped): hand, unregistered (project not in
+    jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall and shop skipped): hand, unregistered (project not in
     projects()) or other; a registered project's job off the board is skipped), minutes the focus project had
     claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board
     job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
@@ -1659,14 +1661,15 @@ def write_pulse(root, digest_id):
                 for n in range(int(was) + 1, int(top) + 1):
                     job = _board_job(boards, name, n)
                     hand = (job or {}).get("started_by") == "hand"
+                    shop = (job or {}).get("started_by") == "shop"  # a shop Mac claim: cool-down and this Mac's CPU never hold the shop
                     if (is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started
-                            and (job or {}).get("started_by") != "runall"):  # a run-all job creation is no start: its launch is a later serve.py start
+                            and (job or {}).get("started_by") != "runall" and not shop):  # a run-all job creation is no start: its launch is a later serve.py start
                         group = "unregistered" if name not in known else None if job is None else "hand" if hand else "other"
                         if group:  # a registered project's job off the board: pruned or reset, no start to name
                             others[group].setdefault(name, []).append(str(n))
                     if known and name not in known:
                         continue  # an unregistered project's rise is no claim
-                    if job is not None and b.get("cooldown") is True:
+                    if job is not None and b.get("cooldown") is True and not shop:
                         (handed if hand else claimed).setdefault(name, []).append(str(n))
                     if hand:
                         continue
