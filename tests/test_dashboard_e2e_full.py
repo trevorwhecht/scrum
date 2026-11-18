@@ -122,7 +122,9 @@ class ChecksMarkup(unittest.TestCase):
         btn = re.search(r'<button class="btn" id="checksBtn" type="button" hidden data-agent-hint="[^"]+">Checks</button>',
                         text)
         self.assertIsNotNone(btn)
-        self.assertLess(text.index('id="aiBtn"'), btn.start(), "Checks sits last in the header")
+        # Job 1116: Checks sits with the other status buttons, right after Codex routing, so at 390 px it shares their row.
+        self.assertLess(text.index('id="routing"'), btn.start())
+        self.assertLess(btn.start(), text.index('id="filter"'))
         self.assertLess(btn.start(), text.index("</header>"))
         dialog = text[text.index('<dialog id="checks" aria-label="Checks">'):]
         dialog = dialog[:dialog.index("</dialog>")]

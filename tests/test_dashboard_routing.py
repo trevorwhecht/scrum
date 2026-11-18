@@ -56,13 +56,14 @@ class RoutingText(unittest.TestCase):
             {"claude": {"5h": 12.6, "weekly": None}, "codex": {"5h": 42, "weekly": 61.4}, OLL: "up"},
             {"codex": {"5h": None, "weekly": None}, OLL: "down"},
             {OLL: "up"}]), [
-            "Claude wk — · Codex 5h 42% · wk 61%",
-            "Claude wk — · Codex 5h — · wk —",
-            "Claude wk — · Codex 5h — · wk —"])
-        self.assertEqual(node_eval("routingText", [{"claude": {"5h": 12.6, "weekly": 49.4}}]),
-                         ["Claude wk 49% · Codex 5h — · wk —"], "Claude's 5h window is gone from the header")
+            "Codex 5h 42% · wk 61%",
+            "Codex 5h — · wk —",
+            "Codex 5h — · wk —"])
+        self.assertEqual(node_eval("routingText", [{"claude": {"5h": 12.6, "weekly": 49.4}}]), ["Codex 5h — · wk —"],
+                         "Claude's weekly use shows once in the header, as the meter's per-account bars (job 1116)")
         hint = re.search(r'<button class="btn" id="routing"[^>]*>', DASHBOARD.read_text()).group(0)
-        self.assertIn('data-agent-hint="Claude weekly used, from', hint)
+        self.assertIn('data-agent-hint="Codex 5h and weekly quota used, from', hint)
+        self.assertIn("each Claude account's weekly use is the meter's usage bars", hint)
 
     def test_dashboard_never_mentions_local_model(self):
         self.assertNotIn(OLL, DASHBOARD.read_text().lower())

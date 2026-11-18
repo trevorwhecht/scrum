@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import collections, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -39,13 +39,17 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
     await page.waitForSelector(".card[data-key]");
     if (mode === "header") {
       await page.waitForFunction(() => { const r = document.getElementById("routing"); return !r.hidden && r.textContent; });
-      await page.waitForFunction(() => !document.getElementById("machine").hidden && !document.getElementById("cooldown").hidden);  // the tallest header
+      await page.waitForFunction(() => !document.getElementById("machine").hidden && !document.getElementById("cooldown").hidden  // the tallest header
+        && document.querySelectorAll("#machine .grp").length === 3 && document.querySelector("#machine .spark") && !document.getElementById("checksBtn").hidden);
       const got = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,
         routing: document.getElementById("routing").textContent,
         options: [...document.getElementById("filter").options].map(o => o.textContent),
         children: [...document.querySelector("header").children].filter(el => el.getClientRects().length)
-          .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right, top: r.top, height: r.height}; }),
+          .map(el => { const r = el.getBoundingClientRect(); return {id: el.id || el.tagName, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+                                                                     width: r.width, height: r.height}; }),
+        sparks: [...document.querySelectorAll("#machine .spark")].filter(s => s.checkVisibility()).length,
+        bars: [...document.querySelectorAll("#machine .bar")].filter(s => s.checkVisibility()).length,
         height: document.querySelector("header").getBoundingClientRect().height}));
       console.log(JSON.stringify(got));
       return;
@@ -167,6 +171,18 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
             {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 62.5, "cpu_cores": 4, "at": time.time()}])
         shop.start()
         self.addCleanup(shop.stop)
+        # ... both Claude accounts' usage bars, 2 sparkline readings per ring, and the Checks button (job 1116 rework).
+        usage = mock.patch.object(serve, "machine_usage", return_value={"accounts": [
+            {"name": "main", "seven_day_pct": 49, "resets_at": time.time() + 86400, "max_pct": 90},
+            {"name": "owa", "seven_day_pct": 90, "resets_at": time.time() + 86400, "max_pct": 90}], "allowance": None, "fable": "ok", "hold_until": None})
+        usage.start()
+        self.addCleanup(usage.stop)
+        t = time.time()
+        history = mock.patch.dict(serve.HISTORY, {key: collections.deque([(t - 120, 50.0, 30.0), (t - 60, 45.0, 60.0)], maxlen=serve.HISTORY_LEN)
+                                                  for key in ("mac", ("shop", "shopmac"))})
+        history.start()
+        self.addCleanup(history.stop)
+        (repo / "scrum" / "e2e-full.json").write_text(json.dumps({"at": t, "head": "abc1234def", "result": "pass"}))
         serve.MACHINE_CACHE.clear()
         self.server = serve.make_server(0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -188,7 +204,7 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_fits_390px(self):
         got = self.browse("header")
-        self.assertEqual(got["routing"], "Claude wk — · Codex 5h 42% · wk 17%", got)
+        self.assertEqual(got["routing"], "Codex 5h 42% · wk 17%", got)
         self.assertIn(PROJECT, got["options"], got)
         self.assertGreaterEqual(len(PROJECT), 30)
         self.assertLessEqual(got["scrollWidth"], 390, got)
@@ -201,12 +217,51 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
 
     def test_header_compact_390px(self):
         got = self.browse("header")
-        # 358 before job 550; 204 after; 215 with job 648's 44 px controls; 233 with job 1116's shop rings (a 2nd meter line)
+        # 358 before job 550; 204 after; 215 with job 648's 44 px controls; 233 with job 1116's shop rings (a 2nd meter line),
+        # still 235 with its usage bars, sparklines and the Checks button
         self.assertLessEqual(got["height"], 235, got)
         by = {c["id"]: c for c in got["children"]}
         self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
         for i in ("rankBtn", "cooldown"):
             self.assertGreaterEqual(by[i]["height"], 44, got)
+
+    CONTROLS = ("cooldown", "routing", "checksBtn", "filter", "rankBtn", "laneFilter", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn")
+
+    def test_header_one_row_1440(self):
+        """Job 1116 rework: at 1440 px the header is one row, its meters (This Mac, Shop, usage) on the left and its
+        buttons on the right, every button 44 px tall with the same 8 px gap, with the Checks button, both usage bars and
+        the sparklines showing."""
+        got = self.browse("header", 1440)
+        self.assertLessEqual(got["scrollWidth"], 1440, got)
+        self.assertEqual((got["sparks"], got["bars"]), (4, 2), got)
+        by = {c["id"]: c for c in got["children"]}
+        controls = sorted((by[i] for i in self.CONTROLS), key=lambda c: c["left"])
+        self.assertEqual([c["id"] for c in controls], list(self.CONTROLS), got)
+        self.assertEqual({c["height"] for c in controls}, {44}, got)
+        for c in [by["H1"], by["machine"]] + controls:  # one row: every item centred on the same line
+            self.assertAlmostEqual(c["top"] + c["height"] / 2, controls[0]["top"] + 22, delta=1, msg=c)
+        self.assertEqual({round(b["left"] - a["right"]) for a, b in zip(controls, controls[1:])}, {8}, got)
+        self.assertEqual(round(controls[0]["left"] - by["machine"]["right"]), 8, got)  # an empty state text adds no gap
+        self.assertAlmostEqual(controls[-1]["right"], 1440 - 16, delta=1, msg=got)
+
+    def test_header_two_bands_390(self):
+        """Job 1116 rework: at 390 px the header wraps into two bands, the title and meters, then the buttons, with no
+        overlap; Checks shares the Cool down row, and the sparklines hide so the meter stays two lines."""
+        got = self.browse("header", 390)
+        self.assertLessEqual(got["scrollWidth"], 390, got)
+        self.assertEqual((got["sparks"], got["bars"]), (0, 2), got)
+        kids = [c for c in got["children"] if c["width"] and c["height"]]
+        for i, a in enumerate(kids):
+            for b in kids[i + 1:]:
+                overlap = a["left"] < b["right"] and b["left"] < a["right"] and a["top"] < b["bottom"] and b["top"] < a["bottom"]
+                self.assertFalse(overlap, (a, b))
+        by = {c["id"]: c for c in got["children"]}
+        controls = [by[i] for i in self.CONTROLS]
+        self.assertLessEqual(by["machine"]["bottom"], min(c["top"] for c in controls), got)
+        self.assertEqual({c["top"] for c in controls[:3]}, {by["cooldown"]["top"]}, got)
+        for c in controls:
+            self.assertGreaterEqual(c["height"], 44, c)
+            self.assertLessEqual(c["right"], 390 - 12 + 0.5, c)
 
     def test_viewer_tabs_close_44_flush_right(self):
         got = self.browse("tabs")
