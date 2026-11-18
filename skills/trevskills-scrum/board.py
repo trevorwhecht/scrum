@@ -26,7 +26,7 @@
                                    then set the job stage=done
   board.py sync <id>               re-read jobs/<id>/ into the board, print round status as JSON
   board.py next                    claim the first "- [ ]" backlog item that waits on no {needs #id} prerequisite and
-                                   no {setup: …} Human setup as a new job, print {"id","feature"}
+                                   no {setup: …} Human setup, and no trailing "(from <id>)" job still open, as a new job, print {"id","feature"}
   board.py cloud-claim <N>         claim up to N open backlog items for the Cloud lane, skipping any that waits
                                    (prerequisite or Human setup), has no pre-written spec with Likely files, or shares a
                                    Likely file with an earlier pick or a cloud/build job; print {"claimed": [{"id","feature"}, ...]}
