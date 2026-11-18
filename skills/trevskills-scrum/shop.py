@@ -82,7 +82,10 @@ SHOP_PERMISSIONS = {
     "ask": ["Bash(prisma db push:*)", "Bash(npx prisma db push:*)"],
     "additionalDirectories": ["/private/tmp", "{home}/scrum-work", "{home}/.claude", "{home}/.claude-owa"],
 }
-# Runs on the shop's python3 after a PERMS = ... line: union, never remove; write only on a change, atomically.
+# The edit-check PostToolUse hook, as install.sh registers it. The path is relative to the session's cwd, so only a
+# scrum-repo clone has it; the guard stops python exiting 2 (which blocks edits) in every other project.
+EDIT_CHECK_CMD = "if [ -f skills/trevskills-scrum/edit-check.py ]; then python3 skills/trevskills-scrum/edit-check.py; fi"
+# Runs on the shop's python3 after a PERMS = ... and EDIT_CHECK_CMD = ... line: union, never remove; write only on a change, atomically.
 MERGE_SCRIPT = r'''
 home = os.path.expanduser("~")
 path = os.path.realpath(os.path.join(home, ".claude", "settings.json"))
@@ -106,6 +109,15 @@ for key, entries in PERMS.items():
         if entry not in have:
             have.append(entry)
             changed = True
+hooks = data.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    sys.exit("settings.json: hooks is not an object")
+post = hooks.setdefault("PostToolUse", [])
+if not isinstance(post, list):
+    sys.exit("settings.json: hooks.PostToolUse is not a list")
+if "edit-check" not in json.dumps(post):
+    post.append({"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": EDIT_CHECK_CMD, "timeout": 60}]})
+    changed = True
 if changed:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.", suffix=".tmp")
@@ -289,7 +301,7 @@ def _account(name: str, alias: str) -> str:
 def _permissions_script() -> str:
     """The Python the shop runs from stdin to merge SHOP_PERMISSIONS into its ~/.claude/settings.json; prints
     `changed` or `same`, and exits non-zero without writing on malformed JSON."""
-    return f"import json, os, sys, tempfile\nPERMS = json.loads({json.dumps(SHOP_PERMISSIONS)!r})\n{MERGE_SCRIPT}"
+    return f"import json, os, sys, tempfile\nPERMS = json.loads({json.dumps(SHOP_PERMISSIONS)!r})\nEDIT_CHECK_CMD = {EDIT_CHECK_CMD!r}\n{MERGE_SCRIPT}"
 
 
 def _done(r: subprocess.CompletedProcess) -> tuple[str, str]:
