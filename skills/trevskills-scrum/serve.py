@@ -1520,7 +1520,8 @@ def cloud_tick(project, root, jobs, now=None):
     artifactsPending mark (board.cloud_pending_clear); a hard-stop move without the branch, a skipped or a failed
     spawn keeps the mark, so a later poll reports the id again. Held during cool-down (no sync, no spawn, CLOUD_LAST
     unstamped, so the first tick after it polls at once). Errors are printed, never raised.
-    Before the sync, each stage-cloud job with a `shop` pid asks shop.ended; after a sync with no error, one whose
+    Before the sync, each stage-cloud job with a `shop` pid asks shop.ended on its own worker (its `worker` alias, else
+    shop.ALIAS: jobs dispatched before workers.txt ran on shopmac); after a sync with no error, one whose
     session ended (a str) and that is still in stage cloud after the sync is aborted with SHOP_ENDED
     (requeued unless a child), after a usage-limit line in its log tail marks its account limited (note_limit)."""
     if board.cooling_down():
@@ -1531,7 +1532,8 @@ def cloud_tick(project, root, jobs, now=None):
         return
     CLOUD_LAST[project] = now
     try:
-        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]))
+        ended = {j["id"]: shop.ended(Path(root).parent.name, j["id"], int(j["shop"]),
+                                     alias=j.get("worker") or shop.ALIAS)
                  for j in jobs if j.get("stage") == "cloud" and j.get("shop")}  # read before the sync, so a PR wins
         out = board.cmd_cloud_sync(root)
         for m in out.get("moved") or []:

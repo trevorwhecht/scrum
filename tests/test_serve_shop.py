@@ -309,6 +309,24 @@ class ShopTickTest(unittest.TestCase):
         self.board.cmd_set(root, "050-x", ["shop=4242"])
         self.assertEqual(self.job(root, "050-x")["shop"], "4242")
 
+    def test_worker_field_shape(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "build"}])
+        board_py = ROOT / "skills" / "trevskills-scrum" / "board.py"
+        bad = subprocess.run([sys.executable, str(board_py), "--dir", str(root), "set", "050-x", "worker=-x"],
+                             capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("worker must match ^[A-Za-z0-9][A-Za-z0-9._-]*$", bad.stdout + bad.stderr)
+        self.assertNotIn("worker", self.job(root, "050-x"))
+        for value in ("user@host", "new mac", ".x", "-oProxyCommand=x"):
+            with self.subTest(value), self.assertRaises(SystemExit):
+                self.board.cmd_set(root, "050-x", [f"worker={value}"])
+        self.assertNotIn("worker", self.job(root, "050-x"))
+        self.board.cmd_set(root, "050-x", ["worker=newmac"])
+        self.assertEqual(self.job(root, "050-x")["worker"], "newmac")
+        self.board.cmd_set(root, "050-x", ["worker="])
+        self.assertIsNone(self.job(root, "050-x")["worker"])
+        self.assertIn("/shop/worker (empty = null)", board_py.read_text().splitlines()[4], "the set usage line")
+
     # --- criterion 6: failures ---
     def test_failed_step_leaves_job_held(self):
         cases = {"md-sync": ("md_sync", False), "setup": ("setup", dict(SETUP, gh="failed")),
@@ -401,11 +419,12 @@ class ShopTickTest(unittest.TestCase):
                                    {"id": PAR, "stage": "running", "lane": "bigboy", "children": ["051-k"]},
                                    {"id": "051-k", "stage": "cloud", "parent": PAR, "shop": "4343", "account": "main",
                                     "feature": "Kid work\n"}])
-        self.sh.ended.side_effect = lambda project, job_id, pid: "Working on it\nDone for now\n"
+        self.sh.ended.side_effect = lambda project, job_id, pid, alias: "Working on it\nDone for now\n"
         with mock.patch.object(self.board, "gh_api", return_value=[]) as gh:
             self.assertEqual(self.cloud(project="Mm Shown"), "")
         gh.assert_called_once()  # cmd_cloud_sync ran for real, and found no PR
-        self.assertEqual(self.sh.ended.call_args_list, [mock.call("mm", "050-x", 4242), mock.call("mm", "051-k", 4343)])
+        self.assertEqual(self.sh.ended.call_args_list, [mock.call("mm", "050-x", 4242, alias="shopmac"),
+                                                        mock.call("mm", "051-k", 4343, alias="shopmac")])
         for job_id in ("050-x", "051-k"):
             job = self.job(root, job_id)
             self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
@@ -413,6 +432,15 @@ class ShopTickTest(unittest.TestCase):
         self.assertIn("Fix the widget", backlog, "a parentless job's feature goes back on the backlog")
         self.assertNotIn("Kid work", backlog, "a BigBoy child is aborted without a requeue")
         self.assertFalse((self.owa / "limit_until").exists(), "no limit line: no account marked")
+
+    def test_ended_asks_job_worker(self):
+        self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa", "worker": "newmac"},
+                            {"id": "051-y", "stage": "cloud", "shop": "4343", "account": "main"},
+                            {"id": "052-z", "stage": "cloud"}])
+        with mock.patch.object(self.board, "gh_api", return_value=[]):
+            self.assertEqual(self.cloud(), "")
+        self.assertEqual(self.sh.ended.call_args_list, [mock.call("mm", "050-x", 4242, alias="newmac"),
+                                                        mock.call("mm", "051-y", 4343, alias="shopmac")])
 
     def test_dead_session_usage_limit_noted(self):
         reset = int(time.time()) + 7200
@@ -427,7 +455,7 @@ class ShopTickTest(unittest.TestCase):
                     (d / "limit_until").unlink(missing_ok=True)
                 job = {"id": "050-x", "stage": "cloud", "shop": "4242"}
                 root = self.project("mm", [dict(job, account=account) if account else job])
-                self.sh.ended.side_effect = lambda *a: tail
+                self.sh.ended.side_effect = lambda *a, **kw: tail
                 with mock.patch.object(self.board, "gh_api", return_value=[]):
                     self.assertEqual(self.cloud(now=now), "")
                 self.assertEqual((acct_dir / "limit_until").read_text(), f"{until}\n")
@@ -449,7 +477,7 @@ class ShopTickTest(unittest.TestCase):
         root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
         order = []
 
-        def ended(*a):
+        def ended(*a, **kw):
             order.append("ended")
             return "Merged it\n"
 
