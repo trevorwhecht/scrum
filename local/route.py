@@ -11,6 +11,7 @@ in routing.json, and cloud otherwise. Every other role answers cloud.
 """
 import argparse
 from datetime import datetime, timedelta, timezone
+import heapq
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ except ImportError:  # Python < 3.11: the local-server config check is skipped
 
 CONFIG = str(Path(__file__).resolve().parent / 'routing.json')
 RUNNERS = ('cloud', 'skip')
+CODEX_SCAN_FILES = 20
 CLAUDE_LIMIT = 'hit your session limit'
 RESET = re.compile(r'resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)', re.I)
 
@@ -57,21 +59,23 @@ def _codex_local_base_url():
 
 
 def codex_quota():
-    """Used percent of the 5h and weekly Codex windows, from the newest rollout file."""
+    """Used percent of the 5h and weekly Codex windows, from the newest rollout file that has rate_limits (of the 20 newest)."""
     quota = {'5h': None, 'weekly': None}
     root = Path(os.environ.get('SCRUM_CODEX_SESSIONS') or Path.home() / '.codex' / 'sessions')
     files = list(root.glob('**/rollout-*.jsonl'))
     if not files:
         return quota
-    newest = max(files, key=lambda p: p.stat().st_mtime)
     limits = None
-    for line in reversed(newest.read_text(errors='replace').splitlines()):
-        if 'rate_limits' not in line:
-            continue
-        try:
-            limits = json.loads(line)['payload']['rate_limits']
-        except (ValueError, KeyError, TypeError):
-            continue
+    for newest in heapq.nlargest(CODEX_SCAN_FILES, files, key=lambda p: p.stat().st_mtime):
+        for line in reversed(newest.read_text(errors='replace').splitlines()):
+            if 'rate_limits' not in line:
+                continue
+            try:
+                limits = json.loads(line)['payload']['rate_limits']
+            except (ValueError, KeyError, TypeError):
+                continue
+            if isinstance(limits, dict):
+                break
         if isinstance(limits, dict):
             break
     if not isinstance(limits, dict):
