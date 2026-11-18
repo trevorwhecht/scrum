@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, collections, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
+import argparse, base64, collections, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -3265,87 +3265,6 @@ def cached_machine_status():
         return MACHINE_CACHE["value"]
 
 
-HEALTH_WINDOW = 300  # seconds of request samples and disconnects /api/machine's "server" summarises
-SLOW_P95_MS = 1000  # healthy handlers run around 50 ms; the job 424 pile-up ran 1-8 s
-HEALTH_MAX_SAMPLES = 200  # per route
-HEALTH_MAX_ROUTES = 64  # a new key past this is recorded as "other"
-HEALTH = {"routes": {}, "disconnects": collections.deque()}  # routes: {key: deque((monotonic, ms))}; disconnects: (monotonic, key)
-HEALTH_LOCK = threading.Lock()
-
-
-def route_key(method, path):
-    """'<METHOD> <path>' with the query dropped and the project, job id, digest and agent segments turned into *, so
-    every project's polls of one endpoint share one key; /p/*/<rel> keeps board.json and calls any other file `file`."""
-    path = urlparse(path).path
-    if m := re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/windows|/job-states|/manual-checks|/digests|/roadmap|/attachments"
-                         r"|/colour|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path):
-        path = "/api/p/*" + re.sub(r"^/jobs/[^/]+/", "/jobs/*/", re.sub(r"^/digests/.+", "/digests/*", m.group(2)))
-    elif m := re.fullmatch(r"/api/p/[^/]+(/.*)?", path):
-        path = "/api/p/*" + (m.group(1) or "")
-    elif m := re.fullmatch(r"/p/[^/]+(?:%2F[^/]+)?/(.+)", path):
-        path = "/p/*/" + ("board.json" if m.group(1) == "board.json" else "file")
-    elif re.fullmatch(r"/api/agents/[^/]+/skills", path):
-        path = "/api/agents/*/skills"
-    return f"{method} {path}"
-
-
-def _prune_health(now):
-    """Drop samples and disconnects older than HEALTH_WINDOW, and routes left with none. Caller holds HEALTH_LOCK."""
-    cut = now - HEALTH_WINDOW
-    for key, samples in list(HEALTH["routes"].items()):
-        while samples and samples[0][0] <= cut:
-            samples.popleft()
-        if not samples:
-            del HEALTH["routes"][key]
-    while HEALTH["disconnects"] and HEALTH["disconnects"][0][0] <= cut:
-        HEALTH["disconnects"].popleft()
-
-
-def record_request(key, ms, disconnected=False):
-    """One handled request: its duration in ms under its route key, plus a disconnect when the client dropped it."""
-    with HEALTH_LOCK:
-        now = time.monotonic()
-        _prune_health(now)
-        routes = HEALTH["routes"]
-        if key not in routes and len(routes) >= HEALTH_MAX_ROUTES:
-            key = "other"
-        routes.setdefault(key, collections.deque(maxlen=HEALTH_MAX_SAMPLES)).append((now, ms))
-        if disconnected:
-            HEALTH["disconnects"].append((now, key))
-
-
-def server_health():
-    """GET /api/machine "server": nearest-rank p95 and count per route over HEALTH_WINDOW, disconnects in it, the worst
-    route by p95 among routes with 5+ samples (all routes when none has), and slow when that route has p95 >= SLOW_P95_MS
-    or any client dropped a connection."""
-    with HEALTH_LOCK:
-        _prune_health(time.monotonic())
-        routes = {}
-        for key, samples in HEALTH["routes"].items():
-            ms = sorted(s[1] for s in samples)
-            routes[key] = {"p95_ms": round(ms[math.ceil(0.95 * len(ms)) - 1]), "count": len(ms)}
-        disconnects = len(HEALTH["disconnects"])
-    eligible = [k for k in routes if routes[k]["count"] >= 5]  # a 1-sample slow route must not outrank sustained slowness
-    worst = max(eligible or routes, key=lambda k: routes[k]["p95_ms"], default=None)
-    slow = bool(eligible and routes[worst]["p95_ms"] >= SLOW_P95_MS) or disconnects >= 1
-    return {"routes": routes, "disconnects": disconnects, "slow": slow, "worst": worst}
-
-
-def timed(handler):
-    """Wraps do_GET/do_POST: records the handler's duration under its route key, and a disconnect on BrokenPipeError or
-    ConnectionResetError, which is re-raised so serve.log's traceback and the connection handling stay as they were."""
-    def run(self):
-        start, dropped = time.monotonic(), False
-        try:
-            return handler(self)
-        except (BrokenPipeError, ConnectionResetError):
-            dropped = True
-            raise
-        finally:
-            record_request(route_key(self.command, self.path), (time.monotonic() - start) * 1000, dropped)
-    return run
-
-
 SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
 SHOP_STATS_CMD = "sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q"  # shop.PROBE_CMD's load lines, then free RAM
 SHOP_STATS = {"at": None, "busy": False, "value": []}  # at: time.monotonic() the last refresh ended
@@ -5980,7 +5899,6 @@ class Handler(BaseHTTPRequestHandler):
     def local_host(self):
         return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL | TAILNET
 
-    @timed
     def do_GET(self):
         path = urlparse(self.path).path
         if not self.local_host():
@@ -6022,7 +5940,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
                                         "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
         if path == "/api/machine":
-            return self.send_json(200, {**cached_machine_status(), "server": server_health()})  # server is live, never cached
+            return self.send_json(200, cached_machine_status())
         if path == "/api/runs":
             discusses = discuss_runs()
             with RUNS_LOCK:
@@ -6084,7 +6002,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(204, b"", TYPES[".md"])
         self.send_json(404, {"error": "not found"})
 
-    @timed
     def do_POST(self):
         origin = self.headers.get("Origin")
         if (not self.local_host() or "application/json" not in (self.headers.get("Content-Type") or "")
