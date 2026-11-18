@@ -3204,12 +3204,15 @@ def changed_routes(wt: Path, ui: list[str]) -> dict[str, set[tuple[str, bool]]]:
             except OSError:
                 pass
     index, out = _import_index(sources), {}
+    # app/ folders that hold a route file: a colocated module only maps to its own folder's route when it is one of them
+    route_dirs = {f.rsplit("/", 1)[0] for f in tracked if "app" in f.split("/")[:-1] and APP_ROUTE_FILE_RE.search(f)}
     for f in ui:
         routes, seen, todo = set(), {f}, [f]
         while todo:  # follow importers until they reach route files
             g = todo.pop()
             if (r := _route_of(g)) is not None:
-                routes.add(r)
+                if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g) or g.rsplit("/", 1)[0] in route_dirs:
+                    routes.add(r)
                 if "pages" in g.split("/")[:-1] or APP_ROUTE_FILE_RE.search(g):
                     continue  # a route file; a colocated app/ module also maps through its importers
             for imp in _importers(index, g):
@@ -3390,7 +3393,7 @@ def ui_sweep_targets(repo, root, since: str, head: str) -> dict:
 
 SWEEP_BLOCKING_RE = re.compile(r"^- \[blocking\] (.+?) — (.+) — (.+?)\s*$")
 SWEEP_UNRENDERED_RE = re.compile(r"^- Unrendered: (.+?)(?: — (.*?))?\s*$")
-SWEEP_OK_RE = re.compile(r"^- ok (\S+)")  # path is the first token; a trailing note is ignored
+SWEEP_OK_RE = re.compile(r"^- ok (.+)")  # the rest is the path plus any note; cmd_ui_sweep_record matches known paths
 
 
 def _ui_sweep_live(root, d):
@@ -3419,17 +3422,19 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
         raise SystemExit(f"cannot read the sweep review or targets: {e}")
     jobs = {t["path"]: ", ".join(t.get("jobs") or []) or "?" for t in targets.get("targets") or []}
     named, items = set(), []  # items: (text, unless_open)
+    by_len = sorted(jobs, key=len, reverse=True)  # a path may hold spaces, "/admin (Orders)": longest known path wins
+    known = lambda s: next((p for p in by_len if s == p or s.startswith(p + " ") or s.startswith(p + " —")), s)
     for line in text.splitlines():
         if m := SWEEP_BLOCKING_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
             key = f"UI sweep: {m[1]}: {m[2]}"
             items.append((f"{key} (merged job {jobs.get(m[1], '?')}; screenshot {m[3]})", key))
         elif m := SWEEP_UNRENDERED_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
             items.append((f"UI sweep could not render {m[1]} (merged job {jobs.get(m[1], '?')}): "
                           f"{m[2] or 'no reason given'}", f"UI sweep could not render {m[1]} ("))
         elif m := SWEEP_OK_RE.match(line):
-            named.add(m[1])
+            named.add(known(m[1]))
     items += [(f"UI sweep could not render {p} (merged job {ids}): not in the sweep review",
                f"UI sweep could not render {p} (") for p, ids in jobs.items() if p not in named]
     for item, key in items:
@@ -4521,7 +4526,11 @@ def child_files(jobs_dir, job_id):
             if found or name == "spec.md" and re.search(r"^#+\s*Likely files", text, re.M | re.I):
                 return found  # a Likely files heading that names no path still means "files unknown"
             # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
-            return {p for p in prose_paths(text) if "/" in p} | bare_name_paths(text, Path(jobs_dir).parent.parent)
+            root = Path(jobs_dir).parent.parent
+            tracked = git_tracked(root)
+            # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
+            return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
+                    for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
     return set()
 
 
@@ -4538,21 +4547,27 @@ def holder_files(jobs_dir, job):
 
 def prose_paths(text):
     """Every backticked token, and every bare token with a /, in text that matches PATH_RE."""
-    bare = (t.rstrip(".,;:") for t in re.sub(r"`[^`]*`", " ", text).split())
+    def unparen(t):  # an unmatched leading ( or trailing ) is prose punctuation; a balanced pair is a Next.js route folder
+        if t.count("(") != t.count(")"):
+            t = t[1:] if t.startswith("(") else t[:-1] if t.endswith(")") else t
+        return t
+    bare = (unparen(t.rstrip(".,;:")) for t in re.sub(r"`[^`]*`", " ", text).split())
     return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | \
            {t for t in bare if PATH_RE.match(t) and repo_path(t) and "/" in t}
 
 
-def bare_name_paths(text, repo):
-    """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one `git ls-files` entry carries by base name."""
+def git_tracked(repo):
+    """`git ls-files` of repo as a list, or [] with no repo or when git fails."""
+    try:
+        return subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True, text=True, timeout=20, check=True).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def bare_name_paths(text, tracked):
+    """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one tracked entry (git_tracked) carries by base name."""
     names = {t.lstrip("`").rstrip(".,;:`") for t in text.split()}
     names = {n for n in names if "/" not in n and PATH_RE.match(n) and repo_path(n)}
-    if not names:
-        return set()
-    try:
-        tracked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True, text=True, timeout=20, check=True).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return set()
     return {m[0] for n in names if len(m := [t for t in tracked if t.rsplit("/", 1)[-1] == n]) == 1}
 
 
@@ -5976,14 +5991,15 @@ def gh_api(repo: Path, endpoint: str, *flags: str) -> list | dict:
         raise GhError(f"gh api {endpoint} printed no JSON ({e})") from None
 
 
-def cloud_worktree(repo: Path, job_id: str) -> str | None:
-    """`git fetch origin`, then `git worktree add <repo>/.claude/worktrees/scrum-<id> scrum/<id>`, as rework does.
-    Returns the path, or None when the add failed."""
+def cloud_worktree(repo: Path, job_id: str, ref: str | None = None) -> str | None:
+    """`git fetch origin`, then `git worktree add <repo>/.claude/worktrees/scrum-<id> <ref>` (ref defaults to
+    scrum/<id>; the PR's head ref can be the short scrum/<number>), as rework does. Returns the path, or None when the
+    add failed."""
     repo = Path(repo).resolve()
     path = repo / ".claude" / "worktrees" / f"scrum-{check_id(job_id)}"  # an id starts with a digit, never "-"
     try:
         subprocess.run(["git", "-C", str(repo), "fetch", "origin"], capture_output=True, timeout=120)
-        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), f"scrum/{job_id}"],
+        r = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), ref or f"scrum/{job_id}"],
                            capture_output=True, timeout=60)
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -6019,9 +6035,15 @@ def _login(item):
 
 
 def _cloud_trusted(pr, job_id):
-    """Whether pr's head is this repo's own scrum/<id> branch: a fork PR, or one from another branch, steers nothing."""
+    """Whether pr is this job's: its head is this repo's own scrum/<id> (or scrum/<number>) branch, and a leading
+    `[scrum <tag>]` names the id or its number. An untagged title is matched by its head; a fork PR, another branch or
+    another job's tag steers nothing."""
     head, base = pr.get("head"), pr.get("base")
-    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") != f"scrum/{job_id}":
+    names = {job_id, job_id.split("-", 1)[0]}
+    if not isinstance(head, dict) or not isinstance(base, dict) or head.get("ref") not in {f"scrum/{n}" for n in names}:
+        return False
+    tag = re.match(r"\[scrum ([^\]]*)\]", str(pr.get("title") or ""))
+    if tag and tag[1] not in names:
         return False
     full = [r.get("full_name") if isinstance(r, dict) else None for r in (head.get("repo"), base.get("repo"))]
     return bool(full[0]) and full[0] == full[1]
@@ -6062,19 +6084,18 @@ def cloud_pending_clear(root: Path, job_id: str) -> None:
 
 
 def _cloud_plan(repo, job_id, prs):
-    """(state, pairs, reason, needs a worktree, abort) for this job's newest [scrum <id>] PR, or None while it still
+    """(state, pairs, reason, needs a worktree, abort, head ref) for this job's newest PR (_cloud_trusted), or None while it still
     runs. abort is None, or (requeue, PR number to close or None). Makes the one comments call a needs-human PR needs;
     raises GhError."""
-    pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
-               and _cloud_trusted(p, job_id)), None)
+    pr = next((p for p in prs if isinstance(p, dict) and _cloud_trusted(p, job_id)), None)
     if not pr:
         return None
-    url = pr.get("html_url") or ""
+    url, head = pr.get("html_url") or "", pr["head"]["ref"]  # _cloud_trusted checked head is a dict with a ref
     lane = [f"lane={m[1]}"] if (m := CLOUD_LANE.search(str(pr.get("body") or ""))) else []  # first line wins
     if pr.get("merged_at"):
-        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None
+        return "MERGED", ["stage=done", f"pr={url}", "reason="] + lane, None, False, None, head
     if pr.get("state") == "closed":
-        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None)
+        return "CLOSED", [f"pr={url}"] + lane, CLOUD_CLOSED, False, (True, None), head
     if CLOUD_LABEL not in [l.get("name") for l in pr.get("labels") or [] if isinstance(l, dict)]:
         return None
     number = pr.get("number")
@@ -6089,12 +6110,12 @@ def _cloud_plan(repo, job_id, prs):
     reason = clean(bodies[-1].split("\n")[0], 300) if bodies else ""
     reason = reason or f"cloud job needs a human; no reason comment on {url}. Fix: read the PR."
     if reason.startswith(CLOUD_SELF_ABORT):
-        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number)
+        return "ABORTED", [f"pr={url}"] + lane, reason, False, (reason.startswith("requeue:"), number), head
     pairs = ["stage=needs-human", f"pr={url}"]
     ref = (pr.get("base") or {}).get("ref")
     if ref:
         pairs.append(f"base=origin/{ref}")
-    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None
+    return "NEEDS-HUMAN", pairs + lane + [f"reason={reason}"], reason, True, None, head
 
 
 def _cloud_abort(root, job_id, url, requeue, reason, lane=None):
@@ -6131,7 +6152,7 @@ def cmd_cloud_sync(root: Path) -> dict:
     except GhError as e:
         return {"moved": [], "arrived": arrived, "error": str(e) or type(e).__name__}
     moved = []
-    for job_id, (state, pairs, reason, wants_worktree, abort) in plans:
+    for job_id, (state, pairs, reason, wants_worktree, abort, head) in plans:
         worktree, url = None, next(p[3:] for p in pairs if p.startswith("pr="))
         try:
             if live(read_board(root), job_id)["stage"] != "cloud":
@@ -6140,9 +6161,14 @@ def cmd_cloud_sync(root: Path) -> dict:
                 lane = next((p[5:] for p in pairs if p.startswith("lane=")), None)
                 _cloud_abort(root, job_id, url, abort[0], reason, lane)
             else:
-                worktree = cloud_worktree(repo, job_id) if wants_worktree else None
+                worktree = cloud_worktree(repo, job_id, head) if wants_worktree else None
                 cmd_set(root, job_id, pairs + ([f"worktree={worktree}"] if worktree else []), expect="cloud",
                         internal=True)
+                if wants_worktree:  # branch is not in FIELDS, so cmd_set cannot write it
+                    with locked_board(root) as board:
+                        job = live(board, job_id)
+                        if job["branch"] != head:
+                            job["branch"] = head
         except SystemExit as e:  # aborted or moved meanwhile, or the done guard refused: it stays where it is
             print(f"cloud-sync: {job_id}: {e}", file=sys.stderr)
             if worktree:  # added for a move that did not happen: leave no orphan behind

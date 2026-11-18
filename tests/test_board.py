@@ -1923,6 +1923,30 @@ class BoardTest(unittest.TestCase):
         self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
         self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
 
+    def test_prose_paths_strips_unmatched_parens(self):
+        self.assertEqual(board.prose_paths("Reword (lanes/cloud.md wording) now"), {"lanes/cloud.md"})
+        self.assertEqual(board.prose_paths("see (the lanes/cloud.md)"), {"lanes/cloud.md"})
+        self.assertEqual(board.prose_paths("Edit src/app/(shop)/page.tsx now"), {"src/app/(shop)/page.tsx"})
+
+    def test_child_files_partial_slash_path_maps_to_tracked(self):
+        repo = Path(self.tmp.name)
+        jobs = self.root / "jobs"
+        self.write("j1/spec.md", "Reword (lanes/cloud.md wording) and a/ex.md, x/none.md, lanes/dup.md.\n")
+        want = {"lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"}
+        self.assertEqual(board.child_files(jobs, "j1"), want)  # no git repo: as written
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        for f in ("skills/x/lanes/cloud.md", "a/ex.md", "z/a/ex.md", "p/lanes/dup.md", "q/lanes/dup.md"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (repo / f).write_text("x")
+        sh("add", "-A")
+        self.assertEqual(board.child_files(jobs, "j1"),
+                         {"skills/x/lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"})
+        (repo / "lanes").mkdir()
+        (repo / "lanes/cloud.md").write_text("x")  # on disk as written (untracked/ignored): not remapped
+        self.assertEqual(board.child_files(jobs, "j1"),
+                         {"lanes/cloud.md", "a/ex.md", "x/none.md", "lanes/dup.md"})
+
     def test_child_files_bare_name_backticked_then_punctuation(self):
         repo = Path(self.tmp.name)
         sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
@@ -7415,7 +7439,7 @@ class CloudSyncTest(unittest.TestCase):
         labelled = self.pr(labels=[{"name": "bug"}, {"name": "scrum:needs-human"}], base={"ref": "dev", "repo": {"full_name": "o/r"}})
         with self.gh([labelled], comments), mock.patch.object(board, "cloud_worktree", return_value=worktree) as wt:
             out = board.cmd_cloud_sync(self.root)
-        wt.assert_called_once_with(self.root.parent, self.job)
+        wt.assert_called_once_with(self.root.parent, self.job, f"scrum/{self.job}")
         return out
 
     def test_needs_human_pr_reads_reason_and_adds_worktree(self):
@@ -7428,6 +7452,41 @@ class CloudSyncTest(unittest.TestCase):
         job = self.get()
         self.assertEqual((job["stage"], job["pr"], job["base"], job["reason"], job["worktree"]),
                          ("needs-human", self.URL, "origin/dev", reason, "/r/.claude/worktrees/scrum-x"))
+
+    def short_head_pr(self):
+        return self.pr(labels=[{"name": "scrum:needs-human"}], head={"ref": "scrum/001", "repo": {"full_name": "o/r"}})
+
+    def test_cloud_plan_returns_matched_head_ref(self):
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        for ref in ("scrum/001", f"scrum/{self.job}"):
+            pr = self.short_head_pr()
+            pr["head"]["ref"] = ref
+            with self.gh([pr], comments):
+                plan = board._cloud_plan(self.root.parent, self.job, [pr])
+            self.assertEqual(plan[5], ref)
+
+    def test_cloud_worktree_checks_out_given_ref(self):
+        runs = []
+        def run(argv, **kw):
+            runs.append(argv)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with mock.patch.object(board.subprocess, "run", side_effect=run):
+            path = board.cloud_worktree(self.root.parent, "007-x", "scrum/007")
+            board.cloud_worktree(self.root.parent, "007-x")
+        wt = str(self.root.parent.resolve() / ".claude" / "worktrees" / "scrum-007-x")
+        self.assertEqual(path, wt)
+        adds = [r for r in runs if "worktree" in r]
+        self.assertEqual([a[-1] for a in adds], ["scrum/007", "scrum/007-x"])
+        self.assertEqual([a[-2] for a in adds], [wt, wt])
+
+    def test_needs_human_short_head_gets_worktree_and_branch(self):
+        comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
+        with self.gh([self.short_head_pr()], comments), \
+                mock.patch.object(board, "cloud_worktree", return_value="/wt") as wt:
+            board.cmd_cloud_sync(self.root)
+        wt.assert_called_once_with(self.root.parent, self.job, "scrum/001")
+        job = self.get()
+        self.assertEqual((job["stage"], job["worktree"], job["branch"]), ("needs-human", "/wt", "scrum/001"))
 
     def test_needs_human_reason_is_capped_at_300(self):
         out = self.needs_human([{"user": self.TREV, "body": "x" * 400 + "\n<!-- scrum needs-human -->"}], None)
@@ -7620,7 +7679,7 @@ class CloudSyncTest(unittest.TestCase):
     def test_cloud_sync_removes_worktree_when_set_refused(self):
         labelled = self.pr(labels=[{"name": "scrum:needs-human"}])
         comments = [{"user": self.TREV, "body": "blocked: y\n<!-- scrum needs-human -->"}]
-        def add(repo, job_id):  # the worktree lands, then Trevor aborts the job before cmd_set
+        def add(repo, job_id, ref):  # the worktree lands, then Trevor aborts the job before cmd_set
             board.cmd_abort(self.root, job_id, False)
             return "/r/.claude/worktrees/scrum-x"
         for rc, err in ((0, b""), (128, b"fatal: not a working tree")):
@@ -7638,6 +7697,7 @@ class CloudSyncTest(unittest.TestCase):
                 self.assertEqual(runs, [["git", "-C", str(self.root.parent), "worktree", "remove",
                                          "/r/.claude/worktrees/scrum-x"]])
                 self.assertEqual(self.get()["stage"], "aborted")
+                self.assertEqual(self.get()["branch"], f"scrum/{self.job}")
                 self.assertNotIn("artifactsPending", self.get())
                 if rc:
                     self.assertIn("fatal: not a working tree", e.getvalue())
@@ -8254,6 +8314,10 @@ class E2eSpecsTest(unittest.TestCase):
         out = self.change("src/app/admin/views/Grid.tsx")  # no spec names /admin/views; the pricing page imports it
         self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/pricing.spec.ts"], []))
 
+    def test_colocated_folder_without_page_is_no_route(self):
+        out = board.changed_routes(self.repo, ["src/app/admin/views/Grid.tsx"])
+        self.assertEqual(out, {"src/app/admin/views/Grid.tsx": {("/pricing", False)}})  # never ("/admin/views", False)
+
     def test_param_route_matches_template_literal(self):
         out = self.change("src/app/order/[id]/page.tsx")
         self.assertEqual((out["mode"], out["specs"], out["uncovered"]), ("scoped", ["e2e/order.spec.ts"], []))
@@ -8350,11 +8414,11 @@ class RenderPathsTest(unittest.TestCase):
     def test_render_paths_maps_routes_and_skips_dynamic(self):
         self.assertEqual(self.commit("src/app/admin/views/Grid.tsx", "src/app/order/[id]/page.tsx",
                                      "src/components/Price.tsx"),
-                         {"paths": ["/admin/views", "/pricing"], "skipped": ["/order/[id]: dynamic route"]})
+                         {"paths": ["/pricing"], "skipped": ["/order/[id]: dynamic route"]})
         out = self.commit(*[f"src/app/p{i}/page.tsx" for i in range(1, 10)])
-        self.assertEqual(out["paths"], ["/admin/views", "/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7"])
-        self.assertEqual(out["skipped"], ["/order/[id]: dynamic route", "/p8: over the 8-page cap",
-                                          "/p9: over the 8-page cap", "/pricing: over the 8-page cap"])
+        self.assertEqual(out["paths"], ["/p1", "/p2", "/p3", "/p4", "/p5", "/p6", "/p7", "/p8"])
+        self.assertEqual(out["skipped"], ["/order/[id]: dynamic route", "/p9: over the 8-page cap",
+                                          "/pricing: over the 8-page cap"])
         with self.assertRaises(SystemExit):
             board.render_paths(self.repo, "-x", self.pfile)
 
@@ -8465,8 +8529,6 @@ class UiSweepTargetsTest(unittest.TestCase):
         self.assertEqual(out, {"since": since, "head": "HEAD", "targets": [
             {"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "rows 160 px tall"},
             {"path": "/", "jobs": [f"commit {sha[:7]}"], "marked": False, "why": "changed src/components/Orphan.tsx"},
-            {"path": "/admin/views", "jobs": ["013-grid"], "marked": False,
-             "why": "changed src/app/admin/views/Grid.tsx"},
             {"path": "/pricing", "jobs": ["011-price", "013-grid"], "marked": False,
              "why": "changed src/components/Price.tsx, src/app/admin/views/Grid.tsx"}]})
 
@@ -8548,6 +8610,14 @@ class UiSweepRecordTest(unittest.TestCase):
         board.cmd_ui_sweep_record(self.root, f)
         self.assertEqual(self.items(), [])
         self.assertEqual((self.record()["result"], self.record()["findings"]), ("pass", 0))
+
+    def test_path_with_space_is_matched_against_known_targets(self):
+        """Job 1119: a target path like "/admin/dashboard (Orders)" is named by its ok line, not filed as unrendered."""
+        t = dict(self.TARGETS, targets=[{"path": "/admin/dashboard (Orders)", "jobs": ["7-x"], "marked": False, "why": "y"}])
+        (self.dir / "targets.json").write_text(json.dumps(t))
+        f = self.review("VERDICT: PASS\n- ok /admin/dashboard (Orders) (viewport only)\n")
+        board.cmd_ui_sweep_record(self.root, f)
+        self.assertEqual(self.items(), [])
 
     def test_ok_line_note_after_path_is_ignored(self):
         f = self.review("VERDICT: PASS\n- ok /leads\n- ok / (viewport shots only)\n- ok /admin/views\n- ok /pricing\n")

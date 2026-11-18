@@ -1,4 +1,4 @@
-"""Job 964: serve.py's shop_tick sends one held job to the shop Mac while this Mac's machine guard holds it, and
+"""Job 964: serve.py's shop_tick sends one held job to the shop Mac whenever a worker has room, and
 cloud_tick requeues a shop session that ended without a PR. Every shop.py function is a mock: no test reaches ssh."""
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
@@ -148,12 +148,16 @@ class ShopTickTest(unittest.TestCase):
         return err.getvalue()
 
     # --- criterion 1: gates and the cap ---
-    def test_dispatch_only_while_guard_holds(self):
+    def test_dispatch_when_guard_passes(self):
         root = self.project("mm", self.runall({"id": "043-a"}))
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM=str(self.board.MIN_FREE_RAM_PCT), SCRUM_CPU_LOAD_PCT="1"):
-            self.assertEqual(self.tick(), (False, "", ""))
-        self.assertEqual(self.calls(), [], "the guard passes: this Mac takes the job, no shop call")
-        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+            got, out, err = self.tick()  # this Mac's guard passes and a worker has room: the shop still takes it
+        self.assertEqual((got, err), (True, ""))
+        self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
+        self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+
+    def test_dispatch_through_cooldown(self):
+        root = self.project("mm", self.runall({"id": "043-a"}))
         flag = self.base / "cooldown"
         flag.write_text("")
         with mock.patch.dict(os.environ, SCRUM_COOLDOWN=str(flag), SCRUM_FREE_RAM=str(self.board.MIN_FREE_RAM_PCT),
@@ -652,6 +656,36 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual(self.job(root, "050-x")["stage"], "aborted")
                 self.assertEqual(gh.call_count, 2, "the sync's read and the close lookup")
                 self.assertEqual(self.patches(gh), [])
+
+    def test_merged_pr_any_head_spelling_is_done_not_aborted(self):
+        merged = "2026-11-18T00:00:00Z"
+        for why, ref, title in (("full head", "scrum/050-x", "[scrum 050-x] Fix"),
+                                ("short head, short tag", "scrum/050", "[scrum 050] Fix"),
+                                ("full head, no tag", "scrum/050-x", "Fix")):
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+                self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
+                pr = self.pr("050-x", 11, state="closed", title=title, merged_at=merged)
+                pr["head"]["ref"] = ref
+                with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]), \
+                        mock.patch.object(self.board, "merge_refusal", return_value=None), \
+                        mock.patch.object(self.board, "artifacts_pushed", return_value=False):
+                    self.assertEqual(self.cloud(), "")
+                job = self.job(root, "050-x")
+                self.assertEqual((job["stage"], job["pr"], job["reason"]),
+                                 ("done", "https://github.com/trevorwhecht/mm/pull/11", None))
+
+    def test_merged_fork_pr_still_shop_ended(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
+        pr = self.pr("050-x", 11, state="closed", head_repo="someone/mm", merged_at="2026-11-18T00:00:00Z")
+        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]), \
+                mock.patch.object(self.board, "merge_refusal", return_value=None), \
+                mock.patch.object(self.board, "artifacts_pushed", return_value=False):
+            self.cloud()
+        job = self.job(root, "050-x")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
 
     def test_pr_close_failure_keeps_abort(self):
         def list_fails(repo, ep, *f):

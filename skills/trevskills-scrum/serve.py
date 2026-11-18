@@ -1540,15 +1540,15 @@ CLOUD_HOME = ("Hard stop: schema",)  # moved jobs whose Sync tail needs a sessio
 
 
 def shop_pr_close(project, root, job_id):
-    """Close the open `[scrum <id>]` PR from this repo's own scrum/<id> (board._cloud_trusted) of a shop job cloud_tick
-    just aborted, with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
+    """Close the open PR that board._cloud_trusted accepts as this job's, for a shop job cloud_tick just aborted,
+    with one PR list read and one PATCH state=closed. A GhError prints one `PR close failed` line."""
     repo = Path(root).parent
     try:
         prs = board.gh_api(repo, board.CLOUD_PULLS)
         if not isinstance(prs, list):
             raise board.GhError(f"gh api {board.CLOUD_PULLS} did not return a list")
-        pr = next((p for p in prs if isinstance(p, dict) and str(p.get("title") or "").startswith(f"[scrum {job_id}]")
-                   and board._cloud_trusted(p, job_id) and p.get("state") == "open"), None)
+        pr = next((p for p in prs if isinstance(p, dict) and board._cloud_trusted(p, job_id)
+                   and p.get("state") == "open"), None)
         if pr is None:
             return
         if not isinstance(pr.get("number"), int):
@@ -1625,16 +1625,17 @@ DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md exp
 
 
 def shop_tick(project, repo, root) -> bool:
-    """While this Mac's machine guard holds work (machine_ok(claim=True) refuses or cpu_hot), send the project's
-    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy (board lane, `Lane: lilguy` anywhere in
+    """Whenever a worker has a free slot, send the project's next held job (fast first, then lowest id), whether or not
+    this Mac's machine guard (machine_ok, cpu_hot) is holding it; this Mac keeps launching its own work, and the claim
+    (cmd_ready shop= for a child, the stage-cloud mark with expect= for a launch) stops both taking one job
+    (held_work: a queued `start` launch or a waiting child; never paused, lilguy (board lane, `Lane: lilguy` anywhere in
     feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent), setup pending or
     naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md, nor a
     launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to
     the first shop.workers() worker, in file order, that is out of backoff, runs fewer than its max stage-cloud `shop`
     jobs on every board (no `worker` field: shopmac), is shop.ready(alias) and has an account: pick_account's own order
     (soonest seven-day reset), then prefer= each of the worker's accounts in its listed order, until one is on the
-    worker's line and ready there. Later workers are not probed. Cool-down counts as a hold (machine_ok refuses), so
-    the shop keeps working through it. A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
+    worker's line and ready there. Later workers are not probed. Cool-down does not stop the shop. A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
     `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. The job is then
     marked stage cloud with shop=<pid>, account= and worker=<alias>; a refused mark, or a local run started meanwhile,
@@ -1674,8 +1675,7 @@ def shop_tick(project, repo, root) -> bool:
                    and j.get("setup") != "pending" and not lilguy(j)
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
                   key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
-    # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
-    if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()):
+    if not pool:
         return False
     if not all(map(is_child, pool)):  # a launch overlapping a running or cloud job waits; cmd_ready checks a child
         busy = busy_files(project, root, jobs)

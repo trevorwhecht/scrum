@@ -4061,7 +4061,9 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
             "**Conflicts** steps then run unchanged",
             "Run `B cloud-sync`, never `gh pr list` or `gh pr view`", "B set $ID stage=done pr=<url> reason=",  # sync
             "**Cloud-home tail** (`/trevskills-scrum cloud-home <id>`", "interactive Sync runs the same steps",
-            "**Untrusted reason text**", "**Fast-forward main**"):
+            "**Untrusted reason text**", "**Fast-forward main**",
+            "never its number alone, another branch or the bare Merge summary title",
+            "an untagged title is matched by its head"):
             self.assertIn(phrase, cloud, phrase)
         self.assertNotIn("B next", cloud)  # dispatch claims through cloud-claim's overlap check, never blind next calls
         self.assertIn("first run **Cloud lane** **Sync**", self.section(text, "## Commands", "## New job"))
