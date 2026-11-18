@@ -170,6 +170,38 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(route_mod.route('codex-review'),
                          {'runner': 'cloud', 'model': None, 'why': 'codex quota below thresholds'})
 
+    def bare_rollout(self, name, mtime):
+        """A rollout file with no rate_limits line, like the second file of a `codex exec review`."""
+        path = self.sessions / '2026' / '10' / '14' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'type': 'event_msg', 'payload': {'type': 'task_complete'}}) + '\n')
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_codex_quota_skips_newest_file_without_rate_limits(self):
+        now = time.time()
+        older = self.rollout(primary=14, secondary=1)
+        os.utime(older, (now - 1, now - 1))
+        self.bare_rollout('rollout-2.jsonl', now)
+        self.assertEqual(route_mod.status()['codex'], {'5h': 14, 'weekly': 1})
+        future = int(now) + 3600
+        line = {'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
+            'primary': {'used_percent': 40, 'resets_at': future},
+            'secondary': {'used_percent': 5, 'resets_at': future}}}}
+        newest = older.parent / 'rollout-3.jsonl'
+        newest.write_text(json.dumps(line) + '\n')
+        os.utime(newest, (now + 1, now + 1))
+        self.assertEqual(route_mod.status()['codex'], {'5h': 40, 'weekly': 5})
+
+    def test_codex_quota_none_when_newest_20_files_lack_rate_limits(self):
+        now = time.time()
+        for i in range(20):
+            self.bare_rollout(f'rollout-bare-{i}.jsonl', now - i)
+        self.assertEqual(route_mod.status()['codex'], {'5h': None, 'weekly': None})
+        old = self.rollout(primary=14, secondary=1)
+        os.utime(old, (now - 100, now - 100))
+        self.assertEqual(route_mod.status()['codex'], {'5h': None, 'weekly': None})
+
     def test_claude_exhausted_expired_reset_ignored(self):
         self.claude_limit(3 * 3600, -2 * 3600)
         self.assertIsNone(route_mod.status(str(self.scrum))['claude_exhausted_until'])
