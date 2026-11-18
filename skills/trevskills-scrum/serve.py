@@ -295,7 +295,8 @@ def cpu_first():
     return best and best[1:]
 
 
-def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False):
+def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "acceptEdits"), manual=False, idle=False,
+          account=None):
     """board.spawn (detached `claude -p`, runs/ log, runlog=, outcome cleared), plus the RUNS entry the dashboard
     shows as running; it covers a job that isn't on the board. Returns the log path relative to root. A GATED action
     on a board job starts only while board.ram_room(floor=0, light=board.light_job(...)) >= 1 (every session ps sees,
@@ -304,7 +305,8 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
     None. A start clears both fields, whichever path launched it, and sets manual_run (the cool-down bypass
     board.cmd_cooldown_park reads) when `manual`, else pops it. A RAM hold older than RAM_HOLD_SECS (from
     play_queued) writes ram_hold, the reading, and logs it to stderr the first time. An id not on the board (run-all,
-    digest, weekly) runs on board.pick_account's account, kept as RUNS[key]["account"] (None: the first account).
+    digest, weekly) runs on `account` when given, else board.pick_account's account, kept as RUNS[key]["account"]
+    (None: the first account).
     While cooling down, a non-manual start of a serve or runall job (started_by) is parked by board.cmd_cooldown_park
     for auto_resume and launches nothing (None); a park that fails launches as usual. `idle` (idle_claim) skips only
     the ram_room check. A RAM hold notes board.ram_room_reason (the readings), then ram_room:<id> per live run of the
@@ -370,12 +372,12 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         if action == "start" and not manual:  # a serve.py start, with the CPU reading its gate passed, for pulse_tick
             with PULSE_STARTS_LOCK:
                 PULSE_STARTS.append({"project": project, "job": job_id, "cpu": cpu})
-    account = None  # a board job's account is picked and recorded by board.spawn
+    off_board, account = account, None  # a board job's account is picked and recorded by board.spawn
     if not on_board:
         try:
             board.find(board.read_board(root), job_id)
         except (SystemExit, OSError):
-            account = board.pick_account(time.time())[0]
+            account = off_board or board.pick_account(time.time())[0]
         proc, log = board.spawn(root, job_id, action, prompt, flags, account=account)
         if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
             with PULSE_STARTS_LOCK:
@@ -2841,18 +2843,31 @@ def window_tick():
 
 
 def weekly_tick():
-    """Start the cross-project weekly digest once per 7d window: only in its last board.WEEKLY_LATE_SECS, while
-    board.fable_ok (no Opus fallback: a paused or unknown week is skipped, retried next tick while the window lasts),
-    when no weekly/*/window holds that resets_at and no weekly run is live. It claims (board.cmd_weekly_start) and
-    spawns in this checkout's registered project (research_home)."""
+    """Start the cross-project weekly digest once per 7d window: only in its last board.WEEKLY_LATE_SECS (this
+    session's own usage.json, board.read_usage(), times the window), while some account with room (no limit_until
+    marker ahead, no reserve_hit) is board.fable_ok (no Opus fallback: when none is, the tick is skipped with each
+    account's state and retried next tick while the window lasts), when no weekly/*/window holds that resets_at and no
+    weekly run is live. It claims (board.cmd_weekly_start) and spawns in this checkout's registered project
+    (research_home) on board.pick_account's account when it is one of those, else the first of them (job 1130)."""
     usage, now = board.read_usage(), time.time()
     limits = usage.get("rate_limits") if isinstance(usage, dict) else None
     week = limits.get("seven_day") if isinstance(limits, dict) else None
     resets = week.get("resets_at") if isinstance(week, dict) else None
     if not board.is_num(resets) or not now < resets <= now + board.WEEKLY_LATE_SECS:
         return
-    if not board.fable_ok(usage, now):
-        print(f"watchdog: weekly digest: skipped, fable state is {board.fable_state(usage, now)}", file=sys.stderr, flush=True)
+    states, ok = [], []
+    for acc in board.accounts():
+        u = board.read_usage(acc.name)
+        if until := board.limited_until(acc.name, now):
+            states.append(f"{acc.name} limited until {datetime.fromtimestamp(until):%H:%M}")
+        elif held := board.reserve_hit(acc, u, now):
+            states.append(f"{acc.name} {held}")
+        elif board.fable_ok(u, now):
+            ok.append(acc.name)
+        else:
+            states.append(f"{acc.name} {board.fable_state(u, now)}")
+    if not ok:
+        print(f"watchdog: weekly digest: skipped, fable state {'; '.join(states)}", file=sys.stderr, flush=True)
         return
     if board.weekly_ran(resets):
         return
@@ -2862,7 +2877,8 @@ def weekly_tick():
     if running(home[0], "weekly"):
         return
     if (out := board.cmd_weekly_start(resets, now))["id"]:
-        spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}")
+        account = pick if (pick := board.pick_account(now)[0]) in ok else ok[0]
+        spawn(home[0], home[1], "weekly", "weekly", f"/trevskills-scrum weekly-digest {out['id']}", account=account)
         board.log_process("Weekly digest", "started", digest=out["id"])
 
 

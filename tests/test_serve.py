@@ -5671,6 +5671,18 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([c.kwargs["account"] for c in bspawn.call_args_list], ["main", "owa"])
         self.assertEqual(s.RUNS["reg/digest"]["account"], "owa")
 
+    def test_spawn_runs_an_off_board_id_on_the_given_account(self):
+        """Job 1130: spawn(account=) runs an id not on the board on that account, not on pick_account's."""
+        s = self.serve
+        self.addCleanup(s.RUNS.pop, "reg/weekly", None)
+        with mock.patch.object(self.board, "spawn", return_value=(mock.Mock(), "runs/w.log")) as bspawn, \
+                mock.patch.object(self.board, "pick_account", return_value=("main", None)):
+            s.spawn("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001", account="owa")
+            s.spawn("reg", self.scrum, "digest", "digest", "/trevskills-scrum digest")
+        self.addCleanup(s.RUNS.pop, "reg/digest", None)
+        self.assertEqual([c.kwargs["account"] for c in bspawn.call_args_list], ["owa", "main"])
+        self.assertEqual((s.RUNS["reg/weekly"]["account"], s.RUNS["reg/digest"]["account"]), ("owa", "main"))
+
     def test_digest_now_spawns_and_refuses_when_empty_or_running(self):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
@@ -11291,20 +11303,79 @@ class WeeklyTest(unittest.TestCase):
         (self.other / "scrum").mkdir(parents=True)
         self.weekly = Path(os.environ["SCRUM_REGISTRY"]).parent / "weekly"
         Path(os.environ["SCRUM_REGISTRY"]).write_text(json.dumps([str(self.reg), str(self.other)]))
-        self.usage = None
+        self.usage = self.owa_usage = None  # main's usage.json, owa's (only listed when a test calls two_accounts)
         for patcher in (mock.patch.object(self.serve, "research_home", lambda: ("reg", self.scrum)),
-                        mock.patch.object(self.board, "read_usage", lambda: self.usage)):
+                        mock.patch.object(self.board, "read_usage",
+                                          lambda account=None: self.owa_usage if account == "owa" else self.usage)):
             patcher.start()
             self.addCleanup(patcher.stop)
         patcher = mock.patch.object(self.serve, "spawn")
         self.spawn = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def use(self, five=10, seven=10, left=86400, age=0):
-        """usage.json: 7d window resetting `left` seconds from now, written `age` seconds ago."""
+    def use(self, five=10, seven=10, left=86400, age=0, owa=False):
+        """usage.json (owa's when `owa`, else main's): 7d window resetting `left` seconds from now, written `age` seconds ago."""
         t = time.time()
-        self.usage = {"rate_limits": {"five_hour": {"used_percentage": five, "resets_at": t + 3600},
-                                      "seven_day": {"used_percentage": seven, "resets_at": t + left}}, "written_at": t - age}
+        u = {"rate_limits": {"five_hour": {"used_percentage": five, "resets_at": t + 3600},
+                             "seven_day": {"used_percentage": seven, "resets_at": t + left}}, "written_at": t - age}
+        if owa:
+            self.owa_usage = u
+        else:
+            self.usage = u
+
+    def two_accounts(self):
+        """main and owa (reserve 80/90) config dirs under the fake home, listed by SCRUM_ACCOUNTS."""
+        self.owa_dir = self.home / "owa-config"
+        self.owa_dir.mkdir()
+        env = mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps(
+            [["main", str(self.home / "main-config"), None], ["owa", str(self.owa_dir), [80, 90]]]))
+        env.start()
+        self.addCleanup(env.stop)
+
+    def skip_line(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.serve.weekly_tick()
+        return err.getvalue()
+
+    def test_tick_runs_on_owa_when_main_is_paused(self):
+        """Job 1130: main alone near its limit never skips the digest: it starts on an account with Fable room."""
+        self.two_accounts()
+        self.done(self.scrum, "reg job")
+        self.use(seven=90)  # main paused
+        self.use(seven=10, left=5 * 86400, owa=True)  # owa ok; its own week resets later
+        self.assertEqual(self.skip_line(), "")
+        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001",
+                                           account="owa")
+        self.assertEqual((self.weekly / "001" / "window").read_text(),
+                         f"{int(self.usage['rate_limits']['seven_day']['resets_at'])}\n", "main's week times the digest")
+
+    def test_tick_with_both_ok_runs_on_pick_accounts_account(self):
+        """Job 1130: both accounts have Fable room: the digest takes pick_account's account (owa's week ends first)."""
+        self.two_accounts()
+        self.done(self.scrum, "reg job")
+        self.use(seven=10)
+        self.use(seven=10, left=3600, owa=True)
+        self.serve.weekly_tick()
+        self.assertEqual(self.spawn.call_args.kwargs["account"], "owa")
+
+    def test_tick_skips_when_no_account_has_fable_room(self):
+        """Job 1130: skipped only when every account is paused, limited or at its reserve; the line names each."""
+        self.two_accounts()
+        self.done(self.scrum, "reg job")
+        self.use(seven=90)  # main paused
+        self.use(seven=86, owa=True)  # owa paused, under its 90 % reserve
+        self.assertEqual(self.skip_line(), "watchdog: weekly digest: skipped, fable state main paused; owa paused\n")
+        self.use(seven=10, five=80, owa=True)  # owa ok for Fable, but at its 5h reserve
+        self.assertEqual(self.skip_line(), "watchdog: weekly digest: skipped, fable state main paused; "
+                                           "owa reserve 5h 80% used (keeps 80%)\n")
+        self.use(seven=10, owa=True)
+        reset = time.time() + 3600
+        (self.owa_dir / "limit_until").write_text(f"{int(reset)}\n")
+        self.assertEqual(self.skip_line(), "watchdog: weekly digest: skipped, fable state main paused; "
+                                           f"owa limited until {datetime.fromtimestamp(int(reset)):%H:%M}\n")
+        self.spawn.assert_not_called()
+        self.assertFalse(self.weekly.exists())
 
     def done(self, root, title):
         job_id = self.board.cmd_new(root, title)
@@ -11325,7 +11396,8 @@ class WeeklyTest(unittest.TestCase):
         a, b = self.done(self.scrum, "reg job"), self.done(self.other / "scrum", "other job")
         self.use(left=2 * 86400 - 60)
         self.serve.weekly_tick()
-        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001")
+        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001",
+                                           account="main")
         self.assertEqual((self.weekly / "001" / "jobs.txt").read_text(), f"{a}\n{b}\n")
         self.assertEqual((self.weekly / "001" / "window").read_text(), f"{int(self.usage['rate_limits']['seven_day']['resets_at'])}\n")
 
@@ -11369,7 +11441,8 @@ class WeeklyTest(unittest.TestCase):
         self.use(left=86400)
         del self.usage["rate_limits"]["five_hour"]
         self.serve.weekly_tick()
-        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001")
+        self.spawn.assert_called_once_with("reg", self.scrum, "weekly", "weekly", "/trevskills-scrum weekly-digest 001",
+                                           account="main")
 
     def test_tick_logs_one_line_when_skipping_in_window_for_fable(self):
         self.done(self.scrum, "reg job")
@@ -11377,7 +11450,7 @@ class WeeklyTest(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.serve.weekly_tick()
-        self.assertEqual(err.getvalue(), "watchdog: weekly digest: skipped, fable state is paused\n")
+        self.assertEqual(err.getvalue(), "watchdog: weekly digest: skipped, fable state main paused\n")
         self.use(seven=90, left=5 * 86400)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):

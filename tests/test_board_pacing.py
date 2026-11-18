@@ -388,13 +388,35 @@ class PickAccountTest(AccountEnv):
         self.write(self.main, five=(91, 9000))  # allowance 3
         self.assertEqual(board.pick_account(NOW, 3)[0], "owa")
         self.assertEqual(board.pick_account(NOW, [1, 2, 3])[0], "owa")
-        name, allow = board.pick_account(NOW, 2)
-        self.assertEqual((name, int(allow)), ("main", 3))
+        self.assertEqual(board.pick_account(NOW, 2), ("main", None))  # owa has room with no taper (job 1130)
         self.write(self.owa, five=self.FULL)
         name, allow = board.pick_account(NOW, 3)
         self.assertEqual((name, int(allow)), (None, 0))
         self.assertIn("main usage", allow.reason)
         self.assertIn("owa usage", allow.reason)
+
+    def test_tapered_main_with_owa_clear_gives_no_taper(self):
+        """Job 1130: one account near its limit never caps claims while another has room with no taper."""
+        self.write(self.main, five=(91, 9000))  # fresh, 9 % left: allowance 3
+        self.assertEqual(int(board.usage_allowance(board.read_usage("main"), NOW, 0)), 3)
+        self.assertEqual(board.pick_account(NOW), ("main", None))
+        self.assertEqual(board.pick_account(NOW, 2), ("main", None))
+
+    def test_both_tapered_gives_the_larger_allowance(self):
+        """Job 1130: every account with room is tapered: the cap is the largest of their allowances."""
+        with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=json.dumps([["main", str(self.main), None],
+                                                                     ["owa", str(self.owa), None]])):
+            self.write(self.main, five=(96, 9000))  # 4 % left: allowance 1
+            self.write(self.owa, five=(91, 9000))  # 9 % left: allowance 3
+            name, allow = board.pick_account(NOW)
+            self.assertEqual((name, int(allow)), ("main", 3))  # the name keeps the account order
+            self.assertIn("usage 5h 91% used", allow.reason)
+            name, allow = board.pick_account(NOW, 1)  # main is full: only owa has room
+            self.assertEqual((name, int(allow)), ("owa", 3))
+            name, allow = board.pick_account(NOW, 3)  # both out
+            self.assertEqual((name, int(allow)), (None, 0))
+            self.assertTrue(allow.reason.startswith("no account has room: main usage 5h 96% used"), allow.reason)
+            self.assertIn("owa usage 5h 91% used", allow.reason)
 
     def test_owa_at_reserve_with_main_full_gives_none(self):
         self.write(self.main, five=self.FULL, seven=(10, 50000))  # main resets first: order stays main, owa
