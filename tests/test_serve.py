@@ -43,6 +43,20 @@ B_HASH = "cf242PFc/kb7xD0Qzhsmd9vvRkc+cWFmbi+k+YvtdKc="  # base64(sha256(b"b()")
 REVIEWER = "---\nname: scrum-review-ui\nmodel: sonnet\nskills:\n    - frontend-design:frontend-design\n---\nReview.\n"
 
 
+def processes_logged(fn):
+    """Job 976: fn() with SCRUM_PULSE in a fresh temp folder; returns (fn's result, the processes.log lines it wrote,
+    each without its `t`)."""
+    d = tempfile.mkdtemp()
+    try:
+        with mock.patch.dict(os.environ, SCRUM_PULSE=os.path.join(d, "pulse.log")):
+            out = fn()
+        log = Path(d) / "processes.log"
+        lines = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+    finally:
+        shutil.rmtree(d, True)
+    return out, [{k: v for k, v in l.items() if k != "t"} for l in lines]
+
+
 class ServeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -5549,6 +5563,21 @@ class DigestTest(unittest.TestCase):
         f.write_text(text)
         return f
 
+    def test_retry_logs_batch(self):
+        """Job 976: each digest_apply batch the retry tick runs logs its digest, proposal count and not-applied count."""
+        target = self.reg / "agents" / "scrum-x.md"
+        held = lambda pid: self.prop(pid, target, status="queued", reason="uncommitted changes")
+        self.digest([held("p1"), held("p2")])
+        with mock.patch.object(self.serve, "digest_apply_ready", return_value=None), \
+                mock.patch.object(self.serve, "digest_apply",
+                                  return_value=([], [{"id": "p2", "reason": "old text found nowhere"}], None)):
+            _, lines = processes_logged(lambda: self.serve.digest_retry_tick("reg", self.reg, self.scrum))
+        self.assertEqual(lines, [{"process": "Digest retry", "result": "retried", "repo": str(self.reg), "digest": "001",
+                                  "proposals": 2, "not_applied": 1}])
+        with mock.patch.object(self.serve, "digest_apply_ready", return_value="uncommitted changes"):
+            _, lines = processes_logged(lambda: self.serve.digest_retry_tick("reg", self.reg, self.scrum))
+        self.assertEqual(lines, [])
+
     def test_digests_list_skips_malformed_proposals(self):
         self.assertEqual(self.get("/api/p/reg/digests")[:2], (200, {"running": False, "undigested": 0, "due": False, "digests": [], "weekly": []}))
         a = self.done_job()
@@ -8350,6 +8379,20 @@ class CloudPollTest(unittest.TestCase):
             s.cloud_tick("p", self.root, jobs, now=now)
         return cs, sp
 
+    def test_sync_logs_moves(self):
+        """Job 976: each job the sync moved logs its state; a sync error logs error."""
+        moved = [{"id": "001-a", "state": "MERGED", "pr": "u1", "reason": None, "worktree": None, "artifacts": False},
+                 {"id": "003-c", "state": "CLOSED", "pr": "u3", "reason": "closed", "worktree": None, "artifacts": False}]
+        _, lines = processes_logged(lambda: self.tick(self.cloud, now=10_000, result={"moved": moved, "error": None}))
+        repo = str(self.root.parent)
+        self.assertEqual(lines, [{"process": "Cloud jobs", "result": "MERGED", "repo": repo, "job": "001-a", "pr": "u1"},
+                                 {"process": "Cloud jobs", "result": "CLOSED", "repo": repo, "job": "003-c", "pr": "u3"}])
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            _, lines = processes_logged(lambda: self.tick(self.cloud, now=20_000, result={"moved": [], "error": "gh broke"}))
+        self.assertEqual(lines, [{"process": "Cloud jobs", "result": "error", "repo": repo, "error": "gh broke"}])
+        _, lines = processes_logged(lambda: self.tick(self.cloud, now=30_000))
+        self.assertEqual(lines, [])
+
     def test_cloud_poll_held_during_cooldown(self):
         moved = [{"id": "001-art", "state": "MERGED", "pr": "u", "reason": None, "worktree": None, "artifacts": True}]
         result = {"moved": moved, "error": None}
@@ -10903,6 +10946,23 @@ class ActionsAlertTest(unittest.TestCase):
             self.assertEqual(kw["timeout"], 20)
         return out, [argv for argv, _ in calls]
 
+    def test_alert_change_logs_process(self):
+        """Job 976: a new alert or a cleared one logs a line; an alert the cache already holds logs nothing."""
+        refused = [self.run_(2, "CI", "pull_request", "failure")]
+        (out, _), lines = processes_logged(lambda: self.alert(refused, {2: [0]}))
+        self.assertEqual(out, self.REFUSED)
+        self.assertEqual(lines, [{"process": "Actions alerts", "result": "alert", "repo": str(self.repo),
+                                  "alert": self.REFUSED}])
+        self.serve.ACTIONS_ALERT[str(self.repo)] = (1.0, self.REFUSED)
+        _, lines = processes_logged(lambda: self.alert(refused, {2: [0]}))
+        self.assertEqual(lines, [])
+        (out, _), lines = processes_logged(lambda: self.alert([self.run_(3, "CI", "push", "success")]))
+        self.assertIsNone(out)
+        self.assertEqual(lines, [{"process": "Actions alerts", "result": "clear", "repo": str(self.repo)}])
+        self.serve.ACTIONS_ALERT[str(self.repo)] = (2.0, None)
+        _, lines = processes_logged(lambda: self.alert([self.run_(3, "CI", "push", "success")]))
+        self.assertEqual(lines, [])
+
     def test_refused_run_alerts(self):
         out, calls = self.alert([self.run_(3, "CI", "pull_request", None, "in_progress"),
                                  self.run_(2, "CI", "pull_request", "failure"), self.run_(1, "CI", "push", "success")],
@@ -11042,6 +11102,15 @@ class ReclaimDiskTest(unittest.TestCase):
     def listed(self):
         return self.git(self.repo, "worktree", "list", "--porcelain").stdout
 
+    def test_reclaim_logs_freed(self):
+        """Job 976: a reclaim that removed a folder logs it; one that removed nothing logs nothing."""
+        jobs = [{"id": "1", "stage": "done", "worktree": str(self.wt("done"))}]
+        n, lines = processes_logged(lambda: self.serve.reclaim_disk(self.repo, jobs))
+        self.assertEqual(n, 1)
+        self.assertEqual(lines, [{"process": "Disk reclaim", "result": "freed", "repo": str(self.repo), "removed": 1}])
+        n, lines = processes_logged(lambda: self.serve.reclaim_disk(self.repo, jobs))
+        self.assertEqual((n, lines), (0, []))
+
     def test_removes_only_done_and_aborted_inside_base(self):
         done, aborted, live, shared, outside, target = (self.wt("done"), self.wt("aborted"), self.wt("live"),
                                                         self.wt("shared"), self.wt("outside", inside=False), self.wt("target"))
@@ -11151,6 +11220,16 @@ class WeeklyTest(unittest.TestCase):
         job_id = self.board.cmd_new(root, title)
         self.board.cmd_set(root, job_id, ["stage=done"])
         return str(root / "jobs" / job_id)
+
+    def test_weekly_logs_start(self):
+        """Job 976: a started weekly digest logs its id; a skipped tick logs nothing."""
+        self.done(self.scrum, "reg job")
+        self.use(left=5 * 86400)
+        _, lines = processes_logged(self.serve.weekly_tick)
+        self.assertEqual(lines, [])
+        self.use(left=2 * 86400 - 60)
+        _, lines = processes_logged(self.serve.weekly_tick)
+        self.assertEqual(lines, [{"process": "Weekly digest", "result": "started", "digest": "001"}])
 
     def test_tick_spawns_late_in_window_when_fable_ok(self):
         a, b = self.done(self.scrum, "reg job"), self.done(self.other / "scrum", "other job")
@@ -11421,6 +11500,28 @@ class IdleCleanupTest(unittest.TestCase):
                 raise ans
             return ans or subprocess.CompletedProcess(argv, 0, "", "")
         return mock.patch.object(self.serve.subprocess, "run", side_effect=run)
+
+    def test_cleanup_logs_counts(self):
+        """Job 976: a cleanup that signalled a dev server or an orphan, or quit Docker, logs its counts."""
+        s = self.serve
+        projects = {"a": self.repo("a")}
+        (projects["a"] / "scrum" / "board.json").write_text(json.dumps({"jobs": []}))
+
+        def clean(dev, orphans, docker):
+            with mock.patch.dict(os.environ, SCRUM_IDLE_CLEANUP="1"), \
+                    mock.patch.object(s.board, "projects", return_value=projects), \
+                    mock.patch.object(s, "live_ids", return_value=set()), \
+                    mock.patch.object(s, "listeners", return_value=[]), \
+                    mock.patch.object(s, "processes", return_value=[]), \
+                    mock.patch.object(s, "stop_dev_servers", return_value=dev), \
+                    mock.patch.object(s, "stop_orphans", return_value=orphans), \
+                    mock.patch.object(s, "docker_tick", return_value=docker):
+                return processes_logged(lambda: s.idle_cleanup({"a": False}))[1]
+        self.assertEqual(clean([7], [8, 9], True), [{"process": "Idle cleanup", "result": "cleaned", "dev_servers": 1,
+                                                    "orphans": 2, "docker": True}])
+        self.assertEqual(clean([], [], True), [{"process": "Idle cleanup", "result": "cleaned", "dev_servers": 0,
+                                                "orphans": 0, "docker": True}])
+        self.assertEqual(clean([], [], False), [])
 
     def test_listeners_parses_lsof(self):
         ok = lambda out: subprocess.CompletedProcess([], 0, out, "")
@@ -11792,6 +11893,17 @@ class E2eFullTest(unittest.TestCase):
         (self.repo / "a.txt").write_text((self.repo / "a.txt").read_text() + msg + "\n")
         self.git("commit", "-q", "-am", msg)
         return self.git("rev-parse", "HEAD")
+
+    def test_run_logs_process(self):
+        """Job 976: each full run logs its result, head, exit, failure count and whole seconds since it started."""
+        (self.repo / "out.txt").write_text(E2E_LIST_OUTPUT)
+        (self.repo / "run-e2e.sh").write_text("cat out.txt; exit 1\n")
+        head = self.git("rev-parse", "HEAD")
+        with mock.patch.object(self.serve.time, "time", return_value=1075.6):
+            rec, lines = processes_logged(lambda: self.serve.e2e_full_run(self.repo, self.root, "sh run-e2e.sh", head, 1000.0, None))
+        self.assertEqual(rec["result"], "fail")
+        self.assertEqual(lines, [{"process": "Full E2E on main", "result": "fail", "repo": str(self.repo), "head": head,
+                                  "exit": 1, "failed": 2, "secs": 75}])
 
     def test_due(self):
         due, now = self.serve.e2e_full_due, 1_000_000
@@ -12409,6 +12521,19 @@ class ProdErrorsTest(unittest.TestCase):
     def backlog(self):
         return [i for i in self.serve.board.read_backlog(self.root)[1]]
 
+    def test_tick_logs_process(self):
+        """Job 976: a sweep logs pass with its signature and added counts; a failed fetch logs error."""
+        rows = [self.row("/a", "Error: x", 1762736400000), self.row("/b", "Error: y", 1762736400000),
+                self.row("/a", "Error: x", 1762736401000)]
+        _, lines = processes_logged(lambda: self.sweep(rows))
+        self.assertEqual(lines, [{"process": "Prod error sweep", "result": "pass", "repo": str(self.repo),
+                                  "signatures": 2, "added": 2}])
+        _, lines = processes_logged(lambda: self.sweep(code=1, now=self.NOW + 86400))
+        self.assertEqual(lines, [{"process": "Prod error sweep", "result": "error", "repo": str(self.repo),
+                                  "signatures": 0, "added": 0}])
+        _, lines = processes_logged(lambda: self.sweep(rows, now=self.NOW + 86401))  # inside the retry wait
+        self.assertEqual(lines, [])
+
     def test_runs_only_when_opted_in_linked_due_and_machine_ok(self):
         run = self.sweep([self.row("/a", "Error: x", 1762736400000)])
         run.assert_called_once()
@@ -12675,6 +12800,20 @@ class E2eWaitRecordTest(unittest.TestCase):
         except subprocess.TimeoutExpired:
             return False
 
+    def test_reap_logs_freed_slot(self):
+        """Job 976: a freed slot logs its slot, holder pid, cwd and whether the holder was dead; no reap logs nothing."""
+        self.waiter(7810)
+        self.flock_child()
+        dead = self.dead_pid()
+        self.write_holder(dead)
+        _, lines = processes_logged(self.reap)
+        self.assertEqual(lines, [{"process": "E2E lock reaps", "result": "freed", "slot": "e2e.lock", "pid": dead,
+                                  "cwd": str(self.wt["1225"]), "dead": True}])
+        child = self.flock_child()
+        self.write_holder(child.pid)
+        _, lines = processes_logged(self.reap)  # a live holder in a check job stays
+        self.assertEqual(lines, [])
+
     def test_over_two_hours(self):
         self.waiter(7810)
         self.write_holder(4242)
@@ -12801,6 +12940,27 @@ class SpawnCooldownTest(unittest.TestCase):
                 mock.patch("sys.stderr", new=err):
             out = self.serve.spawn("repo", self.root, job_id, "start", f"/trevskills-scrum start {job_id}", manual=manual)
         return out, bspawn, err.getvalue()
+
+    def test_spawn_logs_session_start(self):
+        """Job 976: a real launch logs one Session starts line; a queued launch or a cool-down park logs nothing."""
+        job_id = self.job("wake")
+        (out, _, _), lines = processes_logged(lambda: self.start(job_id))
+        self.assertEqual(out, f"runs/{job_id}-start.log")
+        self.assertEqual(lines, [{"process": "Session starts", "result": "start", "repo": str(self.root.parent),
+                                  "job": job_id, "manual": False}])
+        hand = self.job("runall")
+        (out, _, _), lines = processes_logged(lambda: self.start(hand, manual=True))
+        self.assertEqual(lines, [{"process": "Session starts", "result": "start", "repo": str(self.root.parent),
+                                  "job": hand, "manual": True}])
+        queued = self.job("wake")
+        with mock.patch.object(self.board, "ram_room", return_value=0):
+            (out, _, _), lines = processes_logged(lambda: self.start(queued))
+        self.assertIsNone(out)
+        self.assertEqual(lines, [])
+        parked = self.job("runall")
+        (out, _, _), lines = processes_logged(lambda: self.start(parked))
+        self.assertIsNone(out)
+        self.assertEqual(lines, [])
 
     def test_runall_start_refused_in_cool_down(self):
         for by in ("runall", "serve"):

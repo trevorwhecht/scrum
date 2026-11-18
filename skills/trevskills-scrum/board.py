@@ -3369,6 +3369,7 @@ def cmd_ui_sweep_record(root, review_file) -> dict:
     tmp = Path(root) / "ui-sweep.json.tmp"
     tmp.write_text(json.dumps(out, indent=1) + "\n")
     os.replace(tmp, Path(root) / "ui-sweep.json")
+    log_process("UI sweep", out["result"], repo=str(Path(root).parent), findings=out["findings"], dir=out["dir"])
     return out
 
 

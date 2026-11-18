@@ -8329,6 +8329,19 @@ class UiSweepRecordTest(unittest.TestCase):
     def record(self):
         return json.loads((self.root / "ui-sweep.json").read_text())
 
+    def test_record_logs_process(self):
+        """Job 976: a recorded sweep logs its result, finding count and folder to processes.log."""
+        f = self.review("VERDICT: PASS\n- ok /leads\n- ok /\n- ok /admin/views\n- ok /pricing\n")
+        log = Path(self.tmp.name) / "machine" / "processes.log"
+        with mock.patch.dict(os.environ, SCRUM_PULSE=str(log.with_name("pulse.log"))):
+            board.cmd_ui_sweep_record(self.root, f)
+            self.review("VERDICT: CHANGES\n- [blocking] /leads — tall — /s/a.png\n")
+            board.cmd_ui_sweep_record(self.root, f)
+        lines = [{k: v for k, v in json.loads(l).items() if k != "t"} for l in log.read_text().splitlines()]
+        self.assertEqual(lines, [
+            {"process": "UI sweep", "result": "pass", "repo": str(self.root.parent), "findings": 0, "dir": str(self.dir)},
+            {"process": "UI sweep", "result": "fail", "repo": str(self.root.parent), "findings": 4, "dir": str(self.dir)}])
+
     def test_files_findings_and_unrendered_once(self):
         f = self.review("VERDICT: CHANGES\n- [blocking] /leads — rows 160 px tall — /s/render/leads-1440.png\n"
                         "- ok /pricing\n- Unrendered: /admin/views — needs a signed-in session\n")
