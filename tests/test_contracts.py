@@ -1696,6 +1696,49 @@ class ContractTest(unittest.TestCase):
         weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
         self.assertIn("**Pulse**, **Escapes**, **Backlog fallback**", weekly)
 
+    def test_digest_reads_processes(self):
+        """Job 976: the digest audits every process in board.PROCESSES through $D/processes.md."""
+        lane = self.lane("digest")
+        self.assertIn("Learns from finished jobs and from every process the scrum runs (`$D/processes.md`).", lane)
+        step1 = next(l for l in lane.splitlines() if l.startswith("1. Run `B digest-start`"))
+        last = step1[step1.rindex(". ", 0, len(step1) - 1) + 2:]
+        for phrase in ("`$D/processes.md`", "`board.PROCESSES`", "`processes.log` lines since the last digest",
+                       "state files"):
+            self.assertIn(phrase, last, phrase)
+        reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
+        read = reader[reader.index("**Read**"):reader.index("**Look for repeats.**")]
+        bullet = "- `DIGEST_DIR/processes.md`, read once per digest: `board.py digest-start` wrote it"
+        self.assertIn(bullet, read)
+        self.assertLess(read.index("- `DIGEST_DIR/pulse.md`"), read.index(bullet))
+        line = read[read.index(bullet):]
+        line = line[:line.index("\n")]
+        for phrase in ("`Runs:`", "`false alarms`", "`Files:`", "newest first", "`Runs: none logged since the last digest`"):
+            self.assertIn(phrase, line, phrase)
+        self.assertIn("    ## Processes\n    - <process> — runs: <n> (<results>) — flags: <flags or none> — files read: "
+                      "<changed files read, or none>\n", reader)
+        self.assertLess(reader.index("    ## Pulse\n"), reader.index("    ## Processes\n"))
+        self.assertLess(reader.index("    ## Processes\n"), reader.index("    ## Escapes\n"))
+        rule = reader[reader.index("For `## Processes`, use `DIGEST_DIR/processes.md`:"):]
+        rule = rule[:rule.index("\n\n")]
+        for phrase in ("one line per process that has runs or a changed file, in file order",
+                       "Read each changed file it names before writing", "`loaded` run", "closed OBSOLETE or aborted",
+                       "re-tried or re-run for one cause", "far slower than its others",
+                       "Write `None` when the file is missing or no process has runs or a changed file",
+                       "exempt from the 2 or more different jobs rule"):
+            self.assertIn(phrase, rule, phrase)
+        digester = (ROOT / "agents" / "scrum-digester.md").read_text()
+        step2 = next(l for l in digester.splitlines() if l.startswith("2. The scrum's own files:"))
+        self.assertIn("`~/.claude/skills/trevskills-scrum/lanes/*.md`", step2)
+        self.assertLess(digester.index("**Escapes.**"), digester.index("**Processes.**"))
+        self.assertLess(digester.index("**Processes.**"), digester.index("**Backlog fallback.**"))
+        procs = digester[digester.index("**Processes.**"):digester.index("**Backlog fallback.**")]
+        for phrase in ("at most one proposal whose `why` starts `Processes:`", "names the process and the flag",
+                       "`lanes/uisweep.md`", "`lanes/runall.md`", "`lanes/bigboy.md`", "**Backlog fallback**",
+                       "a serve.py tick, an E2E spec or seed data", "A `None` section gets no proposal", "at-most-8 cap"):
+            self.assertIn(phrase, procs, phrase)
+        weekly = digester[digester.index("**Weekly mode**"):digester.index("**Hard limits:**")]
+        self.assertIn("**Escapes**, **Backlog fallback**, **New skill** and **Processes** read `notes.md`", weekly)
+
     def test_digest_reads_trevor(self):
         step1 = next(l for l in self.lane("digest").splitlines() if l.startswith("1. Run `B digest-start`"))
         self.assertIn("B digest-trevor <id>", step1)
