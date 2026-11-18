@@ -8302,6 +8302,7 @@ class MainFfTickTest(unittest.TestCase):
         with mock.patch.object(s.subprocess, "run", side_effect=run or self.git()) as git, \
                 mock.patch.object(s, "spawn") as spawn, mock.patch.object(s, "running", return_value=alive), \
                 mock.patch.object(s, "resume_refusal", return_value=None), \
+                mock.patch.object(s.board, "session_alive_fn", return_value=lambda job: False), \
                 mock.patch.object(s.board, "play") as play:
             result = s.main_ff_tick("p", self.repo, self.root, jobs)
         return result, [c.args[2:] for c in spawn.call_args_list], git, play
