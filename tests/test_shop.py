@@ -1568,7 +1568,8 @@ URL = "https://github.com/trevorwhecht/onewitharts.git"
 PROMPT = f"/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` {TOKEN}\n"
 START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop && cat > .git/scrum-shop/964-shop-x.prompt)'
          ' || exit 1; export CLAUDE_CONFIG_DIR="$HOME/.claude-owa"; [ -r "$HOME/.claude-owa/oauth-token" ] && export '
-         'CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude-owa/oauth-token")"; export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 '
+         'CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude-owa/oauth-token")"; [ -r "$HOME/.config/typesafe/key" ] && export '
+         'TYPESAFE_API_KEY="$(cat "$HOME/.config/typesafe/key")"; export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 '
          'CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; nohup claude -p "$(cat '
          '.git/scrum-shop/964-shop-x.prompt)" --permission-mode acceptEdits --model \'claude-opus-4-5[1m]\' < /dev/null > '
          '.git/scrum-shop/964-shop-x.log 2>&1 & echo $!')
@@ -1615,29 +1616,42 @@ class DispatchTest(SetupCase):
         (clone / ".git").mkdir(parents=True)
         (h / ".local" / "bin").mkdir(parents=True)
         claude = h / ".local" / "bin" / "claude"
-        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
-                          '"$CLAUDE_CODE_OAUTH_TOKEN" "$SCRUM_PW_CHANNEL" "$SCRUM_SHOP" "$CLAUDE_NOTIFIER_DISABLE" '
-                          '"$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" "$PWD" > "$HOME/env"\n'
+        claude.write_text('#!/bin/sh\necho $$ > "$HOME/pid"\nprintf "%s|%s|%s|%s|%s|%s|%s|%s\\n" "$CLAUDE_CONFIG_DIR" '
+                          '"$CLAUDE_CODE_OAUTH_TOKEN" "${TYPESAFE_API_KEY-unset}" "$SCRUM_PW_CHANNEL" "$SCRUM_SHOP" '
+                          '"$CLAUDE_NOTIFIER_DISABLE" "$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" "$PWD" > "$HOME/env"\n'
                           'for a in "$@"; do printf "%s\\n--\\n" "$a"; done > "$HOME/args"\necho session-out\n'
                           'touch "$HOME/done"\n')
         claude.chmod(0o755)
         (h / ".claude-owa").mkdir()
         (h / ".claude-owa" / "oauth-token").write_text("tok-owa-964\n")
-        self.shop(("nohup claude", LOCAL, ""))
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            pid = shop.start("onewitharts", "964-shop-x", PROMPT, "owa", model="claude-opus-4-5[1m]")
-        deadline = time.monotonic() + 10
-        while not (h / "done").exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(out.getvalue(), "")
+        jev_key = h / ".config" / "typesafe" / "key"
+        jev_key.parent.mkdir(parents=True)
+        jev_key.write_text("tsk-1075\n")
+
+        def start():
+            (h / "done").unlink(missing_ok=True)
+            self.shop(("nohup claude", LOCAL, ""))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                pid = shop.start("onewitharts", "964-shop-x", PROMPT, "owa", model="claude-opus-4-5[1m]")
+            deadline = time.monotonic() + 10
+            while not (h / "done").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(out.getvalue(), "")
+            return pid
+        pid = start()
         self.assertEqual(self.calls, [(START, 60, PROMPT.encode())])
         self.assertFalse([a for a in self.argv if TOKEN in " ".join(a) or "touch" in " ".join(a)])
+        self.assertFalse([a for a in self.argv if "tsk-1075" in " ".join(a)])
         self.assertEqual((h / "pid").read_text(), f"{pid}\n")
         self.assertEqual((h / "args").read_text(),
                          "-p\n--\n/trevskills-scrum cloud-job 964-shop-x Build it.\n$(touch pwned) `touch pwned2` "
                          f"{TOKEN}\n--\n--permission-mode\n--\nacceptEdits\n--\n--model\n--\nclaude-opus-4-5[1m]\n--\n")
-        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|chrome|1|1|0|{clone}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|tsk-1075|chrome|1|1|0|{clone}\n")
+        jev_key.unlink()  # no key file: nothing exported, and the session still starts
+        pid = start()
+        self.assertEqual((h / "pid").read_text(), f"{pid}\n")
+        self.assertEqual((h / "env").read_text(), f"{h}/.claude-owa|tok-owa-964|unset|chrome|1|1|0|{clone}\n")
         self.assertEqual(sorted(p.name for p in h.rglob("pwned*")), [])
         logs = clone / ".git" / "scrum-shop"
         self.assertEqual(((logs / "964-shop-x.prompt").read_text(), (logs / "964-shop-x.log").read_text()),
@@ -1794,6 +1808,10 @@ class StructureTest(unittest.TestCase):
         setup = text[text.index("## Setup"):text.index("## Ready")]
         self.assertIn("gh always uses file storage (mode 600) because the shop's login keychain is locked over SSH",
                       setup)
+        jev = setup[setup.index("- **jev key.**"):]  # the last step
+        for phrase in ("`[ -s ~/.config/typesafe/key ]`", "no Keychain read here", "goes on stdin to",
+                       "so the file is mode 600", 'export TYPESAFE_API_KEY="$(cat F)"'):
+            self.assertIn(phrase, jev, phrase)
         copy = text[text.index("## Env copy"):text.index("## E2E channel")]
         for phrase in ("`profile_copy(project, repo)`", "`scrum/` and `.claude/worktrees/`", "`- Render auth:`",
                        "`posixpath.normpath(\".claude/worktrees/scrum-x/\" + <path>)`", "is not under `.claude/`",

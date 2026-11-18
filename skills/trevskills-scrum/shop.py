@@ -161,8 +161,9 @@ CLONE = ('d="$HOME/scrum-work/{p}"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" c
          ' else mkdir -p "$HOME/scrum-work" && git clone -- {u} "$d"; fi && ' + TRUST)
 SHOP_LOGS = ".git/scrum-shop"  # a session's prompt and log, inside the clone's .git so its worktree stays clean
 SHOP_ENV = "export SCRUM_PW_CHANNEL=chrome SCRUM_SHOP=1 CLAUDE_NOTIFIER_DISABLE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0; "
-START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + SHOP_ENV
-         + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
+JEV_KEY_ENV = f'[ -r "{JEV_KEY_FILE}" ] && export TYPESAFE_API_KEY="$(cat "{JEV_KEY_FILE}")"; '  # read on the shop only
+START = ("cd ~/scrum-work/{p} && (umask 077 && mkdir -p {d} && cat > {d}/{j}.prompt) || exit 1; {env}" + JEV_KEY_ENV
+         + SHOP_ENV + 'nohup claude -p "$(cat {d}/{j}.prompt)" --permission-mode acceptEdits{model}'
          ' < /dev/null > {d}/{j}.log 2>&1 & echo $!')
 # ponytail: liveness is `ps -p` showing claude; a reused pid of another claude keeps a dead job alive until it ends
 ENDED = ('ps -p {pid} -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/{p}/{d}/{j}.log"; [ -f "$f" ] || exit 0;'
