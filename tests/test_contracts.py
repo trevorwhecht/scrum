@@ -1637,6 +1637,15 @@ class ContractTest(unittest.TestCase):
         self.assertIn("LANE=fast", text)
         self.assertNotIn("Skip the Codex step entirely", text)
 
+    def test_review_code_blocks_weakened_tests(self):
+        text = (ROOT / "agents" / "scrum-review-code.md").read_text()
+        bullet = next(l for l in text.splitlines() if l.startswith("- a weakened test:"))
+        for phrase in ("`.skip`", "`.only`", "`xit`", "a loosened assertion",
+                       "a test deleted while the behaviour stays", "`[blocking]`", "the diff"):
+            self.assertIn(phrase, bullet, phrase)
+        self.assertIn("added", bullet)
+        self.assertEqual(text.count(".skip"), 1)
+
     def test_digest_reader_reads_timing(self):
         reader = (ROOT / "agents" / "scrum-digest-reader.md").read_text()
         for phrase in ("`DIGEST_DIR/timing.md`", "    ## Time sinks\n", "For `## Time sinks`, use `DIGEST_DIR/timing.md`",

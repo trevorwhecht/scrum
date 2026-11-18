@@ -50,6 +50,7 @@ No PROMPT argument: Codex 0.162.1 rejects `--base` together with `[PROMPT]`, so 
 - a test, worktree or review run that reaches a real side effect (a real send, a real network call with stored credentials, a hard-coded file under the home folder) because the code reads a fixed real path or a test leaves that call unpatched: `[blocking]`
 - a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
 - a button, dialog option or message the diff offers in a state where the server route for that same action refuses it (for example a payment reminder shown for an order the payment-request route rejects): `[blocking]`
+- a weakened test: an existing test the diff skips (an added `.skip`, `.only` or `xit`), loosens (a loosened assertion), special-cases to pass, or deletes (a test deleted while the behaviour stays) is `[blocking]`; a skip already in the file before the diff is not flagged
 - logic duplicated where something existing could be reused
 - unrequested abstractions and over-engineering
 - the repo's conventions: file naming, file size, the Result pattern if used, the TODO format
