@@ -4491,8 +4491,8 @@ def likely_funcs(spec_text):
     `(functions: a, b)`; slot_conflict uses them so fast jobs may share a BIG_SHARED_FILES path."""
     found = {}
     for line in (md_section(spec_text, "Likely files") or "").splitlines():
-        if m := re.match(r"\s*- `([^`\s]+)`[^(]*\(functions:\s*([^)]*)\)", line):
-            names = {n.strip(" `") for n in m.group(2).split(",")} - {""}
+        if m := re.match(r"\s*- `([^`\s]+)`.*?\(functions:\s*((?:[^()]|\(\))*)\)", line):
+            names = {n.strip(" `").removesuffix("()") for n in m.group(2).split(",")} - {""}
             if names:
                 found.setdefault(m.group(1), set()).update(names)
     return found
