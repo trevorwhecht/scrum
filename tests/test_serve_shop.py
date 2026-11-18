@@ -653,6 +653,34 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual(gh.call_count, 2, "the sync's read and the close lookup")
                 self.assertEqual(self.patches(gh), [])
 
+    def test_merged_pr_any_head_spelling_is_done_not_aborted(self):
+        merged = "2026-11-18T00:00:00Z"
+        for why, ref, title in (("full head", "scrum/050-x", "[scrum 050-x] Fix"),
+                                ("short head, short tag", "scrum/050", "[scrum 050] Fix"),
+                                ("full head, no tag", "scrum/050-x", "Fix")):
+            with self.subTest(why):
+                self.serve.CLOUD_LAST.clear()
+                root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+                self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
+                pr = self.pr("050-x", 11, state="closed", title=title, merged_at=merged)
+                pr["head"]["ref"] = ref
+                with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]), \
+                        mock.patch.object(self.board, "merge_refusal", return_value=None), \
+                        mock.patch.object(self.board, "artifacts_pushed", return_value=False):
+                    self.assertEqual(self.cloud(), "")
+                job = self.job(root, "050-x")
+                self.assertEqual((job["stage"], job["pr"], job["reason"]),
+                                 ("done", "https://github.com/trevorwhecht/mm/pull/11", None))
+
+    def test_merged_fork_pr_still_shop_ended(self):
+        root = self.project("mm", [{"id": "050-x", "stage": "cloud", "shop": "4242", "account": "owa"}])
+        self.sh.ended.side_effect = lambda *a, **kw: "Session over\n"
+        pr = self.pr("050-x", 11, state="closed", head_repo="someone/mm", merged_at="2026-11-18T00:00:00Z")
+        with mock.patch.object(self.board, "gh_api", side_effect=lambda repo, ep, *f: {} if f else [pr]):
+            self.cloud()
+        job = self.job(root, "050-x")
+        self.assertEqual((job["stage"], job["reason"]), ("aborted", "requeue: shop session ended without a PR"))
+
     def test_pr_close_failure_keeps_abort(self):
         def list_fails(repo, ep, *f):
             if list_fails.n:
