@@ -1058,7 +1058,7 @@ START = ('cd ~/scrum-work/onewitharts && (umask 077 && mkdir -p .git/scrum-shop 
 CLONE = ('d="$HOME/scrum-work/onewitharts"; if [ -d "$d/.git" ]; then [ "$(git -C "$d" config --get remote.origin.url)" '
          '= https://github.com/trevorwhecht/onewitharts.git ] || exit 3; git -C "$d" fetch origin && git -C "$d" merge '
          '--ff-only refs/remotes/origin/HEAD; else mkdir -p "$HOME/scrum-work" && git clone -- '
-         'https://github.com/trevorwhecht/onewitharts.git "$d"; fi')
+         'https://github.com/trevorwhecht/onewitharts.git "$d"; fi && ' + shop.TRUST)
 ENDED = ('ps -p 4242 -o command= | grep -q claude && exit 3; f="$HOME/scrum-work/onewitharts/.git/scrum-shop/964-shop-x.log";'
          ' [ -f "$f" ] || exit 0; tail -c 8192 "$f"')
 
@@ -1164,6 +1164,21 @@ class DispatchTest(SetupCase):
         self.assertFalse(shop.clone("onewitharts", URL))
         self.assertEqual((self.head(dest), self.head(dest, "refs/remotes/origin/main")), (mine, self.head(work)))
         self.assertEqual(self.calls, [(CLONE, 600, None)] * 3)
+
+    def test_clone_marks_work_folder_trusted(self):
+        h = Path(self.home)
+        self.origin()
+        self.shop(("scrum-work", LOCAL, ""))
+        (h / ".claude-owa").mkdir()
+        (h / ".claude-owa" / ".claude.json").write_text('{"projects": {"/x": {"a": 1}}}')
+        (h / ".claude.json").write_text("{}")
+        for _ in range(2):  # idempotent
+            self.assertTrue(shop.clone("onewitharts", URL))
+        for f in (h / ".claude-owa" / ".claude.json", h / ".claude.json"):
+            self.assertTrue(json.loads(f.read_text())["projects"][str(h / "scrum-work" / "onewitharts")]
+                            ["hasTrustDialogAccepted"])
+            self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads((h / ".claude-owa" / ".claude.json").read_text())["projects"]["/x"], {"a": 1})
 
     def test_clone_refuses_other_origin_or_url(self):
         self.shop(("scrum-work", LOCAL, ""))
