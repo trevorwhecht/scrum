@@ -7835,6 +7835,19 @@ class ReviewPlanTest(unittest.TestCase):
             self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
             self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
 
+    def test_review_plan_test_only_tsx_skips_ui_ux(self):
+        self.project("*.tsx")
+        self.commit("src/x/Foo.test.tsx", "x\n")
+        out = board.cmd_review_plan(self.root, self.job)
+        self.assertEqual(out["spawn"], ["code"])
+        self.assertEqual(self.read(1, "ui"), self.UI_SKIP)
+        self.assertEqual(self.read(1, "ux"), self.UI_SKIP)
+
+    def test_review_plan_runtime_tsx_spawns_ui_ux(self):
+        self.project("*.tsx")
+        self.commit("src/x/Foo.tsx", "x\n")
+        self.assertEqual(board.cmd_review_plan(self.root, self.job)["spawn"], ["ux", "ui", "code"])
+
     def test_review_plan_deletion_skip_boundary_is_90pct(self):
         self.big_base({"web/page.html": "<p>x</p>\n" * 10})
         self.commit("web/page.html", "<p>x</p>\n" + "<p>new</p>\n")  # +1 -9: exactly 90%
