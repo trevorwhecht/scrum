@@ -5424,12 +5424,12 @@ class AiResearchTest(unittest.TestCase):
             log = self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "start", "/trevskills-scrum start x")
         self.addCleanup(self.serve.RUNS.pop, "reg/999-not-a-job", None)
         self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum start x", "--model", "sonnet",
-                                                   "--permission-mode", "acceptEdits"])
+                                                   "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
         self.assertRegex(log, r"^runs/\d{8}-\d{6}-start-999-not-a-job\.log$")
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
             self.serve.spawn("reg", self.reg / "scrum", "999-not-a-job", "resume", "/trevskills-scrum resume x")
         self.assertEqual(popen.call_args.args[0], ["claude-stub", "-p", "/trevskills-scrum resume x", "--model", "sonnet",
-                                                   "--permission-mode", "acceptEdits"])
+                                                   "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
 
     def spawn_argv(self, action, prompt="/p"):
         with mock.patch.object(self.serve.subprocess, "Popen") as popen:
@@ -5440,7 +5440,7 @@ class AiResearchTest(unittest.TestCase):
     def test_spawn_orchestrator_model_from_project(self):
         project = self.reg / "scrum" / "project.md"
         self.addCleanup(lambda: project.unlink(missing_ok=True))
-        plain = ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits"]
+        plain = ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX]
         for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: claude-sonnet-4.5  \n", "claude-sonnet-4.5"),
                             ("- Orchestrator model: inherit\n", None), ("- Orchestrator model: Inherit\n", None),
                             ("- Orchestrator model: so net; rm\n", "sonnet"), ("- Orchestrator model: $(touch x)\n", "sonnet"),
@@ -5458,7 +5458,7 @@ class AiResearchTest(unittest.TestCase):
             if text:
                 project.write_text(text)
             for action in ("approve", "rework", "digest"):
-                self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits"], (text, action))
+                self.assertEqual(self.spawn_argv(action), ["claude-stub", "-p", "/p", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX], (text, action))
 
     def test_research_home_is_this_checkout(self):
         repo = self.serve.HERE.parent.parent
@@ -5681,7 +5681,7 @@ class DigestTest(unittest.TestCase):
             self.assertEqual(code, 202, out)
             popen.assert_called_once()
             argv = popen.call_args.args[0]
-            self.assertEqual(argv[1:], ["-p", "/trevskills-scrum digest", "--permission-mode", "acceptEdits"])
+            self.assertEqual(argv[1:], ["-p", "/trevskills-scrum digest", "--permission-mode", "acceptEdits", "--settings", self.serve.board.NO_CACHE_TAX])
             self.assertEqual(self.serve.RUNS["reg/digest"]["action"], "digest")
             self.assertEqual(self.post("/api/p/reg/digest", {}), (409, None))
             self.assertEqual(popen.call_count, 1)
@@ -10279,6 +10279,14 @@ class IdleClaimTest(unittest.TestCase):
         with mock.patch.object(self.board, "session_alive_fn", return_value=lambda job: job["id"] == "007-term"):
             got, spawn = self.claim(age=610)
         self.assertEqual((got, spawn.call_args_list, self.stage("002-big")), (False, [], "waiting"))
+
+    def test_idle_claim_cloud_job_blocks_overlap(self):
+        """Job 989: a stage-cloud leaf job (claude.ai or shop Mac) holds its files, with no live session here."""
+        self.write({"id": "006-cloud", "stage": "cloud"}, kids={"002-big": ["a.py", "b.py"], "003-small": ["c.py"]})
+        self.files("006-cloud", ["c.py"])
+        got, spawn = self.claim(age=610)
+        self.assertEqual((got, self.started(spawn)), (True, [("002-big", "start", True)]))  # 003-small shares src/c.py
+        self.assertEqual(self.stage("003-small"), "waiting")
 
     def test_unknown_files_only_when_nothing_runs(self):
         self.write({"id": "006-run", "stage": "build"}, kids={"002-nofiles": []})

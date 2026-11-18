@@ -1905,6 +1905,31 @@ class BoardTest(unittest.TestCase):
         (jobs / c2 / "spec.md").unlink()
         self.assertEqual(board.child_files(jobs, c2), set())
 
+    def test_child_files_spec_without_likely_files_falls_back_to_prose(self):
+        self.write("j1/spec.md", "# x\nEdit `src/a.py` only.\n## Assumptions\n- none\n")
+        self.assertEqual(board.child_files(self.root / "jobs", "j1"), {"src/a.py"})
+
+    def test_child_files_bare_name_needs_single_git_match(self):
+        repo = Path(self.tmp.name)
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        for f in ("src/hooks/useQuoteBuilderDraft.ts", "a/dup.ts", "b/dup.ts", "notes.foo"):
+            (repo / f).parent.mkdir(parents=True, exist_ok=True)
+            (repo / f).write_text("x")
+        sh("add", "-A")
+        jobs = self.root / "jobs"
+        self.write("j1/spec.md", "Fix useQuoteBuilderDraft.ts, then dup.ts and `missing.ts`; notes.foo is 1.2.3.\n")
+        self.assertEqual(board.child_files(jobs, "j1"), {"src/hooks/useQuoteBuilderDraft.ts"})
+        self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
+        self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
+
+    def test_ready_spec_copy_of_feature_uses_prose_paths(self):
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.write(f"{c1}/spec.md", "# x\nEdit `src/a.py`.\n")
+        self.write(f"{c2}/spec.md", "# x\nEdit `src/b.py`.\n")
+        self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [c1, c2])
+
     def test_child_files_terminal_batch_reads_claude_paths(self):
         batch = board.TERMINAL_BATCH_INTRO + "\n## From 1: a\n- `.claude/skills/scrum-digest-flow/SKILL.md`\n- `.claude/agents/x.md`\n- `tests/test_x.py`\n"
         self.write("b1/feature.md", batch)
@@ -5330,6 +5355,17 @@ class BoardTest(unittest.TestCase):
         (self.root / "runs" / f"{start}-start-j.log").write_text("")
         self.assertEqual(cells(), ["10m", "3h05m"])
 
+    def test_timing_row_no_claim_uses_first_run(self):
+        t0 = 1_700_000_000
+        self.write("j/feature.md", "f\n")
+        self.write("j/spec.md", "s\n")
+        os.utime(self.root / "jobs/j/feature.md", (t0, t0))
+        os.utime(self.root / "jobs/j/spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        (self.root / "runs").mkdir(exist_ok=True)
+        start = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        (self.root / "runs" / f"{start}-start-j.log").write_text("")
+        self.assertEqual(board._timing_row(self.root, "j", {}, {})[0][2:4], ["10m", "3h00m"])
+
     def test_timing_row_bad_claim_ignored(self):
         t0 = 1_700_000_000
         self.write("j/feature.md", "f\n")
@@ -6797,7 +6833,7 @@ print("stub err", file=sys.stderr)
         self.assertIsInstance(line["pid"], int)
         rec = self.records()[0]
         self.assertEqual(rec["argv"], ["-p", "/trevskills-scrum start 123-some-job", "--model", "sonnet",
-                                       "--permission-mode", "acceptEdits"])
+                                       "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         self.assertEqual(os.path.realpath(rec["cwd"]), os.path.realpath(self.repo))
         self.assertEqual(rec["notifier"], "1")
         self.assertTrue(rec["new_session"])
@@ -6812,7 +6848,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
-                                                      "--permission-mode", "acceptEdits"])
+                                                      "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
 
     def test_big_ticket_model(self):
         (self.root / "board.json").write_text(json.dumps({"jobs": [
@@ -6851,21 +6887,21 @@ print("stub err", file=sys.stderr)
 
     def test_spawn_model_selection(self):
         project = self.root / "project.md"
-        plain = ["-p", "/p", "--permission-mode", "acceptEdits"]
+        plain = ["-p", "/p", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX]
         for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: inherit\n", None),
                             ("- Orchestrator model: Inherit\n", None), ("- Orchestrator model: so net; rm\n", "sonnet"),
                             ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
                             ("- Stack: Python\n", "sonnet")):
             project.write_text("# Project profile\n" + line)
             for action in ("start", "resume"):
-                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits"]
+                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX]
                 self.assertEqual(self.argv(action), expect, (line, action))
             self.assertEqual(self.argv("approve"), plain, line)
         project.write_text("- Orchestrator model: opus\n")
         self.assertEqual(self.argv("approve", model="sonnet"),
-                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits"])
+                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         self.assertEqual(self.argv("start", model="haiku"),
-                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits"])
+                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         for bad in ("so net", "$(touch x)", "", "-x y"):
             with self.assertRaises(SystemExit, msg=bad):
                 board.spawn(self.root, "999-not-a-job", "approve", "/p", model=bad)
@@ -6889,7 +6925,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
-        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits"])
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
 
     def test_spawn_rejects_bad_id_or_action(self):
         for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),

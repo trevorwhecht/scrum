@@ -629,6 +629,22 @@ IDLE_CLAIM_SECS = 0  # idle_claim: a free slot with held work this long starts o
 IDLE_SINCE: dict[str, float] = {}  # project -> when its free slot with held work began (epoch s); a restart drops it
 
 
+def busy_files(project, root, jobs) -> list[set]:
+    """The Likely files (board.child_files) of each running leaf job: a live_ids run, a WATCHED job whose session is
+    alive (ps only when one is a candidate), or a stage-cloud job (a claude.ai or shop Mac session)."""
+    live, jobs_dir = live_ids(project), Path(root) / "jobs"
+    watched = [j for j in jobs if not j.get("children") and j["id"] not in live and j.get("stage") in board.WATCHED]
+    alive = board.session_alive_fn() if watched else None  # ps only when needed
+    return [board.child_files(jobs_dir, j["id"]) for j in jobs
+            if not j.get("children") and (j["id"] in live or j.get("stage") == "cloud" or j in watched and alive(j))]
+
+
+def clear_of_busy(files, busy) -> bool:
+    """True when `files` share no path (board.shared_files) with any of `busy` (busy_files). A busy job with unreadable
+    files blocks all; unreadable `files` are clear only while nothing is busy."""
+    return all(b and not board.shared_files(files, b) for b in busy) if files else not busy
+
+
 def idle_claim(project, root, jobs) -> bool:
     """Start one held job once the project has had held work (held_work) and a free slot for IDLE_CLAIM_SECS
     (IDLE_SINCE). A free slot: fewer than
@@ -655,14 +671,9 @@ def idle_claim(project, root, jobs) -> bool:
         return False
     if now - since < IDLE_CLAIM_SECS:
         return False
-    live, jobs_dir = live_ids(project), Path(root) / "jobs"
-    watched = [j for j in jobs if not j.get("children") and j["id"] not in live and j.get("stage") in board.WATCHED]
-    alive = board.session_alive_fn() if watched else None  # ps only when needed
-    busy = [board.child_files(jobs_dir, j["id"]) for j in jobs
-            if not j.get("children") and (j["id"] in live or j.get("stage") == "cloud" or j in watched and alive(j))]
+    busy, jobs_dir = busy_files(project, root, jobs), Path(root) / "jobs"
     files = {j["id"]: board.child_files(jobs_dir, j["id"]) for j in held}
-    ok = [j for j in held if (all(b and not board.shared_files(files[j["id"]], b) for b in busy) if files[j["id"]]
-                              else not busy)]
+    ok = [j for j in held if clear_of_busy(files[j["id"]], busy)]
     if not ok:
         return False
     pick = min(ok, key=lambda j: (len(files[j["id"]]), j["id"]))
@@ -673,7 +684,7 @@ def idle_claim(project, root, jobs) -> bool:
     if launch := pick.get("queued_launch"):
         return spawn(project, root, pick["id"], launch["action"], launch["prompt"],
                      manual=bool(pick.get("play_queued_manual")), idle=True) is not None
-    out = board.cmd_ready(root, pick["parent"], live, only=pick["id"])  # re-checks the live child under the lock
+    out = board.cmd_ready(root, pick["parent"], live_ids(project), only=pick["id"])  # re-checks the live child under the lock
     return any([spawn(project, root, c, "start", f"/trevskills-scrum start {c}", idle=True) is not None
                 for c in out["ready"]])
 
@@ -1577,8 +1588,10 @@ DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md exp
 
 def shop_tick(project, repo, root) -> bool:
     """While this Mac's machine guard holds work (machine_ok(claim=True) refuses or cpu_hot), send the project's
-    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy, setup pending or
-    naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md) to
+    lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy (board lane, `Lane: lilguy` anywhere in
+    feature.md, or lilguy-fit.json fit true with no parent or a Run-all parent), setup pending or
+    naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md, nor a
+    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to
     the first shop.workers() worker, in file order, that is out of backoff, runs fewer than its max stage-cloud `shop`
     jobs on every board (no `worker` field: shopmac), is shop.ready(alias) and has an account: pick_account's own order
     (soonest seven-day reset), then prefer= each of the worker's accounts in its listed order, until one is on the
@@ -1608,19 +1621,34 @@ def shop_tick(project, repo, root) -> bool:
         except OSError:
             return ""  # dispatched, then failed as a step: the claim is put back
 
-    pool = sorted((j for j in held_work(project, board.read_board(root)["jobs"])
+    jobs = board.read_board(root)["jobs"]
+    lane = {j["id"]: j.get("lane") for j in jobs}
+
+    def lilguy(j):  # what the local lilguy route takes: board lane, `Lane: lilguy` anywhere, or a fit job (no parent / Run-all parent)
+        if board.job_lane(root, j) == "lilguy" or re.search(r"\bLane:\s*lilguy\b", feature(j["id"]), re.I):
+            return True
+        if j.get("parent") and lane.get(j["parent"]) != "runall":
+            return False
+        return board._health_file(jobs_dir / j["id"] / "lilguy-fit.json", dict).get("fit") is True
+
+    pool = sorted((j for j in held_work(project, jobs)
                    if (is_child(j) or (j.get("queued_launch") or {}).get("action") == "start") and not j.get("paused")
-                   and j.get("setup") != "pending" and board.job_lane(root, j) != "lilguy"
+                   and j.get("setup") != "pending" and not lilguy(j)
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
-                  key=lambda j: (int(j["id"].split("-")[0]), j["id"]))  # numeric: 1000- sorts after 999-
+                  key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
     # the pool before the guard: a tick with no held job reads no sensor (machine_ok) and no other board
     if not pool or not (board.machine_ok(root, claim=True) or cpu_hot()):
         return False
-    busy = collections.Counter(j.get("worker") or shop.ALIAS for r in board.projects().values()
-                               for j in board.read_board(r / "scrum")["jobs"]
-                               if j.get("stage") == "cloud" and j.get("shop"))
+    if not all(map(is_child, pool)):  # a launch overlapping a running or cloud job waits; cmd_ready checks a child
+        busy = busy_files(project, root, jobs)
+        pool = [j for j in pool if is_child(j) or clear_of_busy(board.child_files(jobs_dir, j["id"]), busy)]
+        if not pool:
+            return False
+    on = collections.Counter(j.get("worker") or shop.ALIAS for r in board.projects().values()
+                             for j in board.read_board(r / "scrum")["jobs"]
+                             if j.get("stage") == "cloud" and j.get("shop"))  # each worker's shop jobs, every board
     for w in workers:  # the first with room, ready and an account; a later worker is never probed
-        if busy[w.alias] >= w.max or not (ready := shop.ready(alias=w.alias))["ready"]:
+        if on[w.alias] >= w.max or not (ready := shop.ready(alias=w.alias))["ready"]:
             continue
         # ponytail: this Mac's sessions only; count shop jobs too if the allowance overshoots
         n_live = board.live_sessions()
