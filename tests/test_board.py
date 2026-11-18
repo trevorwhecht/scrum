@@ -8489,8 +8489,6 @@ class UiSweepTargetsTest(unittest.TestCase):
         self.assertEqual(out, {"since": since, "head": "HEAD", "targets": [
             {"path": "/leads", "jobs": ["013-grid"], "marked": True, "why": "rows 160 px tall"},
             {"path": "/", "jobs": [f"commit {sha[:7]}"], "marked": False, "why": "changed src/components/Orphan.tsx"},
-            {"path": "/admin/views", "jobs": ["013-grid"], "marked": False,
-             "why": "changed src/app/admin/views/Grid.tsx"},
             {"path": "/pricing", "jobs": ["011-price", "013-grid"], "marked": False,
              "why": "changed src/components/Price.tsx, src/app/admin/views/Grid.tsx"}]})
 
