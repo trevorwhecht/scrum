@@ -84,7 +84,7 @@ In `questions.log`, count only lines dated within 7 days of its newest `date` (a
 
 Sort each list by count, highest first. For the Fast lane verdict: `TOO_EARLY` only while the board holds fewer than 5 fast-lane jobs in total (count `"lane": "fast"` entries in `JOBS_DIR/../board.json`, every digest included, not just this one); `SKIP_SPEC_WRITER` only when the fast specs were mostly near-verbatim copies of feature.md and no CHANGES round or promotion traces back to something a spec would have caught; otherwise `KEEP_SPEC_WRITER`. `<count>` is the number of distinct jobs. Write `None` under a heading that has no entry.
 
-For `## Rediscovery`, look for the same fact re-derived across specs' `## Assumptions` (repo layout, test setup, a domain rule), the same files listed again and again in `## Likely files`, and the same wrong guess flagged by reviews or rework. Keep an entry only when it comes from **3 or more different jobs**. `Files:` names the source paths that hold the fact. Write `None` when no entry qualifies.
+For `## Rediscovery`, look for the same fact re-derived across specs' `## Assumptions` (repo layout, test setup, a domain rule), the same files listed again and again in `## Likely files`, and the same wrong guess flagged by reviews or rework. Skip `Apply digest` specs: serve.py's `digest_item_spec` template writes their Likely files and Assumptions. Keep an entry only when it comes from **3 or more different jobs**. `Files:` names the source paths that hold the fact. Write `None` when no entry qualifies.
 
 For `## Builder model`, use the `jev.log` of every job read:
 - A line without at least 5 tab-separated fields is malformed and skipped.
