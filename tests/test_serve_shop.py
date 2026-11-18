@@ -341,7 +341,8 @@ class ShopTickTest(unittest.TestCase):
                   dict(READY, accounts={"main": False, "owa": True}), "owa"),
                  ("no usage: account order", {}, READY, "main"),
                  ("owa limited", {self.owa / "limit_until": f"{ahead}\n", **sooner(self.owa)}, READY, "main"),
-                 ("owa at reserve", {self.owa / "usage.json": json.dumps(reserve)}, READY, "main"),
+                 ("owa at reserve", {self.owa / "usage.json": json.dumps(reserve), **sooner(self.main)}, READY, "main"),
+                 ("owa at reserve but resets first: primary", {self.owa / "usage.json": json.dumps({"rate_limits": {"seven_day": {"used_percentage": 95, "resets_at": ahead}}})}, READY, "owa"),
                  ("both limited", {self.owa / "limit_until": f"{ahead}\n", self.main / "limit_until": f"{ahead}\n"},
                   READY, None),
                  ("shop owa not ready", sooner(self.owa), dict(READY, accounts={"main": True, "owa": False}), "main")]
