@@ -190,7 +190,7 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
-          "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: once past, the job takes pick_account's first pick
+          "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: fallback_account favours the recorded account only until then
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$"),  # the dashboard links it
           "shop": re.compile(r"^[0-9]{1,10}$"),  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
           "worker": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")}  # the workers.txt ssh alias that session runs on
@@ -7898,10 +7898,11 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
             job = find(read_board(root), job_id)
             recorded = job.get("account")
             if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
-                recorded = None  # its seven_day window reset since: the first pick wins again, no session is killed
+                recorded = None  # its seven_day window reset since: fallback_account no longer favours it
         except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
             recorded = None
-        account = pick_account(time.time(), prefer=recorded)[0] or fallback_account(time.time(), recorded)
+        # job 1184: never prefer the recorded account, so a restart takes the primary whenever it has room
+        account = pick_account(time.time())[0] or fallback_account(time.time(), recorded)
     acc = next((a for a in accs if a.name == account), accs[0])  # an unlisted account (its dir gone) runs on the first
     env = dict(os.environ, CLAUDE_NOTIFIER_DISABLE="1",  # board.py plays scrum's sounds
                CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="0")  # -p kills background agents 10 min after the last turn otherwise
