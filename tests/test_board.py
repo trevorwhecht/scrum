@@ -6822,7 +6822,7 @@ print("stub err", file=sys.stderr)
         self.assertIsInstance(line["pid"], int)
         rec = self.records()[0]
         self.assertEqual(rec["argv"], ["-p", "/trevskills-scrum start 123-some-job", "--model", "sonnet",
-                                       "--permission-mode", "acceptEdits"])
+                                       "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         self.assertEqual(os.path.realpath(rec["cwd"]), os.path.realpath(self.repo))
         self.assertEqual(rec["notifier"], "1")
         self.assertTrue(rec["new_session"])
@@ -6837,7 +6837,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("123-some-job", "approve", "/trevskills-scrum approve 123-some-job it's; rm -rf ~")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.records(2)[1]["argv"], ["-p", "/trevskills-scrum approve 123-some-job it's; rm -rf ~",
-                                                      "--permission-mode", "acceptEdits"])
+                                                      "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
 
     def test_big_ticket_model(self):
         (self.root / "board.json").write_text(json.dumps({"jobs": [
@@ -6876,21 +6876,21 @@ print("stub err", file=sys.stderr)
 
     def test_spawn_model_selection(self):
         project = self.root / "project.md"
-        plain = ["-p", "/p", "--permission-mode", "acceptEdits"]
+        plain = ["-p", "/p", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX]
         for line, model in (("- Orchestrator model: opus\n", "opus"), ("- Orchestrator model: inherit\n", None),
                             ("- Orchestrator model: Inherit\n", None), ("- Orchestrator model: so net; rm\n", "sonnet"),
                             ("- Orchestrator model: $(touch x)\n", "sonnet"), ("- Orchestrator model:   \n", "sonnet"),
                             ("- Stack: Python\n", "sonnet")):
             project.write_text("# Project profile\n" + line)
             for action in ("start", "resume"):
-                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits"]
+                expect = plain if model is None else ["-p", "/p", "--model", model, "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX]
                 self.assertEqual(self.argv(action), expect, (line, action))
             self.assertEqual(self.argv("approve"), plain, line)
         project.write_text("- Orchestrator model: opus\n")
         self.assertEqual(self.argv("approve", model="sonnet"),
-                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits"])
+                         ["-p", "/p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         self.assertEqual(self.argv("start", model="haiku"),
-                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits"])
+                         ["-p", "/p", "--model", "haiku", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
         for bad in ("so net", "$(touch x)", "", "-x y"):
             with self.assertRaises(SystemExit, msg=bad):
                 board.spawn(self.root, "999-not-a-job", "approve", "/p", model=bad)
@@ -6914,7 +6914,7 @@ print("stub err", file=sys.stderr)
         out = self.cli("run-all", "run-all", "/trevskills-scrum run-all")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertRegex(json.loads(out.stdout)["log"], r"^runs/\d{8}-\d{6}-run-all-run-all\.log$")
-        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits"])
+        self.assertEqual(self.records()[0]["argv"], ["-p", "/trevskills-scrum run-all", "--permission-mode", "acceptEdits", "--settings", board.NO_CACHE_TAX])
 
     def test_spawn_rejects_bad_id_or_action(self):
         for job_id, action in (("a/b", "start"), ("a b", "start"), ("..", "start"), ("../x", "start"), ("-x", "start"),
