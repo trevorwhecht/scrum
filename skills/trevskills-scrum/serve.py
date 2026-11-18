@@ -1588,8 +1588,9 @@ DIGEST_PROPOSALS_RE = re.compile(r"digests/\d+/proposals\.json")  # cloud.md exp
 def shop_tick(project, repo, root) -> bool:
     """While this Mac's machine guard holds work (machine_ok(claim=True) refuses or cpu_hot), send the project's
     lowest-id held job (held_work: a queued `start` launch or a waiting child; never paused, lilguy, setup pending or
-    naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md) to
-    the shop Mac as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
+    naming a digest proposals.json, nor any job of a project with a `- Base branch:` line or docker in project.md, nor a
+    launch whose files are not clear_of_busy(busy_files), checked only when the pool holds a launch) to the shop Mac
+    as a headless cloud-job session, while fewer than SHOP_MAX jobs on every board run there and
     shop.ready(). Cool-down counts as a hold (machine_ok refuses), so the shop keeps working through it. Account: the
     first in pick_account's own order (soonest seven-day reset) the shop has ready, else the other. A child is claimed
     (cmd_ready shop=), then md_sync, setup, clone, env_copy, profile_copy and start run; a failed step puts a claimed
