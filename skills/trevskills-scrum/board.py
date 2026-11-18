@@ -2,7 +2,7 @@
 """The scrum team's board. Only the /trevskills-scrum orchestrator calls this; nothing else writes board.json.
 
   board.py new "<title>" [--id ID] [--by <serve|runall|wake|hand>] create jobs/<id>/ and a board entry, print the id (--id keeps a given id; --by records who started it, default hand)
-  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop (empty = null);
+  board.py set <id> key=value ...  set stage/round/limit/pr/reason/worktree/builder/base/tty/runlog/lane/setup/waiting/specwriter/cloud/outcome/account/shop/worker (empty = null);
                                    stage=needs-human is refused: park a job with ask
   board.py set --unpause <id> ...  the same, on a job Trevor paused too (resume and rework only); with stage= it
                                    clears the pause
@@ -183,7 +183,7 @@ FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
           "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud", "outcome", "account", "shop")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome", "account", "shop", "worker")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
@@ -191,7 +191,8 @@ SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$"),  # the dashboard links it
-          "shop": re.compile(r"^[0-9]{1,10}$")}  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
+          "shop": re.compile(r"^[0-9]{1,10}$"),  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
+          "worker": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")}  # the workers.txt ssh alias that session runs on
 ID_RE = re.compile(r"^\d{3,}-[a-z0-9-]+$")
 # Every needs-human stop's fixed title (lanes/stops.md): key -> one-line meaning. The dashboard shows the key with
 # "_" replaced by a space.

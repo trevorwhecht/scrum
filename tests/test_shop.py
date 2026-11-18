@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "trevskills-scrum"
 WRAPPER = ROOT / "skills" / "trevskills-e2e" / "channel.config.mjs"
 sys.path.insert(0, str(SKILL))
+# workers.txt never the real one
+os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))
 import shop  # noqa: E402
 
 REAL_RUN = subprocess.run  # ShopCase patches the subprocess module's run; local-shell checks use this one
@@ -24,9 +26,10 @@ class ShopCase(unittest.TestCase):
         patcher = mock.patch.object(shop.subprocess, "run", side_effect=AssertionError("real ssh under unittest"))
         self.sp = patcher.start()
         self.addCleanup(patcher.stop)
-        shop._cache = shop._ready = None
-        self.addCleanup(setattr, shop, "_cache", None)
-        self.addCleanup(setattr, shop, "_ready", None)
+        shop._cache.clear()
+        shop._ready.clear()
+        self.addCleanup(shop._cache.clear)
+        self.addCleanup(shop._ready.clear)
 
     def answer(self, returncode, stdout=b"", stderr=b""):
         self.sp.side_effect = None
@@ -52,6 +55,19 @@ class RunTest(ShopCase):
         self.assertIs(kwargs["stderr"], subprocess.PIPE)
         self.assertIsInstance(r, subprocess.CompletedProcess)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "hi\n", ""))
+
+    def test_alias_in_argv_and_bad_alias_refused(self):
+        self.answer(0, b"hi\n")
+        shop.run("echo hi", 7, alias="newmac.local")
+        self.assertEqual(self.sp.call_args.args,
+                         (["ssh", "newmac.local", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                           'export PATH="$HOME/.local/bin:$PATH"; echo hi'],))
+        self.sp.reset_mock()
+        for bad in ("-oProxyCommand=x", "user@host", "", "a b", ".hidden", "new mac", "x\n"):
+            with self.subTest(alias=bad):
+                r = shop.run("echo hi", 7, alias=bad)
+                self.assertEqual((r.returncode, r.stdout), (127, ""))
+        self.sp.assert_not_called()
 
     def test_no_input_reads_devnull(self):
         self.answer(0)
@@ -108,12 +124,75 @@ class UnittestGuardTest(unittest.TestCase):
             self.assertFalse(marker.exists(), "ssh started under unittest")
 
 
+class WorkersTest(unittest.TestCase):
+    def workers(self, text=None, registry=None):
+        """shop.workers() with SCRUM_REGISTRY in a temp dir whose workers.txt holds `text` (None: no file)."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        reg = tmp / "sub" / "projects.json"
+        reg.parent.mkdir()
+        if isinstance(text, bytes):
+            (reg.parent / "workers.txt").write_bytes(text)
+        elif text is not None:
+            (reg.parent / "workers.txt").write_text(text)
+        with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(reg)):
+            return shop.workers()
+
+    def test_missing_file_is_shopmac_default(self):
+        got = self.workers()
+        self.assertEqual(got, [("shopmac", 2, ("owa", "main"))])
+        self.assertEqual((got[0].alias, got[0].max, got[0].accounts), ("shopmac", 2, ("owa", "main")))
+
+    def test_lines_parsed_and_bad_lines_skipped(self):
+        text = ("# alias max accounts\n"
+                "shopmac 2 owa,main\n"
+                "newmac\t1   main   # the second Mac\n"
+                "\n   \n"
+                "too few\n"
+                "one two three four\n"
+                "-oProxyCommand=x 1 main\n"
+                "user@host 1 main\n"
+                "zero 0 main\n"
+                "neg -1 main\n"
+                "half 2.5 main\n"
+                "lead 02 main\n"
+                "empty 1 main,,owa\n"
+                "trail 1 main,\n"
+                "twice 1 main,main\n"
+                "work 1 main,work\n"
+                "newmac 3 owa\n"
+                "third 10 owa\n")
+        self.assertEqual(self.workers(text), [("shopmac", 2, ("owa", "main")), ("newmac", 1, ("main",)),
+                                              ("third", 10, ("owa",))])
+        with self.subTest("default path: ~/.claude/trevskills-scrum/workers.txt"):
+            home = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, home, True)
+            (home / ".claude" / "trevskills-scrum").mkdir(parents=True)
+            (home / ".claude" / "trevskills-scrum" / "workers.txt").write_text("homemac 3 main\n")
+            with mock.patch.dict(os.environ, HOME=str(home)):
+                os.environ.pop("SCRUM_REGISTRY")
+                self.assertEqual(shop.workers(), [("homemac", 3, ("main",))])
+
+    def test_no_valid_line_no_workers(self):
+        for why, text in (("empty", ""), ("comments and bad lines", "# none yet\n\nzero 0 main\n-x 1 main\n"),
+                          ("not UTF-8", b"newmac 1 main\n\xff\xfe\n")):
+            with self.subTest(why):
+                self.assertEqual(self.workers(text), [])
+        with self.subTest("a folder, not a file"):
+            tmp = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, tmp, True)
+            (tmp / "workers.txt").mkdir()
+            with mock.patch.dict(os.environ, SCRUM_REGISTRY=str(tmp / "projects.json")):
+                self.assertEqual(shop.workers(), [])
+
+
 class ProbeTest(ShopCase):
     def test_parses_live_sample(self):
         run = self.fake_run(0, LIVE)
         self.assertEqual(shop.probe(), UP)
-        run.assert_called_once_with("sysctl -n vm.loadavg hw.ncpu; command -v node gh claude; true", 10)
-        shop._cache = None
+        run.assert_called_once_with("sysctl -n vm.loadavg hw.ncpu; command -v node gh claude; true", 10,
+                                    alias="shopmac")
+        shop._cache.clear()
         run.return_value = subprocess.CompletedProcess([], 0, "{ 1.00 0.50 0.25 }\n3\n/usr/local/bin/node\n", "")
         self.assertEqual(shop.probe(), {"up": True, "load": 33.3, "tools": {"node": True, "gh": False, "claude": False}})
 
@@ -121,7 +200,7 @@ class ProbeTest(ShopCase):
         run = self.fake_run(0)
         for out in ("", "load: high\nmany cores\n", "{ 1.50 1.20 1.00 }\n0\n","��\n"):
             with self.subTest(out=out):
-                shop._cache = None
+                shop._cache.clear()
                 run.return_value = subprocess.CompletedProcess([], 0, out, "")
                 self.assertEqual(shop.probe(), {"up": True, "load": None,
                                                 "tools": {"node": False, "gh": False, "claude": False}})
@@ -133,7 +212,7 @@ class ProbeTest(ShopCase):
                     127: dict(side_effect=FileNotFoundError(2, "No such file or directory", "ssh"))}
         for code, how in failures.items():
             with self.subTest(code=code):
-                shop._cache = None
+                shop._cache.clear()
                 self.sp.configure_mock(**how)
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -152,6 +231,31 @@ class ProbeTest(ShopCase):
             clock.monotonic.return_value = 1000.0 + stale
             shop.probe()
             self.assertEqual(run.call_count, 2)
+
+    def test_cache_per_alias(self):
+        hosts = []
+
+        def ssh(argv, **kw):
+            hosts.append(argv[1])
+            return subprocess.CompletedProcess(argv, 255 if argv[1] == "newmac" else 0,
+                                               LIVE.encode() if argv[1] == "shopmac" else b"", b"")
+        self.sp.side_effect = ssh
+        self.assertEqual(shop.probe(), UP)
+        self.assertEqual(shop.probe(alias="newmac"), DOWN)
+        self.assertEqual((shop.probe(), shop.probe(alias="newmac")), (UP, DOWN))
+        self.assertEqual(hosts, ["shopmac", "newmac"], "each alias probed once, then cached")
+        ready = {"ready": True}
+        shop._ready.update(shopmac=(shop.time.monotonic(), ready), newmac=(shop.time.monotonic(), ready))
+        shop._cache["newmac"] = (shop.time.monotonic(), UP)  # a stale up result setup must drop
+        shopmac = shop._cache["shopmac"]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(shop.setup(alias="newmac"), {"shop": "failed"})
+        self.assertEqual(out.getvalue(), "shop: down\n")
+        self.assertEqual(hosts, ["shopmac", "newmac", "newmac"], "setup re-probed newmac only")
+        self.assertIs(shop._cache["shopmac"], shopmac)
+        self.assertEqual(shop._ready, {"shopmac": (shop._ready["shopmac"][0], ready)}, "newmac's ready cache dropped")
+        self.assertEqual(shop.probe(), UP)
+        self.assertEqual(hosts, ["shopmac", "newmac", "newmac"])
 
     def test_up_cached_60s(self):
         self.cached(0, LIVE, 59, 61)
@@ -190,6 +294,40 @@ class CliTest(ShopCase):
                 self.assertIn("usage:", err.getvalue())
         self.sp.assert_not_called()
 
+    def test_alias_argument(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        Path(tmp, ".claude").mkdir()
+        Path(tmp, ".claude", "CLAUDE.md").write_text("rules\n")
+        env = mock.patch.dict(os.environ, {"HOME": tmp, "SCRUM_REGISTRY": os.path.join(tmp, "projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        hosts = []
+
+        def ssh(argv, **kw):
+            hosts.append(argv[1])
+            return subprocess.CompletedProcess(argv, 255, b"", b"")  # down: every command prints its down line
+        self.sp.side_effect = ssh
+        workers = Path(tmp, "workers.txt")
+        for why, text, argv, want, out, code in (
+                ("setup to a named alias", None, ["setup", "newmac"], "newmac", "shop: down\n", 1),
+                ("probe to a named alias", None, ["probe", "newmac"], "newmac", json.dumps(DOWN) + "\n", 0),
+                ("md-sync to a named alias", None, ["md-sync", "newmac"], "newmac", "shop: down\n", 1),
+                ("no file: shopmac", None, ["setup"], "shopmac", "shop: down\n", 1),
+                ("first workers.txt line", "first 1 main\nsecond 1 owa\n", ["probe"], "first",
+                 json.dumps(DOWN) + "\n", 0),
+                ("no valid line: shopmac", "# none\n", ["md-sync"], "shopmac", "shop: down\n", 1)):
+            with self.subTest(why):
+                shop._cache.clear()
+                hosts.clear()
+                workers.unlink(missing_ok=True)
+                if text is not None:
+                    workers.write_text(text)
+                self.assertEqual(self.main(argv), (code, out))
+                self.assertEqual(set(hosts), {want})
+        self.assertEqual(self.main(["probe", "x"])[0], 0)  # an alias not in workers.txt is still asked
+        self.assertEqual(hosts[-1], "x")
+
     def test_md_sync_one_line(self):
         home = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, home, True)
@@ -201,7 +339,7 @@ class CliTest(ShopCase):
         for fail, rc, want, code in ((None, 0, "md-sync: ok\n", 0), ("pull --ff-only", 1, "md-sync: failed\n", 1),
                                      ("tar -xf", 255, "md-sync: failed\n", 1), ("sysctl", 255, "shop: down\n", 1)):
             with self.subTest(fail=fail):
-                shop._cache = None
+                shop._cache.clear()
                 self.sp.side_effect = lambda argv, **kw: subprocess.CompletedProcess(
                     argv, rc if fail and fail in argv[-1] else 0, NOISE.encode(), NOISE.encode())
                 with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -230,6 +368,14 @@ class SetupCase(ShopCase):
         super().setUp()
         self.home = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.home, True)
+        self.alias = "shopmac"  # every faked ssh call must go to this alias
+
+    def worker_file(self, text):
+        """Point SCRUM_REGISTRY at self.home and write its workers.txt."""
+        env = mock.patch.dict(os.environ, SCRUM_REGISTRY=os.path.join(self.home, "projects.json"))
+        env.start()
+        self.addCleanup(env.stop)
+        Path(self.home, "workers.txt").write_text(text)
 
     def shop(self, *answers, token=(0, TOKEN + "\n")):
         """Fake ssh and this Mac's `gh auth token` under subprocess.run, so run() itself is exercised. Each remote
@@ -245,7 +391,7 @@ class SetupCase(ShopCase):
                 if isinstance(token, BaseException):
                     raise token
                 return subprocess.CompletedProcess(argv, token[0], token[1], "")
-            self.assertEqual(argv[:6], ARGV)
+            self.assertEqual(argv[:6], ["ssh", self.alias, *ARGV[2:]])
             self.assertTrue(argv[6].startswith(shop.PATH_PREFIX), argv[6])
             cmd = argv[6][len(shop.PATH_PREFIX):]
             self.calls.append((cmd, kw["timeout"], kw.get("input")))
@@ -276,7 +422,8 @@ class SetupCase(ShopCase):
 
 class SetupTest(SetupCase):
     def test_down_runs_no_step(self):
-        shop._cache = (shop.time.monotonic(), {"up": True, "load": 1.0, "tools": {t: True for t in shop.TOOLS}})
+        shop._cache["shopmac"] = (shop.time.monotonic(),
+                                  {"up": True, "load": 1.0, "tools": {t: True for t in shop.TOOLS}})
         self.shop(("sysctl", 255, ""))
         self.assertEqual(self.setup_out(), ({"shop": "failed"}, ["shop: down"]))
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])  # the stale up cache was dropped
@@ -307,6 +454,20 @@ class SetupTest(SetupCase):
             "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
             "owa links: ok (changed)", "account main: ok",
             "account owa: not ready (run claude setup-token in the shop GUI)"]))
+
+    def test_worker_accounts_only(self):
+        self.worker_file("shopmac 2 owa,main\nnewmac 1 owa\n")
+        base = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok"]
+        for alias, accounts in (("newmac", ["owa"]), ("shopmac", ["main", "owa"]), ("other", ["main", "owa"])):
+            with self.subTest(alias=alias):
+                self.alias = alias
+                self.shop(*DONE)
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    got = shop.setup(alias=alias)
+                self.assertEqual(out.getvalue().splitlines(), base + [f"account {n}: ok" for n in accounts])
+                self.assertEqual([k for k in got if k.startswith("account ")], [f"account {n}" for n in accounts])
+                self.assertEqual(len(self.cmds("claude -p")), len(accounts))
+                self.assertEqual({a[1] for a in self.argv if a[0] == "ssh"}, {alias})
 
     def test_second_run_unchanged(self):
         self.shop(*DONE)
@@ -613,9 +774,29 @@ class ReadyTest(SetupCase):
                                             "accounts": {"main": False, "owa": False}}))
         for extra, want in cases:
             with self.subTest(extra=extra):
-                shop._cache = shop._ready = None
+                shop._cache.clear()
+                shop._ready.clear()
                 self.shop(*extra, (".claude-owa/oauth-token", 3, ""), *DONE)
                 self.assertEqual(self.ready(), want)
+
+    def test_worker_accounts_only(self):
+        self.worker_file("newmac 1 owa\nboth 2 owa,main\n")
+        for alias, accounts in (("newmac", {"owa": True}), ("both", {"main": True, "owa": True}),
+                                ("other", {"main": True, "owa": True})):
+            with self.subTest(alias=alias):
+                self.alias = alias
+                self.shop(*DONE)
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    got = shop.ready(alias=alias)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(got, {"ready": True, "up": True, "gh": True, "node": True, "claude": True,
+                                       "accounts": accounts})
+                self.assertEqual(list(got["accounts"]), list(accounts), "SHOP_ACCOUNTS order")
+                self.assertEqual(len(self.cmds("claude -p")), len(accounts))
+        self.alias = "newmac"
+        shop._cache.clear()
+        self.shop(("sysctl", 255, ""))
+        self.assertEqual(shop.ready(alias="newmac")["accounts"], {"owa": False}, "down: the worker's accounts")
 
     def test_down_no_extra_ssh(self):
         self.shop(("sysctl", 255, ""))
@@ -650,12 +831,11 @@ class SetupCacheTest(SetupCase):
         with contextlib.redirect_stdout(io.StringIO()):
             shop.setup()
         shop.ready()
-        self.assertIsNotNone(shop._cache)
-        self.assertIsNotNone(shop._ready)
+        self.assertIn("shopmac", shop._cache)
+        self.assertIn("shopmac", shop._ready)
         with contextlib.redirect_stdout(io.StringIO()):
             shop.setup()
-        self.assertIsNone(shop._cache)
-        self.assertIsNone(shop._ready)
+        self.assertEqual((shop._cache, shop._ready), ({}, {}))
 
     def test_first_setup_links_settings_json_made_by_permissions(self):
         h = Path(self.home)
@@ -864,7 +1044,7 @@ class ProfileCopyTest(SetupCase):
                      "- Render auth: ../../../a b.json\n", "- Render auth:\n", "- Render auth: ../../..\n",
                      "- Render auth: ../../../scrum\n"):
             with self.subTest(line=line):
-                shop._cache = None
+                shop._cache.clear()
                 self.calls.clear()
                 self.profile(f"- Test: x\n{line}")
                 self.assertEqual(self.copy(), "copied")
@@ -900,7 +1080,7 @@ class ProfileCopyTest(SetupCase):
         for fail, ran in (("project.md", 1), ("a.json", 2)):
             for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
                 with self.subTest(fail=fail, rc=rc):
-                    shop._cache = None
+                    shop._cache.clear()
                     self.shop((fail, rc, ""), ("scrum-work", LOCAL, ""), *DONE)
                     self.assertEqual(self.copy(), "failed")
                     self.assertEqual(len(self.calls), 1 + ran)
@@ -946,7 +1126,7 @@ class SecretTest(SetupCase):
         (repo / "playwright" / ".auth" / "admin.json").write_bytes(AUTH)
         for rc in (0, 1, subprocess.TimeoutExpired(["ssh"], 60, output=AUTH)):
             with self.subTest(rc=rc):
-                shop._cache = None
+                shop._cache.clear()
                 self.shop(("admin.json", rc, AUTH.decode()), *DONE)
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -1034,7 +1214,7 @@ class MdSyncTest(SetupCase):
         for fail, ran in (("pull --ff-only", 1), (".md-sync-cleanup-done", 2), ("tar -xf", 3)):
             for rc in (1, 255, subprocess.TimeoutExpired(["ssh"], 60)):
                 with self.subTest(fail=fail, rc=rc):
-                    shop._cache = None
+                    shop._cache.clear()
                     self.shop((fail, rc, ""))
                     self.assertIs(self.sync(), False)
                     self.assertEqual(len(self.calls), 1 + ran)
@@ -1059,7 +1239,7 @@ class MdSyncTest(SetupCase):
         self.assertIs(self.sync(), True)
         self.assertEqual((claude / "CLAUDE.md").read_bytes(), b"# rules 963\n" + IMPORT)
         os.remove(self.mac / ".claude" / "CLAUDE.md")
-        shop._cache = None
+        shop._cache.clear()
         self.shop(*SYNC)
         self.assertIs(self.sync(), False)
         self.assertEqual(self.argv, [])  # not even the probe
@@ -1500,7 +1680,7 @@ class DispatchTest(SetupCase):
         self.shop(("sysctl", 255, ""))
         self.assertIsNone(shop.ended("onewitharts", "964-shop-x", 4242))
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])
-        shop._cache = None
+        shop._cache.clear()
         self.shop(("ps -p 4242", 0, ""), ("ps -p", LOCAL, ""), *DONE)
         self.assertEqual((shop.ended("onewitharts", "964-shop-x", 4242), self.calls[1:]),
                          (NOISE, [(ENDED, 60, None)]))
@@ -1543,7 +1723,8 @@ class StructureTest(unittest.TestCase):
         text = (SKILL / "lanes" / "shop.md").read_text()
         self.assertTrue(text.startswith("# Shop Mac\n\n## Transport and probe\n"), text[:60])
         for phrase in ("`ssh shopmac`", 'export PATH="$HOME/.local/bin:$PATH";', "`input`", "`124`", "`127`",
-                       "60 s", "300 s", "prints nothing and raises nothing", "`python3 shop.py probe`"):
+                       "60 s", "300 s", "prints nothing and raises nothing", "`python3 shop.py probe`",
+                       "`workers.txt`", "`worker=<alias>`"):
             self.assertIn(phrase, text, phrase)
         self.assertEqual([line for line in text.splitlines() if line.startswith("## ")],
                          ["## Transport and probe", "## Setup", "## Ready", "## Env copy", "## E2E channel",
