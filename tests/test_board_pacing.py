@@ -607,16 +607,14 @@ class SpawnAccountTest(AccountEnv):
             self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
             self.assertEqual(self.account(), "owa")
 
-    def test_resume_keeps_recorded_account_while_it_has_room(self):
-        board.cmd_set(self.root, self.job, ["account=owa"])
-        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))
-        self.assertEqual(self.account(), "owa")
-
-    def test_recorded_account_dropped_once_its_seven_day_reset_passed(self):
-        board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(time.time()) + 3600}"])
-        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))  # window still ahead: kept
+    def test_fallback_drops_recorded_account_once_its_seven_day_reset_passed(self):
+        later = int(time.time()) + 3600
+        board.note_limit("main", later)
+        board.note_limit("owa", later)
+        board.cmd_set(self.root, self.job, ["account=owa", f"reset={later}"])
+        self.assertEqual(self.spawn()["CLAUDE_CONFIG_DIR"], str(self.owa))  # window still ahead: the fallback keeps it
         board.cmd_set(self.root, self.job, ["account=owa", f"reset={int(time.time()) - 1}"])
-        self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))  # reset passed: the first pick (main)
+        self.assertIsNone(self.spawn().get("CLAUDE_CONFIG_DIR"))  # reset passed: the first account (main)
         self.assertEqual(self.account(), "main")
 
     def test_spawn_falls_back_when_every_account_is_full(self):
