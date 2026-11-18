@@ -42,16 +42,18 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
      REPO=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)"); F="$REPO/scrum"
      if cd "$F" && L=$(python3 "$HOME/.claude/skills/trevskills-scrum/board.py" --dir "$F" artifacts "$ID"); then
        printf '%s\n' "$L" | tr '\n' '\0' | GIT_INDEX_FILE="$I" xargs -0 git add -f --
-       T=$(GIT_INDEX_FILE="$I" git write-tree) && C=$(git commit-tree "$T" -m "[scrum $ID] artifacts") &&
-         for N in 1 2 3; do
-           git push origin "${C}:$R"
-           [ "$(git ls-remote origin "$R" | cut -f1)" = "$C" ] && S=pushed && break
-           [ "$N" = 3 ] || sleep 5
-         done
+       if [ -z "$(GIT_INDEX_FILE="$I" git ls-files)" ]; then S='nothing staged'; else
+         T=$(GIT_INDEX_FILE="$I" git write-tree) && C=$(git commit-tree "$T" -m "[scrum $ID] artifacts") &&
+           for N in 1 2 3; do
+             git push origin "${C}:$R"
+             [ "$(git ls-remote origin "$R" | cut -f1)" = "$C" ] && S=pushed && break
+             [ "$N" = 3 ] || sleep 5
+           done
+       fi
      fi
      rm -f "$I"; cd "$REPO"; echo "artifacts: $S"
      ```
-     `board.py artifacts` prints only the files that are safe to push and names the rest in `skipped-secrets.txt`; when it fails (no job folder), nothing is pushed. The push is tried 3 times, 5 s apart, and counts only once `git ls-remote` shows the new commit. The final report quotes the block's last line, `artifacts: pushed` or `artifacts: push failed`. The branch is never merged and never has a PR. The cloud session never deletes or force-pushes an artifacts branch: only this Mac's **Sync** deletes it, in **Artifacts home**, after the folder came home. A failed push is reported in the final report but does not change the job's outcome.
+     `board.py artifacts` prints only the files that are safe to push and names the rest in `skipped-secrets.txt`; when it fails (no job folder), nothing is pushed. The push is tried 3 times, 5 s apart, and counts only once `git ls-remote` shows the new commit. The final report quotes the block's last line, `artifacts: pushed`, `artifacts: push failed` or `artifacts: nothing staged` (`git add` staged no file, so no empty-tree branch is pushed). The branch is never merged and never has a PR. The cloud session never deletes or force-pushes an artifacts branch: only this Mac's **Sync** deletes it, in **Artifacts home**, after the folder came home. A failed push is reported in the final report but does not change the job's outcome.
 3. **Sync** (`/trevskills-scrum cloud-sync`; also the start of `cloud` and of bare `/trevskills-scrum`). Run `B cloud-sync`, never `gh pr list` or `gh pr view`: it finds each `cloud` job's newest `[scrum $ID]` PR whose head is this repo's own scrum/$ID branch (a fork's PR, or one from another branch, is ignored) with one GitHub REST pulls call and makes the board update itself, with no LLM. It prints `{"moved": [{"id", "state", "pr", "reason", "worktree", "artifacts"}], "arrived": [ids], "error"}`. A job moved before its `scrum-artifacts/$ID` branch exists gets an internal `artifactsPending` mark; each later run re-checks it, lists the id in `arrived` once the branch exists, and drops a mark whose branch is still missing after 24 h. When it exits 1 (`gh` not signed in, offline, any `gh` failure), nothing changed: report its `error` and skip the rest of Sync. serve.py also runs it every 10 minutes while a job is in stage `cloud` or carries `artifactsPending`, and starts `/trevskills-scrum cloud-home <id>` headless for each id in `arrived` and for each job it moved with `artifacts` true or a reason starting `Hard stop: schema`. For every job it moves (merged, needs-human or aborted), `B cloud-sync` also writes `lane=<lane>` from the PR body's `Scrum lane:` line; with no valid line it writes no lane. Per job, `B cloud-sync` does exactly this:
    - No PR, or an open PR without the `scrum:needs-human` label: still running; leave it.
    - PR `MERGED`: `B set $ID stage=done pr=<url> reason=` (the done guard re-checks the PR).
@@ -67,9 +69,11 @@ Runs backlog jobs in Claude Code cloud sessions (claude.ai/code), paid by Trevor
      cd "$REPO"
      if git fetch origin scrum-artifacts/$ID 2>/dev/null; then
        T=$(mktemp -d)
-       git archive FETCH_HEAD scrum/jobs/$ID | tar -x -C "$T" && rm -f "$T/scrum/jobs/$ID/feature.md" &&
-         mkdir -p "$F/jobs/$ID" && cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" &&
-         git push origin --delete scrum-artifacts/$ID
+       if git archive FETCH_HEAD scrum/jobs/$ID 2>/dev/null | tar -x -C "$T" 2>/dev/null && [ -d "$T/scrum/jobs/$ID" ]; then
+         rm -f "$T/scrum/jobs/$ID/feature.md" && mkdir -p "$F/jobs/$ID" &&
+           cp -R "$T/scrum/jobs/$ID/." "$F/jobs/$ID/" && git push origin --delete scrum-artifacts/$ID
+       else git push origin --delete scrum-artifacts/$ID  # an empty artifacts branch: nothing to copy
+       fi
        rm -rf "$T"
      fi
      ```
