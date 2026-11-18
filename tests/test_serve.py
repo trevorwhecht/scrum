@@ -13225,17 +13225,19 @@ class JobStatesTest(_OwnServer, unittest.TestCase):
 
     JOBS = [{"id": "001-a", "title": "A", "stage": "build", "pr": 12, "lane": "fast"},
             {"id": "002-b", "title": "B", "stage": "done", "reason": "merged"},
-            {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output"},
+            {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output",
+             "question": "Fix it?", "options": [{"label": "Resume", "command": "resume 003-c"}]},
             {"id": "004-d", "title": "D", "stage": "aborted"},
             {"id": "005-e", "title": "E", "stage": "waiting", "paused": True}]
     A = {"id": "001-a", "title": "A", "stage": "build", "reason": None, "pr": 12, "lane": "fast", "paused": False,
-         "stalled": False}
+         "stalled": False, "question": None, "options": None}
     B = {"id": "002-b", "title": "B", "stage": "done", "reason": "merged", "pr": None, "lane": None, "paused": False,
-         "stalled": False}
+         "stalled": False, "question": None, "options": None}
     C = {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output", "pr": None,
-         "lane": None, "paused": False, "stalled": True}
+         "lane": None, "paused": False, "stalled": True,
+         "question": "Fix it?", "options": [{"label": "Resume", "command": "resume 003-c"}]}
     E = {"id": "005-e", "title": "E", "stage": "waiting", "reason": None, "pr": None, "lane": None, "paused": True,
-         "stalled": False}
+         "stalled": False, "question": None, "options": None}
 
     def setUp(self):
         self.start_server(self.JOBS)
@@ -13296,13 +13298,15 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
         with self.gated_backlog_op(gate, threads):
             code, out = self.call_json("POST", "/api/p/repo/backlog",
                                        {"op": "add", "async": True, "text": "  New   thing ", "urgency": "later"})
-            self.assertEqual((code, out), (202, {"queued": True}))
-            self.assertEqual(self.spooled(), [{"text": "New thing", "top": False}])
+            self.assertEqual((code, out), (202, {"queued": True, "id": out["id"]}))
+            self.assertRegex(out["id"], r"^[a-z0-9]{4}$")
+            self.assertEqual(self.spooled(), [{"text": "New thing", "top": False, "id": out["id"]}])
             self.assertEqual(self.texts(), ["Old item"])
             gate.set()
             self.assertTrue(self.wait_for(lambda: "New thing" in self.texts() and self.spooled() == []))
         self.assertEqual(self.texts(), ["Old item", "New thing"])
         self.assertEqual(self.spool.read_text(), "")
+        self.assertIn(f"{{#{out['id']}}}", (self.root / "backlog.md").read_text(), "the reply's id is the item's id")
         self.assertTrue(self.wait_for(lambda: self.estimated == ["New thing"]), "no points: estimated as the sync path does")
 
     def test_empty_text_is_400_and_not_spooled(self):
@@ -13322,8 +13326,8 @@ class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
                 code, _ = self.call_json("POST", "/api/p/repo/backlog",
                                          {"op": "add", "async": True, "text": text, "points": points})
                 self.assertEqual(code, 202)
-            self.assertEqual(self.spooled(), [{"text": "First", "top": False, "points": 3},
-                                              {"text": "Second", "top": False, "points": 5}])
+            self.assertEqual([{k: v for k, v in e.items() if k != "id"} for e in self.spooled()],
+                             [{"text": "First", "top": False, "points": 3}, {"text": "Second", "top": False, "points": 5}])
             code, _ = self.call_json("POST", "/api/p/repo/backlog",
                                      {"op": "add", "async": True, "text": "Urgent", "urgency": "next", "points": 1})
             self.assertEqual(code, 202)
