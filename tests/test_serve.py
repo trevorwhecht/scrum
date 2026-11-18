@@ -12062,6 +12062,22 @@ class E2eFullTest(unittest.TestCase):
         self.assertEqual(self.tick(), 0)
         self.assertEqual(json.loads((self.root / "e2e-full.json").read_text()), rec)
 
+    def test_tick_skips_while_this_projects_ui_sweep_runs(self):
+        """Job 1109: the sweep's dev server held the checkout's next dev lock, so the full run exited 1 at start."""
+        (self.root / "ui-sweep.json").write_text(json.dumps({"at": time.time() - 600, "result": "running"}))
+        self.assertEqual(self.tick(), 0)
+        self.assertFalse((self.root / "e2e-full.json").exists())
+        self.assertIsNone(self.serve.E2E_FULL["running"])
+
+    def test_tick_runs_beside_a_stale_or_finished_ui_sweep(self):
+        now = time.time()
+        for sweep in ({"at": now - 7200 - 60, "result": "running"}, {"at": now - 600, "result": "pass"},
+                      {"at": now - 600, "result": "error"}):
+            (self.root / "ui-sweep.json").write_text(json.dumps(sweep))
+            (self.root / "e2e-full.json").unlink(missing_ok=True)
+            self.serve.E2E_FULL["running"] = None
+            self.assertEqual(self.tick(), 1, sweep)
+
     def test_failures_parse_failed_block_only(self):
         self.assertEqual(self.serve.e2e_full_failures(E2E_LIST_OUTPUT, "e2e"), [
             {"spec": "e2e/pricing.spec.ts", "line": 12, "title": "Pricing › shows price"},

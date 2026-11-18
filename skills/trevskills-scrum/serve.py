@@ -1070,15 +1070,15 @@ def merges_since(repo, record) -> int:
 
 def e2e_full_tick(project, repo, root) -> None:
     """Start one background full E2E run on repo's main checkout when project.md has an E2E command, no full run is in
-    flight anywhere, the E2E lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
+    flight anywhere, this project's UI sweep is not running (its dev server holds the checkout's dev lock), the E2E
+    lock is free, the tracked tree is clean, e2e_full_due holds (watchdog_tick pass 1) and
     board.machine_ok passes (without claim=True, so cool-down never stops it). During
     cool down, once no job on this project blocks a restart, any new HEAD is due: the merges bundled into one run."""
     cmd = e2e_command(root)
     if cmd.lower() in ("", "none") or E2E_FULL["running"]:
         return
     now = time.time()
-    for other in board.projects().values():
-        rec = e2e_full_record(other / "scrum")
+    for rec in [e2e_full_record(other / "scrum") for other in board.projects().values()] + [ui_sweep_record(root)]:
         if rec and rec.get("result") == "running" and now - (rec.get("at") or 0) < E2E_FULL_STALE:
             return
     if not e2e_queue_free() or board._git(repo, "status", "--porcelain", "--untracked-files=no").strip():
