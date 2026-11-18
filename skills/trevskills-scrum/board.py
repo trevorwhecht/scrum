@@ -2899,6 +2899,8 @@ IMPORT_RE = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"]
 # One shell word: quoted runs, a $( ... ) with one level of nested parens, or plain characters.
 SHELL_WORD = r"""(?:'[^']*'|"[^"]*"|\$\((?:'[^']*'|"[^"]*"|\([^()]*\)|[^()'"])*\)|[^\s'"])+"""
 ENV_PREFIX_RE = re.compile(rf"^(?:\s*[A-Za-z_][A-Za-z0-9_]*={SHELL_WORD})*")
+# The Playwright wrapper that sets use.channel from SCRUM_PW_CHANNEL (a machine without Playwright's own Chromium).
+PW_CHANNEL_CONFIG = '"$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"'
 
 
 def _route_of(path):
@@ -2956,14 +2958,20 @@ def _importers(index, path):
     return sorted(set().union(*(index.get(n, set()) for n in names)) - {path})
 
 
-def _e2e_command(cmd, specs):
+def _e2e_command(cmd, specs=()):
     """The E2E command narrowed to specs: after `--` for npm run, appended for playwright test, else
-    `npx playwright test` keeping the leading NAME=value tokens."""
-    args = " ".join(shlex.quote(s) for s in specs)
+    `npx playwright test` keeping the leading NAME=value tokens. With SCRUM_PW_CHANNEL set, `--config
+    PW_CHANNEL_CONFIG` goes before the specs; with no specs (the full suite) any other command stays as it is."""
+    conf = ["--config", PW_CHANNEL_CONFIG] if os.environ.get("SCRUM_PW_CHANNEL", "").strip() else []
+    args = " ".join([*conf, *(shlex.quote(s) for s in specs)])
+    if not args:
+        return cmd
     if re.search(r"\bnpm run\b", cmd):
         return f"{cmd} -- {args}"
     if re.search(r"\bplaywright test\b", cmd):
         return f"{cmd} {args}"
+    if not specs:
+        return cmd
     env = ENV_PREFIX_RE.match(cmd)[0].strip()
     return f"{env} npx playwright test {args}".lstrip()
 
@@ -3019,7 +3027,8 @@ def e2e_specs(wt, base: str, project_file) -> dict:
     out = {"mode": "none", "command": None, "specs": [], "uncovered": [], "trigger": None}
     files = _names(wt, f"{base}...HEAD")
     if files is None or (full and (hit := next((f for f in sorted(files) if glob_match(f, full)), None))):
-        return {**out, "mode": "full", "command": cmd, "trigger": hit if files is not None else "diff unreadable"}
+        return {**out, "mode": "full", "command": _e2e_command(cmd) if cmd else None,
+                "trigger": hit if files is not None else "diff unreadable"}
     globs = _project_list(text, "UI globs") or []
     ui = sorted(f for f in files if f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs))
     if not ui:

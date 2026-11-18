@@ -17,6 +17,7 @@ os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 os.environ["SCRUM_SWAP_LOG"] = os.path.join(tempfile.mkdtemp(), "swap.json")  # never the real swap log
 os.environ.setdefault("SCRUM_PS", os.devnull)  # no live sessions unless a test says so, whatever this machine runs
 os.environ.setdefault("SCRUM_USAGE", os.path.join(os.devnull, "no-usage.json"))  # never Trevor's real usage.json
+os.environ.pop("SCRUM_PW_CHANNEL", None)  # E2E commands carry no --config unless a test sets it
 import board  # noqa: E402
 
 BOARD_PY = ROOT / "skills" / "trevskills-scrum" / "board.py"
@@ -8054,6 +8055,44 @@ class E2eSpecsTest(unittest.TestCase):
                          "npx playwright test --workers=1 'e2e/a b.spec.ts'")
         self.assertEqual(board._e2e_command("FOO=1 BAR='x y' node run-e2e.js", ["e2e/a.spec.ts"]),
                          "FOO=1 BAR='x y' npx playwright test e2e/a.spec.ts")
+
+    def full_command(self, cmd):
+        self.pfile.write_text(f"# Project\n- E2E: {cmd}\n- UI globs: *.tsx *.css src/components/ src/app/\n")
+        out = self.change("src/app/layout.tsx")
+        self.assertEqual(out["mode"], "full")
+        return out["command"]
+
+    def test_channel_config_flag(self):
+        conf = '--config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"'
+        self.assertEqual(board.PW_CHANNEL_CONFIG, '"$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"')
+        with mock.patch.dict(os.environ, {"SCRUM_PW_CHANNEL": " chrome "}):
+            self.assertEqual(self.change("src/app/(pages)/pricing/page.tsx")["command"],
+                             E2E_CMD + ' -- --config "$HOME/.claude/skills/trevskills-e2e/channel.config.mjs" '
+                             'e2e/pricing.spec.ts')
+            self.assertEqual(self.full_command(E2E_CMD), E2E_CMD + " -- " + conf)
+            self.assertEqual(self.full_command("npx playwright test --workers=2"),
+                             'npx playwright test --workers=2 --config '
+                             '"$HOME/.claude/skills/trevskills-e2e/channel.config.mjs"')
+            self.assertEqual(self.full_command("FOO=1 node run-e2e.js"), "FOO=1 node run-e2e.js")
+            self.assertEqual(board._e2e_command("npx playwright test --workers=1", ["e2e/a b.spec.ts"]),
+                             "npx playwright test --workers=1 " + conf + " 'e2e/a b.spec.ts'")
+            self.assertEqual(board._e2e_command("FOO=1 BAR='x y' node run-e2e.js", ["e2e/a.spec.ts"]),
+                             "FOO=1 BAR='x y' npx playwright test " + conf + " e2e/a.spec.ts")
+
+    def test_channel_unset_byte_identical(self):
+        self.assertNotIn("SCRUM_PW_CHANNEL", os.environ)
+        blanks = ({}, {"SCRUM_PW_CHANNEL": ""}, {"SCRUM_PW_CHANNEL": "  "})
+        for env in blanks:  # scoped first: the branch's diff only grows, and full_command's layout edit makes it full
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(self.change("src/app/(pages)/pricing/page.tsx")["command"],
+                                 E2E_CMD + " -- e2e/pricing.spec.ts")
+                self.assertEqual(board._e2e_command("FOO=1 BAR='x y' node run-e2e.js", ["e2e/a.spec.ts"]),
+                                 "FOO=1 BAR='x y' npx playwright test e2e/a.spec.ts")
+        for env in blanks:
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(self.full_command(E2E_CMD), E2E_CMD)
+                self.assertEqual(self.full_command("npx playwright test --workers=2"), "npx playwright test --workers=2")
+                self.assertEqual(self.full_command("FOO=1 node run-e2e.js"), "FOO=1 node run-e2e.js")
 
     def test_cli_without_job(self):
         (self.repo / "src/components/Price.tsx").write_text("export default () => <i>1</i>\n")

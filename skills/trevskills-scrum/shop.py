@@ -2,11 +2,15 @@
 """The scrum's one way to talk to the shop MacBook Pro: every remote command goes through `ssh shopmac`.
 
 usage: shop.py probe   (print the cached probe as one JSON line; exit 0 whether the shop Mac is up or down)
+       shop.py setup   (prepare the shop Mac for a scrum job: one `<step>: <result>` line per step; exit 1 when the
+                        shop Mac is down or a step failed)
 
 run() never raises: a timeout comes back as exit 124, ssh that cannot start as 127, and ssh's own failure as 255.
-probe() is one cached round trip that prints nothing when the shop Mac sleeps. See lanes/shop.md.
+probe() is one cached round trip that prints nothing when the shop Mac sleeps. setup(), ready() and env_copy() never
+print a secret or remote output. See lanes/shop.md.
 """
-import argparse, json, subprocess, sys, time
+import argparse, json, re, subprocess, sys, time
+from pathlib import Path
 
 ALIAS = "shopmac"
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5")  # after the alias: they win over ~/.ssh/config
@@ -17,8 +21,91 @@ UP_TTL = 60
 DOWN_TTL = 300  # 5 of serve.py's one-minute watchdog ticks per probe of a sleeping shop Mac
 TOOLS = ("node", "gh", "claude")
 
-# ponytail: module global with no lock; add one when a second thread calls probe(). Callers treat the dict as read-only.
+NODE_VERSION = "24.22.3"  # built for macOS 13.5, runs on the shop's macOS 12.7 (checked 2026-11-17)
+NODE_SHA256 = "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7"
+GH_VERSION = "2.103.3"
+GH_SHA256 = "a2f86418f4350ae6e9ec60d5000bdf7665728436946a97fc27fe50e6ae752682"
+INSTALL_TIMEOUT, STEP_TIMEOUT, ACCOUNT_TIMEOUT = 600, 60, 120
+IN_TMP = 'd=$(mktemp -d) || exit 1; (cd "$d" && {}); rc=$?; rm -rf "$d"; exit $rc'  # an install's work dir, always removed
+NODE_DIR = f"node-v{NODE_VERSION}-darwin-x64"
+NODE_INSTALL = IN_TMP.format(
+    f"curl -fsSL -o node.tgz https://nodejs.org/dist/v{NODE_VERSION}/{NODE_DIR}.tar.gz"
+    f" && echo '{NODE_SHA256}  node.tgz' | shasum -a 256 -c -"
+    ' && mkdir -p "$HOME/.local/share" "$HOME/.local/bin" && tar -xzf node.tgz -C "$HOME/.local/share"'
+    + "".join(f' && ln -sf "$HOME/.local/share/{NODE_DIR}/bin/{b}" "$HOME/.local/bin/{b}"' for b in ("node", "npm", "npx")))
+GH_DIR = f"gh_{GH_VERSION}_macOS_amd64"
+GH_INSTALL = IN_TMP.format(
+    f"curl -fsSL -o gh.zip https://github.com/cli/cli/releases/download/v{GH_VERSION}/{GH_DIR}.zip"  # -L: it redirects
+    f" && echo '{GH_SHA256}  gh.zip' | shasum -a 256 -c -"
+    f' && unzip -q gh.zip && mkdir -p "$HOME/.local/bin" && cp {GH_DIR}/bin/gh "$HOME/.local/bin/gh"')
+# File storage, never the keychain: the shop's login keychain is locked in SSH sessions (security exits 36).
+GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
+            " && chmod 600 ~/.config/gh/hosts.yml")
+GIT_HELPER = "git config --global --get-all credential.https://github.com.helper"
+
+# Entries of this Mac's ~/.claude-owa that are links into ~/.claude (read 2026-11-17); its credentials are not.
+OWA_LINKS = ("agents", "CLAUDE.md", "commands", "history.jsonl", "hooks", "plugins", "projects", "rules", "scripts",
+             "settings.json", "settings.local.json", "skills")
+OWA_CHECK = ('mkdir -p "$HOME/.claude-owa" || exit 1; for n in ' + " ".join(OWA_LINKS) + '; do [ -e "$HOME/.claude/$n" ]'
+             ' && [ ! -e "$HOME/.claude-owa/$n" ] && [ ! -L "$HOME/.claude-owa/$n" ] && echo "$n"; done; true')
+SHOP_ACCOUNTS = {"main": None, "owa": "$HOME/.claude-owa"}  # account: its CLAUDE_CONFIG_DIR (None: claude's default)
+ACCOUNT_CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
+NO_TOKEN = 3  # the account check's exit code when the account's oauth-token file is missing
+TOKEN_HINT = " (run claude setup-token in the shop GUI)"
+# This Mac's ~/.claude/settings.json permissions a headless scrum job needs (read 2026-11-17), home paths as {home};
+# local-only entries (MCP tools, Chrome, .env.prod, Homebrew, PR merge, safe-reset) are left out.
+SHOP_PERMISSIONS = {
+    "allow": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebSearch", "WebFetch", "Skill", "Read(/{home}/**)",
+              "Read(//tmp/**)", "Read(//private/tmp/**)", "Edit(/{home}/.claude/**/*.md)",
+              "Edit(/{home}/.claude-owa/**/*.md)"],
+    "deny": ["Bash(git reset:*)", "Bash(git rebase:*)", "Bash(git push --force:*)", "Bash(git push --force-with-lease:*)",
+             "Bash(git push -f:*)", "Bash(prisma migrate reset:*)", "Bash(npx prisma migrate reset:*)"],
+    "ask": ["Bash(prisma db push:*)", "Bash(npx prisma db push:*)"],
+    "additionalDirectories": ["/private/tmp", "{home}/scrum-work", "{home}/.claude", "{home}/.claude-owa"],
+}
+# Runs on the shop's python3 after a PERMS = ... line: union, never remove; write only on a change, atomically.
+MERGE_SCRIPT = r'''
+home = os.path.expanduser("~")
+path = os.path.realpath(os.path.join(home, ".claude", "settings.json"))
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except FileNotFoundError:
+    data = {}
+except ValueError:
+    sys.exit("settings.json is not valid JSON")
+perms = data.setdefault("permissions", {}) if isinstance(data, dict) else None
+if not isinstance(perms, dict):
+    sys.exit("settings.json: permissions is not an object")
+changed = False
+for key, entries in PERMS.items():
+    have = perms.setdefault(key, [])
+    if not isinstance(have, list):
+        sys.exit("settings.json: permissions.%s is not a list" % key)
+    for entry in entries:
+        entry = entry.replace("{home}", home)
+        if entry not in have:
+            have.append(entry)
+            changed = True
+if changed:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+print("changed" if changed else "same")
+'''
+# ponytail: a gh logout or a revoked token stays unseen for up to 10 min of an up shop; setup() clears it, and a
+# dispatch that fails on it is the upgrade trigger for a shorter TTL.
+READY_TTL = 600
+PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+ENV_COPY = ("umask 077 && mkdir -p ~/scrum-work/{p} && cat > ~/scrum-work/{p}/.env.local.tmp"
+            " && mv -f ~/scrum-work/{p}/.env.local.tmp ~/scrum-work/{p}/.env.local")
+
+# ponytail: module globals with no lock; add one when a second thread calls probe(). Callers treat the dicts as read-only.
 _cache = None  # (time.monotonic() of the probe, its result)
+_ready = None  # (time.monotonic() of the ready() check, its result)
 
 
 def run(cmd: str, timeout: float, input: str | bytes | None = None) -> subprocess.CompletedProcess:
@@ -54,11 +141,148 @@ def probe() -> dict:
     return _cache[1]
 
 
+def account_env(name: str) -> str:
+    """The shell prefix that selects shop account `name` (a SHOP_ACCOUNTS key) and loads its `claude setup-token` file
+    in the shop's own shell, so the token never reaches this Mac's argv, stdout or logs. Dispatch puts it before its
+    own `claude` command."""
+    conf = SHOP_ACCOUNTS[name]
+    return ((f'export CLAUDE_CONFIG_DIR="{conf}"; ' if conf else "")
+            + f'[ -r {_token_file(name)} ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat {_token_file(name)})"; ')
+
+
+def _token_file(name: str) -> str:
+    return f'"{SHOP_ACCOUNTS[name] or "$HOME/.claude"}/oauth-token"'
+
+
+def _account(name: str) -> str:
+    """"ok" when shop account `name` answers a headless `claude -p`, "no token" when its token file is missing, else
+    "not ready"."""
+    r = run(f"[ -r {_token_file(name)} ] || exit {NO_TOKEN}; {account_env(name)}{ACCOUNT_CHECK}", ACCOUNT_TIMEOUT)
+    if r.returncode == 0 and "ok" in r.stdout.lower():
+        return "ok"
+    return "no token" if r.returncode == NO_TOKEN else "not ready"
+
+
+def _permissions_script() -> str:
+    """The Python the shop runs from stdin to merge SHOP_PERMISSIONS into its ~/.claude/settings.json; prints
+    `changed` or `same`, and exits non-zero without writing on malformed JSON."""
+    return f"import json, os, sys, tempfile\nPERMS = json.loads({json.dumps(SHOP_PERMISSIONS)!r})\n{MERGE_SCRIPT}"
+
+
+def _done(r: subprocess.CompletedProcess) -> tuple[str, str]:
+    return ("changed", "") if r.returncode == 0 else ("failed", f" (exit {r.returncode})")
+
+
+def _gh_login() -> tuple[str, str]:
+    """Pipe this Mac's gh token into the shop's gh login on stdin, unless the shop is already logged in."""
+    if run("gh auth status", STEP_TIMEOUT).returncode == 0:
+        return "ok", ""
+    try:
+        local = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=STEP_TIMEOUT)
+    except OSError:
+        return "failed", " (exit 127)"
+    except subprocess.TimeoutExpired:
+        return "failed", " (exit 124)"
+    token = local.stdout.strip()
+    if local.returncode or not token:
+        return "failed", f" (exit {local.returncode or 1})"
+    return _done(run(GH_LOGIN, STEP_TIMEOUT, input=token))
+
+
+def _gh_git() -> tuple[str, str]:
+    if "gh auth git-credential" in run(GIT_HELPER, STEP_TIMEOUT).stdout:
+        return "ok", ""
+    return _done(run("gh auth setup-git", STEP_TIMEOUT))
+
+
+def _owa_links() -> tuple[str, str]:
+    r = run(OWA_CHECK, STEP_TIMEOUT)
+    if r.returncode:
+        return _done(r)
+    missing = [n for n in r.stdout.split() if n in OWA_LINKS]
+    if not missing:
+        return "ok", ""
+    return _done(run(" && ".join(f'ln -s "$HOME/.claude/{n}" "$HOME/.claude-owa/{n}"' for n in missing), STEP_TIMEOUT))
+
+
+def _permissions() -> tuple[str, str]:
+    r = run("python3 -", STEP_TIMEOUT, input=_permissions_script())
+    if r.returncode:
+        return _done(r)
+    return ("changed" if "changed" in r.stdout.split() else "ok"), ""  # split: a shell startup line may come first
+
+
+def _account_step(name: str) -> tuple[str, str]:
+    a = _account(name)
+    return ("ok", "") if a == "ok" else ("not ready", TOKEN_HINT if a == "no token" else "")
+
+
+def setup() -> dict[str, str]:
+    """Prepare the shop Mac for a scrum job: {step: "ok"|"changed"|"failed"|"not ready"}, printing one
+    `<step>: <result>` line per step and never remote output. Every step checks before it acts, so a second run changes
+    nothing. A down shop Mac prints `shop: down` and returns {"shop": "failed"} after the one probe."""
+    global _cache, _ready
+    _cache = _ready = None
+    p = probe()
+    if not p["up"]:
+        print("shop: down", flush=True)
+        return {"shop": "failed"}
+    tools = p["tools"]
+    steps = {"node": lambda: ("ok", "") if tools["node"] else _done(run(NODE_INSTALL, INSTALL_TIMEOUT)),
+             "gh": lambda: ("ok", "") if tools["gh"] else _done(run(GH_INSTALL, INSTALL_TIMEOUT)),
+             "gh login": _gh_login, "gh git": _gh_git, "owa links": _owa_links, "permissions": _permissions,
+             **{f"account {n}": (lambda n=n: _account_step(n)) for n in SHOP_ACCOUNTS}}
+    out = {}
+    for name, step in steps.items():
+        out[name], note = step()
+        print(f"{name}: {'ok (changed)' if out[name] == 'changed' else out[name]}{note}", flush=True)
+    return out
+
+
+def ready() -> dict:
+    """{"ready", "up", "gh", "node", "claude", "accounts": {"main", "owa"}}, all bools. `ready`: up, gh logged in,
+    node and claude present and at least one account answering. A down shop Mac returns all false at once, with no ssh
+    beyond probe()'s cache; an up result is cached for READY_TTL and setup() clears it. Prints nothing."""
+    global _ready
+    p = probe()
+    if not p["up"]:
+        return {"ready": False, "up": False, "gh": False, "node": False, "claude": False,
+                "accounts": {n: False for n in SHOP_ACCOUNTS}}
+    now = time.monotonic()
+    if _ready and now - _ready[0] < READY_TTL:
+        return _ready[1]
+    gh = run("gh auth status", STEP_TIMEOUT).returncode == 0
+    accounts = {n: _account(n) == "ok" for n in SHOP_ACCOUNTS}
+    node, claude = p["tools"]["node"], p["tools"]["claude"]
+    _ready = (now, {"ready": gh and node and claude and any(accounts.values()), "up": True, "gh": gh, "node": node,
+                    "claude": claude, "accounts": accounts})
+    return _ready[1]
+
+
+def env_copy(project: str, repo: str) -> str:
+    """Copy `<repo>/.env.local` to the shop's `~/scrum-work/<project>/.env.local` over stdin under umask 077:
+    "copied", "none" (no .env.local; no ssh) or "failed" (a bad project name, a down shop Mac or a failed copy).
+    Prints and logs nothing."""
+    if not PROJECT_RE.fullmatch(project):
+        return "failed"
+    try:
+        data = (Path(repo) / ".env.local").read_bytes()
+    except FileNotFoundError:
+        return "none"
+    except OSError:
+        return "failed"
+    if not probe()["up"]:
+        return "failed"
+    return "copied" if run(ENV_COPY.format(p=project), STEP_TIMEOUT, input=data).returncode == 0 else "failed"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="shop.py", description="Talk to the shop Mac over ssh shopmac.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe", help="print the probe as one JSON line")
-    parser.parse_args(argv)
+    sub.add_parser("setup", help="prepare the shop Mac for a scrum job; one line per step")
+    if parser.parse_args(argv).command == "setup":
+        return 1 if "failed" in setup().values() else 0
     print(json.dumps(probe()))
     return 0
 
