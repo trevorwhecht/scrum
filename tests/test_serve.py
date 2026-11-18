@@ -74,6 +74,10 @@ class ServeTest(unittest.TestCase):
         ttl = mock.patch.object(self.serve, "MACHINE_TTL", 0)  # each /api/machine here reads its own env
         ttl.start()
         self.addCleanup(ttl.stop)
+        ttl = mock.patch.object(self.serve, "BOARD_ACTIVITY_TTL", 0)  # each board.json GET here computes live fields
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
         self.serve.HEALTH["routes"].clear()  # each test starts with no latency samples or disconnects
         self.serve.HEALTH["disconnects"].clear()
 
@@ -2080,6 +2084,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(rk("GET", "/p/proj/board.json"), "GET /p/*/board.json")
         self.assertEqual(rk("GET", "/p/proj/jobs/1-x/spec.md"), "GET /p/*/file")
         self.assertEqual(rk("GET", "/p/a%2Fb/board.json"), "GET /p/*/board.json")
+        self.assertEqual(rk("GET", "/api/p/proj/job-states?ids=1"), "GET /api/p/*/job-states")
+        self.assertEqual(rk("GET", "/api/p/a%2Fb/job-states"), "GET /api/p/*/job-states")
         self.assertEqual(rk("POST", "/api/p/proj/jobs/12-x/rework"), "POST /api/p/*/jobs/*/rework")
         self.assertEqual(rk("POST", "/api/p/proj/digests/007/apply"), "POST /api/p/*/digests/*")
         self.assertEqual(rk("GET", "/api/p/proj/digests?brief=1"), "GET /api/p/*/digests")
@@ -12775,3 +12781,286 @@ class AutoOffTest(unittest.TestCase):
             self.assertIsNone(self.got())
             self.assertIsNone(self.got())
             self.assertEqual(read.call_count, 1, "pulse.log changed: read once")
+
+
+class _OwnServer:
+    """A throwaway project `repo` (board.json and backlog.md) and a serve.py server on a free port, for one test."""
+
+    def start_server(self, jobs=()):
+        import serve
+        self.serve = serve
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.root = self.repo / "scrum"
+        (self.root / "jobs").mkdir(parents=True)
+        (self.root / "board.json").write_text(json.dumps({"jobs": list(jobs)}))
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Old item\n")
+        patch = mock.patch.object(serve.board, "projects", return_value={"repo": self.repo})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.server = serve.make_server(0)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def call(self, method, path, body=None):
+        r = urllib.request.Request(self.base + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                   headers={"Content-Type": "application/json"} if body is not None else {})
+        try:
+            with urllib.request.urlopen(r, timeout=30) as res:
+                return res.status, res.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.read()
+
+    def call_json(self, method, path, body=None):
+        code, raw = self.call(method, path, body)
+        return code, json.loads(raw)
+
+    def wait_for(self, cond, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.02)
+        return False
+
+
+class BoardActivityCacheTest(_OwnServer, unittest.TestCase):
+    """cached_board_with_activity: board.json GETs share one board_with_activity per TTL and per board.json state (job 970)."""
+
+    def setUp(self):
+        self.start_server([{"id": "001-a", "title": "A", "stage": "build"}])
+        self.serve.BOARD_ACTIVITY_CACHE.clear()
+        self.addCleanup(self.serve.BOARD_ACTIVITY_CACHE.clear)
+        ttl = mock.patch.object(self.serve, "BOARD_ACTIVITY_TTL", 60)
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        self.computes = []
+
+    def stub(self, root, project):
+        self.computes.append((str(root), project))
+        return {"n": len(self.computes)}
+
+    def test_repeat_calls_share_one_compute(self):
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=self.stub):
+            first = self.serve.cached_board_with_activity(self.root, "repo")
+            second = self.serve.cached_board_with_activity(self.root, "repo")
+            self.assertEqual(len(self.computes), 1)
+            self.assertIs(second, first)
+            self.assertEqual(second, {"n": 1})
+            other = Path(self.tmp.name) / "other" / "scrum"
+            other.mkdir(parents=True)
+            (other / "board.json").write_text('{"jobs": []}')
+            self.assertEqual(self.serve.cached_board_with_activity(other, "other"), {"n": 2}, "each root has its own entry")
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 1})
+        self.assertEqual(len(self.computes), 2)
+
+    def test_board_change_recomputes(self):
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=self.stub):
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 1})
+            (self.root / "board.json").write_text(json.dumps({"jobs": [{"id": "001-a", "title": "A", "stage": "review"}]}))
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 2})
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 2})
+
+    def test_ttl_expiry_recomputes(self):
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=self.stub):
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 1})
+            key, at, data = self.serve.BOARD_ACTIVITY_CACHE[str(self.root)]
+            self.serve.BOARD_ACTIVITY_CACHE[str(self.root)] = (key, at - 61, data)  # older than the 60 s TTL
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 2})
+            with mock.patch.object(self.serve, "BOARD_ACTIVITY_TTL", 0):
+                self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 3}, "TTL 0 never caches")
+
+    def test_concurrent_calls_compute_once(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def slow(root, project):
+            entered.set()
+            release.wait(10)
+            return self.stub(root, project)
+
+        got = []
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=slow):
+            threads = [threading.Thread(target=lambda: got.append(self.serve.cached_board_with_activity(self.root, "repo")))
+                       for _ in range(4)]
+            for t in threads:
+                t.start()
+            self.assertTrue(entered.wait(10))
+            time.sleep(0.3)  # the other three reach the per-root lock
+            release.set()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(len(self.computes), 1)
+        self.assertEqual(got, [{"n": 1}] * 4)
+
+    def test_value_error_not_cached(self):
+        calls = []
+
+        def broken(root, project):
+            calls.append(1)
+            raise ValueError("Expecting value")
+
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=broken):
+            with self.assertRaises(ValueError):
+                self.serve.cached_board_with_activity(self.root, "repo")
+            self.assertNotIn(str(self.root), self.serve.BOARD_ACTIVITY_CACHE)
+            code, raw = self.call("GET", "/p/repo/board.json")
+            self.assertEqual((code, raw), (200, (self.root / "board.json").read_bytes()), "raw bytes, as before")
+        self.assertEqual(len(calls), 2)
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=self.stub):
+            self.assertEqual(self.serve.cached_board_with_activity(self.root, "repo"), {"n": 1})
+
+    def test_board_json_get_records_outcomes_every_time(self):
+        with mock.patch.object(self.serve, "board_with_activity", side_effect=self.stub), \
+                mock.patch.object(self.serve, "record_outcomes", side_effect=lambda p, r: outcomes.append(p)):
+            outcomes = []
+            self.assertEqual(self.call_json("GET", "/p/repo/board.json"), (200, {"n": 1}))
+            self.assertEqual(self.call_json("GET", "/p/repo/board.json"), (200, {"n": 1}))
+        self.assertEqual(outcomes, ["repo", "repo"])
+        self.assertEqual(len(self.computes), 1)
+
+
+class JobStatesTest(_OwnServer, unittest.TestCase):
+    """GET /api/p/<project>/job-states: plain fields from cached_board for messageManager's poll (job 970)."""
+
+    JOBS = [{"id": "001-a", "title": "A", "stage": "build", "pr": 12, "lane": "fast"},
+            {"id": "002-b", "title": "B", "stage": "done", "reason": "merged"},
+            {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output"},
+            {"id": "004-d", "title": "D", "stage": "aborted"},
+            {"id": "005-e", "title": "E", "stage": "waiting", "paused": True}]
+    A = {"id": "001-a", "title": "A", "stage": "build", "reason": None, "pr": 12, "lane": "fast", "paused": False,
+         "stalled": False}
+    B = {"id": "002-b", "title": "B", "stage": "done", "reason": "merged", "pr": None, "lane": None, "paused": False,
+         "stalled": False}
+    C = {"id": "003-c", "title": "C", "stage": "needs-human", "reason": "stalled in build: no output", "pr": None,
+         "lane": None, "paused": False, "stalled": True}
+    E = {"id": "005-e", "title": "E", "stage": "waiting", "reason": None, "pr": None, "lane": None, "paused": True,
+         "stalled": False}
+
+    def setUp(self):
+        self.start_server(self.JOBS)
+
+    def test_returns_only_requested_ids(self):
+        self.assertEqual(self.call_json("GET", "/api/p/repo/job-states?ids=005-e,,002-b,nope,001"), (200, [self.B, self.E]))
+        self.assertEqual(self.call_json("GET", "/api/p/repo/job-states?ids=nope"), (200, []))
+
+    def test_no_ids_returns_non_final_jobs(self):
+        self.assertEqual(self.call_json("GET", "/api/p/repo/job-states"), (200, [self.A, self.C, self.E]))
+        self.assertEqual(self.call_json("GET", "/api/p/repo/job-states?ids="), (200, [self.A, self.C, self.E]))
+
+    def test_over_200_ids_is_400(self):
+        ids = ",".join(f"{i:03d}-x" for i in range(201))
+        self.assertEqual(self.call_json("GET", f"/api/p/repo/job-states?ids={ids}"), (400, {"error": "at most 200 ids"}))
+        ids = ",".join(["001-a"] + [f"{i:03d}-x" for i in range(199)])
+        self.assertEqual(self.call_json("GET", f"/api/p/repo/job-states?ids={ids}"), (200, [self.A]))
+
+    def test_unknown_project_404(self):
+        self.assertEqual(self.call_json("GET", "/api/p/nope/job-states"), (404, {"error": "no such project"}))
+
+    def test_no_per_job_work(self):
+        boom = mock.Mock(side_effect=AssertionError("per-job work"))
+        with mock.patch.object(self.serve, "board_with_activity", boom), mock.patch.object(self.serve, "activity", boom), \
+                mock.patch.object(self.serve, "resume_refusal", boom):
+            self.assertEqual(self.call_json("GET", "/api/p/repo/job-states"), (200, [self.A, self.C, self.E]))
+
+
+class AsyncBacklogAddTest(_OwnServer, unittest.TestCase):
+    """POST /api/p/<project>/backlog {"op": "add", "async": true}: 202 at once, applied by a spool drain (job 970)."""
+
+    def setUp(self):
+        self.start_server()
+        self.spool = self.root / "backlog-spool.jsonl"
+        est = mock.patch.object(self.serve, "estimate", side_effect=lambda root, text: self.estimated.append(text))
+        est.start()
+        self.addCleanup(est.stop)
+        self.estimated = []
+        self.addCleanup(lambda: self.wait_for(lambda: str(self.root) not in self.serve.SPOOL_DRAINING))
+
+    def texts(self):
+        return [i["text"] for i in self.serve.board.backlog_items(self.root)]
+
+    def spooled(self):
+        return [json.loads(l) for l in self.spool.read_text().splitlines()] if self.spool.exists() else []
+
+    def gated_backlog_op(self, gate, threads):
+        real = self.serve.board.backlog_op
+
+        def op(*a, **k):
+            threads.append(threading.get_ident())
+            gate.wait(10)
+            return real(*a, **k)
+        return mock.patch.object(self.serve.board, "backlog_op", side_effect=op)
+
+    def test_returns_202_before_backlog_op_runs(self):
+        gate, threads = threading.Event(), []
+        with self.gated_backlog_op(gate, threads):
+            code, out = self.call_json("POST", "/api/p/repo/backlog",
+                                       {"op": "add", "async": True, "text": "  New   thing ", "urgency": "later"})
+            self.assertEqual((code, out), (202, {"queued": True}))
+            self.assertEqual(self.spooled(), [{"text": "New thing", "top": False}])
+            self.assertEqual(self.texts(), ["Old item"])
+            gate.set()
+            self.assertTrue(self.wait_for(lambda: "New thing" in self.texts() and self.spooled() == []))
+        self.assertEqual(self.texts(), ["Old item", "New thing"])
+        self.assertEqual(self.spool.read_text(), "")
+        self.assertTrue(self.wait_for(lambda: self.estimated == ["New thing"]), "no points: estimated as the sync path does")
+
+    def test_empty_text_is_400_and_not_spooled(self):
+        for body, error in (({"text": "   "}, "backlog item text is empty"),
+                            ({"text": "X", "urgency": "soon"}, "urgency must be now, next or later"),
+                            ({"text": "X", "points": 4}, "points must be one of")):
+            code, out = self.call_json("POST", "/api/p/repo/backlog", {"op": "add", "async": True, **body})
+            self.assertEqual(code, 400, body)
+            self.assertIn(error, out["error"])
+        self.assertFalse(self.spool.exists())
+        self.assertEqual(self.texts(), ["Old item"])
+
+    def test_two_async_adds_both_land_in_order(self):
+        gate, threads = threading.Event(), []
+        with self.gated_backlog_op(gate, threads):
+            for text, points in (("First", 3), ("Second", 5)):
+                code, _ = self.call_json("POST", "/api/p/repo/backlog",
+                                         {"op": "add", "async": True, "text": text, "points": points})
+                self.assertEqual(code, 202)
+            self.assertEqual(self.spooled(), [{"text": "First", "top": False, "points": 3},
+                                              {"text": "Second", "top": False, "points": 5}])
+            code, _ = self.call_json("POST", "/api/p/repo/backlog",
+                                     {"op": "add", "async": True, "text": "Urgent", "urgency": "next", "points": 1})
+            self.assertEqual(code, 202)
+            gate.set()
+            self.assertTrue(self.wait_for(lambda: self.spooled() == [] and len(self.texts()) == 4))
+        self.assertEqual(self.texts(), ["Urgent", "Old item", "First", "Second"])
+        self.assertEqual(len(set(threads)), 1, "one drain applied every line")
+        self.assertEqual(self.estimated, [], "hand-picked points skip the estimate")
+
+    def test_malformed_spool_line_is_dropped_and_next_applied(self):
+        self.spool.write_text('not json\n{"text": "  ", "top": false}\n{"text": "Good", "top": true, "points": 2}\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.serve.drain_backlog_spool(self.root)
+        self.assertEqual(self.texts(), ["Good", "Old item"])
+        self.assertEqual(self.spool.read_text(), "")
+        self.assertIn("backlog spool: dropped not json: ", err.getvalue())
+        self.assertIn('backlog spool: dropped {"text": "  ", "top": false}: backlog item text is empty', err.getvalue())
+        self.assertNotIn(str(self.root), self.serve.SPOOL_DRAINING)
+
+    def test_startup_drain_applies_leftover_line(self):
+        self.spool.write_text('{"text": "Left over", "top": false, "points": 8}\n')
+        self.serve.drain_all_spools()
+        self.assertEqual(self.texts(), ["Old item", "Left over"])
+        self.assertEqual(self.spool.read_text(), "")
+        src = inspect.getsource(self.serve.main)
+        self.assertIn("threading.Thread(target=drain_all_spools, daemon=True).start()", src)
+        self.assertLess(src.index("migrate_backlog_sources()"), src.index("target=drain_all_spools"))
+        self.assertLess(src.index("target=drain_all_spools"), src.index("server.serve_forever()"))
+
+    def test_async_not_true_stays_sync(self):
+        for flag in ("true", 1, False):
+            code, items = self.call_json("POST", "/api/p/repo/backlog",
+                                         {"op": "add", "async": flag, "text": f"Sync {flag}", "points": 2})
+            self.assertEqual(code, 200)
+            self.assertEqual(items[-1]["text"], f"Sync {flag}")
+        self.assertFalse(self.spool.exists())

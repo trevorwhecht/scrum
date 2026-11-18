@@ -3061,7 +3061,7 @@ def route_key(method, path):
     """'<METHOD> <path>' with the query dropped and the project, job id, digest and agent segments turned into *, so
     every project's polls of one endpoint share one key; /p/*/<rel> keeps board.json and calls any other file `file`."""
     path = urlparse(path).path
-    if m := re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/windows|/manual-checks|/digests|/roadmap|/attachments"
+    if m := re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/windows|/job-states|/manual-checks|/digests|/roadmap|/attachments"
                          r"|/colour|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path):
         path = "/api/p/*" + re.sub(r"^/jobs/[^/]+/", "/jobs/*/", re.sub(r"^/digests/.+", "/digests/*", m.group(2)))
     elif m := re.fullmatch(r"/api/p/[^/]+(/.*)?", path):
@@ -4151,6 +4151,141 @@ def board_with_activity(root, project):
     data["uiSweep"] = {k: rec.get(k) for k in ("at", "head", "result", "findings")} if rec else None
     data["autoOff"] = auto_off(project, root)  # the dashboard's "Auto continue off since" header line
     return data
+
+
+BOARD_ACTIVITY_TTL = 3  # seconds a board.json response is reused; counted from when its compute finished
+BOARD_ACTIVITY_CACHE = {}  # str(scrum root) -> (file_key of board.json, time.monotonic() at, board_with_activity result)
+BOARD_ACTIVITY_LOCKS = {}  # str(scrum root) -> threading.Lock held while that root's board is computed
+BOARD_ACTIVITY_GUARD = threading.Lock()  # guards BOARD_ACTIVITY_LOCKS
+
+
+def cached_board_with_activity(root, project):
+    """GET /p/<project>/board.json: board_with_activity(root, project), reused while board.json keeps its file_key and
+    the result is younger than BOARD_ACTIVITY_TTL. A per-root lock is held across the compute, so a burst of polls on an
+    uncached board waits for one compute and shares it. A ValueError (malformed or mid-write) caches nothing and is raised.
+    Callers never mutate the result."""
+    with BOARD_ACTIVITY_GUARD:
+        lock = BOARD_ACTIVITY_LOCKS.setdefault(str(root), threading.Lock())
+    with lock:
+        key = file_key(root / "board.json")
+        hit = BOARD_ACTIVITY_CACHE.get(str(root))
+        if hit and hit[0] == key and time.monotonic() - hit[1] < BOARD_ACTIVITY_TTL:
+            return hit[2]
+        data = board_with_activity(root, project)
+        BOARD_ACTIVITY_CACHE[str(root)] = (key, time.monotonic(), data)
+        return data
+
+
+JOB_STATES_MAX = 200  # ids one GET /api/p/<project>/job-states may ask for
+
+
+def job_states(root, ids):
+    """GET /api/p/<project>/job-states: {id, title, stage, reason, pr, lane, paused, stalled} per job, in board order,
+    read from cached_board only (no activity, refusal, lock or session work). ids (exact strings) picks those jobs and
+    leaves unknown ids out; None or empty gives every job not done or aborted."""
+    jobs = cached_board(root).get("jobs", [])
+    if ids:
+        want = set(ids)
+        jobs = [j for j in jobs if j.get("id") in want]
+    else:
+        jobs = [j for j in jobs if j.get("stage") not in ("done", "aborted")]
+    return [{"id": j.get("id"), "title": j.get("title"), "stage": j.get("stage"), "reason": j.get("reason"),
+             "pr": j.get("pr"), "lane": j.get("lane"), "paused": bool(j.get("paused")), "stalled": board.stalled(j)}
+            for j in jobs]
+
+
+SPOOL_LOCK = threading.Lock()  # every read and write of a backlog-spool.jsonl, and SPOOL_DRAINING
+SPOOL_DRAINING: set[str] = set()  # str(scrum root) whose spool a drain is emptying now
+
+
+def spool_path(root) -> Path:
+    """The async backlog-add spool: one JSON line {"text", "top", "points"?} per add not yet applied."""
+    return Path(root) / "backlog-spool.jsonl"
+
+
+def spool_backlog_add(root, entry: dict) -> None:
+    """Append entry to root's spool and fsync it, then start a drain thread unless one is already emptying that spool."""
+    with SPOOL_LOCK:
+        with open(spool_path(root), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        start = str(root) not in SPOOL_DRAINING
+        SPOOL_DRAINING.add(str(root))
+    if start:
+        threading.Thread(target=_drain_spool, args=(root,), daemon=True).start()
+
+
+def drain_backlog_spool(root) -> None:
+    """Apply root's spool lines in order through board.backlog_op, unless a drain for root is already running."""
+    with SPOOL_LOCK:
+        if str(root) in SPOOL_DRAINING:
+            return
+        SPOOL_DRAINING.add(str(root))
+    _drain_spool(root)
+
+
+def _drain_spool(root) -> None:
+    """The drain; the caller put root in SPOOL_DRAINING. Takes the head line under SPOOL_LOCK, applies it outside the
+    lock, then re-reads the spool under the lock and removes that line from its head (tmp + os.replace), so lines
+    appended meanwhile stay. Ends, leaving SPOOL_DRAINING, once the spool is empty (checked under the lock, so an add
+    that saw this drain running always has its line read). A line that is not JSON or that backlog_op refuses
+    (SystemExit) is dropped and logged; any other error keeps the line for the next add or the startup drain."""
+    path = spool_path(root)
+    try:
+        while True:
+            with SPOOL_LOCK:
+                try:
+                    lines = path.read_text().splitlines()
+                except FileNotFoundError:
+                    lines = []
+                if not lines:
+                    SPOOL_DRAINING.discard(str(root))  # under the same hold as the check: no add slips between
+                    return
+                line = lines[0]
+            try:
+                entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    raise ValueError("not a JSON object")
+                top = entry.get("top") is True
+                items = board.backlog_op(root, "add", text=entry.get("text"), top=top, by="t",  # Trevor's own item
+                                         **({"points": entry["points"]} if "points" in entry else {}))
+            except (ValueError, SystemExit) as e:
+                print(f"backlog spool: dropped {line}: {e}", file=sys.stderr, flush=True)
+            except Exception as e:  # noqa: BLE001  (an OSError mid-write): keep the line, stop this drain
+                print(f"backlog spool: kept {line}: {e}", file=sys.stderr, flush=True)
+                with SPOOL_LOCK:
+                    SPOOL_DRAINING.discard(str(root))
+                return
+            else:
+                new = items[0] if top else items[-1]
+                if new["points"] is None:
+                    threading.Thread(target=estimate, args=(root, new["text"]), daemon=True).start()
+            with SPOOL_LOCK:
+                try:
+                    lines = path.read_text().splitlines()
+                except FileNotFoundError:
+                    lines = []
+                if line in lines:  # the head, since only this drain removes lines and adds append
+                    lines.remove(line)
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                tmp.write_text("".join(f"{l}\n" for l in lines))
+                os.replace(tmp, path)
+    except BaseException:
+        with SPOOL_LOCK:
+            SPOOL_DRAINING.discard(str(root))
+        raise
+
+
+def drain_all_spools() -> None:
+    """At startup: drain every registered project's non-empty backlog-spool.jsonl (adds a crash or restart left behind)."""
+    for repo in board.projects().values():
+        root = repo / "scrum"
+        try:
+            if spool_path(root).stat().st_size:
+                drain_backlog_spool(root)
+        except OSError as e:
+            print(f"backlog spool: {root}: {e}", file=sys.stderr, flush=True)
 
 
 NEW_WINDOW_SCRIPT = """on run argv
@@ -5568,6 +5703,18 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/p/(.+)/backlog", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, cached_backlog_items(root)) if root else self.send_json(404, {"error": "no such project"})
+        if m := re.fullmatch(r"/api/p/(.+)/job-states", path):  # messageManager's poll: plain fields, no per-job work
+            if not (root := scrum_dir(unquote(m.group(1)))):
+                return self.send_json(404, {"error": "no such project"})
+            ids = [i for v in parse_qs(urlparse(self.path).query).get("ids", []) for i in v.split(",") if i]
+            if len(ids) > JOB_STATES_MAX:
+                return self.send_json(400, {"error": f"at most {JOB_STATES_MAX} ids"})
+            try:
+                return self.send_json(200, job_states(root, ids))
+            except FileNotFoundError:
+                return self.send_json(200, [])  # no board.json yet: no jobs
+            except ValueError:
+                return self.send_json(503, {"error": "board.json is unreadable, try again"})
         if m := re.fullmatch(r"/api/p/(.+)/windows", path):
             root = scrum_dir(unquote(m.group(1)))
             return self.send_json(200, latest_windows(root)) if root else self.send_json(404, {"error": "no such project"})
@@ -5600,7 +5747,7 @@ class Handler(BaseHTTPRequestHandler):
                 if target == os.path.realpath(root / "board.json"):
                     record_outcomes(project, root)
                     try:
-                        return self.send_json(200, board_with_activity(root, project))
+                        return self.send_json(200, cached_board_with_activity(root, project))
                     except ValueError:
                         pass  # mid-write or hand-broken: serve the raw bytes as before
                 return self.send(200, Path(target).read_bytes(), TYPES[Path(target).suffix])
@@ -5690,6 +5837,16 @@ class Handler(BaseHTTPRequestHandler):
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
                     return 202, {"id": job_id, "feature": text}
                 top = urgency == "next"
+                if body.get("async") is True:  # answer now; a drain thread runs backlog_op under the board lock
+                    text = board.clean(body.get("text") or "", board.ITEM_MAX)
+                    if not text:
+                        raise SystemExit("backlog item text is empty")
+                    entry = {"text": text, "top": top}
+                    if "points" in body:
+                        board.check_points(body["points"])
+                        entry["points"] = body["points"]
+                    spool_backlog_add(root, entry)
+                    return 202, {"queued": True}
                 items = board.backlog_op(root, "add", text=body.get("text"), top=top, by="t",  # Trevor's own item
                                          **({"points": body["points"]} if "points" in body else {}))
                 new = items[0] if top else items[-1]
@@ -5895,6 +6052,7 @@ def main():
         board.migrate_backlog_sources()  # one-time per project: {by:t} on Trevor's items, the p:4 floor and p:3 agent cap
     except (OSError, SystemExit) as e:
         print(f"focus migration: {e}", file=sys.stderr, flush=True)
+    threading.Thread(target=drain_all_spools, daemon=True).start()  # async backlog adds a restart left in a spool
     threading.Thread(target=watchdog_loop, daemon=True).start()
     names = ", ".join(board.projects()) or "none yet (run /trevskills-scrum in a repo)"
     print(f"Trevskills Scrum: http://localhost:{a.port}  projects: {names}  claude: {CLAUDE}" + (f"  tailnet: {tn}" if tn else ""), flush=True)
