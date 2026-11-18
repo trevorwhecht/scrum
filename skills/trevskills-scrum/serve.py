@@ -3295,24 +3295,29 @@ def machine_status():
 
 
 def machine_usage(now):
-    """The meter's usage segment: 5h and 7d used %, the 5h reset, usage_allowance's live-session cap (null for no
-    taper) and board.fable_state, or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
-    usage = board.read_usage() or {}
-    at = usage.get("written_at")
-    if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
+    """The meter's usage segment: one weekly reading per board.accounts() account, {"name", "seven_day_pct",
+    "resets_at", "max_pct"} (claude_usage's weekly %, whatever its age; max_pct, where its red starts, is its 7d
+    reserve, else board.USAGE_HOLD_PCT), then this session's usage_allowance cap, board.fable_state and the later reset
+    of a held window, which need usage.json under USAGE_STALE_SECS old (else null, "unknown", null). "unknown" when no
+    account has a weekly reading."""
+    accounts = [{"name": a.name, "seven_day_pct": (u := claude_usage(now, a.name))["weekly"],
+                 "resets_at": u["weekly_resets_at"],
+                 "max_pct": dict(zip((k for k, _ in board.WINDOWS), a.reserve or ())).get("seven_day", board.USAGE_HOLD_PCT)}
+                for a in board.accounts()]
+    if all(a["seven_day_pct"] is None for a in accounts):
         return "unknown"
-    u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
-    held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)]
-    return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
-            "allowance": None if allow is None else int(allow), "fable": board.fable_state(usage, now),
-            "hold_until": max(held) if held else None}
-
-
-def claude_usage(now):
-    """Claude's 5h and weekly used % and resets from usage.json (board.py statusline), whatever its age. A window
-    whose reset is past reads null, as route.codex_quota treats an expired window."""
-    out = dict.fromkeys(("5h", "weekly", "5h_resets_at", "weekly_resets_at", "as_of"))
     usage = board.read_usage() or {}
+    allow = board.usage_allowance(usage, now, 0)  # None when stale; a held window gives 0, so stale holds stay hidden
+    held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)] if allow is not None else []
+    return {"accounts": accounts, "allowance": None if allow is None else int(allow),
+            "fable": board.fable_state(usage, now), "hold_until": max(held) if held else None}
+
+
+def claude_usage(now, account=None):
+    """Claude's 5h and weekly used % and resets from usage.json (board.py statusline; `account`'s, else this
+    session's), whatever its age. A window whose reset is past reads null, as route.codex_quota treats an expired window."""
+    out = dict.fromkeys(("5h", "weekly", "5h_resets_at", "weekly_resets_at", "as_of"))
+    usage = (board.read_usage(account) if account else board.read_usage()) or {}
     limits = usage.get("rate_limits")
     if not isinstance(limits, dict):
         return out
