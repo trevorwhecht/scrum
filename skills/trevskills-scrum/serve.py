@@ -510,10 +510,10 @@ def resume_job(project, root, job, jobs, manual=False):
 
 
 def resumable(job):
-    """Paused by Trevor (Play), stalled in either shape (board.stalled), or needs-human for a reason whose card offers
-    Resume (RESUMABLE)."""
+    """Paused by Trevor (Play), stalled in either shape (board.stalled), needs-human for a reason whose card offers
+    Resume (RESUMABLE), or a check job held on the E2E or Check queue (board.queue_waiting)."""
     return bool(job.get("paused") or job["stage"] == "needs-human" and (job.get("reason") or "").startswith(board.RESUMABLE)
-                or board.stalled(job))
+                or board.stalled(job) or board.queue_waiting(job))
 
 
 def limit_held(job):

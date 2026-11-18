@@ -821,6 +821,36 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {})[0], 409)
         spawn.assert_not_called()
 
+    def queue_job(self, title, **fields):
+        job_id = self.serve.board.cmd_new(self.root, title)
+        self.edit_job(job_id, **{"stage": "check", **fields})
+        return job_id
+
+    def test_resumable_accepts_queue_waiting(self):
+        for reason in ("waiting: E2E queue", "waiting: Check queue"):
+            with self.subTest(reason=reason):
+                job_id = self.queue_job("Queue wait", reason=reason)
+                job = next(j for j in json.loads((self.root / "board.json").read_text())["jobs"] if j["id"] == job_id)
+                self.assertTrue(self.serve.resumable(job))
+        self.assertFalse(self.serve.resumable({"id": "x", "stage": "check", "reason": "something else"}))
+        for extra in ({"paused": True}, {"stalled": True}):
+            job = {"id": "x", "stage": "check", "reason": "waiting: E2E queue", **extra}
+            self.assertEqual(self.serve.board.queue_waiting(job), False)
+
+    def test_resume_accepts_queue_waiting(self):
+        for reason in ("waiting: E2E queue", "waiting: Check queue"):
+            with self.subTest(reason=reason):
+                job_id = self.queue_job("Queue wait", reason=reason)
+                with mock.patch.object(self.serve, "spawn") as spawn:
+                    self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {}),
+                                     (202, {"id": job_id, "action": "resume"}))
+                self.assertEqual([c.args[2:] for c in spawn.call_args_list],
+                                 [(job_id, "resume", f"/trevskills-scrum resume {job_id}")])
+        job_id = self.queue_job("Unrelated", reason="checks failing: x")
+        with mock.patch.object(self.serve, "spawn") as spawn:
+            self.assertEqual(self.raw_post(f"/api/p/repo/jobs/{job_id}/resume", {})[0], 409)
+        spawn.assert_not_called()
+
     def raw_post(self, path, body):
         """(status, parsed JSON body) for error responses too; req() drops the body of a non-2xx."""
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST", data=json.dumps(body).encode(),
