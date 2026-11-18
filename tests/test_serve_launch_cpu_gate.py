@@ -144,7 +144,6 @@ class LaunchCpuGate(ServeBase):
             self.assertIsNone(self.serve.cpu_first())
 
     def test_cpu_first_light_memory_held_leads(self):
-        """A light job held by vm_pressure or swap leads cpu_first ahead of an older CPU-held standard job; a standard one does not."""
         std = self.cpu_held_job("Mem std", "standard", "2020-01-01T00:00:00+00:00")
         light = self.cpu_held_job("Mem fast", "fast", "2021-01-01T00:00:00+00:00", gate="vm_pressure")
         base = Path(tempfile.mkdtemp())

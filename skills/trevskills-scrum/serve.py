@@ -255,7 +255,7 @@ def cpu_held(root, job):
 
 
 def gate_heads(root, job):
-    """The gate names (text before `(`) in the job's queue-gates.txt; empty when unreadable."""
+    """The gate names (text before `(`) in queue-gates.txt; empty when unreadable."""
     try:
         gates = (Path(root) / "jobs" / str(job["id"]) / "queue-gates.txt").read_text(encoding="utf-8").split()
     except OSError:
@@ -264,8 +264,7 @@ def gate_heads(root, job):
 
 
 def mem_held(root, job):
-    """True for a non-manual light job (board.light_job) whose queue-gates.txt names vm_pressure or swap: a memory gate
-    held it. cpu_first lets it lead while it is held_work, so other projects' heavy claims wait for it."""
+    """True for a non-manual light job whose queue-gates.txt names vm_pressure or swap; cpu_first lets it lead while held_work."""
     return (not job.get("play_queued_manual") and board.light_job(root, job)
             and bool(gate_heads(root, job) & {"vm_pressure", "swap"}))
 
