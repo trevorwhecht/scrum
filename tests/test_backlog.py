@@ -132,6 +132,20 @@ class BacklogTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             board.cmd_next(self.root, index=0)  # done item
 
+    def test_inline_lane_and_complex_become_header_lines(self):
+        item = "Fix the thing. Lane: debug \u2014 cause unknown. Complex: no \u2014 one file."
+        d = self.root / "jobs" / "100-x"
+        d.mkdir(parents=True)
+        (d / "feature.md").write_text(board.feature_text(item))
+        for key, words, want in (("Lane", board.LANES, "debug"), ("Complex", ("yes", "no"), "no")):
+            self.assertEqual(board.header_value(d / "feature.md", key, words), want)
+        self.assertEqual(board.feature_text("Plain item"), "Plain item\n")
+
+    def test_runall_start_child_feature_has_header_lines(self):
+        (self.root / "backlog.md").write_text("# Backlog\n- [ ] Fix it. Lane: debug \u2014 cause unknown.\n")
+        kid = board.cmd_runall_start(self.root)["children"][0]
+        self.assertEqual(board.header_value(self.root / "jobs" / kid / "feature.md", "Lane", board.LANES), "debug")
+
     def add_cli(self, *args):
         """B backlog-add in process, so no detached estimate spawns; returns (exit code, stderr)."""
         err = io.StringIO()

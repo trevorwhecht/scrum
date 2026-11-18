@@ -127,8 +127,7 @@ class MachineMeter(unittest.TestCase):
         tail = ' ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>'
         self.assertEqual(out["rings"], [G('<span class="ring low" role="img" style="--pct:75" aria-label="RAM 25% free · swap 1%" title="RAM 25% free · swap 1%">25%</span><span class="lbl">RAM</span>' + tail),
                                         G('<span class="ring none" role="img" style="--pct:0" aria-label="RAM — · swap 1%" title="RAM — · swap 1%">—</span><span class="lbl">RAM</span>' + tail)])
-        self.assertEqual(out["sessions"], base + G('<span class="danger">15 sessions running (ceiling 14)</span>'),
-                         "a verdict that repeats no shown reading stays, after the usage segment")
+        self.assertEqual(out["sessions"], base, "no trailing verdict text (Trevor 2026-11-18: it wrapped the meter)")
         self.assertEqual(out["swap"], G('<span class="ring danger" role="img" style="--pct:60" aria-label="RAM 40% free · swap 29%" title="RAM 40% free · swap 29%">40%</span><span class="lbl">RAM</span>'
                                         + ' ' + CPU_NONE + ' <span class="ok">disk 100 GB</span>'), "swap has no text: it turns the ring red and sits in its tooltip")
         self.assertEqual(out["stale"], G('<span class="ring low" role="img" style="--pct:28" aria-label="RAM 72% free · swap 37%" title="RAM 72% free · swap 37%">72%</span><span class="lbl">RAM</span>'
@@ -145,37 +144,26 @@ class MachineMeter(unittest.TestCase):
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
         self.assertIn("launches wait for 10 GB free", meter, "the hint names the disk segment's wait text")
 
-    def test_machine_meter_server_slow(self):
+    def test_machine_meter_no_server_slow(self):
         text = DASHBOARD.read_text()
         meter = re.search(r'<span id="machine"[^>]*>', text).group(0)
-        self.assertIn("p95 over the last 5 minutes is 1000 ms or more", meter)
-        self.assertIn("p95", meter)
-        self.assertIn("1000 ms", meter)
+        self.assertNotIn("Server slow", meter)
+        self.assertNotIn("Trailing red text", meter)
         node = shutil.which("node")
         if not node:
             raise unittest.SkipTest("node not on PATH")
         esc = text[text.index("const esc = "):text.index("\n", text.index("const esc = "))]
-        slow_route = {"GET /p/*/board.json": {"p95_ms": 2400, "count": 9}, "GET /api/machine": {"p95_ms": 40, "count": 9}}
-        cases = [{"routes": slow_route, "disconnects": 0, "slow": True, "worst": "GET /p/*/board.json"},
-                 {"routes": {"GET /a": {"p95_ms": 30, "count": 2}}, "disconnects": 3, "slow": True, "worst": "GET /a"},
-                 {"routes": {"GET /<b>": {"p95_ms": 1500, "count": 6}}, "disconnects": 1, "slow": True, "worst": "GET /<b>"},
-                 {"routes": slow_route, "disconnects": 0, "slow": False, "worst": "GET /p/*/board.json"},
-                 None]
+        slow = {"routes": {"GET /a": {"p95_ms": 2400, "count": 9}}, "disconnects": 3, "slow": True, "worst": "GET /a"}
         script = (f"const $ = () => globalThis.el;\n{esc}\n{fn_body(text, 'machineLevel')}\n{fn_body(text, 'usagePart')}\n"
                   f"{fn_body(text, 'renderMachine')}\n"
                   f"const s = {json.dumps(S)};\n"
                   "globalThis.el = {hidden: false, innerHTML: ''};\n"
-                  f"console.log(JSON.stringify({json.dumps(cases)}.map(sv => {{\n"
-                  "  const m = {...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null};\n"
-                  "  if (sv) m.server = sv;\n"
-                  "  renderMachine(m); return el.innerHTML; })));")
+                  f"renderMachine({{...s, free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null, server: {json.dumps(slow)}}});\n"
+                  "console.log(JSON.stringify(el.innerHTML));")
         out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
         base = G('<span class="ring ok" role="img" style="--pct:60" aria-label="RAM 40% free · swap 1%" title="RAM 40% free · swap 1%">40%</span><span class="lbl">RAM</span> '
                  + CPU_NONE + ' <span class="ok">disk 100 GB</span>')
-        self.assertEqual(out, [base + G('<span class="danger" title="GET /p/*/board.json p95 2400 ms">server slow</span>'),
-                               base + G('<span class="danger" title="3 dropped">server slow</span>'),
-                               base + G('<span class="danger" title="GET /&lt;b&gt; p95 1500 ms · 1 dropped">server slow</span>'),
-                               base, base])
+        self.assertEqual(out, base, "an old server's slow flag adds no text to the meter")
 
     def test_machine_meter_fable_text(self):
         node = shutil.which("node")

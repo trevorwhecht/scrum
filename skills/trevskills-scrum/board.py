@@ -3743,6 +3743,18 @@ def header_value(path: Path, key: str, words: tuple[str, ...]) -> str | None:
     return m[1].lower() if m else None
 
 
+def feature_text(text: str) -> str:
+    """text as a feature.md body: an inline `Lane:` / `Complex:` clause (a backlog item is one line) is also written on its
+    own header line after the first line, where header_value reads it. The last valid clause of each key wins."""
+    hdr = {}
+    for m in re.finditer(r"\b(Lane|Complex):\s*(\w+\b.*?)(?=\s+(?:Lane|Complex):|\Z)", text, re.S):
+        key, rest = m[1].title(), " ".join(m[2].split())
+        if rest.split()[0].lower() in (LANES if key == "Lane" else ("yes", "no")):
+            hdr[key] = rest
+    first, _, more = text.rstrip("\n").partition("\n")
+    return first + "\n" + "".join(f"{k}: {v}\n" for k, v in hdr.items()) + (more + "\n" if more else "")
+
+
 def job_complex(root: Path, job_id: str) -> bool:
     """True only when feature.md's header `Complex:` is yes, or, with no such line there, spec.md's is."""
     d = Path(root) / "jobs" / job_id
@@ -4851,7 +4863,7 @@ def add_child(root, board, parent, t, depends_on, goal, plain=False):
     job_id = add_job(root, board, short_title(t["title"]), started_by=parent.get("started_by") or "runall")
     setup = t.get("setup", "none")
     setup = None if setup.lower() == "none" else setup
-    feature = t["text"] + "\n" if plain else \
+    feature = feature_text(t["text"]) if plain else \
         f"{t['title']}\n\n{t['text']}\n\nTicket {t['ticket']} of BigBoy {parent['id']}: {parent['title']}.\n" \
         + (f"Goal: {goal}\n" if goal else "") + f"Hard stops: {t.get('hard', 'none')}\n" \
         + (f"Human setup: {setup}\n" if setup else "") \
@@ -6980,7 +6992,8 @@ def last_log_line(root, runlog):
 
 
 def cmd_watchdog(root, alive=None, exits=None, hold=None):
-    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session: it keeps
+    """Flag every job stuck in a WATCHED stage with no board update for STALL_MINUTES and no live session (for a parent,
+    a live child session or its live chain lock counts as its own): it keeps
     its stage with `stalled` true and a STALL reason, and plays no sound. Its stall line carries "exit" (exits, serve.py's
     {run log: exit code}, looked up by the job's runlog) and "last_log" (last_log_line), each None when unknown.
     Every stall line is "auto" when auto_resume will retry it (no parent, or a running unpaused runall/bigboy parent).
@@ -7006,7 +7019,9 @@ def cmd_watchdog(root, alive=None, exits=None, hold=None):
                                                      and not parent.get("paused")
                                                      and parent.get("lane") in ("runall", "bigboy"))
                 live_idle = False
-                if alive(job):
+                # a parent's final review runs in its child's session (onewitharts 1091): its family counts as its own
+                kids = [j for j in board["jobs"] if j["id"] in (job.get("children") or ())]
+                if alive(job) or (kids and (chain_lock_live(root, job["id"]) or any(alive(k) for k in kids))):
                     if not (stalled_since(job, idle_cutoff) and job_dir_idle(root, job["id"], idle_cutoff.timestamp())):
                         continue
                     live_idle = True

@@ -30,7 +30,7 @@ as the redacted content the item view shows (Markdown too: its secret-looking va
 docs and replies with suggested edits. Its log lands in the scrum/runs/ of the registered project serve.py runs from;
 nothing is applied except by hand in the editor.
 """
-import argparse, base64, collections, errno, fcntl, hashlib, json, math, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
+import argparse, base64, collections, errno, fcntl, hashlib, json, os, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1493,15 +1493,16 @@ def main_guard_clear(repo, branch) -> bool:
 
 
 def main_ff_tick(project, repo, root, jobs) -> bool:
-    """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and that has no tracked run, once main is
-    ready (main_ready) and resume_refusal and take_room let it: once per job and updatedAt (MAIN_FF_TRIED), so a
+    """Resume each running, unpaused BigBoy parent whose reason is MAIN_FF and whose family has no live session or chain
+    lock (family_live), once main is ready (main_ready) and resume_refusal and take_room let it: once per job and
+    updatedAt (MAIN_FF_TRIED), so a
     resume that leaves the job unchanged is not respawned every tick. Never writes the board. True when it spawned."""
-    spawned = False
+    spawned, by_id, alive = False, {j["id"]: j for j in jobs}, once(lambda: board.session_alive_fn())
     for job in jobs:
         key = f"{project}/{job['id']}"
         if job.get("lane") != "bigboy" or job.get("stage") != "running" or job.get("paused") \
-                or not (job.get("reason") or "").startswith(MAIN_FF) or running(project, job["id"]) \
-                or MAIN_FF_TRIED.get(key) == job.get("updatedAt"):
+                or not (job.get("reason") or "").startswith(MAIN_FF) \
+                or MAIN_FF_TRIED.get(key) == job.get("updatedAt") or family_live(project, root, job, by_id, alive):
             continue
         branch = (job.get("base") or "main").removeprefix("origin/")
         if not main_ready(repo, branch) or resume_refusal(project, root, job) or not take_room():
@@ -1760,7 +1761,7 @@ def shop_tick(project, repo, root) -> bool:
         out = board.cmd_next(root, shop=fits)
         if out["id"] is None:
             return False
-        (jobs_dir / out["id"] / "feature.md").write_text(out["feature"] + "\n")  # as Run now writes it
+        (jobs_dir / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))  # as Run now writes it
         job, child = {"id": out["id"], "stage": "spec"}, False
         if board.tag_runs_on(root, job["id"]) == "main":  # Jev says it needs this Mac: held here, no step, no backoff
             hold_start(root, job["id"])
@@ -1783,7 +1784,8 @@ def shop_tick(project, repo, root) -> bool:
     if not shop.md_sync(alias=alias):
         return fail("md-sync")
     steps = shop.setup(alias=alias)
-    if "failed" in steps.values() or steps.get(f"account {account}") != "ok":
+    if any(v == "failed" for k, v in steps.items() if k not in shop.OPTIONAL_STEPS) \
+            or steps.get(f"account {account}") != "ok":
         return fail("setup")
     try:
         url = board._git(repo, "remote", "get-url", "origin").decode().strip()
@@ -1948,23 +1950,32 @@ def once(fn):
     return lambda: cache[0] if cache else (cache.append(fn()) or cache[0])
 
 
+def family_live(project, root, job, by_id, alive) -> bool:
+    """A live session owns job: its chain lock is live, or job or one of its children on the board has a tracked run or
+    a ps line (a BigBoy parent's final review runs in its last child's session, onewitharts 1091). alive() last."""
+    fam = [job, *(by_id[k] for k in job.get("children") or () if k in by_id)]
+    return board.chain_lock_live(root, job["id"]) or any(running(project, j["id"]) for j in fam) \
+        or any(alive()(j) for j in fam)
+
+
 ORPHAN_MINUTES = 3  # fixed, not a setting: long enough for a just-claimed child's session to show up in ps
 ORPHAN_RESPAWN: dict[str, str] = {}  # "project/child id" -> stage it was last respawned in
 # ponytail: in-memory once-guards (this and STALL_RESUMED); a serve.py restart allows one more attempt per child
 
 
-def respawn_orphans(project, root, p, kids, alive):
+def respawn_orphans(project, root, p, kids, alive, by_id=None):
     """Start (or resume, once it has a spec and a worktree) each child of running parent p that sits in a WATCHED
     stage with no session for ORPHAN_MINUTES: a chaining session claimed it and ended before spawning it. Once per
-    child per stage. alive() (the ps scan) runs only for a child already past the cutoff. True when it spawned."""
-    spawned = False
+    child per stage. A child whose own children (looked up in by_id, the board) hold its session is not orphaned
+    (family_live). alive() (the ps scan) runs only for a child already past the cutoff. True when it spawned."""
+    spawned, by_id = False, by_id or {k["id"]: k for k in kids}
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=ORPHAN_MINUTES)
     for kid in kids:
         key, stage = f"{project}/{kid['id']}", kid.get("stage")
         if stage not in board.WATCHED or kid.get("waiting") or kid.get("lane") == "lilguy" or kid.get("limitResetAt") \
                 or kid.get("paused") or kid.get("stalled") or board.queue_waiting(kid) \
                 or not board.stalled_since(kid, cutoff) or ORPHAN_RESPAWN.get(key) == stage \
-                or running(project, kid["id"]) or alive()(kid) or resume_refusal(project, root, kid):
+                or family_live(project, root, kid, by_id, alive) or resume_refusal(project, root, kid):
             continue  # a refused child keeps its stage, reason and once-per-stage attempt for a later tick
         action = "resume" if (root / "jobs" / kid["id"] / "spec.md").is_file() and kid.get("worktree") else "start"
         if action == "resume":  # `resume` only accepts a stalled job
@@ -2016,7 +2027,7 @@ def sweep_parents(project, root, jobs, alive=None, claim=True):
                 or p.get("paused"):
             continue
         kids = [by_id[k] for k in p["children"] if k in by_id]
-        if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive):
+        if not board.chain_lock_live(root, p["id"]) and respawn_orphans(project, root, p, kids, alive, by_id):
             continue  # a child was just respawned (a resumed one now reads stalled, i.e. idle): not idle this tick
         if not all(board.idle(k) for k in kids):
             if p["lane"] == "runall" and any(k.get("stage") == "waiting" for k in kids) \
@@ -3295,87 +3306,6 @@ def cached_machine_status():
         if not MACHINE_CACHE or time.monotonic() - MACHINE_CACHE["at"] >= MACHINE_TTL:
             MACHINE_CACHE.update(at=time.monotonic(), value=machine_status())
         return MACHINE_CACHE["value"]
-
-
-HEALTH_WINDOW = 300  # seconds of request samples and disconnects /api/machine's "server" summarises
-SLOW_P95_MS = 1000  # healthy handlers run around 50 ms; the job 424 pile-up ran 1-8 s
-HEALTH_MAX_SAMPLES = 200  # per route
-HEALTH_MAX_ROUTES = 64  # a new key past this is recorded as "other"
-HEALTH = {"routes": {}, "disconnects": collections.deque()}  # routes: {key: deque((monotonic, ms))}; disconnects: (monotonic, key)
-HEALTH_LOCK = threading.Lock()
-
-
-def route_key(method, path):
-    """'<METHOD> <path>' with the query dropped and the project, job id, digest and agent segments turned into *, so
-    every project's polls of one endpoint share one key; /p/*/<rel> keeps board.json and calls any other file `file`."""
-    path = urlparse(path).path
-    if m := re.fullmatch(r"/api/p/(.+?)(/backlog(?:/run|/run-all)?|/windows|/job-states|/manual-checks|/digests|/roadmap|/attachments"
-                         r"|/colour|/digest|/digests/\d{3}/[^/]+|/jobs/[^/]+/[^/]+)", path):
-        path = "/api/p/*" + re.sub(r"^/jobs/[^/]+/", "/jobs/*/", re.sub(r"^/digests/.+", "/digests/*", m.group(2)))
-    elif m := re.fullmatch(r"/api/p/[^/]+(/.*)?", path):
-        path = "/api/p/*" + (m.group(1) or "")
-    elif m := re.fullmatch(r"/p/[^/]+(?:%2F[^/]+)?/(.+)", path):
-        path = "/p/*/" + ("board.json" if m.group(1) == "board.json" else "file")
-    elif re.fullmatch(r"/api/agents/[^/]+/skills", path):
-        path = "/api/agents/*/skills"
-    return f"{method} {path}"
-
-
-def _prune_health(now):
-    """Drop samples and disconnects older than HEALTH_WINDOW, and routes left with none. Caller holds HEALTH_LOCK."""
-    cut = now - HEALTH_WINDOW
-    for key, samples in list(HEALTH["routes"].items()):
-        while samples and samples[0][0] <= cut:
-            samples.popleft()
-        if not samples:
-            del HEALTH["routes"][key]
-    while HEALTH["disconnects"] and HEALTH["disconnects"][0][0] <= cut:
-        HEALTH["disconnects"].popleft()
-
-
-def record_request(key, ms, disconnected=False):
-    """One handled request: its duration in ms under its route key, plus a disconnect when the client dropped it."""
-    with HEALTH_LOCK:
-        now = time.monotonic()
-        _prune_health(now)
-        routes = HEALTH["routes"]
-        if key not in routes and len(routes) >= HEALTH_MAX_ROUTES:
-            key = "other"
-        routes.setdefault(key, collections.deque(maxlen=HEALTH_MAX_SAMPLES)).append((now, ms))
-        if disconnected:
-            HEALTH["disconnects"].append((now, key))
-
-
-def server_health():
-    """GET /api/machine "server": nearest-rank p95 and count per route over HEALTH_WINDOW, disconnects in it, the worst
-    route by p95 among routes with 5+ samples (all routes when none has), and slow when that route has p95 >= SLOW_P95_MS
-    or any client dropped a connection."""
-    with HEALTH_LOCK:
-        _prune_health(time.monotonic())
-        routes = {}
-        for key, samples in HEALTH["routes"].items():
-            ms = sorted(s[1] for s in samples)
-            routes[key] = {"p95_ms": round(ms[math.ceil(0.95 * len(ms)) - 1]), "count": len(ms)}
-        disconnects = len(HEALTH["disconnects"])
-    eligible = [k for k in routes if routes[k]["count"] >= 5]  # a 1-sample slow route must not outrank sustained slowness
-    worst = max(eligible or routes, key=lambda k: routes[k]["p95_ms"], default=None)
-    slow = bool(eligible and routes[worst]["p95_ms"] >= SLOW_P95_MS) or disconnects >= 1
-    return {"routes": routes, "disconnects": disconnects, "slow": slow, "worst": worst}
-
-
-def timed(handler):
-    """Wraps do_GET/do_POST: records the handler's duration under its route key, and a disconnect on BrokenPipeError or
-    ConnectionResetError, which is re-raised so serve.log's traceback and the connection handling stay as they were."""
-    def run(self):
-        start, dropped = time.monotonic(), False
-        try:
-            return handler(self)
-        except (BrokenPipeError, ConnectionResetError):
-            dropped = True
-            raise
-        finally:
-            record_request(route_key(self.command, self.path), (time.monotonic() - start) * 1000, dropped)
-    return run
 
 
 SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
@@ -6020,7 +5950,6 @@ class Handler(BaseHTTPRequestHandler):
     def local_host(self):
         return urlparse("//" + (self.headers.get("Host") or "")).hostname in LOCAL | TAILNET
 
-    @timed
     def do_GET(self):
         path = urlparse(self.path).path
         if not self.local_host():
@@ -6062,7 +5991,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"codex": s.get("codex"), "claude_exhausted_until": s.get("claude_exhausted_until"),
                                         "claude": claude_usage(t), "jev": jev_usage(board.projects().values(), t)})
         if path == "/api/machine":
-            return self.send_json(200, {**cached_machine_status(), "server": server_health()})  # server is live, never cached
+            return self.send_json(200, cached_machine_status())
         if path == "/api/runs":
             discusses = discuss_runs()
             with RUNS_LOCK:
@@ -6124,7 +6053,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(204, b"", TYPES[".md"])
         self.send_json(404, {"error": "not found"})
 
-    @timed
     def do_POST(self):
         origin = self.headers.get("Origin")
         if (not self.local_host() or "application/json" not in (self.headers.get("Content-Type") or "")
@@ -6202,7 +6130,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not text:
                         raise SystemExit("backlog item text is empty")
                     job_id = board.cmd_new(root, board.short_title(text))
-                    (root / "jobs" / job_id / "feature.md").write_text(text + "\n")
+                    (root / "jobs" / job_id / "feature.md").write_text(board.feature_text(text))
                     spawn(project, root, job_id, "start", f"/trevskills-scrum start {job_id}")
                     return 202, {"id": job_id, "feature": text}
                 top = urgency == "next"
@@ -6241,7 +6169,7 @@ class Handler(BaseHTTPRequestHandler):
             if cpu is not None and cpu > board.MAX_LAUNCH_CPU_LOAD_PCT:
                 return 409, {"error": f"CPU load {cpu:.0f}% is over {board.MAX_LAUNCH_CPU_LOAD_PCT}%; nothing claimed, try again shortly"}
             out = board.cmd_next(root, body.get("index"))
-            (root / "jobs" / out["id"] / "feature.md").write_text(out["feature"] + "\n")
+            (root / "jobs" / out["id"] / "feature.md").write_text(board.feature_text(out["feature"]))
             if askme:  # interactive, like discuss: questions first, then the same session runs the job
                 code, obj = run_terminal([(osa_new_window(root.parent, *terminal_env(), CLAUDE,
                                                           f"/trevskills-scrum start {out['id']} askme {askme}"),
