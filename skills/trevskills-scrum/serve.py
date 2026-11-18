@@ -377,6 +377,9 @@ def spawn(project, root, job_id, action, prompt, flags=("--permission-mode", "ac
         except (SystemExit, OSError):
             account = board.pick_account(time.time())[0]
         proc, log = board.spawn(root, job_id, action, prompt, flags, account=account)
+        if action == "run-all" and not manual:  # a run-all launch (not a board job) is a start too, for pulse_tick
+            with PULSE_STARTS_LOCK:
+                PULSE_STARTS.append({"project": project, "job": job_id, "cpu": board.cpu_load_pct()})
     with RUNS_LOCK:
         RUNS[f"{project}/{job_id}"] = {"action": action, "started": time.time(), "proc": proc, "log": log,
                                        "account": account,

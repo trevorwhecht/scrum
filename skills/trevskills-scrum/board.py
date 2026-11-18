@@ -1541,7 +1541,7 @@ def write_pulse(root, digest_id):
     rises nothing; only jobs on the board (_board_job), started_by hand listed apart as Hand-started), claims while
     CPU load over 500% (only the lines' `started` entries, serve.py's own non-manual starts, whose launch-time `cpu`
     is a number over 500; a missing or malformed `started` adds nothing), other starts while CPU load over 500% (rise
-    jobs at a line whose cpu_load is over 500 that no `started` entry names: hand, unregistered (project not in
+    jobs at a line whose cpu_load is over 500 that no `started` entry names (started_by runall skipped): hand, unregistered (project not in
     projects()) or other; a registered project's job off the board is skipped), minutes the focus project had
     claimable work while another project was busy, and every claim (any cool-down or load, less hand) by its board
     job's `account` (none: the first account; job not on the board: unknown), in accounts() order. A line's per-project
@@ -1621,7 +1621,8 @@ def write_pulse(root, digest_id):
                 for n in range(int(was) + 1, int(top) + 1):
                     job = _board_job(boards, name, n)
                     hand = (job or {}).get("started_by") == "hand"
-                    if is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started:
+                    if (is_num(b.get("cpu_load")) and b["cpu_load"] > 500 and (name, str(n)) not in started
+                            and (job or {}).get("started_by") != "runall"):  # a run-all job creation is no start: its launch is a later serve.py start
                         group = "unregistered" if name not in known else None if job is None else "hand" if hand else "other"
                         if group:  # a registered project's job off the board: pruned or reset, no start to name
                             others[group].setdefault(name, []).append(str(n))
