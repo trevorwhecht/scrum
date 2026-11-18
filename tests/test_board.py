@@ -12084,6 +12084,16 @@ class FableTest(unittest.TestCase):
         self.usage_file.unlink()
         self.assertEqual(self.cli("008-bigboy", "planner").stdout, "none\n", "no usage.json: Opus")
 
+    def test_fable_ok_counts_stale_usage(self):
+        """A usage.json hours old still counts: the cli gate passes written_at through as fresh (a missing one stays unknown)."""
+        self.setup_jobs()
+        for five, seven, want in ((10, 10, "claude-fable-5-1"), (10, 80, "none")):
+            self.write_usage(five, seven)
+            data = json.loads(self.usage_file.read_text())
+            data["written_at"] -= 17 * 3600
+            self.usage_file.write_text(json.dumps(data))
+            self.assertEqual(self.cli("001-std", "planner").stdout.strip(), want, (five, seven))
+
     def test_fable_ok_logs_decision(self):
         self.setup_jobs()
         log = self.root / "jobs" / "008-bigboy" / "fable.log"
