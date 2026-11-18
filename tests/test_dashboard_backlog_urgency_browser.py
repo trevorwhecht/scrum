@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, threading, unittest
+import json, os, re, shutil, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -122,7 +122,9 @@ class DashboardBacklogUrgencyBrowserTest(unittest.TestCase):
         self.assertEqual(got["posts"], [{"op": "add", "text": "Jump the queue", "urgency": "next"},
                                         {"op": "add", "text": "Start this now", "urgency": "now"}], got)
         scrum = self.repo / "scrum"
-        self.assertEqual((scrum / "backlog.md").read_text(), "# Backlog\n- [ ] Jump the queue {p:5} {by:t}\n" + BACKLOG[len("# Backlog\n"):])
+        text, tags = re.subn(r" \{#[a-z0-9]{4}\}", "", (scrum / "backlog.md").read_text())
+        self.assertEqual(tags, 1, text)  # the random id tag is present; only its value is ignored
+        self.assertEqual(text, "# Backlog\n- [ ] Jump the queue {p:5} {by:t}\n" + BACKLOG[len("# Backlog\n"):])
         job = json.loads((scrum / "board.json").read_text())["jobs"][-1]
         self.assertEqual((job["title"], job["stage"]), ("Start this now", "spec"), got)
         self.assertEqual((scrum / "jobs" / job["id"] / "feature.md").read_text(), "Start this now\n")

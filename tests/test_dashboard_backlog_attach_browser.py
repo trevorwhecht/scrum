@@ -1,4 +1,4 @@
-import json, os, shutil, subprocess, sys, tempfile, threading, unittest
+import json, os, re, shutil, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -165,7 +165,9 @@ class DashboardBacklogAttachBrowserTest(unittest.TestCase):
         self.assertFalse(got["afterTwo"]["add"], got)
         self.assertEqual(got["pickedClass"], "pts p8", got)
         self.assertEqual(got["afterAdd"], {"points": "", "cls": "pts px", "blError": ""}, got)
-        self.assertEqual((self.repo / "scrum" / "backlog.md").read_text(),
+        text, tags = re.subn(r" \{#[a-z0-9]{4}\}", "", (self.repo / "scrum" / "backlog.md").read_text())
+        self.assertEqual(tags, 1, text)  # the random id tag is present; only its value is ignored
+        self.assertEqual(text,
                          BACKLOG + f"- [ ] [8] Header broken [screenshot: {shot}] {{p:4}} {{by:t}}\n")
         self.estimate.assert_not_called()
 
