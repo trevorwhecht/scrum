@@ -5117,7 +5117,7 @@ def resume_blocker(root, job_id, live=()):
         return None
     fast = (header_value(jobs_dir / job_id / "spec.md", "Lane", LANES)
             or header_value(jobs_dir / job_id / "feature.md", "Lane", LANES)) == "fast"  # as cmd_ready
-    hit = slot_conflict(job, busy, files, fast=fast)
+    hit = slot_conflict(job, busy, files, fast=fast, funcs={k["id"]: spec_funcs(jobs_dir, k["id"]) for k in kids})
     return Blocker(*hit) if hit else None
 
 
@@ -5158,7 +5158,7 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None, s
     """Claim (stage -> spec) every waiting child that may start now, under the lock, so no child starts twice.
     `live` ids count as in progress whatever their stage (see resume_blocker). A sibling or outside job in POST_BUILD
     holds no slot (it still counts in in_progress), and a `Lane: fast` kid (spec.md header, else feature.md) passes
-    slot_conflict's `fast`. Paused and stalled siblings with readable Likely files keep their
+    slot_conflict's `fast`, with every kid's and holder's spec_funcs as its `funcs`. Paused and stalled siblings with readable Likely files keep their
     overlap slot (one that runs alone holds nothing without a live session, job 951), and every live or in-progress (not paused, stalled or needs-human) leaf job of another tree is an outside holder: a child clashes with
     one only by shared Likely files or unreadable ones (slot_conflict, both sides parallel), never by parallel=no; one
     with no spec.md uses holder_files and holds nothing when that is empty. An overlap gate names the file (overlap_gate).

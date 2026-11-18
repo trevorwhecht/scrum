@@ -5781,6 +5781,22 @@ class BoardTest(unittest.TestCase):
             c1, out = setup("fast", kid_files=())
             self.assertEqual(board.resume_blocker(self.root, c1), "this job runs alone")
 
+    @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build siblings run
+    def test_resume_blocker_fast_kid_disjoint_functions(self):
+        stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
+        for lane, k2, free in (("fast", ["cmd_next"], True), ("fast", ["cmd_hook", "slot_conflict"], False), ("fast", [], False),
+                               ("standard", ["cmd_next"], False)):
+            with self.subTest(lane=lane, funcs=k2):
+                self.tearDown(); self.setUp()
+                parent, h, c1, c2 = self.board_py_kids(["cmd_hook"], ["slot_conflict"], k2, lane=lane)
+                board.cmd_set(self.root, c1, ["stage=build"])
+                board.cmd_set(self.root, c2, stalled, internal=True)
+                got = board.resume_blocker(self.root, c2)
+                if free:
+                    self.assertIsNone(got)
+                else:
+                    self.assertEqual(got, f"sibling {h} shares {self.BOARD_PY}; sibling {c1} shares {self.BOARD_PY}")
+
     @mock.patch.object(board, "session_alive_fn", lambda: (lambda job: True))  # the build/review siblings run
     def test_resume_blocker_matches_ready_rules(self):
         stalled = ["stage=needs-human", "reason=stalled in build: no board update for 30 min and no live session. Fix: click Resume."]
