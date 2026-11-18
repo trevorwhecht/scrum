@@ -40,12 +40,13 @@ class ShopTickTest(unittest.TestCase):
         env = mock.patch.dict(os.environ, SCRUM_USAGE=str(self.main / "usage.json"), SCRUM_ACCOUNTS=json.dumps(
             [["main", str(self.main), None], ["owa", str(self.owa), [80, 90]]]),
             SCRUM_FREE_RAM="5",  # below MIN_FREE_RAM_PCT: the guard holds work unless a test says otherwise
+            SCRUM_REGISTRY=str(self.base / "projects.json"),  # no workers.txt (shopmac only) unless a test writes one
             GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")  # no insteadOf rewrites the origin URL
         env.start()
         self.addCleanup(env.stop)
         self.week(self.owa, 3600)  # owa's week resets first: pick_account's order puts it first unless a test says otherwise
-        serve.SHOP_RETRY_AT = 0.0
-        self.addCleanup(setattr, serve, "SHOP_RETRY_AT", 0.0)
+        serve.SHOP_RETRY_AT.clear()
+        self.addCleanup(serve.SHOP_RETRY_AT.clear)
         for s in (serve.CLOUD_LAST, serve.RUNS, serve.IDLE_SINCE):
             s.clear()
             self.addCleanup(s.clear)
@@ -120,6 +121,14 @@ class ShopTickTest(unittest.TestCase):
         """The shop functions called so far, in order."""
         return [c[0] for c in self.sh.mock_calls]
 
+    def workers(self, text):
+        """This test's workers.txt, beside setUp's SCRUM_REGISTRY."""
+        (self.base / "workers.txt").write_text(text)
+
+    def aliases(self, skip=()):
+        """The alias= of every shop call so far but those named in `skip`, in order."""
+        return [c.kwargs.get("alias") for c in self.sh.mock_calls if c[0] not in skip]
+
     def tick(self, name="mm"):
         """shop_tick for project `name`: (result, stdout, stderr)."""
         out, err = io.StringIO(), io.StringIO()
@@ -149,11 +158,11 @@ class ShopTickTest(unittest.TestCase):
                              SCRUM_CPU_LOAD_PCT="1"):
             got, out, err = self.tick()  # cool-down holds work here, so the shop takes it though the sensors pass
         self.assertEqual((got, err), (True, ""))
-        self.assertEqual(out, "shop: mm: 043-a: started on the shop Mac (pid 4242, account owa)\n")
+        self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
         self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
 
     def test_two_job_cap_across_boards(self):
-        self.assertEqual(self.serve.SHOP_MAX, 2)
+        self.assertEqual(self.serve.shop.workers(), [("shopmac", 2, ("owa", "main"))])
         root = self.project("mm", self.runall({"id": "043-a"}))
         self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"}])
         self.project("bb", [{"id": "020-y", "stage": "cloud", "shop": "12", "account": "owa"}])
@@ -164,6 +173,83 @@ class ShopTickTest(unittest.TestCase):
         self.project("bb", [{"id": "020-y", "stage": "done"}])
         self.assertIs(self.tick()[0], True)
         self.assertEqual(self.job(root, "043-a")["shop"], "4242")
+
+    def test_second_worker_when_first_full(self):
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        root = self.project("mm", self.runall({"id": "043-a"}, {"id": "044-b"}))
+        self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"},  # no worker: shopmac
+                            {"id": "011-x", "stage": "cloud", "shop": "12", "account": "owa", "worker": "shopmac"},
+                            {"id": "012-x", "stage": "done", "shop": "13", "worker": "newmac"},
+                            {"id": "013-x", "stage": "aborted", "shop": "14", "worker": "newmac"},
+                            {"id": "014-x", "stage": "waiting", "shop": "15", "worker": "newmac"}])
+        got, out, err = self.tick()
+        self.assertEqual((got, out, err), (True, "shop: mm: 043-a: started on newmac (pid 4242, account main)\n", ""))
+        self.assertEqual(self.calls(), ["ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start"])
+        self.assertEqual(self.aliases(), ["newmac"] * 7, "shopmac is full: never probed")
+        job = self.job(root, "043-a")
+        self.assertEqual((job["stage"], job["shop"], job["account"], job["worker"]),
+                         ("cloud", "4242", "main", "newmac"))
+        self.sh.reset_mock()
+        self.assertEqual(self.tick(), (False, "", ""))
+        self.assertEqual(self.calls(), [], "both workers full")
+        self.assertEqual(self.job(root, "044-b")["stage"], "waiting")
+
+    def test_unready_worker_skipped_for_next(self):
+        self.workers("shopmac 2 owa,main\nnewmac 2 owa,main\nthird 2 owa,main\n")
+        self.sh.ready.side_effect = lambda alias: READY if alias == "newmac" else dict(READY, ready=False)
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        got, out, err = self.tick()
+        self.assertEqual((got, out, err), (True, "shop: mm: 043-a: started on newmac (pid 4242, account owa)\n", ""))
+        self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias="shopmac"), mock.call(alias="newmac")],
+                         "third is not probed")
+        self.assertEqual(self.aliases(skip=("ready",)), ["newmac"] * 6)
+        self.assertEqual(self.job(root, "043-a")["worker"], "newmac")
+
+    def test_worker_account_list_limits_pick(self):
+        (self.owa / "limit_until").write_text(f"{int(time.time()) + 3600}\n")  # pick_account names only main
+        self.workers("solo 1 owa\nnewmac 2 main,owa\n")
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on newmac (pid 4242, account main)\n", ""))
+        self.assertEqual(self.sh.ready.call_args_list, [mock.call(alias="solo"), mock.call(alias="newmac")])
+        self.assertEqual((self.sh.start.call_args.args[3], self.job(root, "043-a")["account"]), ("main", "main"))
+        with self.subTest("main resets first, but solo lists only owa"):
+            (self.owa / "limit_until").unlink()
+            self.week(self.main, 60)
+            self.workers("solo 1 owa\n")
+            self.sh.reset_mock()
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on solo (pid 4242, account owa)\n", ""))
+            self.assertEqual(self.job(root, "043-a")["account"], "owa")
+        with self.subTest("solo's ready() lacks owa"):
+            self.sh.reset_mock()
+            self.sh.ready.return_value = dict(READY, accounts={"owa": False})
+            root = self.project("mm", self.runall({"id": "043-a"}))
+            self.assertEqual(self.tick(), (False, "", ""))
+            self.assertEqual(self.calls(), ["ready"])
+
+    def test_no_workers_no_shop_call(self):
+        self.workers("# no worker yet\nzero 0 main\n")
+        roots = [self.project("mm", self.runall({"id": "043-a"})),
+                 self.project("aa", [{"id": "010-x", "stage": "cloud", "shop": "11", "account": "main"}])]
+        before = [(r / "board.json").read_bytes() for r in roots]
+        self.assertEqual(self.tick(), (False, "", ""))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual([(r / "board.json").read_bytes() for r in roots], before)
+
+    def test_backoff_per_worker(self):
+        self.workers("shopmac 2 owa,main\nnewmac 1 main\n")
+        self.sh.clone.side_effect = lambda project, url, alias: alias == "newmac"  # clone fails on shopmac only
+        root = self.project("mm", self.runall({"id": "043-a"}))
+        t0 = time.time()
+        self.assertEqual(self.tick(), (False, "", "shop: mm: 043-a: clone failed on shopmac\n"))
+        self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+        self.assertEqual(list(self.serve.SHOP_RETRY_AT), ["shopmac"])
+        self.assertGreaterEqual(self.serve.SHOP_RETRY_AT["shopmac"], t0 + 600)
+        self.assertLessEqual(self.serve.SHOP_RETRY_AT["shopmac"], time.time() + 600)
+        self.sh.reset_mock()
+        self.assertEqual(self.tick(), (True, "shop: mm: 043-a: started on newmac (pid 4242, account main)\n", ""))
+        self.assertEqual(self.aliases(), ["newmac"] * 7, "no shop call to the backed-off worker")
+        self.assertEqual(self.job(root, "043-a")["worker"], "newmac")
 
     def test_watchdog_runs_shop_tick_in_own_guard(self):
         for name in ("mm", "nn"):
@@ -270,14 +356,15 @@ class ShopTickTest(unittest.TestCase):
             self.assertEqual((got, err), (True, ""))
             repo = self.projects["mm"]
             self.assertEqual(self.sh.mock_calls, [
-                mock.call.ready(), mock.call.md_sync(), mock.call.setup(),
-                mock.call.clone("mm", "https://github.com/trevorwhecht/mm.git"),
-                mock.call.env_copy("mm", str(repo)),
-                mock.call.profile_copy("mm", str(repo)),
+                mock.call.ready(alias="shopmac"), mock.call.md_sync(alias="shopmac"), mock.call.setup(alias="shopmac"),
+                mock.call.clone("mm", "https://github.com/trevorwhecht/mm.git", alias="shopmac"),
+                mock.call.env_copy("mm", str(repo), alias="shopmac"),
+                mock.call.profile_copy("mm", str(repo), alias="shopmac"),
                 mock.call.start("mm", "043-a", "/trevskills-scrum cloud-job 043-a Fix the widget\n\n\n## Pre-written spec"
-                                "\n\n# Spec\n## Likely files\n- `src/a.py`\n", "owa", model="sonnet")])
+                                "\n\n# Spec\n## Likely files\n- `src/a.py`\n", "owa", model="sonnet", alias="shopmac")])
             job = self.job(root, "043-a")
-            self.assertEqual((job["stage"], job["shop"], job["account"]), ("cloud", "4242", "owa"))
+            self.assertEqual((job["stage"], job["shop"], job["account"], job["worker"]),
+                         ("cloud", "4242", "owa", "shopmac"))
             self.assertTrue((root / "jobs" / "043-a" / "claimed-at.txt").is_file(), "claimed through cmd_ready")
             self.assertEqual((root / "jobs" / "043-a" / "feature.md").read_text(), FEATURE)
             self.assertEqual(self.job(root, "044-b")["stage"], "waiting", "one dispatch per call")
@@ -289,9 +376,11 @@ class ShopTickTest(unittest.TestCase):
             root = self.project("nn", [self.queued()])
             self.assertIs(self.tick("nn")[0], True)
             self.assertEqual(self.sh.start.call_args, mock.call(
-                "nn", "050-q", "/trevskills-scrum cloud-job 050-q Fix the widget\n", "owa", model="sonnet"))
+                "nn", "050-q", "/trevskills-scrum cloud-job 050-q Fix the widget\n", "owa", model="sonnet",
+                alias="shopmac"))
             job = self.job(root, "050-q")
-            self.assertEqual((job["stage"], job["shop"], job["account"]), ("cloud", "4242", "owa"))
+            self.assertEqual((job["stage"], job["shop"], job["account"], job["worker"]),
+                         ("cloud", "4242", "owa", "shopmac"))
             for gone in ("queued_launch", "play_queued", "ram_hold"):
                 self.assertNotIn(gone, job)
 
@@ -336,7 +425,7 @@ class ShopTickTest(unittest.TestCase):
         for why, (fn, value) in cases.items():
             for kind in ("child", "launch"):
                 with self.subTest(why, kind=kind):
-                    self.serve.SHOP_RETRY_AT = 0.0
+                    self.serve.SHOP_RETRY_AT.clear()
                     self.sh.reset_mock()
                     self.sh.configure_mock(**{"md_sync.return_value": True, "setup.return_value": dict(SETUP),
                                               "clone.return_value": True, "env_copy.return_value": "copied",
@@ -352,7 +441,7 @@ class ShopTickTest(unittest.TestCase):
                     got, out, err = self.tick()
                     self.assertEqual((got, out), (False, ""))
                     self.assertEqual(len(err.splitlines()), 1, err)
-                    self.assertTrue(err.startswith(f"shop: mm: {job_id}: {why.removesuffix(' account')} failed"), err)
+                    self.assertEqual(err, f"shop: mm: {job_id}: {why.removesuffix(' account')} failed on shopmac\n")
                     job = self.job(root, job_id)
                     if kind == "child":
                         self.assertEqual(job["stage"], "waiting")
@@ -366,8 +455,8 @@ class ShopTickTest(unittest.TestCase):
                     self.sh.reset_mock()
                     self.assertEqual(self.tick(), (False, "", ""))
                     self.assertEqual(self.calls(), [], "backoff: no shop call")
-                    self.assertGreaterEqual(self.serve.SHOP_RETRY_AT, t0 + 600)
-                    self.assertLessEqual(self.serve.SHOP_RETRY_AT, time.time() + 600)
+                    self.assertGreaterEqual(self.serve.SHOP_RETRY_AT["shopmac"], t0 + 600)
+                    self.assertLessEqual(self.serve.SHOP_RETRY_AT["shopmac"], time.time() + 600)
 
     def test_refused_mark_kills_remote_session(self):
         def pause(*a, **kw):
@@ -389,7 +478,7 @@ class ShopTickTest(unittest.TestCase):
                 root = self.project("mm", self.runall({"id": "043-a"}))
                 got, out, err = self.tick()
                 self.assertEqual((got, out), (False, ""))
-                self.assertEqual(self.sh.run.call_args_list, [mock.call("kill 4242", 60)])
+                self.assertEqual(self.sh.run.call_args_list, [mock.call("kill 4242", 60, alias="shopmac")])
                 self.assertEqual(len(err.splitlines()), 1, err)
                 self.assertTrue(err.startswith("shop: mm: 043-a: "), err)
                 job = self.job(root, "043-a")
@@ -411,7 +500,7 @@ class ShopTickTest(unittest.TestCase):
                 self.assertEqual(self.calls(), ["ready"])
                 self.assertEqual((root / "board.json").read_bytes(), before)
                 self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
-                self.assertEqual(self.serve.SHOP_RETRY_AT, 0.0, "not ready is no failure: no backoff")
+                self.assertEqual(self.serve.SHOP_RETRY_AT, {}, "not ready is no failure: no backoff")
 
     # --- criterion 8: dead shop sessions ---
     def test_dead_shop_session_requeued(self):

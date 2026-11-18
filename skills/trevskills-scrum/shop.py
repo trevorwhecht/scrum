@@ -480,7 +480,7 @@ def memory_key(path: str) -> str:
 
 
 def _registry() -> Path:
-    """projects.json's path: SCRUM_REGISTRY, else ~/.claude/trevskills-scrum/projects.json (board.read_registry's rule)."""
+    """projects.json's path: SCRUM_REGISTRY, else ~/.claude/trevskills-scrum/projects.json (read_registry's rule)."""
     return Path(os.environ.get("SCRUM_REGISTRY") or Path.home() / ".claude" / "trevskills-scrum" / "projects.json")
 
 

@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "trevskills-scrum"
 WRAPPER = ROOT / "skills" / "trevskills-e2e" / "channel.config.mjs"
 sys.path.insert(0, str(SKILL))
-os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))  # workers.txt never the real one
+# workers.txt never the real one
+os.environ.setdefault("SCRUM_REGISTRY", os.path.join(tempfile.mkdtemp(), "projects.json"))
 import shop  # noqa: E402
 
 REAL_RUN = subprocess.run  # ShopCase patches the subprocess module's run; local-shell checks use this one
@@ -58,8 +59,9 @@ class RunTest(ShopCase):
     def test_alias_in_argv_and_bad_alias_refused(self):
         self.answer(0, b"hi\n")
         shop.run("echo hi", 7, alias="newmac.local")
-        self.assertEqual(self.sp.call_args.args, (["ssh", "newmac.local", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                                                   'export PATH="$HOME/.local/bin:$PATH"; echo hi'],))
+        self.assertEqual(self.sp.call_args.args,
+                         (["ssh", "newmac.local", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                           'export PATH="$HOME/.local/bin:$PATH"; echo hi'],))
         self.sp.reset_mock()
         for bad in ("-oProxyCommand=x", "user@host", "", "a b", ".hidden", "new mac", "x\n"):
             with self.subTest(alias=bad):
@@ -188,7 +190,8 @@ class ProbeTest(ShopCase):
     def test_parses_live_sample(self):
         run = self.fake_run(0, LIVE)
         self.assertEqual(shop.probe(), UP)
-        run.assert_called_once_with("sysctl -n vm.loadavg hw.ncpu; command -v node gh claude; true", 10, alias="shopmac")
+        run.assert_called_once_with("sysctl -n vm.loadavg hw.ncpu; command -v node gh claude; true", 10,
+                                    alias="shopmac")
         shop._cache.clear()
         run.return_value = subprocess.CompletedProcess([], 0, "{ 1.00 0.50 0.25 }\n3\n/usr/local/bin/node\n", "")
         self.assertEqual(shop.probe(), {"up": True, "load": 33.3, "tools": {"node": True, "gh": False, "claude": False}})
@@ -419,7 +422,8 @@ class SetupCase(ShopCase):
 
 class SetupTest(SetupCase):
     def test_down_runs_no_step(self):
-        shop._cache["shopmac"] = (shop.time.monotonic(), {"up": True, "load": 1.0, "tools": {t: True for t in shop.TOOLS}})
+        shop._cache["shopmac"] = (shop.time.monotonic(),
+                                  {"up": True, "load": 1.0, "tools": {t: True for t in shop.TOOLS}})
         self.shop(("sysctl", 255, ""))
         self.assertEqual(self.setup_out(), ({"shop": "failed"}, ["shop: down"]))
         self.assertEqual([c[0] for c in self.calls], [shop.PROBE_CMD])  # the stale up cache was dropped
