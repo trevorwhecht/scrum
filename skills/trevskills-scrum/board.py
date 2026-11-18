@@ -4482,7 +4482,7 @@ def prose_paths(text):
 
 def bare_name_paths(text, repo):
     """Tracked full paths for the slash-less file names in text (`useX.ts`) that exactly one `git ls-files` entry carries by base name."""
-    names = {t.strip("`").rstrip(".,;:") for t in text.split()}
+    names = {t.lstrip("`").rstrip(".,;:`") for t in text.split()}
     names = {n for n in names if "/" not in n and PATH_RE.match(n) and repo_path(n)}
     if not names:
         return set()
