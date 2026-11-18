@@ -348,7 +348,7 @@ class AccountEnv(unittest.TestCase):
 
 class AccountsTest(AccountEnv):
     def test_accounts_order_env_override_and_missing_dir(self):
-        self.assertEqual(board.ACCOUNTS, (("main", "~/.claude", None), ("owa", "~/.claude-owa", (80, 90))))
+        self.assertEqual(board.ACCOUNTS, (("main", "~/.claude", (80, 90)), ("owa", "~/.claude-owa", (80, 90))))
         self.assertEqual(board.accounts(), [("main", self.main, None), ("owa", self.owa, (80, 90))])
         self.assertEqual(board.accounts()[1].reserve, (80, 90))
         gone = Path(self.tmp.name) / "gone"
@@ -358,9 +358,9 @@ class AccountsTest(AccountEnv):
         home = Path(self.tmp.name)
         (home / ".claude-owa").mkdir()
         with mock.patch.dict(os.environ, HOME=str(home)):
-            self.assertEqual(board.accounts(), [("main", home / ".claude", None), ("owa", home / ".claude-owa", (80, 90))])
+            self.assertEqual(board.accounts(), [("main", home / ".claude", (80, 90)), ("owa", home / ".claude-owa", (80, 90))])
             with mock.patch.dict(os.environ, SCRUM_USAGE="/x/usage.json"):
-                self.assertEqual(board.accounts(), [("main", home / ".claude", None)])
+                self.assertEqual(board.accounts(), [("main", home / ".claude", (80, 90))])
 
     def test_usage_path_per_account(self):
         self.assertEqual(board.usage_path(), self.main / "usage.json")
@@ -427,6 +427,19 @@ class PickAccountTest(AccountEnv):
             self.assertTrue(allow.reason.startswith("no account has room: main usage 5h 99% used"), allow.reason)
             self.assertIn("owa reserve", allow.reason)
 
+    def test_primary_is_never_held_and_the_roles_flip(self):
+        """Job 1139: the account whose 7d resets soonest has no reserve; the other is held at 90 %."""
+        os.environ["SCRUM_ACCOUNTS"] = json.dumps([["main", str(self.main), [80, 90]], ["owa", str(self.owa), [80, 90]]])
+        self.write(self.main, seven=(95, 90000))
+        self.write(self.owa, seven=(95, 50000))  # owa resets first: primary, not held
+        self.assertEqual(board.primary_account(NOW), "owa")
+        self.assertIsNone(board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
+        self.assertIn("reserve 7d 95%", board.reserve_hit(board.accounts()[0], board.read_usage("main"), NOW))
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
+        self.write(self.owa, seven=(95, 100000))  # owa now resets last: it flips to backup
+        self.assertEqual(board.primary_account(NOW), "main")
+        self.assertIn("reserve 7d", board.reserve_hit(board.accounts()[1], board.read_usage("owa"), NOW))
+
     def test_owa_below_reserve_with_main_full_gives_owa(self):
         self.write(self.main, five=self.FULL)
         self.write(self.owa, five=(79, 9000), seven=(89, 90000))
@@ -460,10 +473,10 @@ class PickAccountTest(AccountEnv):
         self.write(self.owa, seven=(10, 80000))
         self.assertEqual(board.pick_account(NOW)[0], "owa")
 
-    def test_soonest_reset_owa_at_reserve_gives_main(self):
+    def test_soonest_reset_account_has_no_reserve(self):
         self.write(self.main, seven=(10, 90000))
-        self.write(self.owa, seven=(90, 80000))
-        self.assertEqual(board.pick_account(NOW)[0], "main")
+        self.write(self.owa, seven=(95, 80000))  # job 1139: primary, so 95 % does not hold it
+        self.assertEqual(board.pick_account(NOW)[0], "owa")
 
     def test_soonest_reset_prefer_wins(self):
         self.write(self.main, seven=(10, 90000))
