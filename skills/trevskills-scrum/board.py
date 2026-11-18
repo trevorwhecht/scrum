@@ -1494,6 +1494,11 @@ def log_process(process: str, result: str, **fields) -> None:
     if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
         return  # a test run would add fixture runs to the live log the digest reads
     now = int(time.time())
+    if "repo" in fields:
+        try:
+            fields["repo"] = os.path.realpath(str(fields["repo"]))  # a relative repo would resolve against the digest's cwd
+        except (OSError, ValueError):
+            pass  # unresolvable: keep as given, never raise
     line = json.dumps({"t": now, "process": process, "result": result, **fields}, default=str)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4372,12 +4377,13 @@ def reserve_hit(acc, usage, now):
 
 
 def pick_account(now, live=0, prefer=None):
-    """(name, allowance) of the first account with room, `prefer` first when listed, then the soonest seven_day reset
+    """(name, allowance): name is the first account with room, `prefer` first when listed, then the soonest seven_day reset
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
-    reserve window reached (reserve_hit)."""
+    reserve window reached (reserve_hit). allowance is the claims cap across every account with room (job 1130):
+    None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
-    why = []
+    why, room = [], []
     usages = {a.name: read_usage(a.name) for a in accs}
 
     def order(acc):
@@ -4398,8 +4404,11 @@ def pick_account(now, live=0, prefer=None):
         if held := reserve_hit(acc, usage, now):
             why.append(f"{acc.name} {held}")
             continue
-        return acc.name, allow
-    return None, Allowance(0, "no account has room: " + "; ".join(why))
+        room.append((acc.name, allow))
+    if not room:
+        return None, Allowance(0, "no account has room: " + "; ".join(why))
+    caps = [a for _, a in room]
+    return room[0][0], None if any(a is None for a in caps) else max(caps)
 
 
 def seven_day_reset(account):
@@ -7529,6 +7538,10 @@ def cmd_fable_ok(root: Path, job_id: str, role: str) -> str:
         return "none"
     now = time.time()
     usage = read_usage()
+    if isinstance(usage, dict) and is_num(usage.get("written_at")):
+        # Only the interactive statusline refreshes usage.json, so a headless job reads it hours old. Trust its windows anyway:
+        # a reset window reads 0 (fable_used) and a live one is a lower bound. ponytail: a stale 7d reading can undercount.
+        usage = {**usage, "written_at": now}
     state = fable_state(usage, now)
     model = FABLE_MODEL if state == "ok" else "none"
     job = Path(root) / "jobs" / job_id
