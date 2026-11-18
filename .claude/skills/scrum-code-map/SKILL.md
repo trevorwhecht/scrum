@@ -16,7 +16,7 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `ram_room(floor=1, light=False)`: how many sessions a claim batch may start. `cmd_ready` and the watchdog's `RESUME_ROOM` use floor=1 (never below 1); serve.py `spawn`, `start_ready` and `pulse_tick` use `floor=0` (raw room, 0 or less when full), and `spawn` passes `light=light_job(...)` for fast and lilguy jobs. `ram_room_reason(light)` builds the `ram_room(free=..,est=..,min=..,young=..,sessions=..)` token serve.py `note_queue_gate` writes to queue-gates.txt.
 - `resume_blocker(root, job_id, live=())`: a `Blocker` (a str with `.ids`) when a sibling child holds overlapping files; it applies `slot_conflict` against siblings only.
 - Launch gates live in `cmd_ready(root, parent_id, live=(), manual=False, only=None)`, and its docstring states every rule. Holders come in two pools: `slots` (in-progress, paused or stalled siblings) and `outside` (live or in-progress leaf jobs of other trees; files from `child_files` when specced, else `holder_files`).
-- `slot_conflict(k, busy, files, extra=(), fast=False)` is the one overlap rule both callers share: `parallel=no` or unreadable Likely files runs alone, `shared_files` decides a clash, `is_test_path` files never clash, and `BIG_SHARED_FILES` clash only once `SHARED_BIG_LIMIT` holders name one, counted across both pools.
+- `slot_conflict(k, busy, files, extra=(), fast=False, funcs=None)` is the one overlap rule both callers share: `parallel=no` or unreadable Likely files runs alone, `shared_files` decides a clash, `is_test_path` files never clash, and `BIG_SHARED_FILES` clash only once `SHARED_BIG_LIMIT` holders name one, counted across both pools; `funcs` (id -> `likely_funcs`) lets a fast kid skip a holder whose named functions on a `BIG_SHARED_FILES` path are disjoint from its own.
 - Holders in `POST_BUILD` stages hold no slot, a fast or lilguy kid skips a holder still in `spec` that shares no file, a Critical kid skips `unbuilt` holders, and a hold older than `OVERLAP_HOLD_MAX_S` is released.
 - Each hold sets `overlap_hold` on the kid and writes a gate to `jobs/<id>/queue-gates.txt` with `note_queue_gate` (`overlap:<holder>:<file>` from `overlap_gate`, `runs_alone:<id>`, `depends_on:<id>`, `overlap_skipped:<id>`), which timing.md's Queue gate column reads.
 - Find their tests with `grep -n 'cmd_ready\|slot_conflict\|resume_blocker' tests/test_board.py`.
@@ -25,7 +25,7 @@ Find each name with `grep -n 'def <name>'`; never trust a line number. Every fun
 - `cmd_ask(...)`: the only way a job becomes needs-human.
 - `cmd_abort(...)` calls `abort_job(root, job, requeue, reason)`.
 - `projects()`: registered repos that have a `scrum/` folder; `SCRUM_REGISTRY` overrides the registry path.
-- Job-folder readers to reuse, never re-parse: `md_section(text, heading)`, `likely_files(spec_text)`, `job_files(d)`, `_round_text(folder, name)`; `.claude/` routing is `is_claude_path(path)` and `claude_split(root, job)`.
+- Job-folder readers to reuse, never re-parse: `md_section(text, heading)`, `likely_files(spec_text)`, `likely_funcs(spec_text)`, `job_files(d)`, `_round_text(folder, name)`; `.claude/` routing is `is_claude_path(path)` and `claude_split(root, job)`.
 
 ## serve.py (`skills/trevskills-scrum/serve.py`)
 - `Handler.route(project, root, rest, body)`: the dashboard POST API (`/attachments`, `/manual-checks`, `/backlog`, job actions). When you add or remove a job action, check which branch an unmatched action reaches.

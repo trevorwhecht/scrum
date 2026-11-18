@@ -1594,6 +1594,13 @@ class ContractTest(unittest.TestCase):
             self.assertIn(phrase, rule, phrase)
         self.assertNotIn("3 files", rule)
 
+    def test_spec_writer_likely_files_names_functions(self):
+        text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
+        rule = next(l for l in text.splitlines() if l.startswith("- **Likely files** names every file the diff will change"))
+        for phrase in ("(functions:", "`skills/trevskills-scrum/board.py`", "`serve.py`"):
+            self.assertIn(phrase, rule, phrase)
+        self.assertEqual(text.count("(functions:"), 1)  # no second rule
+
     def test_spec_writer_honours_orchestrator_lane_and_complex(self):
         text = (ROOT / "agents" / "scrum-spec-writer.md").read_text()
         for phrase in ("Lane override:", "Complex: yes|no", "five header lines"):
