@@ -7,6 +7,7 @@ This session runs on the shop MacBook Pro, a remote worker for the main Mac's sc
 - Node 24 darwin-x64 lives in `~/.local` (`~/.local/bin/node`, `npm`, `npx`).
 - Playwright runs through Google Chrome, not Playwright's Chromium: `channel: "chrome"`, set from `SCRUM_PW_CHANNEL`.
 - Full builds and full test suites are fine here.
+- Bash here runs zsh, which reads a colon right after a bare variable name as a modifier, so write a variable before a `:` in braces: `"${C}:refs/heads/..."`.
 
 ## Memory, rules and CLAUDE.md are read-only
 

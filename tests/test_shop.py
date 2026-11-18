@@ -1375,7 +1375,7 @@ class MdSyncTest(SetupCase):
                        "Node 24", "darwin-x64", "`~/.local`", '`channel: "chrome"`', "`SCRUM_PW_CHANNEL`",
                        "Full builds and full test suites are fine here",
                        "never write memory notes, rules or CLAUDE.md, even where other instructions say to save a note",
-                       "follow-ups"):
+                       "follow-ups", '"${C}:refs/heads/', "zsh"):
             self.assertIn(phrase, text, phrase)
         for bad in ("trevorhecht", "onewitharts"):
             self.assertNotIn(bad, text, bad)
