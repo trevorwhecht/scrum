@@ -52,6 +52,11 @@ try { ({chromium} = require("playwright")); } catch (e) { console.log(JSON.strin
         groups: [...document.querySelectorAll("#machine .grp")].map(g => { const r = g.getBoundingClientRect(); return Math.round(r.top + r.height / 2); }),  // centres
         sparks: [...document.querySelectorAll("#machine .spark")].filter(s => s.checkVisibility()).length,
         bars: [...document.querySelectorAll("#machine .bar")].filter(s => s.checkVisibility()).length,
+        usage: document.getElementById("machine").textContent,
+        selects: Object.fromEntries(["filter", "laneFilter"].map(i => { const el = document.getElementById(i), c = document.createElement("span");
+          c.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font:" + getComputedStyle(el).font;
+          c.textContent = el.selectedOptions[0].textContent; document.body.append(c); const w = c.getBoundingClientRect().width; c.remove();
+          return [i, {clientWidth: el.clientWidth, labelWidth: w}]; })),
         height: document.querySelector("header").getBoundingClientRect().height}));
       console.log(JSON.stringify(got));
       return;
@@ -230,6 +235,21 @@ class DashboardMobile390BrowserTest(unittest.TestCase):
         self.assertEqual(len({by[i]["top"] for i in ("backlogBtn", "digestBtn", "agentsBtn", "aiBtn")}), 1, got)
         for i in ("rankBtn", "cooldown"):
             self.assertGreaterEqual(by[i]["height"], 44, got)
+
+    def test_header_held_and_fable_390px(self):
+        """Job 1136: with the usage group at its longest (allowance 0, held until, Fable near limit) the header stays
+        within the 235 px phone cap, and both selects are wide enough for their label."""
+        import serve
+        held = {"accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": time.time() + 86400, "max_pct": 90},
+                             {"name": "owa", "seven_day_pct": 90, "resets_at": time.time() + 86400, "max_pct": 90}],
+                "allowance": 0, "fable": "warn", "hold_until": time.time() + 3 * 86400}
+        with mock.patch.object(serve, "machine_usage", return_value=held):
+            serve.MACHINE_CACHE.clear()
+            got = self.browse("header")
+        self.assertLessEqual(got["height"], 235, got)
+        self.assertIn("held until", got["usage"], got)
+        for i in ("filter", "laneFilter"):
+            self.assertGreaterEqual(got["selects"][i]["clientWidth"], got["selects"][i]["labelWidth"], got)
 
     CONTROLS = ("cooldown", "routing", "checksBtn", "filter", "rankBtn", "laneFilter", "SPAN", "backlogBtn", "digestBtn", "agentsBtn", "aiBtn")
 

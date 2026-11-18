@@ -245,7 +245,7 @@ button.node:hover,button.node:focus-visible{border-color:var(--accent);outline:n
   #tabs{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior:contain}#tabs>*{flex:none}#tabs .close{position:sticky;right:0;background:var(--card)}
   #tabs{padding-right:0}#tabs .close{min-height:44px;min-width:44px}
   header>*,#controls>*{min-width:0}#filter,#laneFilter{max-width:100%}#routing{white-space:normal}#filter{margin-left:0}
-  header{gap:4px 6px;padding:6px 12px;align-items:center}#controls{gap:4px 6px}#routing{flex:1 1 auto;padding-block:0}#machine .spark{display:none}#filter,#laneFilter{flex:1 1 90px}#backlogBtn,#digestBtn,#agentsBtn,#aiBtn,#checksBtn{flex:1 1 70px;white-space:nowrap}
+  header{gap:4px 6px;padding:6px 12px;align-items:center}#controls{gap:4px 6px}#routing{flex:1 1 auto;padding-block:0}#machine .spark,#machine .grp:has(.acct~span:not(.acct)) .bar{display:none}  /* a held or Fable note after the accounts: bars dropped (the text keeps the level colour) */#machine{line-height:14px}#filter,#laneFilter{flex:1 0 auto;field-sizing:content}#backlogBtn,#digestBtn,#agentsBtn,#aiBtn,#checksBtn{flex:1 1 70px;white-space:nowrap}
   #colPick{display:block;width:calc(100% - 32px);margin:0 16px 12px;min-height:44px;font-size:16px}#colPick:empty{display:none}.col:not(.pick){display:none}
   #filter,#laneFilter,#rankBtn,#volume,#cooldown,#backlogBtn,#digestBtn,#agentsBtn,#aiBtn{min-height:44px}
   .diff{grid-template-columns:minmax(0,1fr)}#dgProject{font-size:16px}
@@ -727,7 +727,8 @@ function usagePart(u) {
       + `<span class="bar" style="--pct:${v == null ? 0 : Math.min(100, Math.round(v))};--cap:${Number(a.max_pct)}"></span>`
       + ` ${esc(a.name)} ${v == null ? "—" : Math.round(v) + "%"}</span>`;
   });
-  const held = [u.allowance == null ? "" : `allowance ${esc(u.allowance)}`, u.hold_until ? `held until ${heldUntilText(u.hold_until)}` : ""].filter(Boolean).join(" · ");
+  // Allowance 0 with a hold is "held until", in red: the 0 is implied, and the group stays one phone line.
+  const held = [u.allowance == null || (u.allowance === 0 && u.hold_until) ? "" : `allowance ${esc(u.allowance)}`, u.hold_until ? `held until ${heldUntilText(u.hold_until)}` : ""].filter(Boolean).join(" · ");
   if (held) parts.push(`<span class="${u.allowance == null ? "ok" : u.allowance === 0 ? "danger" : "low"}">${held}</span>`);
   if (u.fable === "warn") parts.push('<span class="low">Fable near limit</span>');
   if (u.fable === "paused") parts.push('<span class="danger">Fable paused, using Opus</span>');
