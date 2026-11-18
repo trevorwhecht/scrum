@@ -2052,6 +2052,10 @@ class BoardTest(unittest.TestCase):
         bare = "## Likely files\n- `skills/trevskills-scrum/board.py`: the scheduler\n"
         self.assertEqual(board.likely_funcs(bare), {})
         self.assertEqual(board.likely_files(bare), {"skills/trevskills-scrum/board.py"})
+        later = "## Likely files\n- `board.py`: scheduler (gate) (functions: cmd_ready)\n"
+        self.assertEqual(board.likely_funcs(later), {"board.py": {"cmd_ready"}})
+        calls = "## Likely files\n- `board.py` (functions: cmd_ready(), `slot_conflict()`)\n"
+        self.assertEqual(board.likely_funcs(calls), {"board.py": {"cmd_ready", "slot_conflict"}})
         outside = "## Problem\n- `skills/trevskills-scrum/serve.py` (functions: spawn)\n## Likely files\n- `tests/t.py`\n"
         self.assertEqual(board.likely_funcs(outside), {})
 
