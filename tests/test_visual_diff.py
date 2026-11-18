@@ -17,8 +17,9 @@ class VisualDiffTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def run_script(self, *args, timeout=60):
-        return subprocess.run([NODE, str(SCRIPT), *args], capture_output=True, text=True, timeout=timeout)
+    def run_script(self, *args, timeout=60, no_node_path=False):
+        env = {k: v for k, v in os.environ.items() if k != "NODE_PATH"} if no_node_path else None
+        return subprocess.run([NODE, str(SCRIPT), *args], capture_output=True, text=True, timeout=timeout, env=env)
 
     def test_usage_error_exits_2(self):
         out = str(self.tmp / "round-1" / "visual")
@@ -38,7 +39,7 @@ class VisualDiffTest(unittest.TestCase):
         (proj / "package.json").write_text('{"name": "p"}\n')
         out = self.tmp / "round-2" / "visual"
         r = self.run_script("--base", "http://127.0.0.1:9", "--head", "http://127.0.0.1:9", "--out", str(out),
-                            "--project-dir", str(proj), "/")
+                            "--project-dir", str(proj), "/", no_node_path=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         reason = f"playwright not installed in {proj}"
         self.assertEqual(json.loads((out / "results.json").read_text()),
