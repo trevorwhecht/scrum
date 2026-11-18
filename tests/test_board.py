@@ -1923,6 +1923,16 @@ class BoardTest(unittest.TestCase):
         self.write("j2/spec.md", "Fix `useQuoteBuilderDraft.ts`.\n## Likely files\n- `src/q.py`\n")
         self.assertEqual(board.child_files(jobs, "j2"), {"src/q.py"})
 
+    def test_child_files_bare_name_backticked_then_punctuation(self):
+        repo = Path(self.tmp.name)
+        sh = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+        sh("init", "-q")
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src/x.ts").write_text("x")
+        sh("add", "-A")
+        self.write("j1/spec.md", "Edit `x.ts`. Then `x.ts`, and `x.ts`;\n")
+        self.assertEqual(board.child_files(self.root / "jobs", "j1"), {"src/x.ts"})
+
     def test_ready_spec_copy_of_feature_uses_prose_paths(self):
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
         c1, c2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -4897,14 +4907,14 @@ class BoardTest(unittest.TestCase):
         text, _ = self.pulse_digest([line(s, 10), line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 400}])],
                                     since=s, boards=boards)
         self.assertIn("Claims while CPU load over 500%: 0\n"
-                      "Other starts while CPU load over 500%: 2 — hand app 11; other app 12\n", text)
+                      "Other starts while CPU load over 500%: 1 — hand app 11\n", text)  # job 1087: runall creations are no start
         self.tearDown(); self.setUp()
         ghost = lambda top: {"claimable": 0, "waiting": 0, "busy": False, "top": top}
         text, _ = self.pulse_digest([line(s, 10, ghost=ghost(3)),
                                      line(s + 60, 13, [{"project": "app", "job": "013-c", "cpu": 520}], ghost=ghost(5))],
                                     since=s, boards=boards)
         self.assertIn("Claims while CPU load over 500%: 1 — app 13\n"
-                      "Other starts while CPU load over 500%: 4 — hand app 11; unregistered ghost 4 5; other app 12\n",
+                      "Other starts while CPU load over 500%: 3 — hand app 11; unregistered ghost 4 5\n",
                       text)
 
     def test_pulse_hot_claims_malformed_started(self):
@@ -5023,7 +5033,7 @@ class BoardTest(unittest.TestCase):
             boards={"app": [{"id": "001-a", "started_by": "serve"}, {"id": "002-b", "started_by": "runall"}],
                     "new": [{"id": f"00{n}-n", "started_by": "serve"} for n in range(1, 6)]})
         self.assertIn("Claims during cool down: 2 — app 1 2\n", text)
-        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 2 — other app 1 2\n", text)
+        self.assertIn("Claims while CPU load over 500%: 0\nOther starts while CPU load over 500%: 1 — other app 1\n", text)
 
     def claim_pulse(self, gap, boards, cpu=100):
         """pulse_digest over two cool-down lines `gap` s apart, app's top 10 then 13; returns the pulse.md text."""
@@ -5267,6 +5277,7 @@ class BoardTest(unittest.TestCase):
         self.write(f"{job}/spec.md", "s\n")
         os.utime(folder / "feature.md", (t0, t0))
         os.utime(folder / "spec.md", (t0 + 3 * 3600 + 600, t0 + 3 * 3600 + 600))
+        (folder / "claimed-at.txt").write_text(f"{t0}\n")  # claim at created: the run log below is no claim fallback
         (self.root / "runs").mkdir()
         stamp = datetime.fromtimestamp(t0 + 3 * 3600, timezone.utc).strftime("%Y%m%d-%H%M%S")
         (self.root / "runs" / f"{stamp}-start-{job}.log").write_text("x")

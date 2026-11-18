@@ -17,6 +17,7 @@ class ShopChip(unittest.TestCase):
         self.assertIn('class="card shop"', html)
         self.assertIn('<span class="lanechip">Shop</span>', html)
         self.assertIn("Running on shop Mac, ", html)
+        self.assertIn('<span class="lanechip">Shop · mac2</span>', run(card(shop="4242", worker="mac2"))[0])
         for other in (plain, left, none):
             self.assertNotIn("shop", other.lower())
         self.assertIn("Running in cloud, ", plain)

@@ -66,7 +66,7 @@ Shell state doesn't survive between Bash calls: re-derive `REPO`, `F` and the bo
 
 **Untrusted reason text:** a reason that copies text from an agent-written file (assessment.md, decision.md, a track or review file) or from command output (stderr, file names, branch names) can contain `$(...)` or a backtick. Remove every `'` from that text, then pass the reason in single quotes, `reason='...'`, never in double quotes, so the shell expands nothing in it. Reason templates below with a `<placeholder>` do this; ones whose only variables are `$ID` or `$DEFAULT` keep double quotes.
 
-If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time (idempotent): it puts this repo on the dashboard.
+If this isn't the main checkout, stop and say so. Run `B register "$REPO"` every time: it puts this repo on the dashboard.
 
 **Prerequisites (every command that runs a job: new job, `next`, `start`, `run-all`, `approve`, `rework`, `resume`, `lilguy`, `cloud`, `cloud-job`, `cloud-home`; not bare `/trevskills-scrum`).** Before spawning any agent, check:
 - `git remote` prints something. If not, stop and tell the user to run `git remote add origin <url>`.
@@ -127,8 +127,8 @@ Read `$HOME/.claude/skills/trevskills-scrum/lanes/roadmap.md` when this lane run
 
 Read `$HOME/.claude/skills/trevskills-scrum/lanes/lilguy.md` when this lane runs.
 
-The parked `Terminal batch: project .claude edits` job's default answer is `Run it in a Terminal window`: serve.py's terminal_batch_tick opens its `lilguy <id>` window itself, so no run waits on that click, and Trevor still approves each `.claude/` edit there.
-A single job parked on a refused `.claude/` edit takes the same default: ask it with `--title BUILDER_BLOCKED` and `--recommend a`, option a `Run it in a Terminal window=lilguy <id>`, so the watchdog's claude_migrate folds it into that batch instead of leaving it for a click.
+The parked `Terminal batch: project .claude edits` job's default answer is `Run it in a Terminal window`: serve.py's terminal_batch_tick opens its `lilguy <id>` window itself, so no run waits on that click; Trevor approves each `.claude/` edit there.
+A single job parked on a refused `.claude/` edit takes the same default: ask it with a question starting `blocked: this job changes files in the project .claude folder`, `--title BUILDER_BLOCKED`, `--recommend a` and option a `Run it in a Terminal window=lilguy <id>`, so the watchdog folds it into that batch.
 
 ## Cloud lane
 

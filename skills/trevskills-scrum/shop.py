@@ -167,7 +167,14 @@ ENDED = ('ps -p {pid} -o command= | grep -q claude && exit 3; f="$HOME/scrum-wor
 
 CLONES = ("~/code/scrum", "~/code/trevorhecht-skills")  # the clones the shop's ~/.claude skills, agents and rules link to
 MD_PULL = " && ".join(f"git -C {c} pull --ff-only" for c in CLONES)
-NOTES_IMPORT = "@~/code/scrum/skills/trevskills-scrum/shop/machine-notes.md"
+NOTES_DIR = "skills/trevskills-scrum/shop"  # one machine-notes-<alias>.md per worker, beside the clone path below
+
+
+def notes_import(alias: str) -> str:
+    """The CLAUDE.md import line for worker `alias`'s own notes (its facts and the no-writes rule)."""
+    return f"@~/code/scrum/{NOTES_DIR}/machine-notes-{alias}.md"
+
+
 CLEANUP_MARKER = "$HOME/.md-sync-cleanup-done"
 # The shop's login shell is zsh, where a glob that matches nothing is an error, so both scripts run in /bin/sh.
 # Back up first; a failed backup exits before any mv and writes no marker. mv, not cp: ~/scrum-probe holds a 54 MB
@@ -530,14 +537,16 @@ def _projects() -> dict[str, Path]:
     return {r.name: r for r in repos if keys.count(memory_key(r.name)) == 1}
 
 
-def _md_tar() -> bytes:
-    """The copy step's stdin: CLAUDE.md (this Mac's bytes, a newline when they lack one, then NOTES_IMPORT),
-    memory/<name>/ for each _projects() entry that has a memory dir here, and skills/<name>/ for each plain folder in
-    ~/.claude/skills (not a link, not `synced`, a PROJECT_RE name; jobs read files there, e.g. trevskills-email's
-    ai-tells.md), its links copied as files and a broken one skipped. Raises OSError (no CLAUDE.md, a bad read)."""
+def _md_tar(alias: str = ALIAS) -> bytes:
+    """The copy step's stdin: CLAUDE.md (this Mac's bytes, a newline when they lack one, then notes_import(alias), left
+    out when this repo has no notes file for that worker), memory/<name>/ for each _projects() entry that has a memory
+    dir here, and skills/<name>/ for each plain folder in ~/.claude/skills (not a link, not `synced`, a PROJECT_RE name;
+    jobs read files there, e.g. trevskills-email's ai-tells.md), its links copied as files and a broken one skipped.
+    Raises OSError (no CLAUDE.md, a bad read)."""
     claude = Path.home() / ".claude"
     text = (claude / "CLAUDE.md").read_bytes()
-    text += (b"" if text.endswith(b"\n") else b"\n") + NOTES_IMPORT.encode() + b"\n"
+    if (Path(__file__).parent / "shop" / f"machine-notes-{alias}.md").is_file():
+        text += (b"" if text.endswith(b"\n") else b"\n") + notes_import(alias).encode() + b"\n"
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", dereference=True) as tar:
         info = tar.gettarinfo(claude / "CLAUDE.md", "CLAUDE.md")
@@ -566,7 +575,7 @@ def md_sync(alias: str = ALIAS) -> bool:
     True when all three exit 0; False at the first failure, with no later call. This Mac's files are read before any
     ssh, so a missing CLAUDE.md costs no call, and a down shop Mac costs only the probe. Prints nothing."""
     try:
-        stream = _md_tar()
+        stream = _md_tar(alias)
     except OSError:
         return False
     if not probe(alias)["up"]:

@@ -1138,7 +1138,7 @@ class SecretTest(SetupCase):
 
 
 PULL = "git -C ~/code/scrum pull --ff-only && git -C ~/code/trevorhecht-skills pull --ff-only"
-IMPORT = b"@~/code/scrum/skills/trevskills-scrum/shop/machine-notes.md\n"
+IMPORT = b"@~/code/scrum/skills/trevskills-scrum/shop/machine-notes-shopmac.md\n"
 SYNC = (("pull --ff-only", 0, ""), (".md-sync-cleanup-done", LOCAL, ""), ("tar -xf", LOCAL, ""))  # no git here
 
 
@@ -1412,8 +1412,9 @@ class MdSyncTest(SetupCase):
         self.assertEqual(len(self.cmds(".md-sync-cleanup-done")), 2)
 
     def test_machine_notes(self):
-        self.assertEqual(shop.NOTES_IMPORT, IMPORT.decode().strip())
-        notes = SKILL / "shop" / "machine-notes.md"
+        self.assertEqual(shop.notes_import("shopmac"), IMPORT.decode().strip())
+        self.assertEqual(shop.notes_import("mac2"), IMPORT.decode().strip().replace("shopmac", "mac2"))
+        notes = SKILL / "shop" / "machine-notes-shopmac.md"
         self.assertEqual(ROOT / IMPORT.decode().strip()[len("@~/code/scrum/"):], notes)  # ~/code/scrum: this repo
         text = notes.read_text()
         for phrase in ("macOS 12", "No Homebrew", "Python 3.12 is `~/.local/bin/python3`", "`/usr/bin/python3` is older",
