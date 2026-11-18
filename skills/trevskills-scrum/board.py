@@ -4270,6 +4270,18 @@ def cmd_statusline(text):
                       if isinstance(w := limits.get(key), dict) and is_num(w.get("used_percentage")))
 
 
+KNOWN_EXTS = {"py", "md", "json", "js", "jsx", "ts", "tsx", "html", "css", "sh", "yml", "yaml", "toml", "txt", "sql", "prisma", "mjs", "cjs"}
+
+
+def repo_path(p):
+    """True when a PATH_RE token can be a repo file: not a version number, a bracket-led token, a dotted code name (`board.spawn`),
+    or a home/URL path without a known extension (`~/.local`, `/login`; `/other/repo/x.py` stays so outside_repo_files can see it)."""
+    ext = p.rsplit(".", 1)[-1] in KNOWN_EXTS and "." in p
+    if p[:1] in "([" or re.match(r"\d+(\.\d+)+$", p):
+        return False
+    return ext if p[:1] in "~/" else "/" in p or ext
+
+
 def child_files(jobs_dir, job_id):
     """A child's Likely files: from spec.md, or from feature.md (plan-apply's Parallel: paths) while it has no spec."""
     for name in ("spec.md", "feature.md"):
@@ -4292,14 +4304,14 @@ def holder_files(jobs_dir, job):
     except OSError:
         text = ""
     diff = _route_diff(job) if job.get("worktree") else None
-    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p)} | set(diff[1] if diff else ())
+    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | set(diff[1] if diff else ())
 
 
 def prose_paths(text):
-    """Every backticked token, and every bare token with a / or a file extension, in text that matches PATH_RE."""
+    """Every backticked token, and every bare token with a /, in text that matches PATH_RE."""
     bare = (t.rstrip(".,;:") for t in re.sub(r"`[^`]*`", " ", text).split())
-    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p)} | \
-           {t for t in bare if PATH_RE.match(t) and ("/" in t or re.search(r"\.\w{2,}$", t))}
+    return {p for p in re.findall(r"`([^`\s]+)`", text) if PATH_RE.match(p) and repo_path(p)} | \
+           {t for t in bare if PATH_RE.match(t) and repo_path(t) and "/" in t}
 
 
 def shared_files(a, b):
@@ -4317,7 +4329,7 @@ def likely_files(spec_text):
             found.update(re.findall(r"`([^`\s]+)`", line))
         elif line.startswith("- ") and line[2:].split():
             found.add(re.sub(r"[:,]$", "", line[2:].split()[0]))
-    return {p for p in found if PATH_RE.match(p)}
+    return {p for p in found if PATH_RE.match(p) and repo_path(p)}
 
 
 def parse_plan(text):

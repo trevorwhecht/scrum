@@ -1957,6 +1957,31 @@ class BoardTest(unittest.TestCase):
         self.assertFalse(lock.exists())
         self.assertEqual(board.cmd_chain_lock(self.root, parent, "003-part-2", wait=0)["acquired"], True)
 
+    NOISE = "(CLAUDE.md 1.64 /login use.channel board.spawn ~/.local ~/.claude-owa"
+
+    def test_likely_files_drops_noise_tokens(self):
+        bullets = "".join(f"- {t}\n" for t in self.NOISE.split())
+        text = "## Likely files\n" + bullets + "- `skills/trevskills-scrum/board.py`\n- `tests/test_board.py`\n- `package.json`\n- `~/.local` `1.64` `/login` `use.channel`\n"
+        self.assertEqual(board.likely_files(text), {"skills/trevskills-scrum/board.py", "tests/test_board.py", "package.json"})
+
+    def test_prose_paths_drops_noise_tokens(self):
+        text = f"See {self.NOISE} CLAUDE.md and `src/a.py` also docs/b.md."
+        self.assertEqual(board.prose_paths(text), {"src/a.py", "docs/b.md"})
+
+    def test_holder_files_drops_noise_tokens(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "j").mkdir()
+        (d / "j" / "feature.md").write_text("`" + "` `".join(self.NOISE.split()) + "` `src/a.py` `CLAUDE.md`\n")
+        self.assertEqual(board.holder_files(d, {"id": "j"}), {"src/a.py", "CLAUDE.md"})
+
+    def test_child_files_noise_does_not_overlap(self):
+        d = Path(tempfile.mkdtemp())
+        for j, files in (("a", self.NOISE.split() + ["src/a.py"]), ("b", ["CLAUDE.md"])):
+            (d / j).mkdir()
+            (d / j / "spec.md").write_text("## Likely files\n" + "".join(f"- `{t}`\n" for t in files))
+        self.assertEqual(board.child_files(d, "a"), {"src/a.py"})
+        self.assertEqual(board.shared_files(board.child_files(d, "a"), board.child_files(d, "b")), set())
+
     def test_likely_files_reads_only_that_section(self):
         text = "## Problem\n`a/x.py`\n## Likely files\n- `skills/board.py`: `SHAPES[\"lane\"]` and `cmd_ready(root)`\n- `tests/t.py`\n## Assumptions\n- `b/y.py`\n"
         self.assertEqual(board.likely_files(text), {"skills/board.py", "tests/t.py"})
