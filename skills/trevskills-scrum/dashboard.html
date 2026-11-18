@@ -117,7 +117,7 @@ body:has(dialog[open]){overflow:hidden}
 .tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 header{flex-wrap:wrap}header .btn,#filter,#laneFilter{min-height:44px}  /* every header control the same height */
 #controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;flex:1 1 auto}  /* the buttons, flush right; when they do not fit beside the meters the header breaks before the whole row, never between buttons */
-@media (min-width:1400px){header{gap:8px;align-items:center}#machine .btn{margin-block:-6px}h1,#controls>*{flex-shrink:0}#status:empty{flex-basis:0}#machine,#routing{flex-shrink:1;white-space:normal}#cooldownState,#autoOff{flex-shrink:1;min-width:16ch}#cooldownState:empty,#autoOff:empty{min-width:0}#machine{flex:1 1 auto}#filter,#laneFilter{field-sizing:content}#status:empty,#cooldownState:empty,#autoOff:empty{position:absolute}}  /* desktop: one row where everything fits, else the meters on one line and the buttons as one row under them; the readouts wrap in their own box, never cut off; the buttons keep their size. The meter is measured at its one-line width and takes the free width, so the buttons sit right; a select is as wide as its chosen option; an empty state text takes no gap */
+@media (min-width:1400px){header{gap:8px;align-items:center}#machine .btn{margin-block:-6px}h1,#controls>*{flex-shrink:0}#status:empty{flex-basis:0}#machine,#routing{flex-shrink:1;white-space:normal}#cooldownState,#autoOff{flex-shrink:1;min-width:16ch}#cooldownState:empty,#autoOff:empty{min-width:0}#machine{flex:1 1 auto}#filter,#laneFilter{field-sizing:content}#status:empty,#cooldownState:empty,#autoOff:empty{position:absolute}}  /* desktop: one row where everything fits, else the meters on one line and the buttons as one row under them; the readouts wrap in their own box, never cut off; the buttons keep their size. The meter is measured at its one-line width and takes the free width, so the buttons sit right; a select is as wide as its chosen option; an empty state text takes no gap; a shop Mac's Cool down button's -6 px block margin is (44 - 32) / 2, so its 44 px tap target keeps the meter's 32 px line */
 .running{display:block;font-size:12px;color:var(--accent);margin-top:6px}
 .note{font-size:12px;color:var(--muted);margin:0}
 .sentback:empty{display:none}.sentback h3{font-size:13px;margin:8px 0 4px}.sentback ul{margin:0;padding-left:18px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -757,8 +757,10 @@ function renderCooldown(m) {
 }
 
 // Each shop Mac's own Cool down button (job 1185) is redrawn on every poll, so a worker whose POST is in flight is kept
-// here and its button stays disabled; machineLast is the last api/machine reading, which a click redraws at once.
-const shopCoolPending = new Set();
+// here and its button stays disabled; a failed POST's error is kept per worker and shown beside its button until the next
+// click on it (announced once: role=alert only on the redraw right after the failure); machineLast is the last
+// api/machine reading, which a click redraws at once.
+const shopCoolPending = new Set(), shopCoolError = new Map();
 let machineLast = null;
 function renderMachine(m) {
   const el = $("machine");
@@ -803,9 +805,10 @@ function renderMachine(m) {
   // Cool down / Resume work button (its "cooldown" flag), with "cooling down" before it while that worker takes no new work.
   const shops = Array.isArray(m.shop) ? m.shop : [];
   const coolBtn = s => {
-    const n = esc(s.name), on = !!s.cooldown;
+    const n = esc(s.name), on = !!s.cooldown, fail = shopCoolError.get(s.name);
     return `${on ? " <span>cooling down</span>" : ""} <button class="btn" type="button" data-worker="${n}"${on ? ' data-on="1"' : ""}`
-      + `${shopCoolPending.has(s.name) ? " disabled" : ""} aria-label="${on ? "Resume work on" : "Cool down"} ${n}">${on ? "Resume work" : "Cool down"}</button>`;
+      + `${shopCoolPending.has(s.name) ? " disabled" : ""} aria-label="${on ? "Resume work on" : "Cool down"} ${n}">${on ? "Resume work" : "Cool down"}</button>`
+      + (fail ? ` <span class="error"${fail.fresh ? ' role="alert"' : ""}>${esc(fail.msg)}</span>` : "");
   };
   const shopRings = shops.map(s => {
     const label = shops.length > 1 ? `Shop ${esc(s.name)}` : "Shop", read = ago(s.at);
@@ -822,7 +825,9 @@ function renderMachine(m) {
     part("disk", "disk", m.free_disk_gb, " GB" + (diskRed ? `, launches wait for ${esc(m.min_free_disk_gb)} GB free` : ""))].join(" ");
   const focused = document.activeElement?.matches?.("#machine [data-worker]") && document.activeElement.dataset.worker;
   el.innerHTML = [thisMac, ...shopRings, usagePart(m.usage)].filter(Boolean).map(g => `<span class="grp">${g}</span>`).join("");
-  if (focused) [...el.querySelectorAll("[data-worker]")].find(b => b.dataset.worker === focused)?.focus();
+  shopCoolError.forEach(f => { f.fresh = false; });
+  // preventScroll: the poll runs every 2 s, and a plain focus() would scroll the page back up to the header each time
+  if (focused) [...el.querySelectorAll("[data-worker]")].find(b => b.dataset.worker === focused)?.focus({preventScroll: true});
 }
 
 // Every project's board.checkoutAlert (its live checkout cannot go live) and board.actionsAlert (GitHub refused to start
@@ -2293,19 +2298,19 @@ $("cooldown").addEventListener("click", async e => {
 $("machine").addEventListener("click", async e => {
   const btn = e.target.closest("button[data-worker]"), worker = btn && btn.dataset.worker;
   if (!btn || shopCoolPending.has(worker)) return;
-  const focused = document.activeElement === btn;  // disabling drops focus; give it back
+  const focused = document.activeElement === btn;  // the disabled redraw drops focus; give it back
   shopCoolPending.add(worker);
-  btn.disabled = true;
+  shopCoolError.delete(worker);
+  renderMachine(machineLast);  // drawn disabled, without the last failure's error
   try {
     const out = await post("api/cooldown", {worker, on: !btn.dataset.on});
     if (machineLast) machineLast = {...machineLast, shop: (machineLast.shop || []).map(s => s.name === worker ? {...s, cooldown: out.cooldown} : s)};
   } catch (err) {
-    const state = $("cooldownState");
-    if (state) state.textContent = `${worker}: ${err.message}`;
+    shopCoolError.set(worker, {msg: err.message, fresh: true});
   } finally {
     shopCoolPending.delete(worker);
     renderMachine(machineLast);
-    if (focused) [...$("machine").querySelectorAll("[data-worker]")].find(b => b.dataset.worker === worker)?.focus();
+    if (focused) [...$("machine").querySelectorAll("[data-worker]")].find(b => b.dataset.worker === worker)?.focus({preventScroll: true});
   }
 });
 

@@ -107,6 +107,7 @@ class ShopCooldownButtons(unittest.TestCase):
                   "  free_ram_pct: 40, swap_pct: 1, free_disk_gb: 100, verdict: null};\n"
                   "const shop = (name, cooldown) => ({name, free_ram_pct: 50, cpu_load_pct: 10, cpu_cores: 4, at: 1763459960, cooldown});\n"
                   "const btns = () => [...els.machine.innerHTML.matchAll(/<button [^>]*>[^<]*<\\/button>/g)].map(m => m[0]);\n"
+                  "const errs = () => [...els.machine.innerHTML.matchAll(/<button [^>]*>[^<]*<\\/button> <span class=\"error\"[^>]*>[^<]*<\\/span>/g)].map(m => m[0]);\n"
                   "const fake = (worker, on) => ({dataset: on ? {worker, on: '1'} : {worker}, closest() { return this; }});\n"
                   "const settle = () => new Promise(r => setTimeout(r));\n"
                   f"(async () => {{ {body} }})();")
@@ -126,7 +127,8 @@ class ShopCooldownButtons(unittest.TestCase):
 
     def test_click_posts_worker_and_keeps_pending_through_poll(self):
         """A second click while the POST is in flight sends nothing; a poll re-render keeps it disabled; two workers'
-        answers arriving out of order each land on their own button; a failed POST leaves the label and shows the error."""
+        answers arriving out of order each land on their own button; a failed POST leaves the label and shows the error
+        beside that button until the next click on it."""
         out = self.run_node(
             "const poll = () => renderMachine({...M, shop: [shop('a', false), shop('b', true)]});\n"
             "poll(); const out = {};\n"
@@ -137,9 +139,10 @@ class ShopCooldownButtons(unittest.TestCase):
             "posts[1].ok({cooldown: false, worker: 'b'}); await settle(); out.bFirst = btns();\n"
             "posts[0].ok({cooldown: true, worker: 'a'}); await settle(); out.both = btns();\n"
             "els.machine.on({target: fake('a', true)}); posts[2].fail(new Error('Server error 500')); await settle();\n"
-            "out.failed = [btns(), els.cooldownState.textContent, posts[2].body];\n"
-            "delete els.cooldownState; els.machine.on({target: fake('b', false)}); posts[3].fail(new Error('x')); await settle();\n"
-            "out.missing = btns();\n"
+            "out.failed = [btns(), errs(), els.cooldownState.textContent, posts[2].body];\n"
+            "poll(); out.polled = errs();\n"
+            "els.machine.on({target: fake('a', false)}); out.retry = errs(); posts[3].ok({cooldown: true, worker: 'a'}); await settle();\n"
+            "out.retried = [btns(), errs()];\n"
             "els.machine.on({target: {closest: () => null}}); out.count = posts.length;\n"
             "console.log(JSON.stringify(out));")
         self.assertEqual(out["pending"], [button("a", disabled=True), button("b", on=True)])
@@ -147,10 +150,24 @@ class ShopCooldownButtons(unittest.TestCase):
                                         ["api/cooldown", {"worker": "b", "on": False}]])
         self.assertEqual(out["bFirst"], [button("a", disabled=True), button("b")], "b's answer first: a still waits")
         self.assertEqual(out["both"], [button("a", on=True), button("b")])
-        self.assertEqual(out["failed"], [[button("a", on=True), button("b")], "a: Server error 500",
-                                         {"worker": "a", "on": False}])
-        self.assertEqual(out["missing"], [button("a", on=True), button("b")], "no #cooldownState: no throw")
+        alert = '<span class="error" role="alert">Server error 500</span>'
+        self.assertEqual(out["failed"], [[button("a", on=True), button("b")], [button("a", on=True) + " " + alert], "",
+                                         {"worker": "a", "on": False}], "the error sits beside a's own button, not #cooldownState")
+        self.assertEqual(out["polled"], [button("a") + ' <span class="error">Server error 500</span>'],
+                         "a poll keeps the error, and does not announce it again")
+        self.assertEqual(out["retry"], [], "the next click on that worker clears its error")
+        self.assertEqual(out["retried"], [[button("a", on=True), button("b", on=True)], []])
         self.assertEqual(out["count"], 4, "a click outside a button posts nothing")
+
+    def test_poll_refocus_never_scrolls(self):
+        """The 2 s poll redraw gives focus back to the focused shop button without scrolling the page to the header."""
+        out = self.run_node(
+            "const calls = [];\n"
+            "document.activeElement = {matches: s => s === '#machine [data-worker]', dataset: {worker: 'a'}};\n"
+            "els.machine.querySelectorAll = () => ['b', 'a'].map(w => ({dataset: {worker: w}, focus(o) { calls.push([w, o]); }}));\n"
+            "renderMachine({...M, shop: [shop('a', false), shop('b', false)]});\n"
+            "console.log(JSON.stringify(calls));")
+        self.assertEqual(out, [["a", {"preventScroll": True}]])
 
 
 if __name__ == "__main__":
