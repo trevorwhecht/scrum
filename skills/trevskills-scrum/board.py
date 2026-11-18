@@ -183,13 +183,14 @@ FABLE_SWITCH_7D_PCT = 85
 STAGES = ("plan", "running", "waiting", "spec", "build", "check", "review", "approve", "merging", "deploying", "done",
           "needs-human", "aborted", "cloud")  # cloud: running in a claude.ai/code session (SKILL.md Cloud lane); never WATCHED
 FIELDS = ("stage", "round", "limit", "pr", "reason", "worktree", "builder", "base", "tty", "runlog", "lane", "setup",
-          "waiting", "specwriter", "cloud", "outcome", "account", "shop", "worker")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
+          "waiting", "specwriter", "cloud", "outcome", "account", "reset", "shop", "worker")  # the `waiting` field (paused on Trevor) is unrelated to the bigboy "waiting" stage
 ACTIVE = ("spec", "build", "check", "review", "approve", "merging", "deploying")  # stages an interactive session can pause in
 # Where the job's terminal and run log are: both are matched or read by path, so they're strict.
 SHAPES = {"tty": re.compile(r"^ttys[0-9]+$"), "runlog": re.compile(r"^runs/[\w.-]+\.log$"),
           "lane": re.compile(r"^(?:fast|standard|debug|bigboy|runall|lilguy)$"),  # no lane key = standard
           "setup": re.compile(r"^(?:pending|done)$"),  # a bigboy child's Human setup wait
           "account": re.compile(r"^[a-z0-9-]{1,20}$"),  # the accounts() name board.spawn ran the session on
+          "reset": re.compile(r"^[0-9]{0,12}$"),  # the account's seven_day resets_at when board.spawn recorded it: once past, the job takes pick_account's first pick
           "cloud": re.compile(r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$"),  # the dashboard links it
           "shop": re.compile(r"^[0-9]{1,10}$"),  # the shop Mac pid of a stage-cloud job's session (serve.py shop_tick)
           "worker": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")}  # the workers.txt ssh alias that session runs on
@@ -4396,6 +4397,13 @@ def pick_account(now, live=0, prefer=None):
     return None, Allowance(0, "no account has room: " + "; ".join(why))
 
 
+def seven_day_reset(account):
+    """The account's seven_day resets_at as an int string, "" when usage.json has none."""
+    w = ((read_usage(account) or {}).get("rate_limits") or {}).get("seven_day")
+    at = w.get("resets_at") if isinstance(w, dict) else None
+    return str(int(at)) if is_num(at) else ""
+
+
 def fallback_account(now, recorded):
     """Account for a spawn when none has room: the one whose limit marker ends soonest (no marker counts as now), the
     recorded one winning ties or when it is not limited; the first account when `recorded` is unlisted."""
@@ -7612,7 +7620,10 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     accs = accounts()
     if account is None:
         try:
-            recorded = find(read_board(root), job_id).get("account")
+            job = find(read_board(root), job_id)
+            recorded = job.get("account")
+            if recorded and str(job.get("reset") or "").isdigit() and time.time() >= int(job["reset"]):
+                recorded = None  # its seven_day window reset since: the first pick wins again, no session is killed
         except (SystemExit, OSError):  # not on the board (run-all, digest, weekly), or no board yet
             recorded = None
         account = pick_account(time.time(), prefer=recorded)[0] or fallback_account(time.time(), recorded)
@@ -7639,7 +7650,7 @@ def spawn(root: Path, job_id: str, action: str, prompt: str | None = None, flags
     except (OSError, TypeError):  # already exited, or a test's mock pid
         pass
     try:  # the run log link reads this; a job that isn't on the board (run-all, digest) has no row to set
-        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}"], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
+        cmd_set(root, job_id, [f"runlog=runs/{log.name}", "tty=", "outcome=", f"account={acc.name}", f"reset={seven_day_reset(acc.name)}"], unpause=True)  # Play starts on a paused job; a stale interactive tty would still match the hook and liveness checks
     except SystemExit:
         pass
     return proc, f"runs/{log.name}"
