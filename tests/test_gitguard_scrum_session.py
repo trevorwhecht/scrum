@@ -36,16 +36,16 @@ func TestScrumSessionCommitOnMainRefused(t *testing.T) {
 	board := filepath.Join(repo, "scrum", "board.json")
 
 	t.Setenv("CLAUDE_NOTIFIER_DISABLE", "1")
-	if guardReason(ev, "??", 0) == "" {
+	if guardReason(ev) == "" {
 		t.Errorf("CLAUDE_NOTIFIER_DISABLE=1 (scrum-launched session): commit on main allowed, want denied")
 	}
 	t.Setenv("CLAUDE_NOTIFIER_DISABLE", "")
 	os.WriteFile(board, []byte(`{"jobs": [{"id": "950", "stage": "spec", "pid": 111}]}`), 0o644)
-	if guardReason(ev, "??", 111) == "" {
+	if guardReason(ev) == "" {
 		t.Errorf("session pid owns an ACTIVE job: commit on main allowed, want denied")
 	}
 	os.WriteFile(board, []byte(`{"jobs": [{"id": "950", "stage": "build", "tty": "ttys004"}]}`), 0o644)
-	if guardReason(ev, "ttys004", 222) == "" {
+	if guardReason(ev) == "" {
 		t.Errorf("session tty owns a pid-less ACTIVE job: commit on main allowed, want denied")
 	}
 
@@ -57,7 +57,7 @@ func TestScrumSessionCommitOnMainRefused(t *testing.T) {
 	}
 	wtev := event{"hook_event_name": "PreToolUse", "tool_name": "Bash",
 		"tool_input": map[string]any{"command": "git commit -m x"}, "cwd": wt}
-	if r := guardReason(wtev, "??", 0); r != "" {
+	if r := guardReason(wtev); r != "" {
 		t.Errorf("scrum session commit in a job worktree: denied, want allowed: %s", r)
 	}
 }

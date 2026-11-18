@@ -52,7 +52,7 @@ func run(stdin io.Reader, stdout io.Writer) {
 	if !gitCommitRE.MatchString(command(ev)) {
 		return // fast path: no git, no file read
 	}
-	reason := guardReason(ev, "", 0)
+	reason := guardReason(ev)
 	if reason == "" {
 		return
 	}
@@ -73,8 +73,8 @@ func command(ev event) string {
 
 // guardReason: the deny reason when a Bash `git commit` would land on main/master in a registered repo's main
 // checkout, else "". Scrum-launched sessions are not exempt (job 957): no scrum path commits on main through a Bash
-// call. tty and pid are unused, kept so callers and tests keep one signature.
-func guardReason(ev event, tty string, pid int) string {
+// call.
+func guardReason(ev event) string {
 	cmd := command(ev)
 	m := gitCommitRE.FindStringSubmatchIndex(cmd)
 	cwd, _ := ev["cwd"].(string)
