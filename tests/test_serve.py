@@ -2005,11 +2005,14 @@ class ServeTest(unittest.TestCase):
         parent, (kid,) = out["id"], out["children"]
         kid_job = lambda: b.find(b.read_board(root), kid)
         self.assertEqual(b.MAX_LAUNCH_CPU_LOAD_PCT, 500)
-        with mock.patch.object(b, "machine_ok", return_value=None), mock.patch.object(b, "ram_room", return_value=4):
+        # finish_first reads every registered project's board: another test's leftover E2E-queue job would hold the claim
+        with mock.patch.object(b, "machine_ok", return_value=None), mock.patch.object(b, "ram_room", return_value=4), \
+                mock.patch.object(b, "finish_first", return_value=None):
             for load, manual, ready in (("501", False, []), ("500", False, [kid]), ("501", True, [kid])):
                 b.cmd_set(root, kid, ["stage=waiting"])
                 with mock.patch.dict(os.environ, SCRUM_CPU_LOAD_PCT=load), mock.patch.object(self.serve, "spawn") as spawn:
-                    self.assertEqual(self.serve.start_ready("repo", root, parent, manual=manual)["ready"], ready)
+                    out = self.serve.start_ready("repo", root, parent, manual=manual)
+                    self.assertEqual(out["ready"], ready, (load, manual, out, kid_job().get("reason")))
                 self.assertEqual(([c.args[2] for c in spawn.call_args_list], kid_job()["stage"]),
                                  (ready, "spec" if ready else "waiting"), (load, manual))
         self.assertEqual(kid_job()["started_by"], "runall")
