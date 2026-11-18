@@ -4372,12 +4372,13 @@ def reserve_hit(acc, usage, now):
 
 
 def pick_account(now, live=0, prefer=None):
-    """(name, allowance) of the first account with room, `prefer` first when listed, then the soonest seven_day reset
+    """(name, allowance): name is the first account with room, `prefer` first when listed, then the soonest seven_day reset
     first (no future 7d window last, ACCOUNTS order within ties), else (None, Allowance(0, reason)) naming every account and why. Room: no limit_until marker ahead, usage_allowance None or above the live
     count (`live` an int or a list), and no
-    reserve window reached (reserve_hit)."""
+    reserve window reached (reserve_hit). allowance is the claims cap across every account with room (job 1130):
+    None when any of them has no taper, else the largest of their allowances."""
     accs = accounts()
-    why = []
+    why, room = [], []
     usages = {a.name: read_usage(a.name) for a in accs}
 
     def order(acc):
@@ -4398,8 +4399,11 @@ def pick_account(now, live=0, prefer=None):
         if held := reserve_hit(acc, usage, now):
             why.append(f"{acc.name} {held}")
             continue
-        return acc.name, allow
-    return None, Allowance(0, "no account has room: " + "; ".join(why))
+        room.append((acc.name, allow))
+    if not room:
+        return None, Allowance(0, "no account has room: " + "; ".join(why))
+    caps = [a for _, a in room]
+    return room[0][0], None if any(a is None for a in caps) else max(caps)
 
 
 def seven_day_reset(account):
