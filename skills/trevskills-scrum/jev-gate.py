@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One Jev decision for the pipeline. Never fails the caller: any error prints the step's fallback.
 
-usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical prod-error)
+usage: jev-gate.py <step> <job-dir>   (steps: model spec-model promote dupe approver reviewer-security reviewer-ui rank critical prod-error runs-on)
 stdout is one line, the decision. Every run appends to <job-dir>/jev.log:
 timestamp, step, question, raw answer, decision, elapsed seconds (tab-separated).
 """
@@ -27,6 +27,8 @@ STEPS = {
                  "normal"),  # prints critical or normal
     "prod-error": ("Does this output show the run failed, crashed, or lost or corrupted data, rather than a problem the "
                    "script reported and worked around (skipped, kept, retried)?", 0.3, "real"),  # prints real or handled
+    "runs-on": ("Does this job need any of these, which only this Mac has: {terms}?", (0.3, 0.7),
+                "unsure"),  # prints main, any or unsure (board.tag_runs_on falls back to the term list)
 }
 LEVELS = ["trivial edit", "small contained change", "multi-file change with new logic", "cross-cutting or risky change"]
 IMPORTANCE = ["Trivial (cosmetic or pedantic, nobody would notice if never done)",
@@ -83,6 +85,18 @@ def critical_ticket(text, asked):
     return q, raw, "critical" if v >= cut else "normal"
 
 
+def runs_on(text, terms, asked):
+    """(question, raw answer, decision) for one job's feature.md plus spec.md: `main` at the upper cutoff or more, `any`
+    at the lower one or less, else `unsure`; `any` with no Jev call when there is no term or no text. 20 s timeout."""
+    q, (low, high), _ = STEPS["runs-on"]
+    if not terms or not text.strip():
+        return "-", "-", "any"
+    q = q.format(terms=", ".join(terms))
+    asked.append(q)
+    v, raw = jev.noul(text.strip(), q, timeout=20)
+    return q, raw, "main" if v >= high else "any" if v <= low else "unsure"
+
+
 def decide(step, job, asked):
     """(question, raw answer, decision); question and raw are '-' when no Jev call was made.
     asked gets the question appended just before each Jev call, so main() can tell if one started."""
@@ -95,6 +109,9 @@ def decide(step, job, asked):
         asked.append(q)
         v, raw = jev.score(text, q, LEVELS)
         return q, raw, "sonnet" if v < cut else "opus"
+    if step == "runs-on":
+        return runs_on("\n\n".join(f.read_text() for f in (job / "feature.md", job / "spec.md") if f.is_file()),
+                       board.main_only_terms(), asked)
     stdin = sys.stdin.read().strip()
     if step == "rank":
         return rank_ticket(stdin, job.parent.parent, asked)
