@@ -478,6 +478,30 @@ class ShopTickTest(unittest.TestCase):
                     self.assertGreaterEqual(self.serve.SHOP_RETRY_AT["shopmac"], t0 + 600)
                     self.assertLessEqual(self.serve.SHOP_RETRY_AT["shopmac"], time.time() + 600)
 
+    def test_ruff_failure_does_not_block_dispatch(self):
+        """Job 1160: ruff only feeds edit-check.py, which skips when ruff is missing, so `ruff: failed` never holds the
+        shop; a failed required step or an unready account still stops the dispatch at setup."""
+        cases = {"ruff only": (dict(SETUP, ruff="failed"), True),
+                 "ruff and gh login": (dict(SETUP, ruff="failed", **{"gh login": "failed"}), False),
+                 "ruff and account owa": (dict(SETUP, ruff="failed", **{"account owa": "not ready"}), False)}
+        for why, (steps, sent) in cases.items():
+            with self.subTest(why):
+                self.serve.SHOP_RETRY_AT.clear()
+                self.sh.reset_mock()
+                self.sh.setup.return_value = steps
+                root = self.project("mm", self.runall({"id": "043-a"}))
+                got, out, err = self.tick()
+                if sent:
+                    self.assertEqual((got, err), (True, ""), "a failed ruff step held the dispatch")
+                    self.assertEqual(out, "shop: mm: 043-a: started on shopmac (pid 4242, account owa)\n")
+                    self.assertEqual(self.calls(),
+                                     ["ready", "md_sync", "setup", "clone", "env_copy", "profile_copy", "start"])
+                    self.assertEqual(self.job(root, "043-a")["stage"], "cloud")
+                else:
+                    self.assertEqual((got, out, err), (False, "", "shop: mm: 043-a: setup failed on shopmac\n"))
+                    self.assertEqual(self.job(root, "043-a")["stage"], "waiting")
+                    self.assertNotIn("clone", self.calls())
+
     def test_refused_mark_kills_remote_session(self):
         def pause(*a, **kw):
             with self.board.locked_board(self.projects["mm"] / "scrum") as b:
