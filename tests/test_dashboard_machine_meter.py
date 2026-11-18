@@ -20,7 +20,7 @@ class MachineMeter(unittest.TestCase):
         meter = re.search(r'<span id="machine"[^>]*>', header)
         self.assertIsNotNone(meter, "the meter sits in <header>")
         self.assertIn(" hidden", meter.group(0), "hidden until the first good fetch")
-        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB[^"]*150%')
+        self.assertRegex(meter.group(0), r'data-agent-hint="[^"]*20%[^"]*25%[^"]*10 GB[^"]*300%')
         self.assertIn("5-minute load average", meter.group(0), "the hint names the CPU ring's reading")
         self.assertIn("of all cores", meter.group(0))
         self.assertIn("usage.json", meter.group(0), "the hint names the usage segment's source")
