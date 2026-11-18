@@ -735,18 +735,20 @@ def claim_item(lines, item, job_id):
     lines[item["line"]] = format_item(item)
 
 
-def cmd_next(root, index=None):
+def cmd_next(root, index=None, shop=None):
     """Claim the highest-priority open backlog item (or item `index`) as a new job, under the lock, so no two sessions share one.
     Cool-down refuses the automatic claim (no index), and so does finish_first; an explicit index is Trevor's Run now
-    and still claims."""
-    if index is None and cooling_down():
+    and still claims. `shop` (serve.py's shop_tick, a claim for the shop Mac) is a predicate the automatic pick must
+    also pass; cool-down never refuses it, finish_first still does."""
+    if index is None and shop is None and cooling_down():
         raise SystemExit(COOLING_CLAIM)
     if index is None and (hold := finish_first(root)):
         raise SystemExit(f"{hold}: no new backlog claim. It claims again once that job moves on.")
     with locked_board(root) as board:
         lines, items = read_backlog(root)
         if index is None:
-            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)), None)
+            item = next((i for i in sorted(items, key=priority_key) if not i["done"] and not i["setup"] and not waiting_on(i, items, board) and not origin_open(i, board)
+                         and (shop is None or shop(i))), None)
             if item is None:
                 return {"id": None, "feature": None}
         else:
@@ -4526,21 +4528,27 @@ def child_files(jobs_dir, job_id):
     """A child's Likely files: from spec.md, or from feature.md (plan-apply's Parallel: paths) while it has no spec."""
     for name in ("spec.md", "feature.md"):
         if (f := Path(jobs_dir) / job_id / name).is_file():
-            text = f.read_text(encoding="utf-8", errors="replace")
-            if name == "feature.md" and TERMINAL_BATCH_TITLE in text:
-                # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
-                return {p for p in re.findall(r"`([^`\s]+)`", text)
-                        if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
-            found = likely_files(text)
-            if found or name == "spec.md" and re.search(r"^#+\s*Likely files", text, re.M | re.I):
-                return found  # a Likely files heading that names no path still means "files unknown"
-            # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
-            root = Path(jobs_dir).parent.parent
-            tracked = git_tracked(root)
-            # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
-            return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
-                    for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
+            return text_files(Path(jobs_dir).parent.parent, f.read_text(encoding="utf-8", errors="replace"),
+                              spec=name == "spec.md")
     return set()
+
+
+def text_files(root, text, spec=False):
+    """child_files for one text in repo `root`: a spec.md's when `spec`, else a feature.md's (serve.py's shop_tick also
+    reads a backlog item not claimed yet this way)."""
+    if not spec and TERMINAL_BATCH_TITLE in text:
+        # the Terminal batch has no spec: its files are the .claude/ paths its bullets name (not the bare `.claude/` folder)
+        return {p for p in re.findall(r"`([^`\s]+)`", text)
+                if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
+    found = likely_files(text)
+    if found or spec and re.search(r"^#+\s*Likely files", text, re.M | re.I):
+        return found  # a Likely files heading that names no path still means "files unknown"
+    # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
+    root = Path(root)
+    tracked = git_tracked(root)
+    # a path that exists on disk as written (even git-ignored, like scrum/backlog.md) is never remapped
+    return {p if p in tracked or (root / p).exists() or len(m := [t for t in tracked if t.endswith("/" + p)]) != 1 else m[0]
+            for p in prose_paths(text) if "/" in p} | bare_name_paths(text, tracked)
 
 
 def holder_files(jobs_dir, job):

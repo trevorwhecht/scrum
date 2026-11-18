@@ -1639,7 +1639,13 @@ def shop_tick(project, repo, root) -> bool:
     (soonest seven-day reset), then prefer= each of the worker's accounts in its listed order, until one is on the
     worker's line and ready there. Later workers are not probed. Cool-down does not stop the shop. A child is claimed (cmd_ready shop=), then md_sync, setup, clone, env_copy,
     profile_copy and start run on that worker; a failed step puts a claimed child back to waiting, prints one
-    `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. The job is then
+    `shop: <project>: <id>: <step> failed on <alias>` line and holds that worker for SHOP_RETRY_EVERY. With nothing in
+    that pool (job 1141), new work goes instead, by auto_continue_tick's rules: a project with an `- Auto continue:`
+    line, its run-all not running, a claimable backlog line and no finish_first hold; board.cmd_next(shop=) claims the
+    top item under the board lock (cool-down never refuses it) that is not lilguy (`Lane: lilguy` in its text or its
+    pre-written spec's header), names no digest proposals.json, and whose files (board.text_files of that spec, else
+    its text) are clear_of_busy, and its feature.md is the item's text; a failed step after that leaves the new job a
+    queued `start` launch (held work). The job is then
     marked stage cloud with shop=<pid>, account= and worker=<alias>; a refused mark, or a local run started meanwhile,
     kills the session on that worker. No worker, a down one or nothing to send: no output, no change. True when it
     dispatched."""
@@ -1677,7 +1683,10 @@ def shop_tick(project, repo, root) -> bool:
                    and j.get("setup") != "pending" and not lilguy(j)
                    and not DIGEST_PROPOSALS_RE.search(feature(j["id"]))),
                   key=lambda j: (board.job_lane(root, j) != "fast", int(j["id"].split("-")[0]), j["id"]))  # fast first, then numeric id: 1000- sorts after 999-
-    if not pool:
+    # nothing held: new work, under auto_continue_tick's own rules (opted in, its run-all not running, a claimable line, finish_first)
+    new = not pool and auto_continue(root) is not None and not running(project, "run-all") and claimable(root) \
+        and not board.finish_first(root)
+    if not pool and not new:
         return False
     if not all(map(is_child, pool)):  # a launch overlapping a running or cloud job waits; cmd_ready checks a child
         busy = busy_files(project, root, jobs)
@@ -1705,7 +1714,26 @@ def shop_tick(project, repo, root) -> bool:
         if not child or job["id"] in board.cmd_ready(root, job["parent"], live_ids(project), shop=job["id"])["ready"]:
             break
     else:
-        return False
+        if not new:
+            return False
+        busy = None
+
+        def fits(item):  # what the pool would take once claimed: feature.md is the item's text, spec.md its pre-written spec
+            nonlocal busy
+            spec = board.spec_path(root, item["text"])
+            if re.search(r"\bLane:\s*lilguy\b", item["text"], re.I) or DIGEST_PROPOSALS_RE.search(item["text"]) \
+                    or board.header_value(spec, "Lane", board.LANES) == "lilguy":
+                return False
+            if busy is None:  # once, under cmd_next's lock: the board as it is at the claim
+                busy = busy_files(project, root, board.read_board(root)["jobs"])
+            return not busy or clear_of_busy(board.text_files(repo, spec.read_text(encoding="utf-8", errors="replace"), spec=True)
+                                             if spec.is_file() else board.text_files(repo, item["text"] + "\n"), busy)
+
+        out = board.cmd_next(root, shop=fits)
+        if out["id"] is None:
+            return False
+        (jobs_dir / out["id"] / "feature.md").write_text(out["feature"] + "\n")  # as Run now writes it
+        job, child = {"id": out["id"], "stage": "spec"}, False
     job_id, claimed = job["id"], "spec" if child else job["stage"]
 
     def fail(step):
@@ -1715,6 +1743,13 @@ def shop_tick(project, repo, root) -> bool:
                 (jobs_dir / job_id / "claimed-at.txt").unlink(missing_ok=True)
             except SystemExit:
                 pass  # moved meanwhile: its new owner keeps it
+        elif new:  # a fresh claim waits as held work: a queued start this Mac's play_queue_tick or a later shop tick takes
+            with board.locked_board(root) as b:
+                live = next((j for j in b["jobs"] if j["id"] == job_id), {})
+                if live.get("stage") == "spec" and not live.get("shop"):
+                    live.setdefault("play_queued", board.now())
+                    live.setdefault("queued_launch", {"action": "start", "prompt": f"/trevskills-scrum start {job_id}",
+                                                      "stage": "spec"})
         print(f"shop: {project}: {job_id}: {step} failed on {alias}", file=sys.stderr, flush=True)
         SHOP_RETRY_AT[alias] = time.time() + SHOP_RETRY_EVERY
         return False
