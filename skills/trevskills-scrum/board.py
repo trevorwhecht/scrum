@@ -1414,6 +1414,55 @@ def pulse_path():
     return Path(os.environ.get("SCRUM_PULSE") or registry_path().parent / "pulse.log")
 
 
+# Every process the scrum runs on its own, for the digest (write_processes): (name, serve.py/board.py functions,
+# state files relative to the scrum folder, globs allowed). tests/test_processes.py fails on a watchdog call, *_tick
+# or scrum-folder file no entry names, and on a log_process name that is no entry.
+PROCESSES = (
+    ("Session starts", ("spawn", "auto_continue_tick", "play_queue_tick", "auto_resume", "auto_play", "idle_claim",
+                        "start_ready", "wake_waiting", "sweep_parents", "main_ff_tick", "terminal_batch_tick"), ()),
+    ("Stalls and exits", ("cmd_watchdog", "respawn_exited", "record_outcomes", "cmd_migrate_paused", "claude_migrate"),
+     ("questions.log",)),
+    ("Full E2E on main", ("e2e_full_tick", "e2e_full_run"), ("e2e-full.json", "e2e-full.log")),
+    ("UI sweep", ("ui_sweep_tick", "cmd_ui_sweep_record"), ("ui-sweep.json", "ui-sweep/*/review.md")),
+    ("Prod error sweep", ("prod_errors_tick",), ("prod-errors.json",)),
+    ("Actions alerts", ("actions_alert",), ()),
+    ("Disk reclaim", ("reclaim_disk",), ()),
+    ("Idle cleanup", ("idle_cleanup", "stop_dev_servers", "stop_orphans", "docker_tick", "prune_worktrees"), ()),
+    ("E2E lock reaps", ("e2e_lock_reap",), ()),
+    ("Digest retry", ("digest_retry_tick",), ()),
+    ("Weekly digest", ("weekly_tick",), ()),
+    ("Cloud jobs", ("cloud_tick", "cmd_cloud_sync", "cmd_cloud_claim", "shop_tick"), ()),
+    ("Usage windows", ("window_tick",), ("windows",)),
+    ("Pulse", ("pulse_tick", "record_cpu_sample", "cooldown_chime"), ()),
+    ("Run all and triage", ("cmd_runall_start", "cmd_triage_start", "cmd_triage_apply"), ("triage/*",)),
+    ("Roadmap and BigBoy", ("cmd_roadmap_next",), ("roadmap.md", "jobs/*/track-*.md", "jobs/*/bigboy-review.md")),
+    ("Backlog ranking", ("cmd_rank_backlog",), ("jev.log",)),
+    ("Held items", (), ("held.md",)),
+    ("Manual checks", ("cmd_manual_add",), ("manual-checks.md",)),
+)
+
+
+def processes_path():
+    """The machine-wide process run log (one JSON line a run, log_process), beside pulse.log (SCRUM_PULSE moves it)."""
+    return pulse_path().with_name("processes.log")
+
+
+def log_process(process: str, result: str, **fields) -> None:
+    """Append one {"t", "process", "result", **fields} JSON line to processes_path(): one PROCESSES entry's run, for
+    the digest's processes.md (write_processes). Never raises: an OSError prints one `processes: ` stderr line. Under
+    unittest the real default ~/.claude/trevskills-scrum/processes.log is never written (a silent return)."""
+    path = processes_path()
+    if "unittest" in sys.modules and path == Path.home() / ".claude" / "trevskills-scrum" / "processes.log":
+        return  # a test run would add fixture runs to the live log the digest reads
+    line = json.dumps({"t": int(time.time()), "process": process, "result": result, **fields}, default=str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print(f"processes: {e}", file=sys.stderr)
+
+
 def pulse_auto(lines, project=None):
     """[(t, auto)] for each pulse.log line (board._json_lines) with a numeric t, in file order: auto is True when the
     line's projects.<project>.auto is True (any project's, when project is None)."""
