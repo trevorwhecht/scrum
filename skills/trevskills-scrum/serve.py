@@ -3309,40 +3309,112 @@ def timed(handler):
     return run
 
 
+SHOP_STATS_TTL = 30  # seconds between background reads of the shop Macs' RAM and load; /api/machine never waits on ssh
+SHOP_STATS_CMD = "sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q"  # shop.PROBE_CMD's load lines, then free RAM
+SHOP_STATS = {"at": None, "busy": False, "value": []}  # at: time.monotonic() the last refresh ended
+SHOP_STATS_LOCK = threading.Lock()
+
+
+def shop_stats():
+    """GET /api/machine "shop": the cached refresh_shop_stats list ([] before the first read). Starts one background
+    refresh when none runs and the last one ended SHOP_STATS_TTL ago or more, so a poll never runs ssh."""
+    with SHOP_STATS_LOCK:
+        if not SHOP_STATS["busy"] and (SHOP_STATS["at"] is None or time.monotonic() - SHOP_STATS["at"] >= SHOP_STATS_TTL):
+            SHOP_STATS["busy"] = True
+            threading.Thread(target=refresh_shop_stats, daemon=True).start()
+        return SHOP_STATS["value"]
+
+
+def refresh_shop_stats():
+    """{"name", "free_ram_pct", "cpu_load_pct", "cpu_cores", "at"} per shop.workers() worker from one shop.run each:
+    memory_pressure's free RAM %, the 1-minute load as a % of all cores (board.cpu_load_pct's unit), the core count and
+    time.time() of the read. An unreadable value is null; a worker with neither reading is unreachable and is re-read
+    only after shop.DOWN_TTL, as shop.probe backs off a sleeping Mac."""
+    try:
+        old, value = {e["name"]: e for e in SHOP_STATS["value"]}, []
+        for w in shop.workers():
+            prev = old.get(w.alias)
+            down = prev and prev["free_ram_pct"] is None and prev["cpu_load_pct"] is None
+            if down and time.time() - prev["at"] < shop.DOWN_TTL:
+                value.append(prev)
+                continue
+            out = shop.run(SHOP_STATS_CMD, shop.PROBE_TIMEOUT, alias=w.alias).stdout  # read whatever the exit code
+            lines, ram = out.splitlines(), board.FREE_RAM_RE.search(out)
+            try:
+                load, cores = float(lines[0].strip("{} ").split()[0]), int(lines[1])
+            except (IndexError, ValueError):
+                load = cores = None
+            value.append({"name": w.alias, "free_ram_pct": float(ram.group(1)) if ram else None,
+                          "cpu_load_pct": round(load / cores * 100, 1) if load is not None and cores else None,
+                          "cpu_cores": cores, "at": time.time()})
+        with SHOP_STATS_LOCK:
+            SHOP_STATS["value"] = value
+    finally:
+        with SHOP_STATS_LOCK:
+            SHOP_STATS.update(at=time.monotonic(), busy=False)
+
+
+HISTORY_EVERY = 60  # seconds between two sparkline samples of one machine
+HISTORY_LEN = 30  # samples kept per machine: the meter's sparklines span the last 30 min
+HISTORY = {}  # "mac" or ("shop", alias) -> deque of (time.time(), free_ram_pct, cpu_load_pct)
+HISTORY_LOCK = threading.Lock()
+
+
+def machine_history(key, ram, cpu, now):
+    """The meter's sparkline readings for `key`, oldest first: {"free_ram_pct": [...], "cpu_load_pct": [...]} from its
+    samples of the last HISTORY_LEN * HISTORY_EVERY seconds, after appending (now, ram, cpu) when its newest sample is
+    HISTORY_EVERY s old or more. In memory only, sampled on the /api/machine poll; an unread value stays null."""
+    with HISTORY_LOCK:
+        q = HISTORY.setdefault(key, collections.deque(maxlen=HISTORY_LEN))
+        if not q or now - q[-1][0] >= HISTORY_EVERY:
+            q.append((now, ram, cpu))
+        recent = [s for s in q if now - s[0] < HISTORY_LEN * HISTORY_EVERY]
+    return {"free_ram_pct": [s[1] for s in recent], "cpu_load_pct": [s[2] for s in recent]}
+
+
 def machine_status():
     """The dashboard's machine-health meter: board.machine_ok's readings, thresholds and verdict. Disk is read on this
     file's volume (the dashboard spans every project, and they share one disk). machine_ok re-reads each value (a few
-    ms each) so its verdict is exactly the gate's, whatever checks it grows."""
+    ms each) so its verdict is exactly the gate's, whatever checks it grows. "history" and each shop entry's are
+    machine_history's sparkline readings."""
     r = lambda v: None if v is None else round(v, 1)
-    return {"free_ram_pct": r(board.free_ram_pct()), "swap_pct": r(board.swap_used_pct()),
+    now, ram, cpu = time.time(), r(board.free_ram_pct()), r(board.cpu_load_pct())
+    return {"free_ram_pct": ram, "swap_pct": r(board.swap_used_pct()),
             "free_disk_gb": r(board.free_disk_gb(HERE)), "min_free_ram_pct": board.MIN_FREE_RAM_PCT,
             "max_swap_pct": board.MAX_SWAP_PCT, "min_free_disk_gb": board.MIN_FREE_DISK_GB,
-            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(time.time()), "cooldown": board.cooling_down(),
+            "verdict": board.machine_ok(HERE, claim=True), "usage": machine_usage(now), "cooldown": board.cooling_down(),
             "sessions": board.live_sessions(), "cpu_busy_pct": r(board.cpu_busy_pct()),
-            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": r(board.cpu_load_pct()),
+            "max_cpu_busy_pct": board.MAX_CPU_BUSY_PCT, "cpu_load_pct": cpu,
             "cpu_cores": os.cpu_count(), "max_cpu_load_pct": board.MAX_CPU_LOAD_PCT,
-            "restart_waiting": restart_blockers()}
+            "restart_waiting": restart_blockers(), "history": machine_history("mac", ram, cpu, now),
+            "shop": [{**s, "history": machine_history(("shop", s["name"]), s["free_ram_pct"], s["cpu_load_pct"], now)}
+                     for s in shop_stats()]}
 
 
 def machine_usage(now):
-    """The meter's usage segment: 5h and 7d used %, the 5h reset, usage_allowance's live-session cap (null for no
-    taper) and board.fable_state, or "unknown" when usage.json is missing, malformed or older than USAGE_STALE_SECS."""
-    usage = board.read_usage() or {}
-    at = usage.get("written_at")
-    if not isinstance(usage.get("rate_limits"), dict) or not board.is_num(at) or now - at > board.USAGE_STALE_SECS:
+    """The meter's usage segment: one weekly reading per board.accounts() account, {"name", "seven_day_pct",
+    "resets_at", "max_pct"} (claude_usage's weekly %, whatever its age; max_pct, where its red starts, is its 7d
+    reserve, else board.USAGE_HOLD_PCT), then this session's usage_allowance cap, board.fable_state and the later reset
+    of a held window, which need usage.json under USAGE_STALE_SECS old (else null, "unknown", null). "unknown" when no
+    account has a weekly reading."""
+    accounts = [{"name": a.name, "seven_day_pct": (u := claude_usage(now, a.name))["weekly"],
+                 "resets_at": u["weekly_resets_at"],
+                 "max_pct": dict(zip((k for k, _ in board.WINDOWS), a.reserve or ())).get("seven_day", board.USAGE_HOLD_PCT)}
+                for a in board.accounts()]
+    if all(a["seven_day_pct"] is None for a in accounts):
         return "unknown"
-    u, allow = claude_usage(now), board.usage_allowance(usage, now, 0)
-    held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)]
-    return {"five_hour_pct": u["5h"], "seven_day_pct": u["weekly"], "five_hour_resets_at": u["5h_resets_at"],
-            "allowance": None if allow is None else int(allow), "fable": board.fable_state(usage, now),
-            "hold_until": max(held) if held else None}
-
-
-def claude_usage(now):
-    """Claude's 5h and weekly used % and resets from usage.json (board.py statusline), whatever its age. A window
-    whose reset is past reads null, as route.codex_quota treats an expired window."""
-    out = dict.fromkeys(("5h", "weekly", "5h_resets_at", "weekly_resets_at", "as_of"))
     usage = board.read_usage() or {}
+    allow = board.usage_allowance(usage, now, 0)  # None when stale; a held window gives 0, so stale holds stay hidden
+    held = [w["resets_at"] for _, _, w in board.held_windows(usage, now)] if allow is not None else []
+    return {"accounts": accounts, "allowance": None if allow is None else int(allow),
+            "fable": board.fable_state(usage, now), "hold_until": max(held) if held else None}
+
+
+def claude_usage(now, account=None):
+    """Claude's 5h and weekly used % and resets from usage.json (board.py statusline; `account`'s, else this
+    session's), whatever its age. A window whose reset is past reads null, as route.codex_quota treats an expired window."""
+    out = dict.fromkeys(("5h", "weekly", "5h_resets_at", "weekly_resets_at", "as_of"))
+    usage = (board.read_usage(account) if account else board.read_usage()) or {}
     limits = usage.get("rate_limits")
     if not isinstance(limits, dict):
         return out

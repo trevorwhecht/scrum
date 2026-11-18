@@ -4800,6 +4800,7 @@ SESSION_RAMP_SECS = 120  # ram_room: a session younger than this has not grown i
 #                          the room; two projects claiming within that minute both burst (the 2026-10-24 pile-up)
 MAX_YOUNG_SESSIONS = 2  # ram_room: at most this many sessions younger than SESSION_RAMP_SECS at once, so starts ramp 2 per
 #                         2 min and the CPU gates see each pair's load first (2026-11-04: 10 started on wake, load 70 on 8 cores)
+FREE_RAM_RE = re.compile(r"System-wide memory free percentage: (\d+(?:\.\d+)?)%")  # memory_pressure; serve.py: the shop Mac
 
 
 def free_ram_pct():
@@ -4812,7 +4813,7 @@ def free_ram_pct():
         out = subprocess.run(["/usr/bin/memory_pressure"], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    m = re.search(r"System-wide memory free percentage: (\d+(?:\.\d+)?)%", out)
+    m = FREE_RAM_RE.search(out)
     return float(m.group(1)) if m else None
 
 

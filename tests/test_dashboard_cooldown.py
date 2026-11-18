@@ -15,8 +15,8 @@ class CooldownButton(unittest.TestCase):
     def test_markup_and_posts(self):
         text = DASHBOARD.read_text()
         header = text[text.index("<header>"):text.index("</header>")]
-        self.assertRegex(header, r'<span id="machine"[^>]*></span>\s*<button class="btn" id="cooldown" type="button"',
-                         "right after #machine")
+        self.assertRegex(header, r'<span id="machine"[^>]*></span>\s*<div id="controls">\s*<button class="btn" id="cooldown" type="button"',
+                         "right after #machine, first of the header's buttons")
         btn = re.search(r'<button class="btn" id="cooldown"[^>]*>', header).group(0)
         self.assertIn("data-agent-hint=", btn, "the explanation is in the hint, not on screen")
         self.assertIn("holds only new work", btn)

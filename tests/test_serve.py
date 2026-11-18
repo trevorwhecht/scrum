@@ -2075,9 +2075,9 @@ class ServeTest(unittest.TestCase):
         self.assertIsNone(self.serve.resume_refusal("repo", self.root, alone))
 
     def test_api_machine(self):
-        keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct",
+        keys = ["cooldown", "cpu_busy_pct", "cpu_cores", "cpu_load_pct", "free_disk_gb", "free_ram_pct", "history",
                 "max_cpu_busy_pct", "max_cpu_load_pct", "max_swap_pct", "min_free_disk_gb", "min_free_ram_pct",
-                "restart_waiting", "server", "sessions", "swap_pct", "usage", "verdict"]
+                "restart_waiting", "server", "sessions", "shop", "swap_pct", "usage", "verdict"]
         cores = mock.patch.object(self.serve.os, "cpu_count", return_value=8)
         cores.start()
         self.addCleanup(cores.stop)
@@ -2086,6 +2086,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((code, sorted(out)), (200, keys))
         out.pop("server")
         out.pop("restart_waiting")  # the fixture board's jobs; RestartBlockersTest pins the value
+        out.pop("shop")  # a background read; test_shop_stats_poll_never_runs_ssh pins it
+        out.pop("history")  # earlier tests' samples; test_api_machine_sends_history_for_this_mac_and_each_shop pins it
         self.assertEqual(out, {"free_ram_pct": 14.0, "swap_pct": 3.0, "free_disk_gb": 50.0, "min_free_ram_pct": 20,
                                "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "free RAM 14% (< 20%)",
                                "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2093,7 +2095,7 @@ class ServeTest(unittest.TestCase):
                                "cpu_load_pct": 1.0, "cpu_cores": 8, "max_cpu_load_pct": 300})
         with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_SWAP_PCT="30.04", SCRUM_FREE_DISK_GB="120.25",
                              SCRUM_CPU_BUSY_PCT="42.56"):
-            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting")},
+            self.assertEqual({k: v for k, v in self.req("GET", "/api/machine")[1].items() if k not in ("server", "restart_waiting", "shop", "history")},
                              {"free_ram_pct": 34.6, "swap_pct": 30.0, "free_disk_gb": 120.2, "min_free_ram_pct": 20,
                               "max_swap_pct": 25, "min_free_disk_gb": 10, "verdict": "swap used 30.0% of RAM (> 25%)",
                               "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2115,6 +2117,8 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
         out.pop("server")
         out.pop("restart_waiting")
+        out.pop("shop")
+        out.pop("history")
         self.assertEqual((code, out), (200, {"free_ram_pct": None, "swap_pct": None, "free_disk_gb": None,
                                              "min_free_ram_pct": 20, "max_swap_pct": 25, "min_free_disk_gb": 10,
                                              "verdict": None, "usage": "unknown", "cooldown": False, "sessions": 0,
@@ -2226,23 +2230,49 @@ class ServeTest(unittest.TestCase):
             code, out = self.req("GET", "/api/machine")
             self.assertEqual(code, 200)
             self.assertEqual(sorted(out.pop("server")), ["disconnects", "routes", "slow", "worst"])
-            self.assertEqual(out["usage"], {"five_hour_pct": 93, "seven_day_pct": 40,
-                                            "five_hour_resets_at": now + 3600, "allowance": 0,
-                                            "fable": "paused", "hold_until": now + 3600})  # 93 % used: held
+            self.assertEqual(out["usage"], {"accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400,
+                                                          "max_pct": 90}],
+                                            "allowance": 0, "fable": "paused", "hold_until": now + 3600})  # 93 % 5h: held
+            self.assertNotIn("five_hour_pct", json.dumps(out["usage"]), "the header has no 5h reading")
             self.assertEqual(out["verdict"], None, "the existing keys are unchanged")
-            fresh["rate_limits"]["five_hour"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
-            del fresh["rate_limits"]["seven_day"]["used_percentage"]
+            fresh["written_at"] = time.time() - 301  # stale: the weekly reading stays, the allowance and holds go
             usage.write_text(json.dumps(fresh))
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], {
-                "five_hour_pct": None, "seven_day_pct": None, "five_hour_resets_at": None, "allowance": None,
-                "fable": "unknown", "hold_until": None})
-            fresh["written_at"] = time.time() - 301
+                "accounts": [{"name": "main", "seven_day_pct": 40, "resets_at": now + 3 * 86400, "max_pct": 90}],
+                "allowance": None, "fable": "unknown", "hold_until": None})
+            fresh["rate_limits"]["seven_day"]["resets_at"] = now - 60  # a past reset reads null, as claude_usage
             usage.write_text(json.dumps(fresh))
-            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+            self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown", "no account has a weekly reading")
             usage.write_text("{not json")
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
             usage.unlink()
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
+
+    def test_machine_usage_one_weekly_reading_per_account(self):
+        """main 49% from a day-old file, owa 90% with its 80/90 reserve: each account's weekly %, its reset and the
+        used % its red starts at (owa: its 7d reserve; main, no reserve: board.USAGE_HOLD_PCT)."""
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (base / "main").mkdir()
+        (base / "owa").mkdir()
+        now = time.time()
+        (base / "main" / "usage.json").write_text(json.dumps({"written_at": now - 86400, "rate_limits": {
+            "seven_day": {"used_percentage": 49, "resets_at": now + 2 * 86400}}}))
+        (base / "owa" / "usage.json").write_text(json.dumps({"written_at": now, "rate_limits": {
+            "seven_day": {"used_percentage": 90, "resets_at": now + 86400}}}))
+        accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [80, 90]]])
+        with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts, SCRUM_USAGE=str(base / "main" / "usage.json")):
+            self.assertEqual(self.serve.machine_usage(now), {
+                "accounts": [{"name": "main", "seven_day_pct": 49, "resets_at": now + 2 * 86400, "max_pct": 90},
+                             {"name": "owa", "seven_day_pct": 90, "resets_at": now + 86400, "max_pct": 90}],
+                "allowance": None, "fable": "unknown", "hold_until": None})
+            accounts = json.dumps([["main", str(base / "main"), None], ["owa", str(base / "owa"), [70, 85]]])
+            with mock.patch.dict(os.environ, SCRUM_ACCOUNTS=accounts):
+                self.assertEqual(self.serve.machine_usage(now)["accounts"][1]["max_pct"], 85, "the 7d reserve, not the 5h one")
+            (base / "owa" / "usage.json").unlink()
+            self.assertEqual(self.serve.machine_usage(now)["accounts"][1],
+                             {"name": "owa", "seven_day_pct": None, "resets_at": None, "max_pct": 90})
+            (base / "main" / "usage.json").unlink()
+            self.assertEqual(self.serve.machine_usage(now), "unknown")
 
     def test_machine_usage_hold_until_later_reset(self):
         usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
@@ -2254,8 +2284,9 @@ class ServeTest(unittest.TestCase):
                 usage.write_text(json.dumps({"written_at": now, "rate_limits": {
                     "five_hour": {"used_percentage": five, "resets_at": now + 3600},
                     "seven_day": {"used_percentage": seven, "resets_at": s_reset}}}))
-                if want == "past7":
-                    want = now + 3600
+                if want == "past7":  # no live weekly reading on any account
+                    self.assertEqual(self.serve.machine_usage(now), "unknown")
+                    continue
                 self.assertEqual(self.serve.machine_usage(now)["hold_until"], want, (five, seven))
 
     def test_machine_usage_fable(self):
@@ -2270,9 +2301,114 @@ class ServeTest(unittest.TestCase):
                 self.assertEqual(self.serve.machine_usage(now)["fable"], want, (five, seven))
             usage.write_text(json.dumps({"written_at": now, "rate_limits": {
                 "five_hour": {"used_percentage": 10, "resets_at": now + 3600}}}))
-            self.assertEqual(self.serve.machine_usage(now)["fable"], "unknown", "no 7d window")
+            self.assertEqual(self.serve.machine_usage(now), "unknown", "no 7d window: no weekly reading")
             usage.unlink()
             self.assertEqual(self.serve.machine_usage(now), "unknown", "the string return is unchanged")
+
+    def shop_stats_state(self, **state):
+        s = self.serve
+        saved = dict(s.SHOP_STATS)
+        s.SHOP_STATS.update({"at": None, "busy": False, "value": [], **state})
+        self.addCleanup(lambda: (s.SHOP_STATS.clear(), s.SHOP_STATS.update(saved)))
+
+    def test_shop_stats_reads_each_worker_and_backs_off_a_down_one(self):
+        s = self.serve
+        self.shop_stats_state()
+        up = "{ 6.00 5.00 4.00 }\n4\nThe system has 8589934592 (524288 pages).\nSystem-wide memory free percentage: 41%\n"
+        outs = {"shopmac": (0, up), "mac2": (255, "")}
+        calls = []
+
+        def run(cmd, timeout, alias):
+            calls.append((cmd, timeout, alias))
+            return subprocess.CompletedProcess([], *outs[alias], "")
+        workers = [s.shop.Worker("shopmac", 2, ("owa", "main")), s.shop.Worker("mac2", 1, ("main",))]
+        with mock.patch.object(s.shop, "workers", return_value=workers), mock.patch.object(s.shop, "run", side_effect=run), \
+                mock.patch.object(s.time, "time", return_value=1000.0) as clock:
+            s.refresh_shop_stats()
+            self.assertEqual(s.SHOP_STATS["value"], [
+                {"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0},
+                {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": None, "cpu_cores": None, "at": 1000.0}])
+            self.assertEqual(calls, [("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "shopmac"),
+                                     ("sysctl -n vm.loadavg hw.ncpu; memory_pressure -Q", 10, "mac2")])
+            self.assertFalse(s.SHOP_STATS["busy"])
+            calls.clear()
+            clock.return_value = 1299.0
+            s.refresh_shop_stats()
+            self.assertEqual([c[2] for c in calls], ["shopmac"], "an unreachable worker waits 300 s before another ssh")
+            self.assertEqual(s.SHOP_STATS["value"][1]["at"], 1000.0)
+            calls.clear()
+            clock.return_value = 1300.0
+            outs["mac2"] = (1, "{ 1.00 1.00 1.00 }\n8\n")  # memory_pressure failed: load still counts
+            s.refresh_shop_stats()
+            self.assertEqual([c[2] for c in calls], ["shopmac", "mac2"])
+            self.assertEqual(s.SHOP_STATS["value"][1],
+                             {"name": "mac2", "free_ram_pct": None, "cpu_load_pct": 12.5, "cpu_cores": 8, "at": 1300.0})
+        with mock.patch.object(s.shop, "workers", return_value=workers), \
+                mock.patch.object(s.shop, "run", side_effect=KeyError("boom")):
+            with self.assertRaises(KeyError):
+                s.refresh_shop_stats()
+        self.assertFalse(s.SHOP_STATS["busy"], "a failed refresh never leaves the next one blocked")
+
+    def test_shop_stats_poll_never_runs_ssh(self):
+        s = self.serve
+        cached = [{"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0}]
+        self.shop_stats_state(value=cached)
+        with mock.patch.object(s.threading, "Thread") as thread, mock.patch.object(s.time, "monotonic", return_value=500.0):
+            self.assertEqual(s.shop_stats(), cached, "the cached value comes back at once")
+            self.assertEqual(thread.call_args.kwargs, {"target": s.refresh_shop_stats, "daemon": True})
+            thread.return_value.start.assert_called_once_with()
+            self.assertEqual(s.shop_stats(), cached)
+            self.assertEqual(thread.call_count, 1, "one refresh at a time")
+            s.SHOP_STATS.update(busy=False, at=480.0)
+            s.shop_stats()
+            self.assertEqual(thread.call_count, 1, "20 s after the last refresh: none")
+            s.SHOP_STATS["at"] = 470.0
+            s.shop_stats()
+            self.assertEqual(thread.call_count, 2, "30 s after it: the next one")
+        s.SHOP_STATS.update(busy=False, at=None)
+        s.MACHINE_CACHE.clear()
+        with mock.patch.object(s.shop, "run", side_effect=AssertionError("ssh on the poll")) as run, \
+                mock.patch.object(s, "refresh_shop_stats") as refresh:
+            code, out = self.req("GET", "/api/machine")
+            for _ in range(50):
+                if refresh.called:
+                    break
+                time.sleep(0.01)
+        self.assertEqual((code, [{k: v for k, v in e.items() if k != "history"} for e in out["shop"]]), (200, cached))
+        self.assertEqual((run.called, refresh.call_count), (False, 1), "the refresh runs on its own thread")
+
+    def history_state(self):
+        s = self.serve
+        saved = dict(s.HISTORY)
+        s.HISTORY.clear()
+        self.addCleanup(lambda: (s.HISTORY.clear(), s.HISTORY.update(saved)))
+
+    def test_machine_history_one_sample_a_minute_for_30_min(self):
+        h = self.serve.machine_history
+        self.history_state()
+        self.assertEqual(h("mac", 40.0, 55.5, 1000.0), {"free_ram_pct": [40.0], "cpu_load_pct": [55.5]})
+        self.assertEqual(h("mac", 30.0, 99.0, 1059.0), {"free_ram_pct": [40.0], "cpu_load_pct": [55.5]},
+                         "59 s after the last sample: none")
+        self.assertEqual(h("mac", 30.0, None, 1060.0), {"free_ram_pct": [40.0, 30.0], "cpu_load_pct": [55.5, None]})
+        self.assertEqual(h(("shop", "shopmac"), 70.0, 12.5, 1060.0), {"free_ram_pct": [70.0], "cpu_load_pct": [12.5]},
+                         "each machine keeps its own samples")
+        for i in range(2, 40):
+            h("mac", float(i), float(i), 1000.0 + 60 * i)
+        self.assertEqual(h("mac", 0.0, 0.0, 3340.0)["free_ram_pct"], [float(i) for i in range(10, 40)], "the newest 30")
+        self.assertEqual(h("mac", 7.0, 8.0, 3340.0 + 1800), {"free_ram_pct": [7.0], "cpu_load_pct": [8.0]},
+                         "after 30 min with no poll the old samples are gone")
+
+    def test_api_machine_sends_history_for_this_mac_and_each_shop(self):
+        s = self.serve
+        self.history_state()
+        cached = [{"name": "shopmac", "free_ram_pct": 41.0, "cpu_load_pct": 150.0, "cpu_cores": 4, "at": 1000.0}]
+        self.shop_stats_state(value=cached, at=time.monotonic(), busy=False)
+        s.MACHINE_CACHE.clear()
+        with mock.patch.dict(os.environ, SCRUM_FREE_RAM="34.56", SCRUM_CPU_LOAD_PCT="12.04"):
+            out = self.req("GET", "/api/machine")[1]
+        self.assertEqual(out["history"], {"free_ram_pct": [34.6], "cpu_load_pct": [12.0]})
+        self.assertEqual(out["shop"], [{**cached[0], "history": {"free_ram_pct": [41.0], "cpu_load_pct": [150.0]}}])
+        self.assertNotIn("history", s.SHOP_STATS["value"][0], "the cached shop read is never changed")
 
     PAUSED_REASON = "stalled in build: paused by Trevor. Fix: click Play."
 

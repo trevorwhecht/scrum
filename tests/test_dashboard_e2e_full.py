@@ -122,7 +122,9 @@ class ChecksMarkup(unittest.TestCase):
         btn = re.search(r'<button class="btn" id="checksBtn" type="button" hidden data-agent-hint="[^"]+">Checks</button>',
                         text)
         self.assertIsNotNone(btn)
-        self.assertLess(text.index('id="aiBtn"'), btn.start(), "Checks sits last in the header")
+        # Job 1116: Checks sits with the other status buttons, right after Codex routing, so at 390 px it shares their row.
+        self.assertLess(text.index('id="routing"'), btn.start())
+        self.assertLess(btn.start(), text.index('id="filter"'))
         self.assertLess(btn.start(), text.index("</header>"))
         dialog = text[text.index('<dialog id="checks" aria-label="Checks">'):]
         dialog = dialog[:dialog.index("</dialog>")]
@@ -137,12 +139,14 @@ class ChecksMarkup(unittest.TestCase):
         self.assertIn("#checks,#usage,#rank{width:100%", mobile[:mobile.index("}")])
 
     def test_desktop_header_one_row(self):
-        """At 1400 px and wider the header never wraps: buttons keep their size, and #machine and #routing wrap their
-        text inside their own box instead (job 977 rework: no readout text is cut off)."""
+        """At 1400 px and wider buttons keep their size, and #machine and #routing wrap their text inside their own box
+        instead (job 977 rework: no readout text is cut off). Job 1116: the buttons sit together in #controls, so the
+        header breaks only between the meters and the whole button row, never inside a meter group or between buttons."""
         text = DASHBOARD.read_text()
-        start = text.index("@media (min-width:1400px){header{flex-wrap:nowrap")
+        start = text.index("@media (min-width:1400px){header{gap:8px;align-items:center}")
         rule = text[start:text.index("\n", start)]
-        self.assertIn("header>*{flex-shrink:0}", rule)
+        self.assertIn("h1,#controls>*{flex-shrink:0}", rule, "the title and every button keep their size")
+        self.assertIn("#machine{flex:1 1 auto}", rule, "the meter is measured at its one-line width, so the buttons move under it whole")
         self.assertIn("#machine,#routing{flex-shrink:1;white-space:normal}", rule)
         self.assertIn("#status:empty{flex-basis:0}", rule, "an empty status takes no room; a status keeps its 26ch")
         self.assertIn("#cooldownState:empty,#autoOff:empty{min-width:0}", rule, "an empty state text takes no room")

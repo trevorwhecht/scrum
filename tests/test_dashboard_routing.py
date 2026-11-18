@@ -56,9 +56,14 @@ class RoutingText(unittest.TestCase):
             {"claude": {"5h": 12.6, "weekly": None}, "codex": {"5h": 42, "weekly": 61.4}, OLL: "up"},
             {"codex": {"5h": None, "weekly": None}, OLL: "down"},
             {OLL: "up"}]), [
-            "Claude 5h 13% · wk — · Codex 5h 42% · wk 61%",
-            "Claude 5h — · wk — · Codex 5h — · wk —",
-            "Claude 5h — · wk — · Codex 5h — · wk —"])
+            "Codex 5h 42% · wk 61%",
+            "Codex 5h — · wk —",
+            "Codex 5h — · wk —"])
+        self.assertEqual(node_eval("routingText", [{"claude": {"5h": 12.6, "weekly": 49.4}}]), ["Codex 5h — · wk —"],
+                         "Claude's weekly use shows once in the header, as the meter's per-account bars (job 1116)")
+        hint = re.search(r'<button class="btn" id="routing"[^>]*>', DASHBOARD.read_text()).group(0)
+        self.assertIn('data-agent-hint="Codex 5h and weekly quota used, from', hint)
+        self.assertIn("each Claude account's weekly use is the meter's usage bars", hint)
 
     def test_dashboard_never_mentions_local_model(self):
         self.assertNotIn(OLL, DASHBOARD.read_text().lower())
@@ -75,8 +80,6 @@ class WindowRows(unittest.TestCase):
         seven = {"headline": 2.4, "points_done": 1, "budget": {"used_pct": 50}, "first_pass_rate": 1,
                  "wasted_pct": 0, "escapes": 1, "resets_at": 200000}
         self.assertEqual(self.rows([[{"project": "app", "windows": {"five_hour": five, "seven_day": seven}}]]), [
-            '<tr><th scope="row">app</th><td title="ended 1970-01-02 03:46">Last 5h window: 6 points, 41% budget, 0.15/%. '
-            'First pass 80%, waste 12%, 0 escapes</td></tr>'
             '<tr><th scope="row">app</th><td title="ended 1970-01-03 07:33">Last 7d window: 1 point, 50% budget, 2.4/%. '
             'First pass 100%, waste 0%, 1 escape</td></tr>'])
 
@@ -87,19 +90,17 @@ class WindowRows(unittest.TestCase):
                           {"project": "b"},
                           {"project": "c", "windows": {"five_hour": nulls, "seven_day": None}}]])[0]
         self.assertEqual(out,
-            '<tr><th scope="row">&lt;script&gt;x&lt;/script&gt;</th><td>Last 5h window: No scorecard yet</td></tr>'
             '<tr><th scope="row">&lt;script&gt;x&lt;/script&gt;</th><td>Last 7d window: No scorecard yet</td></tr>'
-            '<tr><th scope="row">b</th><td>Last 5h window: No scorecard yet</td></tr>'
             '<tr><th scope="row">b</th><td>Last 7d window: No scorecard yet</td></tr>'
-            '<tr><th scope="row">c</th><td title="ended 1970-01-02 03:46">Last 5h window: 0 points, — budget, —. '
-            'First pass —, waste —, — escapes</td></tr>'
             '<tr><th scope="row">c</th><td>Last 7d window: No scorecard yet</td></tr>')
+        self.assertEqual(self.rows([[{"project": "c", "windows": {"five_hour": None, "seven_day": nulls}}]])[0],
+            '<tr><th scope="row">c</th><td title="ended 1970-01-02 03:46">Last 7d window: 0 points, — budget, —. '
+            'First pass —, waste —, — escapes</td></tr>')
         for word in ("undefined", "null", "NaN", "<script>"):
             self.assertNotIn(word, out)
 
     def test_failed_fetch_reads_couldnt_load(self):
         self.assertEqual(self.rows([[{"project": "a", "windows": None}]])[0],
-            '<tr><th scope="row">a</th><td>Last 5h window: Couldn&#39;t load scorecard</td></tr>'
             '<tr><th scope="row">a</th><td>Last 7d window: Couldn&#39;t load scorecard</td></tr>')
 
     def test_load_windows_404_is_empty_and_shows_loading(self):
@@ -129,7 +130,7 @@ class UsageRows(unittest.TestCase):
              "codex": {"5h": 42, "weekly": 61.4}, OLL: "up", OLL + "_models": ["old-local-model", "gemma3:4b"],
              "jev": {"today": 3, "last": "2026-10-22T14:30:00"}}
         self.assertEqual(self.rows([s]), [
-            '<tr><th scope="row">Claude</th><td title="resets 2025-10-22 16:00">38%</td><td>81%</td><td>2025-10-22 13:45</td></tr>'
+            '<tr><th scope="row">Claude</th><td>—</td><td>81%</td><td>2025-10-22 13:45</td></tr>'
             '<tr><th scope="row">Codex</th><td>42%</td><td>61%</td><td>—</td></tr>'
             '<tr><th scope="row">Jev</th><td>—</td><td>—</td><td>3 today · last 2026-10-22 14:30</td></tr>'])
 
