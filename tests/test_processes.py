@@ -42,6 +42,48 @@ class ProcessesLogTest(unittest.TestCase):
             board.log_process("Disk reclaim", "freed")
         self.assertTrue(err.getvalue().startswith("processes: "), err.getvalue())
         self.assertEqual(len(err.getvalue().splitlines()), 1)
+        self.log.parent.unlink()
+        self.log.parent.mkdir()
+        self.log.write_text('{"t": 1}\n')
+        err = io.StringIO()
+        with redirect_stderr(err), mock.patch.object(board.os, "replace", side_effect=OSError("boom")):
+            board.log_process("Disk reclaim", "freed")
+        self.assertEqual(err.getvalue(), "processes: boom\n")
+
+    NOW = 1_700_000_000
+    DAY = 86400
+
+    def seed(self, *lines):
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        self.log.write_text("".join(lines))
+
+    def test_log_process_rotates_old_lines(self):
+        old = self.NOW - board.PULSE_KEEP_SECS - 2 * self.DAY
+        self.seed(f'{{"t": {old}, "process": "A"}}\n', f'{{"t": {self.NOW - 100}, "process": "B"}}\n')
+        with mock.patch.object(board.time, "time", return_value=self.NOW):
+            board.log_process("C", "ok")
+        self.assertEqual(self.log.read_text(),
+                         f'{{"t": {self.NOW - 100}, "process": "B"}}\n'
+                         f'{{"t": {self.NOW}, "process": "C", "result": "ok"}}\n')
+        self.assertFalse(self.log.with_name("processes.log.tmp").exists())
+
+    def test_log_process_keeps_file_within_slack(self):
+        slack = self.NOW - board.PULSE_KEEP_SECS - self.DAY // 2
+        self.seed(f'{{"t": {slack}, "process": "A"}}\n')
+        with mock.patch.object(board.time, "time", return_value=self.NOW):
+            board.log_process("C", "ok")
+        self.assertEqual(self.log.read_text(),
+                         f'{{"t": {slack}, "process": "A"}}\n{{"t": {self.NOW}, "process": "C", "result": "ok"}}\n')
+
+    def test_log_process_rotates_malformed_first_line(self):
+        for first in ("not json\n", '{"process": "A"}\n'):
+            self.seed(first, f'{{"t": {self.NOW - 5}, "process": "B"}}\n', "{bad\n", '{"process": "X"}\n')
+            with mock.patch.object(board.time, "time", return_value=self.NOW):
+                board.log_process("C", "ok")
+            self.assertEqual(self.log.read_text(),
+                             f'{{"t": {self.NOW - 5}, "process": "B"}}\n'
+                             f'{{"t": {self.NOW}, "process": "C", "result": "ok"}}\n')
+            self.assertFalse(self.log.with_name("processes.log.tmp").exists())
 
     def test_log_process_skips_real_log_under_unittest(self):
         home = Path(self.tmp.name) / "home"
