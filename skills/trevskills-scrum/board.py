@@ -3317,7 +3317,7 @@ def cmd_review_plan(root: Path, job_id: str, incremental: bool = False) -> dict:
     if files is not None:
         skips = {}
         globs = ui_globs(root)
-        if globs and not any(glob_match(f, globs) for f in files):
+        if globs and not any(f and not RUNTIME_EXCLUDE_RE.search(f) and glob_match(f, globs) for f in files):
             skips.update(ui=UI_SKIP, ux=UI_SKIP)
         if not any(rx.search(f) for f in files for rx in SECURITY_RES):
             skips["security"] = SECURITY_SKIP
