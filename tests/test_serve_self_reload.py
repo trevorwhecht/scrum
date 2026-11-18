@@ -19,6 +19,7 @@ os.environ["SCRUM_CPU_BUSY_PCT"] = "1"  # CPU nearly idle unless a test says so;
 os.environ["SCRUM_CPU_LOAD_PCT"] = "1"  # load nearly nil unless a test says so; no test reads the real load average
 os.environ["SCRUM_FREE_DISK_GB"] = "1000"
 import serve  # noqa: E402
+REAL_SELF_FILES = serve.SELF_FILES
 
 
 class FakeProc:
@@ -202,6 +203,26 @@ class SelfReloadTest(unittest.TestCase):
         self.assertIn("still running the old code", self.err.getvalue())
         with mock.patch.object(serve, "code_stamp", side_effect=RuntimeError("boom")):
             self.assertFalse(self.call(execv, mock.Mock()))  # nothing escapes, the watchdog loop goes on
+
+    def test_shop_py_is_a_self_file(self):
+        shop = serve.HERE / "shop.py"
+        self.assertTrue(shop.is_file())
+        with mock.patch.object(serve, "SELF_FILES", REAL_SELF_FILES):
+            self.assertEqual(serve.SELF_FILES.count(shop), 1)
+            self.assertEqual(len(serve.code_stamp()), len(REAL_SELF_FILES))
+
+    def test_reload_when_only_shop_py_changes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        files = tuple(Path(tmp.name) / n for n in ("serve.py", "board.py", "route.py", "shop.py"))
+        for f in files:
+            f.write_text("x")
+            os.utime(f, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(files[3], ns=(2_000_000_000, 2_000_000_000))
+        with mock.patch.object(serve, "SELF_FILES", files), mock.patch.object(serve, "CODE_STAMP", (1_000_000_000,) * 4):
+            execv = mock.Mock()
+            self.assertTrue(self.call(execv, mock.Mock(side_effect=ok_check)))
+            execv.assert_called_once()
 
     def test_watchdog_loop_checks_after_tick(self):
         order = []
