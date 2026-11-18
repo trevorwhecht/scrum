@@ -4454,7 +4454,10 @@ def child_files(jobs_dir, job_id):
                 return {p for p in re.findall(r"`([^`\s]+)`", text)
                         if p.startswith(".claude/") and len(p) > 8 and PATH_RE.match(p)}
             found = likely_files(text)
-            return found or prose_paths(text) | bare_name_paths(text, Path(jobs_dir).parent.parent)  # no Likely files: the paths the text names
+            if found or name == "spec.md" and re.search(r"^#+\s*Likely files", text, re.M | re.I):
+                return found  # a Likely files heading that names no path still means "files unknown"
+            # no spec, or a spec with no Likely files section: the paths the text names; slash-less names must resolve in git
+            return {p for p in prose_paths(text) if "/" in p} | bare_name_paths(text, Path(jobs_dir).parent.parent)
     return set()
 
 
