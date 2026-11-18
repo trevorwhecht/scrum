@@ -4003,7 +4003,7 @@ const job = d => ({key: "k", project: "p", id: "1", diverged: d, files: ["build.
         cloud = self.lane("cloud")
         job = cloud[cloud.index("2. **Cloud job**"):cloud.index("3. **Sync**")]
         for phrase in ("scrum-artifacts/", "GIT_INDEX_FILE", "git add -f", "B artifacts $ID", "git write-tree",
-                       "commit-tree", "refs/heads/scrum-artifacts/$ID", "never merged", "never has a PR",
+                       "commit-tree", "refs/heads/scrum-artifacts/${ID}", "never merged", "never has a PR",
                        "does not change the job's outcome", "merged, needs-human or obsolete abort"):
             self.assertIn(phrase, job, phrase)
         sync = cloud[cloud.index("3. **Sync**"):]
