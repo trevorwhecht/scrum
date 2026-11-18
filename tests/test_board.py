@@ -1334,8 +1334,8 @@ class BoardTest(unittest.TestCase):
         self.assertEqual((out["ready"], out["held"]), ([c1, c2], None))
 
     def test_cmd_ready_light_kid_uses_light_room(self):
-        """Job 955: with no standard RAM room a fast kid still claims on the light room spawn sizes it with, one
-        claim per light room; a standard kid waits."""
+        """Job 955: with no standard RAM room a fast kid still claims on the light room spawn sizes it with, as the
+        call's only claim; a standard kid waits."""
         parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3),
                            self.ticket(4, deps="T1, T2, T3", exposure="yes"))
         std, fast1, fast2, _ = board.cmd_plan_apply(self.root, parent)["children"]
@@ -1355,6 +1355,16 @@ class BoardTest(unittest.TestCase):
         with rooms(0, 1):
             self.assertEqual(board.cmd_ready(self.root, parent)["ready"], [fast2])  # spec.md's Lane: fast counts too
         self.assertEqual(self.child(std)["stage"], "waiting")
+        # standard room 1, light room 2: spawn counts the standard claim as a young session, so the fast kid waits
+        parent = self.plan(self.ticket(1), self.ticket(2), self.ticket(3, deps="T1, T2", exposure="yes"))
+        std, fast, _ = board.cmd_plan_apply(self.root, parent)["children"]
+        self.spec(std, "src/d.py")
+        self.spec(fast, "src/e.py")
+        board.cmd_set(self.root, fast, ["lane=fast"])
+        with rooms(1, 2):
+            out = board.cmd_ready(self.root, parent)
+        self.assertEqual((out["ready"], out["held"]), ([std], None))
+        self.assertEqual(self.child(fast)["stage"], "waiting")
 
     def test_ready_records_overlap_hold(self):
         # Job 764: the card shows why a waiting child is held; a claim or a dep wait drops a stale hold.

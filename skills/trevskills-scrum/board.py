@@ -4941,9 +4941,9 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
     `only` (serve.py's idle_claim) claims that one waiting child or nothing, as a parallel child checked only against
     siblings and outside jobs with a live session (parked ones do not count), with room 1 in place of ram_room();
     machine_ok and a zero usage allowance still hold it, and the parent's stage and reason change only on a claim.
-    Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was. Once that room
-    is spent, a light kid (LIGHT_LANES, its lane read as for the skip below) still claims while the call's claims stay
-    under ram_room(floor=0, light=True), spawn's size for it. `held` in the output: the machine_ok or usage refusal,
+    Otherwise room is ram_room(floor=0): with none, nothing is claimed and the parent is left as it was, except that
+    one light kid (LIGHT_LANES, its lane read as for the skip below) still claims when ram_room(floor=0, light=True),
+    spawn's size for it, is at least 1 and the call has claimed nothing else. `held` in the output: the machine_ok or usage refusal,
     `ram_room` when the standard room is 0, else None (serve.py's start_ready notes it as a queue gate)."""
     jobs_dir = Path(root) / "jobs"
     with locked_board(root) as board:
@@ -5016,13 +5016,13 @@ def cmd_ready(root, parent_id, live=(), manual=False, only: str | None = None):
             light = (k.get("lane") or header_value(jobs_dir / k["id"] / "spec.md", "Lane", LANES)
                      or header_value(jobs_dir / k["id"] / "feature.md", "Lane", LANES)) in LIGHT_LANES
             if len(ready) >= room:  # machine_ok passed for the first claim only: never burst past the free RAM
-                if not light:  # standard room spent; a light kid may still fit the light share, as spawn sizes it
+                # standard room spent; a light kid may still fit the light share, as spawn sizes it, but only as the
+                # call's first claim: spawn counts each earlier claim as a young standard session
+                if not light or ready:
                     continue
                 if light_room is None:
                     light_room = ram_room(floor=0, light=True)
-                    if cap is not None:
-                        light_room = min(light_room, cap)
-                if len(ready) >= light_room:
+                if light_room < 1:
                     continue
             undone = [dep for dep in k.get("depends_on") or [] if stage.get(dep) != "done"]
             if undone:
