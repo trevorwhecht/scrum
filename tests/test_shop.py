@@ -356,11 +356,16 @@ DONE = (("sysctl", 0, HAVE_ALL), ("gh auth status", 0, ""),
         ("credential.https://github.com.helper", 0, "\n!/u/.local/bin/gh auth git-credential\n"),
         ('mkdir -p "$HOME/.claude-owa"', 0, ""), ("python3 -", 0, "same\n"), ("claude -p", 0, "ok\n"))
 ALL_OK = ["node: ok", "gh: ok", "gh login: ok", "gh git: ok", "permissions: ok", "owa links: ok", "account main: ok",
-          "account owa: ok"]
+          "account owa: ok", "jev key: ok"]
 GH_LOGIN = ("gh auth login --hostname github.com --git-protocol https --with-token --insecure-storage"
             " && chmod 600 ~/.config/gh/hosts.yml")
 CHECK = "claude -p 'Reply with the single word ok' --model haiku --max-turns 1"
 HINT = " (run claude setup-token in the shop GUI)"
+JEV = "tsk_FAKE1075KEY"  # this Mac's Keychain TypeSafe key in every faked read
+KEYCHAIN = ["/usr/bin/security", "find-generic-password", "-s", "TypeSafe", "-a", "typesafe", "-w"]
+JEV_CHECK = '[ -s "$HOME/.config/typesafe/key" ]'
+JEV_WRITE = ("umask 077 && mkdir -p ~/.config/typesafe && cat > ~/.config/typesafe/key.tmp"
+             " && mv -f ~/.config/typesafe/key.tmp ~/.config/typesafe/key")
 
 
 class SetupCase(ShopCase):
@@ -377,20 +382,21 @@ class SetupCase(ShopCase):
         self.addCleanup(env.stop)
         Path(self.home, "workers.txt").write_text(text)
 
-    def shop(self, *answers, token=(0, TOKEN + "\n")):
-        """Fake ssh and this Mac's `gh auth token` under subprocess.run, so run() itself is exercised. Each remote
-        command gets the first answer (key, rc, stdout) whose key it contains, else exit 0; rc LOCAL runs it here
-        under self.home, an exception rc is raised. self.calls holds every (remote command, timeout, input)."""
+    def shop(self, *answers, token=(0, TOKEN + "\n"), keychain=(0, JEV + "\n")):
+        """Fake ssh, this Mac's `gh auth token` and its Keychain TypeSafe read under subprocess.run, so run() itself is
+        exercised. Each remote command gets the first answer (key, rc, stdout) whose key it contains, else exit 0; rc
+        LOCAL runs it here under self.home, an exception rc is raised. self.calls holds every (remote command, timeout,
+        input)."""
         self.calls, self.argv = [], []
 
         def fake(argv, **kw):
             self.argv.append(list(argv))
-            if argv[0] == "gh":
-                self.assertEqual((argv, kw), (["gh", "auth", "token"], {"capture_output": True, "text": True,
-                                                                         "timeout": 60}))
-                if isinstance(token, BaseException):
-                    raise token
-                return subprocess.CompletedProcess(argv, token[0], token[1], "")
+            if argv[0] != "ssh":  # a local read: gh's token or the Keychain key
+                want, answer = (["gh", "auth", "token"], token) if argv[0] == "gh" else (KEYCHAIN, keychain)
+                self.assertEqual((argv, kw), (want, {"capture_output": True, "text": True, "timeout": 60}))
+                if isinstance(answer, BaseException):
+                    raise answer
+                return subprocess.CompletedProcess(argv, answer[0], answer[1], "")
             self.assertEqual(argv[:6], ["ssh", self.alias, *ARGV[2:]])
             self.assertTrue(argv[6].startswith(shop.PATH_PREFIX), argv[6])
             cmd = argv[6][len(shop.PATH_PREFIX):]
@@ -439,21 +445,22 @@ class SetupTest(SetupCase):
         got, lines = self.setup_out()
         self.assertEqual(lines, ["node: ok (changed)", "gh: ok", "gh login: ok", "gh git: failed (exit 1)",
                                  "permissions: ok (changed)", "owa links: ok (changed)", "account main: ok",
-                                 "account owa: not ready (run claude setup-token in the shop GUI)"])
+                                 "account owa: not ready (run claude setup-token in the shop GUI)", "jev key: ok"])
         self.assertEqual(got, {"node": "changed", "gh": "ok", "gh login": "ok", "gh git": "failed",
                                "permissions": "changed", "owa links": "changed", "account main": "ok",
-                               "account owa": "not ready"})
+                               "account owa": "not ready", "jev key": "ok"})
         self.assertEqual(list(got), ["node", "gh", "gh login", "gh git", "permissions", "owa links", "account main",
-                                     "account owa"])
+                                     "account owa", "jev key"])
         self.assertEqual([(c[0].split()[0], c[1]) for c in self.calls[1:]],
                          [("d=$(mktemp", 600), ("gh", 60), ("git", 60), ("gh", 60), ("python3", 60), ("mkdir", 60),
-                          ("ln", 60), ("[", 120), ("[", 120)])
+                          ("ln", 60), ("[", 120), ("[", 120), ("[", 60)])
+        self.assertEqual(self.calls[-1], (JEV_CHECK, 60, None))
         self.assertEqual(self.setup_out(cli=True)[0], 1)
         self.shop(("setup-git", 0, ""), *answers)
         self.assertEqual(self.setup_out(cli=True), (0, [
             "node: ok (changed)", "gh: ok", "gh login: ok", "gh git: ok (changed)", "permissions: ok (changed)",
             "owa links: ok (changed)", "account main: ok",
-            "account owa: not ready (run claude setup-token in the shop GUI)"]))
+            "account owa: not ready (run claude setup-token in the shop GUI)", "jev key: ok"]))
 
     def test_worker_accounts_only(self):
         self.worker_file("shopmac 2 owa,main\nnewmac 1 owa\n")
@@ -464,7 +471,8 @@ class SetupTest(SetupCase):
                 self.shop(*DONE)
                 with contextlib.redirect_stdout(io.StringIO()) as out:
                     got = shop.setup(alias=alias)
-                self.assertEqual(out.getvalue().splitlines(), base + [f"account {n}: ok" for n in accounts])
+                self.assertEqual(out.getvalue().splitlines(),
+                                 base + [f"account {n}: ok" for n in accounts] + ["jev key: ok"])
                 self.assertEqual([k for k in got if k.startswith("account ")], [f"account {n}" for n in accounts])
                 self.assertEqual(len(self.cmds("claude -p")), len(accounts))
                 self.assertEqual({a[1] for a in self.argv if a[0] == "ssh"}, {alias})
@@ -587,6 +595,59 @@ class SetupTest(SetupCase):
                 self.assertIn(["gh", "auth", "token"], self.argv)
                 self.assertEqual(self.cmds("gh auth login"), [])
 
+    def test_jev_key_skipped_when_file_exists(self):
+        self.shop((JEV_CHECK, 0, ""), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[-1], got["jev key"]), ("jev key: ok", "ok"))
+        self.assertEqual(self.cmds(".config/typesafe"), [(JEV_CHECK, 60, None)])  # no write
+        self.assertNotIn(KEYCHAIN, self.argv)  # no Keychain read here
+
+    def test_jev_key_sent_on_stdin(self):
+        self.shop((JEV_CHECK, 1, ""), ("cat > ~/.config/typesafe", 0, f"wrote {JEV}\n"), *DONE)
+        got, lines = self.setup_out()
+        self.assertEqual((lines[-1], got["jev key"]), ("jev key: ok (changed)", "changed"))
+        self.assertEqual(self.argv.count(KEYCHAIN), 1)
+        self.assertEqual(self.cmds(".config/typesafe"), [(JEV_CHECK, 60, None), (JEV_WRITE, 60, b"tsk_FAKE1075KEY")])
+        self.assertFalse([a for a in self.argv if JEV in " ".join(a)], "key in an argv or remote command")
+        self.assertNotIn(JEV, "\n".join(lines))
+
+    def test_jev_key_local_read_fails(self):
+        for keychain, line in (((44, ""), "jev key: failed (exit 44)"), ((0, " \n\t"), "jev key: failed (exit 1)"),
+                               ((36, JEV + "\n"), "jev key: failed (exit 36)"),
+                               (FileNotFoundError(2, "No such file or directory", "/usr/bin/security"),
+                                "jev key: failed (exit 127)"),
+                               (subprocess.TimeoutExpired(KEYCHAIN, 60), "jev key: failed (exit 124)")):
+            with self.subTest(keychain=keychain):
+                self.shop((JEV_CHECK, 1, ""), *DONE, keychain=keychain)
+                rc, lines = self.setup_out(cli=True)
+                self.assertEqual((rc, lines), (1, ALL_OK[:-1] + [line]))
+                self.assertIn(KEYCHAIN, self.argv)
+                self.assertEqual(self.cmds(".config/typesafe"), [(JEV_CHECK, 60, None)])  # no remote write
+        for write in (1, 255, subprocess.TimeoutExpired(["ssh"], 60, output=JEV.encode())):
+            with self.subTest(write=write):
+                self.shop((JEV_CHECK, 1, ""), ("cat > ~/.config/typesafe", write, f"bad key {JEV}\n"), *DONE)
+                rc, lines = self.setup_out(cli=True)
+                code = 124 if isinstance(write, BaseException) else write
+                self.assertEqual((rc, lines[-1]), (1, f"jev key: failed (exit {code})"))
+                self.assertNotIn(JEV, "\n".join(lines))
+                self.assertEqual(len(self.cmds("cat > ~/.config/typesafe")), 1)
+
+    def test_jev_key_file_mode_600_second_run_unchanged(self):
+        """The check and the write run in a local sh under a temp home, as the shop would."""
+        key = Path(self.home) / ".config" / "typesafe" / "key"
+        self.shop((JEV_CHECK, LOCAL, ""), ("cat > ~/.config/typesafe", LOCAL, ""), *DONE)
+        self.assertEqual(self.setup_out()[1][-1], "jev key: ok (changed)")
+        self.assertEqual((key.read_text(), os.listdir(key.parent)), (JEV, ["key"]))
+        self.assertEqual((stat.S_IMODE(key.stat().st_mode), stat.S_IMODE(key.parent.stat().st_mode)), (0o600, 0o700))
+        got, lines = self.setup_out()  # the file is there now
+        self.assertEqual((lines, got["jev key"]), (ALL_OK, "ok"))
+        self.assertEqual(self.argv.count(KEYCHAIN), 1)
+        self.assertEqual(len(self.cmds("cat > ~/.config/typesafe")), 1)
+        key.write_text("")  # an empty file is rewritten, and a loose mode does not survive
+        key.chmod(0o644)
+        self.assertEqual(self.setup_out()[1][-1], "jev key: ok (changed)")
+        self.assertEqual((key.read_text(), stat.S_IMODE(key.stat().st_mode)), (JEV, 0o600))
+
     def test_setup_git_only_when_missing(self):
         for helper, line, runs in (("\n!/u/.local/bin/gh auth git-credential\n", "gh git: ok", 0),
                                    ("osxkeychain\n", "gh git: ok (changed)", 1), (None, "gh git: ok (changed)", 1)):
@@ -648,13 +709,13 @@ class SetupTest(SetupCase):
         (h / ".claude-owa").mkdir()
         (h / ".claude-owa" / "oauth-token").write_text("tok-owa-962\n")
         self.shop(("claude -p", LOCAL, ""), *DONE)
-        self.assertEqual(self.setup_out()[1][6:], ["account main: not ready (run claude setup-token in the shop GUI)",
+        self.assertEqual(self.setup_out()[1][6:8], ["account main: not ready (run claude setup-token in the shop GUI)",
                                                    "account owa: ok"])
         self.assertEqual((h / "calls").read_text(),
                          f"{h}/.claude-owa|tok-owa-962|-p Reply with the single word ok --model haiku --max-turns 1\n")
         (h / ".claude").mkdir()
         (h / ".claude" / "oauth-token").write_text("tok-main-962\n")
-        self.assertEqual(self.setup_out()[1][6:], ["account main: ok", "account owa: ok"])
+        self.assertEqual(self.setup_out()[1][6:8], ["account main: ok", "account owa: ok"])
         self.assertEqual((h / "calls").read_text().splitlines()[1:], [
             "unset|tok-main-962|-p Reply with the single word ok --model haiku --max-turns 1",
             f"{h}/.claude-owa|tok-owa-962|-p Reply with the single word ok --model haiku --max-turns 1"])
@@ -673,7 +734,7 @@ class SetupTest(SetupCase):
                 self.shop((".claude-owa/oauth-token", *owa), ("claude -p", *main), *DONE)
                 rc, lines = self.setup_out(cli=True)
                 self.assertEqual(rc, 0)
-                self.assertEqual(lines[6:], ["account main: not ready", owa_line])
+                self.assertEqual(lines[6:8], ["account main: not ready", owa_line])
 
 
 class PermissionsMergeTest(unittest.TestCase):
