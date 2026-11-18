@@ -38,7 +38,7 @@ The shop Mac has Google Chrome but no Playwright Chromium. With `SCRUM_PW_CHANNE
 
 ## MD sync
 
-`md_sync()` makes this Mac the single writer of what shop sessions read: the skill clones, `~/.claude/CLAUDE.md` and the memory notes. Dispatch calls it before every shop dispatch and skips the dispatch on `False`. It prints nothing. `python3 shop.py md-sync` prints one line, `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1), and never remote output.
+`md_sync()` makes this Mac the single writer of what shop sessions read: the skill clones, `~/.claude/CLAUDE.md` and the memory notes. Dispatch (not wired yet) is to call it before every shop dispatch and skip the dispatch on `False`. It prints nothing. `python3 shop.py md-sync` prints one line, `md-sync: ok` (exit 0), `md-sync: failed` or `shop: down` (exit 1), and never remote output.
 
 - **Local reads first.** This Mac's CLAUDE.md and memory dirs are read before any ssh, so a missing `~/.claude/CLAUDE.md` returns `False` with no call. A down probe returns `False` with no other call.
 - **Three calls, in order, 60 s each.** A non-zero exit returns `False` at once and runs no later call.
