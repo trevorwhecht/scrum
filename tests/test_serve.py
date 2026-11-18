@@ -2229,6 +2229,20 @@ class ServeTest(unittest.TestCase):
             usage.unlink()
             self.assertEqual(self.req("GET", "/api/machine")[1]["usage"], "unknown")
 
+    def test_machine_usage_hold_until_later_reset(self):
+        usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
+        now = time.time()
+        with mock.patch.dict(os.environ, SCRUM_USAGE=str(usage)):
+            for five, seven, want in ((93, 95, now + 3 * 86400), (93, 40, now + 3600), (40, 95, now + 3 * 86400),
+                                      (40, 40, None), (93, 95, "past7")):
+                s_reset = now - 60 if want == "past7" else now + 3 * 86400
+                usage.write_text(json.dumps({"written_at": now, "rate_limits": {
+                    "five_hour": {"used_percentage": five, "resets_at": now + 3600},
+                    "seven_day": {"used_percentage": seven, "resets_at": s_reset}}}))
+                if want == "past7":
+                    want = now + 3600
+                self.assertEqual(self.serve.machine_usage(now)["hold_until"], want, (five, seven))
+
     def test_machine_usage_fable(self):
         usage = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "usage.json"
         now = time.time()
